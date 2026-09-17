@@ -241,7 +241,7 @@ Stage instances move through:
 
 Alternative terminal or holding states are:
 
-`REJECTED`, `SNOOZED`, `PAUSED`, `SKIPPED`, `CANCELLED`, and `FAILED_PERMANENT`.
+`REJECTED`, `SNOOZED`, `PAUSED`, `SKIPPED`, `CANCELLED`, `FAILED_PERMANENT`, and `UNKNOWN`.
 
 Each outbound unit has an idempotency key derived from organisation, sequence version, stage instance, channel, recipient, and invoice/group version. A database uniqueness constraint is the final duplicate-send guard. Retries reuse the same outbound record and create new attempt records.
 
