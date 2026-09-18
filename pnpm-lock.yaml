@@ -65,6 +65,16 @@ importers:
         specifier: ^3.7.5
         version: 3.7.5
 
+  packages/integrations:
+    dependencies:
+      '@bc5000/domain':
+        specifier: workspace:*
+        version: link:../domain
+    devDependencies:
+      '@types/node':
+        specifier: ^24.10.0
+        version: 24.13.5
+
 packages:
 
   '@babel/helper-string-parser@7.29.7':

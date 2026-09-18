@@ -1,0 +1,19 @@
+{
+  "name": "@bc5000/integrations",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./xero": "./src/xero/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@bc5000/domain": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0"
+  }
+}
