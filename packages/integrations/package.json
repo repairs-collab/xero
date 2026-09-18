@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./sinch": "./src/sinch/index.ts",
     "./xero": "./src/xero/index.ts"
   },
   "scripts": {
