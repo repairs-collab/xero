@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 
+import { and, eq } from 'drizzle-orm';
+
 import type { Database } from '../client.js';
 import { webhookEvents } from '../schema/operations.js';
 
@@ -13,6 +15,10 @@ export interface RecordWebhookInput {
 
 export interface WebhookRepository {
   recordOnce(input: RecordWebhookInput): Promise<'recorded' | 'duplicate'>;
+  recordOnceWithId(input: RecordWebhookInput): Promise<{
+    kind: 'recorded' | 'duplicate';
+    id: string;
+  }>;
 }
 
 export class PostgresWebhookRepository implements WebhookRepository {
@@ -21,6 +27,13 @@ export class PostgresWebhookRepository implements WebhookRepository {
   async recordOnce(
     input: RecordWebhookInput
   ): Promise<'recorded' | 'duplicate'> {
+    return (await this.recordOnceWithId(input)).kind;
+  }
+
+  async recordOnceWithId(input: RecordWebhookInput): Promise<{
+    kind: 'recorded' | 'duplicate';
+    id: string;
+  }> {
     const bodyHash = createHash('sha256')
       .update(input.rawBody)
       .digest('hex');
@@ -47,6 +60,23 @@ export class PostgresWebhookRepository implements WebhookRepository {
       })
       .returning({ id: webhookEvents.id });
 
-    return inserted.length === 1 ? 'recorded' : 'duplicate';
+    const created = inserted[0];
+    if (created !== undefined) return { kind: 'recorded', id: created.id };
+
+    const [existing] = await this.database
+      .select({ id: webhookEvents.id })
+      .from(webhookEvents)
+      .where(
+        and(
+          eq(webhookEvents.organisationId, input.organisationId),
+          eq(webhookEvents.provider, input.provider),
+          eq(webhookEvents.providerEventKey, providerEventKey)
+        )
+      )
+      .limit(1);
+    if (existing === undefined) {
+      throw new Error('Webhook conflict could not be resolved');
+    }
+    return { kind: 'duplicate', id: existing.id };
   }
 }

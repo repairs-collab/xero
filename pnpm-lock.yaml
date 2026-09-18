@@ -38,6 +38,12 @@ importers:
       '@bc5000/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@bc5000/integrations':
+        specifier: workspace:*
+        version: link:../../packages/integrations
+      '@bc5000/jobs':
+        specifier: workspace:*
+        version: link:../../packages/jobs
       drizzle-orm:
         specifier: 0.45.2
         version: 0.45.2(@types/pg@8.23.1)(pg@8.23.0)
