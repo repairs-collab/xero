@@ -1,24 +1,13 @@
-export interface XeroInitialSyncJob {
-  organisationId: string;
-}
+import type { JobName } from './names.js';
+import type { JobPayloads } from './payloads.js';
 
-export interface XeroIncrementalSyncJob {
-  organisationId: string;
-}
-
-export interface XeroInvoiceRefreshJob {
-  organisationId: string;
-  invoiceId: string;
-  webhookEventId?: string;
-}
-
-export interface JobPayloads {
-  'xero.initial-sync': XeroInitialSyncJob;
-  'xero.incremental-sync': XeroIncrementalSyncJob;
-  'xero.invoice-refresh': XeroInvoiceRefreshJob;
-}
-
-export type JobName = keyof JobPayloads;
+export type {
+  JobPayloads,
+  XeroIncrementalSyncJob,
+  XeroInitialSyncJob,
+  XeroInvoiceRefreshJob
+} from './payloads.js';
+export type { JobName } from './names.js';
 
 export interface PublishOptions {
   singletonKey?: string;

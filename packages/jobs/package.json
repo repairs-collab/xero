@@ -4,11 +4,16 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/contracts.ts",
+    ".": "./src/index.ts",
     "./producers": "./src/producers.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "pg": "^8.23.0",
+    "pg-boss": "12.33.0",
+    "zod": "^4.6.5"
   }
 }
