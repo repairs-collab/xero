@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@bc5000/db": "workspace:*",
+    "@bc5000/domain": "workspace:*",
     "@bc5000/integrations": "workspace:*",
     "@bc5000/jobs": "workspace:*",
     "decimal.js": "^10.6.0",

@@ -219,13 +219,23 @@ export const stageInstances = pgTable(
       .notNull(),
     status: varchar('status', { length: 24 })
       .$type<
+        | 'CALCULATED'
+        | 'AWAITING_APPROVAL'
         | 'SCHEDULED'
         | 'DUE'
         | 'PENDING_APPROVAL'
         | 'QUEUED'
+        | 'SENDING'
+        | 'SENT'
+        | 'UNKNOWN'
+        | 'DELIVERED'
+        | 'REJECTED'
+        | 'PAUSED'
+        | 'SNOOZED'
         | 'SUCCEEDED'
         | 'SKIPPED'
         | 'FAILED'
+        | 'FAILED_PERMANENT'
         | 'CANCELLED'
       >()
       .notNull(),
