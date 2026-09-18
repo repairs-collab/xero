@@ -36,8 +36,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10.20.0
       - uses: actions/setup-node@v5
         with:
           node-version: 24
@@ -71,8 +69,6 @@ jobs:
         with:
           name: bill-chaser-images-${{ github.sha }}
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10.20.0
       - uses: actions/setup-node@v5
         with:
           node-version: 24
@@ -139,8 +135,6 @@ jobs:
         with:
           name: bill-chaser-images-${{ github.sha }}
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10.20.0
       - uses: actions/setup-node@v5
         with:
           node-version: 24
