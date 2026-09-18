@@ -38,6 +38,9 @@ importers:
       '@bc5000/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@bc5000/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
       '@bc5000/integrations':
         specifier: workspace:*
         version: link:../../packages/integrations

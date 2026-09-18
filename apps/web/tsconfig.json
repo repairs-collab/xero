@@ -1,6 +1,7 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "lib": ["dom", "dom.iterable", "ES2024"],
     "allowJs": false,
     "jsx": "preserve",
     "incremental": true,

@@ -13,6 +13,7 @@
     "@aws-sdk/client-cognito-identity-provider": "3.1129.0",
     "@bc5000/auth": "workspace:*",
     "@bc5000/db": "workspace:*",
+    "@bc5000/domain": "workspace:*",
     "@bc5000/integrations": "workspace:*",
     "@bc5000/jobs": "workspace:*",
     "drizzle-orm": "0.45.2",

@@ -1,20 +1,6 @@
 import { PostgresWebhookRepository } from '@bc5000/db/web';
-import { DurableJobQueue } from '@bc5000/jobs';
-
 import { getDatabaseClient } from './runtime.js';
-
-let queuePromise: Promise<DurableJobQueue> | undefined;
-
-const getQueue = (): Promise<DurableJobQueue> => {
-  queuePromise ??= (async () => {
-    const databaseUrl = process.env.DATABASE_URL;
-    if (databaseUrl === undefined) throw new Error('DATABASE_URL is required');
-    const queue = new DurableJobQueue({ databaseUrl });
-    await queue.start();
-    return queue;
-  })();
-  return queuePromise;
-};
+import { getJobQueue } from './job-runtime.js';
 
 export async function getCommonWebhookDependencies() {
   const organisationId = process.env.WEBHOOK_ORGANISATION_ID;
@@ -24,7 +10,7 @@ export async function getCommonWebhookDependencies() {
   return {
     organisationId,
     repository: new PostgresWebhookRepository(getDatabaseClient().db),
-    queue: await getQueue()
+    queue: await getJobQueue()
   };
 }
 
