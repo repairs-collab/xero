@@ -1,27 +1,10 @@
 import { fileURLToPath } from 'node:url';
 
-import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
-import { Pool } from 'pg';
 
-import * as schema from './schema/index.js';
+import type { Database } from './connection.js';
 
-export type Database = NodePgDatabase<typeof schema>;
-type TransactionCallback = Parameters<Database['transaction']>[0];
-export type DbTransaction = Parameters<TransactionCallback>[0];
-
-export interface DatabaseClient {
-  db: Database;
-  pool: Pool;
-}
-
-export function createDatabase(databaseUrl: string): DatabaseClient {
-  const pool = new Pool({ connectionString: databaseUrl });
-  return {
-    pool,
-    db: drizzle(pool, { schema })
-  };
-}
+export * from './connection.js';
 
 export async function migrateDatabase(db: Database): Promise<void> {
   const migrationsFolder = fileURLToPath(

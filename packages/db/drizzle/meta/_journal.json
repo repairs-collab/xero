@@ -15,6 +15,13 @@
       "when": 1789693333394,
       "tag": "0001_audit_append_only",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789696383306,
+      "tag": "0002_bumpy_big_bertha",
+      "breakpoints": true
     }
   ]
 }

@@ -68,6 +68,7 @@ export const memberships = pgTable(
     role: varchar('role', { length: 16 })
       .$type<'ADMIN' | 'OPERATOR'>()
       .notNull(),
+    disabledAt: timestamp('disabled_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .defaultNow()
