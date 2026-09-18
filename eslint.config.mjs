@@ -6,6 +6,7 @@ export default tseslint.config(
     ignores: [
       '**/.next/**',
       '**/coverage/**',
+      '**/cdk.out/**',
       '**/dist/**',
       '**/node_modules/**',
       '.superpowers/**',
@@ -15,6 +16,14 @@ export default tseslint.config(
     ]
   },
   js.configs.recommended,
+  {
+    files: ['**/*.mjs'],
+    languageOptions: {
+      globals: {
+        process: 'readonly'
+      }
+    }
+  },
   {
     files: ['**/*.ts', '**/*.tsx'],
     extends: [...tseslint.configs.recommendedTypeChecked],

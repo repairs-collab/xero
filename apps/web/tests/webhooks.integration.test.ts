@@ -149,10 +149,10 @@ describe('public webhook endpoints', () => {
         method: 'POST',
         headers: {
           date,
-          'x-sinch-signature': signer.sign(privateKey).toString('base64'),
-          'x-sinch-digest': 'SHA-512',
-          'x-sinch-cipher': 'RSA',
-          'x-sinch-key-id': 'key-1'
+          'x-messagemedia-signature': signer.sign(privateKey).toString('base64'),
+          'x-messagemedia-digest-type': 'SHA-512',
+          'x-messagemedia-cipher-type': 'RSA',
+          'x-messagemedia-key-id': 'key-1'
         },
         body
       })

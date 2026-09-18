@@ -94,10 +94,14 @@ export function createSinchWebhookHandler(
       requestLine: `${request.method} ${url.pathname}${url.search} HTTP/1.1`,
       date: request.headers.get('date') ?? '',
       rawBody,
-      signatureBase64: request.headers.get('x-sinch-signature') ?? '',
-      digest: request.headers.get('x-sinch-digest') ?? '',
-      cipher: request.headers.get('x-sinch-cipher') ?? '',
-      keyId: request.headers.get('x-sinch-key-id') ?? '',
+      signatureBase64:
+        request.headers.get('x-messagemedia-signature') ?? '',
+      digest:
+        request.headers.get('x-messagemedia-digest-type') ?? '',
+      cipher:
+        request.headers.get('x-messagemedia-cipher-type') ?? '',
+      keyId:
+        request.headers.get('x-messagemedia-key-id') ?? '',
       publicKeys: dependencies.publicKeys
     });
     if (!verified) return new Response('', { status: 401 });

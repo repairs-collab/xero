@@ -6,9 +6,9 @@ import type { Database } from './connection.js';
 
 export * from './connection.js';
 
-export async function migrateDatabase(db: Database): Promise<void> {
-  const migrationsFolder = fileURLToPath(
-    new URL('../drizzle', import.meta.url)
-  );
+export async function migrateDatabase(
+  db: Database,
+  migrationsFolder = fileURLToPath(new URL('../drizzle', import.meta.url))
+): Promise<void> {
   await migrate(db, { migrationsFolder });
 }

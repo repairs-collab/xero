@@ -13,7 +13,10 @@ importers:
         version: 9.39.5
       '@vitest/coverage-v8':
         specifier: 4.1.2
-        version: 4.1.2(vitest@4.1.2(@types/node@24.13.5)(vite@8.3.0(@types/node@24.13.5)))
+        version: 4.1.2(vitest@4.1.2(@types/node@24.13.5)(vite@8.3.0(@types/node@24.13.5)(esbuild@0.25.12)))
+      esbuild:
+        specifier: 0.25.12
+        version: 0.25.12
       eslint:
         specifier: ^9.39.5
         version: 9.39.5(supports-color@7.2.0)
@@ -25,7 +28,7 @@ importers:
         version: 8.70.0(eslint@9.39.5(supports-color@7.2.0))(supports-color@7.2.0)(typescript@6.0.3)
       vitest:
         specifier: 4.1.2
-        version: 4.1.2(@types/node@24.13.5)(vite@8.3.0(@types/node@24.13.5))
+        version: 4.1.2(@types/node@24.13.5)(vite@8.3.0(@types/node@24.13.5)(esbuild@0.25.12))
 
   apps/web:
     dependencies:
@@ -100,6 +103,22 @@ importers:
       '@types/node':
         specifier: ^24.10.0
         version: 24.13.5
+
+  infra:
+    dependencies:
+      aws-cdk-lib:
+        specifier: ^2.259.0
+        version: 2.269.0(constructs@10.8.1)
+      constructs:
+        specifier: ^10.4.4
+        version: 10.8.1
+    devDependencies:
+      '@types/node':
+        specifier: ^24.10.0
+        version: 24.13.5
+      aws-cdk:
+        specifier: ^2.1029.2
+        version: 2.1142.0
 
   packages/auth:
     dependencies:
@@ -178,6 +197,19 @@ importers:
         version: 24.13.5
 
 packages:
+
+  '@aws-cdk/asset-awscli-v1@2.2.292':
+    resolution: {integrity: sha512-d4aMFsAFj19FtxVyw8IzlUKv5Zu4sIvgnEjI2IU6IWBJgVbJ4aFnadANqYa+6MwB1CQbGOg0jh8WE77M+Nb/9A==}
+
+  '@aws-cdk/asset-node-proxy-agent-v6@2.1.3':
+    resolution: {integrity: sha512-98We1QWfin9vtuuQtNFhIIAEWb8CreyYTAP0Vn8HqSBoNiFJM9nZgifJeQawT9Wq0NX1HCNFlxCyTccIrK1PSA==}
+
+  '@aws-cdk/cloud-assembly-schema@54.24.0':
+    resolution: {integrity: sha512-9sH1pBpWuqZR/9rYAveNi62B/jDrc9BNOL83alD/wtIUSbRkg1aj6JX2r1cSugQwLBjCizQscQZgAb5wWnTTMg==}
+    engines: {node: '>= 18.0.0'}
+    bundledDependencies:
+      - jsonschema
+      - semver
 
   '@aws-sdk/client-cognito-identity-provider@3.1129.0':
     resolution: {integrity: sha512-i15yYtVxIDWk3Cw+qLCR6fxQHU9d7ha3aPVbOUhUK7oHG4ZkAonEtS4vnq+pUYar5BLEbJf7bxa4IzwYew652A==}
@@ -1136,6 +1168,30 @@ packages:
   ast-v8-to-istanbul@1.0.6:
     resolution: {integrity: sha512-fvpl29helSO2w/z7utIbrkNXILdrLwDwAMH2I/zPKlGf5244+gf+B4cyS1sANcrPY2h+hWCGSgC8N61s/+AF9A==}
 
+  aws-cdk-lib@2.269.0:
+    resolution: {integrity: sha512-Ob2EmB3faXGUMjXYhxsMvktZtaojr/aaeLqFjq9WbO+vOX1mx49OQPVB6NNNLfNKWF993Bb6nr4rsPblpUAJww==}
+    engines: {node: '>= 20.0.0'}
+    peerDependencies:
+      constructs: ^10.5.0
+    bundledDependencies:
+      - '@aws/cloudformation-validate'
+      - '@balena/dockerignore'
+      - '@aws-cdk/cloud-assembly-api'
+      - case
+      - fs-extra
+      - ignore
+      - jsonschema
+      - minimatch
+      - punycode
+      - semver
+      - yaml
+      - mime-types
+
+  aws-cdk@2.1142.0:
+    resolution: {integrity: sha512-gNOeii+avTJmOwfR8tVgraZ5A2EBC/529EXg7e+yBp8Zl608dAv5CtFRoJt8QoKiruiCwYr4HF6ClNAse/NkSg==}
+    engines: {node: '>= 18.0.0'}
+    hasBin: true
+
   balanced-match@1.0.2:
     resolution: {integrity: sha512-3oSeUO0TMV67hN1AmbXsK4yaqU7tjiHlbxRDZOpH0KW9+CeX4bRAaX0Anxt0tx2MrpRpWwQaPwIlISEJhYU5Pw==}
 
@@ -1188,6 +1244,9 @@ packages:
 
   concat-map@0.0.1:
     resolution: {integrity: sha512-/Srv4dswyQNBfohGpz9o6Yb3Gz3SrUDqBH5rTuhGR7ahtlbYKnVxw2bCFMRljaA7EXHaXZ8wsHdodFvbkhKmqg==}
+
+  constructs@10.8.1:
+    resolution: {integrity: sha512-98yGXYyhePqPYh3cYu8nzBERmAhC0DONe3UD03okK0nehZ7hYP4wgZuf02a04+uOWxnTJ5Rpp5m0GRNpwyLGGA==}
 
   convert-source-map@2.0.0:
     resolution: {integrity: sha512-Kvp459HrV2FEJ1CAsi1Ku+MY3kasH19TFykTz2xWmMeq6bk2NU3XXvfJ+Q61m0xktWwt+1HSYf3JZsTms3aRJg==}
@@ -2025,6 +2084,12 @@ packages:
 
 snapshots:
 
+  '@aws-cdk/asset-awscli-v1@2.2.292': {}
+
+  '@aws-cdk/asset-node-proxy-agent-v6@2.1.3': {}
+
+  '@aws-cdk/cloud-assembly-schema@54.24.0': {}
+
   '@aws-sdk/client-cognito-identity-provider@3.1129.0':
     dependencies:
       '@aws-sdk/core': 3.978.0
@@ -2760,7 +2825,7 @@ snapshots:
       '@typescript-eslint/types': 8.70.0
       eslint-visitor-keys: 5.0.1
 
-  '@vitest/coverage-v8@4.1.2(vitest@4.1.2(@types/node@24.13.5)(vite@8.3.0(@types/node@24.13.5)))':
+  '@vitest/coverage-v8@4.1.2(vitest@4.1.2(@types/node@24.13.5)(vite@8.3.0(@types/node@24.13.5)(esbuild@0.25.12)))':
     dependencies:
       '@bcoe/v8-coverage': 1.0.2
       '@vitest/utils': 4.1.2
@@ -2772,7 +2837,7 @@ snapshots:
       obug: 2.2.1
       std-env: 4.2.0
       tinyrainbow: 3.1.1
-      vitest: 4.1.2(@types/node@24.13.5)(vite@8.3.0(@types/node@24.13.5))
+      vitest: 4.1.2(@types/node@24.13.5)(vite@8.3.0(@types/node@24.13.5)(esbuild@0.25.12))
 
   '@vitest/expect@4.1.2':
     dependencies:
@@ -2783,13 +2848,13 @@ snapshots:
       chai: 6.2.2
       tinyrainbow: 3.1.1
 
-  '@vitest/mocker@4.1.2(vite@8.3.0(@types/node@24.13.5))':
+  '@vitest/mocker@4.1.2(vite@8.3.0(@types/node@24.13.5)(esbuild@0.25.12))':
     dependencies:
       '@vitest/spy': 4.1.2
       estree-walker: 3.0.3
       magic-string: 0.30.21
     optionalDependencies:
-      vite: 8.3.0(@types/node@24.13.5)
+      vite: 8.3.0(@types/node@24.13.5)(esbuild@0.25.12)
 
   '@vitest/pretty-format@4.1.2':
     dependencies:
@@ -2842,6 +2907,15 @@ snapshots:
       estree-walker: 3.0.3
       js-tokens: 10.0.0
 
+  aws-cdk-lib@2.269.0(constructs@10.8.1):
+    dependencies:
+      '@aws-cdk/asset-awscli-v1': 2.2.292
+      '@aws-cdk/asset-node-proxy-agent-v6': 2.1.3
+      '@aws-cdk/cloud-assembly-schema': 54.24.0
+      constructs: 10.8.1
+
+  aws-cdk@2.1142.0: {}
+
   balanced-match@1.0.2: {}
 
   balanced-match@4.0.4: {}
@@ -2881,6 +2955,8 @@ snapshots:
   color-name@1.1.4: {}
 
   concat-map@0.0.1: {}
+
+  constructs@10.8.1: {}
 
   convert-source-map@2.0.0: {}
 
@@ -3537,7 +3613,7 @@ snapshots:
     dependencies:
       punycode: 2.3.1
 
-  vite@8.3.0(@types/node@24.13.5):
+  vite@8.3.0(@types/node@24.13.5)(esbuild@0.25.12):
     dependencies:
       lightningcss: 1.33.0
       picomatch: 4.0.7
@@ -3546,12 +3622,13 @@ snapshots:
       tinyglobby: 0.2.17
     optionalDependencies:
       '@types/node': 24.13.5
+      esbuild: 0.25.12
       fsevents: 2.3.3
 
-  vitest@4.1.2(@types/node@24.13.5)(vite@8.3.0(@types/node@24.13.5)):
+  vitest@4.1.2(@types/node@24.13.5)(vite@8.3.0(@types/node@24.13.5)(esbuild@0.25.12)):
     dependencies:
       '@vitest/expect': 4.1.2
-      '@vitest/mocker': 4.1.2(vite@8.3.0(@types/node@24.13.5))
+      '@vitest/mocker': 4.1.2(vite@8.3.0(@types/node@24.13.5)(esbuild@0.25.12))
       '@vitest/pretty-format': 4.1.2
       '@vitest/runner': 4.1.2
       '@vitest/snapshot': 4.1.2
@@ -3568,7 +3645,7 @@ snapshots:
       tinyexec: 1.3.1
       tinyglobby: 0.2.17
       tinyrainbow: 3.1.1
-      vite: 8.3.0(@types/node@24.13.5)
+      vite: 8.3.0(@types/node@24.13.5)(esbuild@0.25.12)
       why-is-node-running: 2.3.0
     optionalDependencies:
       '@types/node': 24.13.5

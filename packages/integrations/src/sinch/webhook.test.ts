@@ -168,6 +168,7 @@ describe('parseSinchEvent', () => {
   it.each([
     ['QUEUED', 100, 'nonterminal'],
     ['DELIVERED', 0, 'delivered'],
+    ['delivered', 220, 'delivered'],
     ['REJECTED', 400, 'permanently-failed']
   ] as const)(
     'categorises delivery status %s as %s',

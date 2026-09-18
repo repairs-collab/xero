@@ -1,0 +1,19 @@
+{
+  "name": "@bc5000/infra",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "cdk": "cdk"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.259.0",
+    "constructs": "^10.4.4"
+  },
+  "devDependencies": {
+    "aws-cdk": "^2.1029.2",
+    "@types/node": "^24.10.0"
+  }
+}

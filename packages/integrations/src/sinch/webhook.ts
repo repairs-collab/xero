@@ -106,12 +106,13 @@ const metadataFrom = (value: unknown): Record<string, string> => {
 const deliveryCategory = (
   status: string
 ): SinchDeliveryEvent['category'] => {
-  if (status === 'DELIVERED') return 'delivered';
+  const normalised = status.toUpperCase();
+  if (normalised === 'DELIVERED') return 'delivered';
   if (
-    status === 'REJECTED' ||
-    status === 'FAILED' ||
-    status === 'UNDELIVERABLE' ||
-    status === 'EXPIRED'
+    normalised === 'REJECTED' ||
+    normalised === 'FAILED' ||
+    normalised === 'UNDELIVERABLE' ||
+    normalised === 'EXPIRED'
   ) {
     return 'permanently-failed';
   }

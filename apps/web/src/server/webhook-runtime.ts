@@ -1,15 +1,25 @@
-import { PostgresWebhookRepository } from '@bc5000/db/web';
+import { organisations, PostgresWebhookRepository } from '@bc5000/db/web';
 import { getDatabaseClient } from './runtime.js';
 import { getJobQueue } from './job-runtime.js';
 
 export async function getCommonWebhookDependencies() {
-  const organisationId = process.env.WEBHOOK_ORGANISATION_ID;
+  const database = getDatabaseClient().db;
+  let organisationId = process.env.WEBHOOK_ORGANISATION_ID;
   if (organisationId === undefined) {
-    throw new Error('WEBHOOK_ORGANISATION_ID is required');
+    const rows = await database
+      .select({ id: organisations.id })
+      .from(organisations)
+      .limit(2);
+    if (rows.length !== 1 || rows[0] === undefined) {
+      throw new Error(
+        'WEBHOOK_ORGANISATION_ID is required when more than one organisation exists'
+      );
+    }
+    organisationId = rows[0].id;
   }
   return {
     organisationId,
-    repository: new PostgresWebhookRepository(getDatabaseClient().db),
+    repository: new PostgresWebhookRepository(database),
     queue: await getJobQueue()
   };
 }

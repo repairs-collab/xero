@@ -18,6 +18,7 @@
   "devDependencies": {
     "@eslint/js": "^9.39.5",
     "@vitest/coverage-v8": "4.1.2",
+    "esbuild": "0.25.12",
     "eslint": "^9.39.5",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.70.0",

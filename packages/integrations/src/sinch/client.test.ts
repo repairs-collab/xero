@@ -144,3 +144,22 @@ describe('SinchClient.getMessageStatus', () => {
     });
   });
 });
+
+describe('SinchClient.checkConnection', () => {
+  it('authenticates with the read-only APAC webhook endpoint', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push({
+      status: 200,
+      headers: {},
+      body: JSON.stringify({ page: 0, pageSize: 1, pageData: [] })
+    });
+
+    await expect(createClient(http).checkConnection()).resolves.toEqual({
+      kind: 'healthy'
+    });
+    expect(http.requests[0]).toMatchObject({
+      method: 'GET',
+      url: 'https://au.app.api.sinch.com/v1/webhooks/messages?page=0&page_size=1'
+    });
+  });
+});
