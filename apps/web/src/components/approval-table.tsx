@@ -34,10 +34,11 @@ export function ApprovalTable({ rows }: { rows: ApprovalRow[] }) {
             </div>
             <form className="approval-actions">
               <input type="hidden" name="organisationId" value={row.organisationId} />
-              <button className="button button--primary" formAction={approveReminder} name="approvalId" value={row.id}>Approve</button>
-              <button className="button" formAction={rejectReminder} name="approvalId" value={row.id}>Reject</button>
+              <input type="hidden" name="approvalId" value={row.id} />
+              <button className="button button--primary" formAction={approveReminder}>Approve</button>
+              <button className="button" formAction={rejectReminder}>Reject</button>
               <label className="snooze-label">Snooze until<input name="until" type="datetime-local" /></label>
-              <button className="button button--quiet" formAction={snoozeReminder} name="approvalId" value={row.id}>Snooze</button>
+              <button className="button button--quiet" formAction={snoozeReminder}>Snooze</button>
             </form>
           </article>
         ))}

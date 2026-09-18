@@ -11,6 +11,7 @@
     "typecheck": "pnpm -r typecheck",
     "test": "vitest run",
     "test:integration": "vitest run --project integration",
+    "test:e2e": "pnpm --filter @bc5000/web test:e2e",
     "build": "pnpm -r build",
     "db:generate": "pnpm --filter @bc5000/db db:generate",
     "db:migrate": "pnpm --filter @bc5000/db db:migrate"
