@@ -1,0 +1,26 @@
+{
+  "name": "bill-chaser-5000",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.20.0",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run",
+    "test:integration": "vitest run --project integration",
+    "build": "pnpm -r build",
+    "db:generate": "pnpm --filter @bc5000/db db:generate",
+    "db:migrate": "pnpm --filter @bc5000/db db:migrate"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@vitest/coverage-v8": "4.1.2",
+    "eslint": "^9.39.5",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.70.0",
+    "vitest": "4.1.2"
+  }
+}
