@@ -66,6 +66,10 @@ export interface XeroContact {
   active: boolean;
   email: string | null;
   phones: string[];
+  phoneCandidates: Array<{
+    type: string;
+    number: string;
+  }>;
 }
 
 export interface XeroInvoice {

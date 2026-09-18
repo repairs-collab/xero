@@ -67,7 +67,12 @@ export const mapXeroContact = (contact: RawXeroContact): XeroContact => ({
   email: contact.EmailAddress ?? null,
   phones: (contact.Phones ?? [])
     .map((phone) => phone.PhoneNumber?.trim())
-    .filter((phone): phone is string => phone !== undefined && phone !== '')
+    .filter((phone): phone is string => phone !== undefined && phone !== ''),
+  phoneCandidates: (contact.Phones ?? []).flatMap((phone) => {
+    const number = phone.PhoneNumber?.trim();
+    if (number === undefined || number === '') return [];
+    return [{ type: phone.PhoneType ?? 'UNKNOWN', number }];
+  })
 });
 
 export const mapXeroOrganisation = (

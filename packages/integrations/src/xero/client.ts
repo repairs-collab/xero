@@ -27,6 +27,10 @@ export interface XeroClientOptions {
   baseUrl?: string;
 }
 
+export interface ListOutstandingInvoicesOptions {
+  ifModifiedSince?: string;
+}
+
 interface XeroEnvelope<T> {
   data: T;
   rateLimit: XeroRateLimit;
@@ -89,7 +93,9 @@ export class XeroClient {
     };
   }
 
-  async listOutstandingInvoices(): Promise<XeroResult<XeroInvoice[]>> {
+  async listOutstandingInvoices(
+    options: ListOutstandingInvoicesOptions = {}
+  ): Promise<XeroResult<XeroInvoice[]>> {
     const invoices: XeroInvoice[] = [];
     let page = 1;
     let lastRateLimit: XeroRateLimit = {
@@ -107,10 +113,16 @@ export class XeroClient {
       });
       const response = await this.requestJson<{
         Invoices: RawXeroInvoice[];
-      }>('GET', `/Invoices?${search.toString()}`);
+      }>(
+        'GET',
+        `/Invoices?${search.toString()}`,
+        options.ifModifiedSince === undefined
+          ? {}
+          : { 'If-Modified-Since': options.ifModifiedSince }
+      );
       invoices.push(...response.data.Invoices.map(mapXeroInvoice));
       lastRateLimit = response.rateLimit;
-      if (response.data.Invoices.length < 100) break;
+      if (response.data.Invoices.length === 0) break;
       page += 1;
     }
 
@@ -181,9 +193,10 @@ export class XeroClient {
 
   private async requestJson<T>(
     method: HttpRequest['method'],
-    path: string
+    path: string,
+    headers: Record<string, string> = {}
   ): Promise<XeroEnvelope<T>> {
-    const response = await this.request(method, path);
+    const response = await this.request(method, path, headers);
     this.throwForResponse(response);
     try {
       return {
@@ -200,7 +213,8 @@ export class XeroClient {
 
   private async request(
     method: HttpRequest['method'],
-    path: string
+    path: string,
+    headers: Record<string, string> = {}
   ): Promise<HttpResponse> {
     const accessToken = await this.options.tokenProvider.getAccessToken();
     return this.options.http.request({
@@ -208,7 +222,8 @@ export class XeroClient {
       url: `${this.baseUrl}${path}`,
       headers: {
         Authorization: `Bearer ${accessToken}`,
-        Accept: 'application/json'
+        Accept: 'application/json',
+        ...headers
       }
     });
   }

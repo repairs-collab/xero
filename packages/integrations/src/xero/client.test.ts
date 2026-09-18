@@ -131,6 +131,11 @@ describe('XeroClient data operations', () => {
         status: 200,
         headers: { 'x-minlimit-remaining': '54' },
         body: JSON.stringify({ Invoices: [rawInvoice(101)] })
+      },
+      {
+        status: 200,
+        headers: { 'x-minlimit-remaining': '53' },
+        body: JSON.stringify({ Invoices: [] })
       }
     );
 
@@ -143,8 +148,8 @@ describe('XeroClient data operations', () => {
       dueDate: '2026-08-31',
       amountDue: '120.5000'
     });
-    expect(result.rateLimit.remaining).toBe(54);
-    expect(http.requests).toHaveLength(2);
+    expect(result.rateLimit.remaining).toBe(53);
+    expect(http.requests).toHaveLength(3);
     const firstUrl = new URL(http.requests[0]?.url ?? '');
     expect(firstUrl.searchParams.get('summaryOnly')).toBe('true');
     expect(firstUrl.searchParams.get('page')).toBe('1');
@@ -154,6 +159,23 @@ describe('XeroClient data operations', () => {
     expect(new URL(http.requests[1]?.url ?? '').searchParams.get('page')).toBe(
       '2'
     );
+  });
+
+  it('uses If-Modified-Since for an incremental invoice scan', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push({
+      status: 200,
+      headers: {},
+      body: JSON.stringify({ Invoices: [] })
+    });
+
+    await createClient(http).listOutstandingInvoices({
+      ifModifiedSince: '2026-09-17T23:58:00.000Z'
+    });
+
+    expect(http.requests[0]?.headers).toMatchObject({
+      'If-Modified-Since': '2026-09-17T23:58:00.000Z'
+    });
   });
 
   it('maps organisation, contact, and online invoice URL responses', async () => {
@@ -209,7 +231,10 @@ describe('XeroClient data operations', () => {
       data: {
         id: 'contact-1',
         active: true,
-        phones: ['0400 000 000']
+        phones: ['0400 000 000'],
+        phoneCandidates: [
+          { type: 'MOBILE', number: '0400 000 000' }
+        ]
       }
     });
     await expect(
