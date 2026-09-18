@@ -23,6 +23,10 @@ export const jobPayloadSchemas = {
     organisationId: identifier,
     replyId: identifier
   }),
+  [jobNames.providerConnectionTest]: z.object({
+    organisationId: identifier,
+    provider: z.enum(['XERO', 'SINCH'])
+  }),
   [jobNames.webhookProcess]: z.object({
     organisationId: identifier,
     webhookEventId: identifier,

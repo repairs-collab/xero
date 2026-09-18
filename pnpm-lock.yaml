@@ -171,6 +171,12 @@ importers:
         specifier: ^4.6.5
         version: 4.6.5
 
+  packages/observability:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.10.0
+        version: 24.13.5
+
 packages:
 
   '@aws-sdk/client-cognito-identity-provider@3.1129.0':
