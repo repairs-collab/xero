@@ -3,6 +3,7 @@ import { and, eq } from 'drizzle-orm';
 import {
   type Database,
   messageAttempts,
+  operatorReplies,
   outboundMessages,
   stageInstances
 } from '@bc5000/db';
@@ -30,7 +31,15 @@ export async function processDeliveryEvent(
       )
       .for('update')
       .limit(1);
-    if (row === undefined) throw new Error('Sinch delivery message was not found');
+    if (row === undefined) {
+      const [reply] = await transaction.select().from(operatorReplies).where(and(eq(operatorReplies.organisationId, organisationId), eq(operatorReplies.providerMessageId, event.messageId))).for('update').limit(1);
+      if (reply === undefined) throw new Error('Sinch delivery message was not found');
+      if (['DELIVERED', 'FAILED', 'CANCELLED'].includes(reply.status) || event.category === 'nonterminal') return;
+      const occurredAt = new Date(event.occurredAt);
+      const delivered = event.category === 'delivered';
+      await transaction.update(operatorReplies).set({ status: delivered ? 'DELIVERED' : 'FAILED', failureReason: delivered ? null : event.status, sentAt: occurredAt, updatedAt: occurredAt }).where(eq(operatorReplies.id, reply.id));
+      return;
+    }
 
     const terminal = ['DELIVERED', 'FAILED', 'CANCELLED'].includes(
       row.outbound.status

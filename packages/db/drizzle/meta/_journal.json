@@ -22,6 +22,20 @@
       "when": 1789696383306,
       "tag": "0002_bumpy_big_bertha",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1789698837059,
+      "tag": "0003_nosy_scalphunter",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1789699593416,
+      "tag": "0004_superb_diamondback",
+      "breakpoints": true
     }
   ]
 }

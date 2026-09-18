@@ -1,12 +1,11 @@
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
-  oxc: { jsx: 'react-jsx' },
   test: {
     passWithNoTests: true,
     projects: [
       {
-        oxc: { jsx: 'react-jsx' },
+        oxc: { jsx: { runtime: 'automatic' } },
         test: {
           name: 'unit',
           include: [
@@ -20,9 +19,10 @@ export default defineConfig({
         }
       },
       {
-        oxc: { jsx: 'react-jsx' },
+        oxc: { jsx: { runtime: 'automatic' } },
         test: {
           name: 'integration',
+          globalSetup: ['test/integration-global-setup.tsx'],
           include: ['**/*.integration.test.ts', '**/*.integration.test.tsx']
         }
       }

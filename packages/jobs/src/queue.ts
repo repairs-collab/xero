@@ -44,7 +44,7 @@ const externalSendOptions = {
 } as const;
 
 const optionsFor = (name: JobName) =>
-  name === jobNames.reminderExecute
+  name === jobNames.reminderExecute || name === jobNames.operatorReplyExecute
     ? externalSendOptions
     : safeRetryOptions;
 

@@ -5,6 +5,7 @@ export const jobNames = {
   xeroNightlyReconcile: 'xero.nightly-reconcile',
   remindersCalculate: 'reminders.calculate',
   reminderExecute: 'reminder.execute',
+  operatorReplyExecute: 'operator-reply.execute',
   webhookProcess: 'webhook.process',
   retentionApply: 'retention.apply'
 } as const;

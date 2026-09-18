@@ -11,6 +11,7 @@ import {
   uuid,
   varchar
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 
 import { conversations } from './messaging.js';
 import { organisations, users } from './organisation.js';
@@ -137,6 +138,9 @@ export const tasks = pgTable(
       .defaultNow()
   },
   (table) => [
+    uniqueIndex('tasks_open_debt_escalation_uq')
+      .on(table.organisationId, table.contactId, table.sequenceId, table.kind)
+      .where(sql`${table.status} = 'OPEN' and ${table.kind} = 'DEBT_ESCALATION'`),
     index('tasks_open_idx').on(
       table.organisationId,
       table.status,

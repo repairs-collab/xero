@@ -17,6 +17,7 @@
     "@bc5000/integrations": "workspace:*",
     "@bc5000/jobs": "workspace:*",
     "drizzle-orm": "0.45.2",
+    "libphonenumber-js": "^1.12.23",
     "next": "16.3.5",
     "react": "19.3.0",
     "react-dom": "19.3.0"

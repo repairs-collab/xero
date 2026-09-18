@@ -352,7 +352,7 @@ export async function calculateReminderWork(
             )
             .limit(1);
           if (existingTasks.length === 0) {
-            await dependencies.database.insert(tasks).values({
+            const createdTask = await dependencies.database.insert(tasks).values({
               organisationId,
               contactId: row.contact.id,
               invoiceId: row.invoice.id,
@@ -362,8 +362,8 @@ export async function calculateReminderWork(
               dueAt: new Date(occurrence.scheduledAtUtc),
               summary: `Escalate overdue invoice ${row.invoice.invoiceNumber}`,
               updatedAt: now
-            });
-            summary.createdTasks += 1;
+            }).onConflictDoNothing().returning({ id: tasks.id });
+            summary.createdTasks += createdTask.length;
           }
         }
       }

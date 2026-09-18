@@ -50,6 +50,9 @@ importers:
       drizzle-orm:
         specifier: 0.45.2
         version: 0.45.2(@types/pg@8.23.1)(pg@8.23.0)
+      libphonenumber-js:
+        specifier: ^1.12.23
+        version: 1.13.13
       next:
         specifier: 16.3.5
         version: 16.3.5(@types/node@24.13.5)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)

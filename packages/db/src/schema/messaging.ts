@@ -208,3 +208,26 @@ export const suppressions = pgTable(
     )
   ]
 );
+
+export const operatorReplies = pgTable(
+  'operator_replies',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    organisationId: uuid('organisation_id').notNull().references(() => organisations.id, { onDelete: 'cascade' }),
+    conversationId: uuid('conversation_id').notNull().references(() => conversations.id, { onDelete: 'cascade' }),
+    actorUserId: uuid('actor_user_id').notNull().references(() => users.id),
+    content: text('content').notNull(),
+    contentHash: text('content_hash').notNull(),
+    status: varchar('status', { length: 24 }).$type<'PENDING' | 'DRY_RUN' | 'SENDING' | 'ACCEPTED' | 'DELIVERED' | 'FAILED' | 'UNKNOWN' | 'CANCELLED'>().notNull().default('PENDING'),
+    providerMessageId: text('provider_message_id'),
+    idempotencyKey: text('idempotency_key').notNull(),
+    failureReason: text('failure_reason'),
+    sentAt: timestamp('sent_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [
+    uniqueIndex('operator_replies_org_idempotency_uq').on(table.organisationId, table.idempotencyKey),
+    index('operator_replies_conversation_idx').on(table.organisationId, table.conversationId, table.createdAt)
+  ]
+);

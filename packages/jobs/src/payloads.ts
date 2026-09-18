@@ -19,6 +19,10 @@ export const jobPayloadSchemas = {
     organisationId: identifier,
     stageInstanceId: identifier
   }),
+  [jobNames.operatorReplyExecute]: z.object({
+    organisationId: identifier,
+    replyId: identifier
+  }),
   [jobNames.webhookProcess]: z.object({
     organisationId: identifier,
     webhookEventId: identifier,

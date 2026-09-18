@@ -1,4 +1,7 @@
+'use client';
+
 import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 import type { ReactNode } from 'react';
 
 const navigation = [
@@ -23,6 +26,7 @@ export function AppShell({
   role: 'ADMIN' | 'OPERATOR';
   organisationName?: string;
 }) {
+  const pathname = usePathname();
   const initials = displayName.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase();
   return (
     <div className="app-shell">
@@ -34,11 +38,11 @@ export function AppShell({
         <nav aria-label="Primary navigation">
           <span className="nav-label">Workspace</span>
           {navigation.slice(0, 7).map(([label, href, icon]) => (
-            <Link href={href} key={label} className="nav-item"><span aria-hidden="true">{icon}</span>{label}</Link>
+            <Link href={href} key={label} className={`nav-item ${pathname === href || (href !== '/' && pathname.startsWith(`${href}/`)) ? 'nav-item--active' : ''}`}><span aria-hidden="true">{icon}</span>{label}</Link>
           ))}
           <span className="nav-label nav-label--settings">Configuration</span>
           {navigation.slice(7).map(([label, href, icon]) => (
-            <Link href={href} key={label} className="nav-item"><span aria-hidden="true">{icon}</span>{label}</Link>
+            <Link href={href} key={label} className={`nav-item ${pathname === href || pathname.startsWith(`${href}/`) ? 'nav-item--active' : ''}`}><span aria-hidden="true">{icon}</span>{label}</Link>
           ))}
         </nav>
         <div className="sidebar__footer">
