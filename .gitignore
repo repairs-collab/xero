@@ -2,3 +2,13 @@
 .superpowers/
 work/
 outputs/
+.env*
+!.env.example
+.next/
+dist/
+coverage/
+cdk.out/
+node_modules/
+playwright-report/
+test-results/
+*.tsbuildinfo

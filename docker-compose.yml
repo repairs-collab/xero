@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: bc5000
+      POSTGRES_USER: bc5000
+      POSTGRES_PASSWORD: bc5000
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bc5000 -d bc5000"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - bc5000-postgres:/var/lib/postgresql/data
+
+volumes:
+  bc5000-postgres:

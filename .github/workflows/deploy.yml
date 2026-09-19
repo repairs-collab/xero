@@ -1,0 +1,178 @@
+name: Deploy Bill Chaser 5000
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: bill-chaser-production
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-southeast-2
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  verify-and-build:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: bc5000
+          POSTGRES_USER: bc5000
+          POSTGRES_PASSWORD: bc5000
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U bc5000 -d bc5000"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm audit --prod --audit-level high
+      - run: pnpm lint && pnpm typecheck && pnpm test && pnpm test:integration && pnpm build
+        env:
+          DATABASE_URL: postgres://bc5000:bc5000@localhost:5432/bc5000
+      - uses: docker/setup-buildx-action@v3
+      - name: Build immutable images once
+        run: |
+          docker build --pull --file apps/web/Dockerfile --tag bill-chaser-web:${IMAGE_TAG} .
+          docker build --pull --file apps/worker/Dockerfile --tag bill-chaser-worker:${IMAGE_TAG} .
+          docker save bill-chaser-web:${IMAGE_TAG} | zstd -T0 -o bill-chaser-web.tar.zst
+          docker save bill-chaser-worker:${IMAGE_TAG} | zstd -T0 -o bill-chaser-worker.tar.zst
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bill-chaser-images-${{ github.sha }}
+          path: bill-chaser-*.tar.zst
+          retention-days: 3
+          if-no-files-found: error
+
+  deploy-staging:
+    needs: verify-and-build
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: bill-chaser-images-${{ github.sha }}
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ap-southeast-2
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+      - uses: aws-actions/amazon-ecr-login@v2.1.6
+      - name: Ensure shared infrastructure and repositories exist
+        run: >-
+          pnpm --filter @bc5000/infra cdk deploy
+          staging-bill-chaser-network
+          staging-bill-chaser-data
+          staging-bill-chaser-identity
+          --require-approval never
+          --context stage=staging
+      - name: Push and scan SHA-tagged images
+        run: |
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          REGISTRY="${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          zstd -dc bill-chaser-web.tar.zst | docker load
+          zstd -dc bill-chaser-worker.tar.zst | docker load
+          docker tag bill-chaser-web:${IMAGE_TAG} ${REGISTRY}/staging-bill-chaser-web:${IMAGE_TAG}
+          docker tag bill-chaser-worker:${IMAGE_TAG} ${REGISTRY}/staging-bill-chaser-worker:${IMAGE_TAG}
+          docker push ${REGISTRY}/staging-bill-chaser-web:${IMAGE_TAG}
+          docker push ${REGISTRY}/staging-bill-chaser-worker:${IMAGE_TAG}
+          for REPOSITORY in staging-bill-chaser-web staging-bill-chaser-worker; do
+            aws ecr start-image-scan --repository-name "$REPOSITORY" --image-id imageTag=${IMAGE_TAG} || true
+            aws ecr wait image-scan-complete --repository-name "$REPOSITORY" --image-id imageTag=${IMAGE_TAG}
+            FINDINGS=$(aws ecr describe-image-scan-findings --repository-name "$REPOSITORY" --image-id imageTag=${IMAGE_TAG} --query 'imageScanFindings.findingSeverityCounts.[CRITICAL,HIGH]' --output text)
+            test "$FINDINGS" = "None\tNone" -o "$FINDINGS" = "0\t0"
+          done
+      - name: Deploy staging services
+        run: >-
+          pnpm --filter @bc5000/infra cdk deploy --all
+          --require-approval never
+          --context stage=staging
+          --context imageTag=${IMAGE_TAG}
+          --context certificateArn=${{ vars.CERTIFICATE_ARN }}
+          --context hostname=${{ vars.HOSTNAME }}
+      - name: Run migrations as a one-off ECS task
+        run: |
+          CLUSTER=$(aws ecs list-clusters --query 'clusterArns[?contains(@, `staging-bill-chaser`)] | [0]' --output text)
+          SERVICE=$(aws ecs list-services --cluster "$CLUSTER" --query 'serviceArns[?contains(@, `WorkerService`)] | [0]' --output text)
+          TASK_DEFINITION=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query 'services[0].taskDefinition' --output text)
+          NETWORK=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query 'services[0].networkConfiguration' --output json)
+          TASK=$(aws ecs run-task --cluster "$CLUSTER" --task-definition "$TASK_DEFINITION" --launch-type FARGATE --network-configuration "$NETWORK" --overrides '{"containerOverrides":[{"name":"Worker","command":["node","/app/worker.mjs","migrate"]}]}' --query 'tasks[0].taskArn' --output text)
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK"
+          EXIT=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK" --query 'tasks[0].containers[?name==`Worker`].exitCode | [0]' --output text)
+          test "$EXIT" = "0"
+      - name: Staging smoke test
+        run: curl --fail --show-error --silent --retry 12 --retry-delay 10 "https://${{ vars.HOSTNAME }}/health/ready"
+
+  deploy-production:
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: bill-chaser-images-${{ github.sha }}
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ap-southeast-2
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+      - uses: aws-actions/amazon-ecr-login@v2.1.6
+      - name: Ensure production shared infrastructure exists
+        run: >-
+          pnpm --filter @bc5000/infra cdk deploy
+          production-bill-chaser-network
+          production-bill-chaser-data
+          production-bill-chaser-identity
+          --require-approval never
+          --context stage=production
+      - name: Push the verified build to production ECR
+        run: |
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          REGISTRY="${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          zstd -dc bill-chaser-web.tar.zst | docker load
+          zstd -dc bill-chaser-worker.tar.zst | docker load
+          docker tag bill-chaser-web:${IMAGE_TAG} ${REGISTRY}/production-bill-chaser-web:${IMAGE_TAG}
+          docker tag bill-chaser-worker:${IMAGE_TAG} ${REGISTRY}/production-bill-chaser-worker:${IMAGE_TAG}
+          docker push ${REGISTRY}/production-bill-chaser-web:${IMAGE_TAG}
+          docker push ${REGISTRY}/production-bill-chaser-worker:${IMAGE_TAG}
+      - name: Deploy production and run the migration task
+        run: |
+          pnpm --filter @bc5000/infra cdk deploy --all --require-approval never --context stage=production --context imageTag=${IMAGE_TAG} --context certificateArn=${{ vars.CERTIFICATE_ARN }} --context hostname=${{ vars.HOSTNAME }}
+          CLUSTER=$(aws ecs list-clusters --query 'clusterArns[?contains(@, `production-bill-chaser`)] | [0]' --output text)
+          SERVICE=$(aws ecs list-services --cluster "$CLUSTER" --query 'serviceArns[?contains(@, `WorkerService`)] | [0]' --output text)
+          TASK_DEFINITION=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query 'services[0].taskDefinition' --output text)
+          NETWORK=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query 'services[0].networkConfiguration' --output json)
+          TASK=$(aws ecs run-task --cluster "$CLUSTER" --task-definition "$TASK_DEFINITION" --launch-type FARGATE --network-configuration "$NETWORK" --overrides '{"containerOverrides":[{"name":"Worker","command":["node","/app/worker.mjs","migrate"]}]}' --query 'tasks[0].taskArn' --output text)
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK"
+          test "$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK" --query 'tasks[0].containers[?name==`Worker`].exitCode | [0]' --output text)" = "0"
+      - name: Production smoke test
+        run: curl --fail --show-error --silent --retry 12 --retry-delay 10 "https://${{ vars.HOSTNAME }}/health/ready"

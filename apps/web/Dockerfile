@@ -1,0 +1,34 @@
+# syntax=docker/dockerfile:1.7
+FROM node:24.19.0-bookworm-slim AS dependencies
+ENV PNPM_HOME=/pnpm
+ENV PATH=$PNPM_HOME:$PATH
+RUN corepack enable && corepack prepare pnpm@10.20.0 --activate
+WORKDIR /workspace
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY apps/web/package.json apps/web/package.json
+COPY packages/auth/package.json packages/auth/package.json
+COPY packages/db/package.json packages/db/package.json
+COPY packages/domain/package.json packages/domain/package.json
+COPY packages/integrations/package.json packages/integrations/package.json
+COPY packages/jobs/package.json packages/jobs/package.json
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
+
+FROM dependencies AS build
+COPY apps/web apps/web
+COPY packages packages
+RUN pnpm --filter @bc5000/web build
+
+FROM node:24.19.0-bookworm-slim AS runtime
+ENV NODE_ENV=production
+ENV HOSTNAME=0.0.0.0
+ENV PORT=3000
+WORKDIR /app
+RUN groupadd --system --gid 10001 billchaser && useradd --system --uid 10001 --gid billchaser billchaser
+COPY --from=build --chown=billchaser:billchaser /workspace/apps/web/.next/standalone ./
+COPY --from=build --chown=billchaser:billchaser /workspace/apps/web/.next/static ./apps/web/.next/static
+COPY --chown=billchaser:billchaser apps/container-entrypoint.mjs /app/container-entrypoint.mjs
+USER billchaser
+EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 CMD ["node", "-e", "fetch('http://127.0.0.1:3000/health/live').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+ENTRYPOINT ["node", "/app/container-entrypoint.mjs"]
+CMD ["node", "apps/web/server.js"]

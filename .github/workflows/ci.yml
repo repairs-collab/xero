@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: bc5000
+          POSTGRES_USER: bc5000
+          POSTGRES_PASSWORD: bc5000
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bc5000 -d bc5000"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm test:integration
+      - run: pnpm build
+      - run: pnpm --filter @bc5000/infra cdk synth --quiet
+
+  browser-journeys:
+    runs-on: ubuntu-latest
+    needs: verify
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: bc5000
+          POSTGRES_USER: bc5000
+          POSTGRES_PASSWORD: bc5000
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bc5000 -d bc5000"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://bc5000:bc5000@127.0.0.1:5432/bc5000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @bc5000/web exec playwright install --with-deps chromium
+      - run: pnpm test:e2e
+      - name: Retain browser evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bill-chaser-browser-evidence
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+          retention-days: 14

@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "tasks_open_debt_escalation_uq" ON "tasks" USING btree ("organisation_id","contact_id","sequence_id","kind") WHERE "tasks"."status" = 'OPEN' and "tasks"."kind" = 'DEBT_ESCALATION';

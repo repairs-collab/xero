@@ -1,0 +1,246 @@
+import { describe, expect, it } from 'vitest';
+
+import type { HttpClient, HttpRequest, HttpResponse } from '../http.js';
+import { XeroClient } from './client.js';
+import type { XeroTokenProvider } from './token-cache.js';
+import {
+  XeroEmailPermanentFailure,
+  XeroTransientFailure
+} from './types.js';
+
+class FakeHttpClient implements HttpClient {
+  requests: HttpRequest[] = [];
+  responses: HttpResponse[] = [];
+
+  request(request: HttpRequest): Promise<HttpResponse> {
+    this.requests.push(request);
+    const response = this.responses.shift();
+    if (response === undefined) throw new Error('No fake response configured');
+    return Promise.resolve(response);
+  }
+}
+
+const tokenProvider: XeroTokenProvider = {
+  getAccessToken: () => Promise.resolve('access-token')
+};
+
+const rawInvoice = (index = 1) => ({
+  InvoiceID: `invoice-${index}`,
+  InvoiceNumber: `INV-${index}`,
+  Contact: {
+    ContactID: 'contact-1',
+    Name: 'Example Customer'
+  },
+  Type: 'ACCREC',
+  Status: 'AUTHORISED',
+  DateString: '2026-08-01T00:00:00',
+  DueDateString: '2026-08-31T00:00:00',
+  AmountDue: '120.5000',
+  CurrencyCode: 'AUD',
+  UpdatedDateUTC: '2026-09-18T00:00:00Z'
+});
+
+const createClient = (http: HttpClient) =>
+  new XeroClient({
+    http,
+    tokenProvider,
+    baseUrl: 'https://api.xero.test/api.xro/2.0'
+  });
+
+describe('XeroClient request contract', () => {
+  it('does not send xero-tenant-id for a Custom Connection', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push({
+      status: 200,
+      headers: { 'x-minlimit-remaining': '57' },
+      body: JSON.stringify({ Invoices: [rawInvoice()] })
+    });
+    const client = createClient(http);
+
+    await client.getInvoice('invoice-id');
+
+    expect(http.requests[0]?.headers).toMatchObject({
+      Authorization: 'Bearer access-token',
+      Accept: 'application/json'
+    });
+    expect(http.requests[0]?.headers).not.toHaveProperty('xero-tenant-id');
+  });
+
+  it('maps a 204 invoice email response to accepted', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push({ status: 204, headers: {}, body: '' });
+
+    await expect(createClient(http).emailInvoice('invoice-id')).resolves.toEqual(
+      { kind: 'accepted' }
+    );
+  });
+
+  it('maps an invoice email 400 to a permanent failure', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push({
+      status: 400,
+      headers: {},
+      body: '{"Message":"Invoice cannot be emailed"}'
+    });
+
+    await expect(
+      createClient(http).emailInvoice('invoice-id')
+    ).rejects.toBeInstanceOf(XeroEmailPermanentFailure);
+  });
+
+  it('maps 429 and Retry-After to XeroRateLimited', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push({
+      status: 429,
+      headers: { 'retry-after': '17' },
+      body: ''
+    });
+
+    await expect(createClient(http).getInvoice('invoice-id')).rejects.toMatchObject(
+      {
+        name: 'XeroRateLimited',
+        retryAfterSeconds: 17
+      }
+    );
+  });
+
+  it('maps 5xx responses to a transient failure', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push({ status: 503, headers: {}, body: '' });
+
+    await expect(
+      createClient(http).getOrganisation()
+    ).rejects.toBeInstanceOf(XeroTransientFailure);
+  });
+});
+
+describe('XeroClient data operations', () => {
+  it('pages outstanding invoices with the optimised Xero filters', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push(
+      {
+        status: 200,
+        headers: { 'x-minlimit-remaining': '55' },
+        body: JSON.stringify({
+          Invoices: Array.from({ length: 100 }, (_, index) =>
+            rawInvoice(index + 1)
+          )
+        })
+      },
+      {
+        status: 200,
+        headers: { 'x-minlimit-remaining': '54' },
+        body: JSON.stringify({ Invoices: [rawInvoice(101)] })
+      },
+      {
+        status: 200,
+        headers: { 'x-minlimit-remaining': '53' },
+        body: JSON.stringify({ Invoices: [] })
+      }
+    );
+
+    const result = await createClient(http).listOutstandingInvoices();
+
+    expect(result.data).toHaveLength(101);
+    expect(result.data[0]).toMatchObject({
+      id: 'invoice-1',
+      issueDate: '2026-08-01',
+      dueDate: '2026-08-31',
+      amountDue: '120.5000'
+    });
+    expect(result.rateLimit.remaining).toBe(53);
+    expect(http.requests).toHaveLength(3);
+    const firstUrl = new URL(http.requests[0]?.url ?? '');
+    expect(firstUrl.searchParams.get('summaryOnly')).toBe('true');
+    expect(firstUrl.searchParams.get('page')).toBe('1');
+    expect(firstUrl.searchParams.get('where')).toBe(
+      'Type=="ACCREC" AND Status=="AUTHORISED" AND AmountDue>0'
+    );
+    expect(new URL(http.requests[1]?.url ?? '').searchParams.get('page')).toBe(
+      '2'
+    );
+  });
+
+  it('uses If-Modified-Since for an incremental invoice scan', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push({
+      status: 200,
+      headers: {},
+      body: JSON.stringify({ Invoices: [] })
+    });
+
+    await createClient(http).listOutstandingInvoices({
+      ifModifiedSince: '2026-09-17T23:58:00.000Z'
+    });
+
+    expect(http.requests[0]?.headers).toMatchObject({
+      'If-Modified-Since': '2026-09-17T23:58:00.000Z'
+    });
+  });
+
+  it('maps organisation, contact, and online invoice URL responses', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push(
+      {
+        status: 200,
+        headers: {},
+        body: JSON.stringify({
+          Organisations: [
+            {
+              OrganisationID: 'organisation-1',
+              Name: 'Example Organisation',
+              BaseCurrency: 'AUD',
+              Timezone: 'AUSEASTERNSTANDARDTIME'
+            }
+          ]
+        })
+      },
+      {
+        status: 200,
+        headers: {},
+        body: JSON.stringify({
+          Contacts: [
+            {
+              ContactID: 'contact-1',
+              Name: 'Example Customer',
+              ContactStatus: 'ACTIVE',
+              EmailAddress: 'accounts@example.invalid',
+              Phones: [
+                { PhoneType: 'MOBILE', PhoneNumber: '0400 000 000' }
+              ]
+            }
+          ]
+        })
+      },
+      {
+        status: 200,
+        headers: {},
+        body: JSON.stringify({
+          OnlineInvoices: [
+            { OnlineInvoiceUrl: 'https://in.xero.com/example' }
+          ]
+        })
+      }
+    );
+    const client = createClient(http);
+
+    await expect(client.getOrganisation()).resolves.toMatchObject({
+      data: { id: 'organisation-1', baseCurrency: 'AUD' }
+    });
+    await expect(client.getContact('contact-1')).resolves.toMatchObject({
+      data: {
+        id: 'contact-1',
+        active: true,
+        phones: ['0400 000 000'],
+        phoneCandidates: [
+          { type: 'MOBILE', number: '0400 000 000' }
+        ]
+      }
+    });
+    await expect(
+      client.getOnlineInvoiceUrl('invoice-1')
+    ).resolves.toMatchObject({
+      data: 'https://in.xero.com/example'
+    });
+  });
+});
