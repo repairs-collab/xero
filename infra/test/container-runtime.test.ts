@@ -16,4 +16,15 @@ describe('production container runtimes', () => {
     expect(contents).toContain('/usr/local/lib/node_modules/npm');
     expect(contents).toContain('USER node');
   });
+
+  it('provides Node require support to bundled worker dependencies', () => {
+    const contents = readFileSync(
+      resolve(process.cwd(), 'apps/worker/Dockerfile'),
+      'utf8'
+    );
+
+    expect(contents).toContain(
+      `--banner:js="import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);"`
+    );
+  });
 });
