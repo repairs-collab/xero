@@ -1,4 +1,4 @@
-import { Duration, Stack, type StackProps } from 'aws-cdk-lib';
+import { ArnFormat, Duration, Stack, type StackProps } from 'aws-cdk-lib';
 import { Certificate } from 'aws-cdk-lib/aws-certificatemanager';
 import { SubnetType } from 'aws-cdk-lib/aws-ec2';
 import {
@@ -17,7 +17,11 @@ import {
   ApplicationProtocol,
   SslPolicy
 } from 'aws-cdk-lib/aws-elasticloadbalancingv2';
-import { AnyPrincipal, Effect, PolicyStatement } from 'aws-cdk-lib/aws-iam';
+import {
+  Effect,
+  PolicyStatement,
+  ServicePrincipal
+} from 'aws-cdk-lib/aws-iam';
 import { Key } from 'aws-cdk-lib/aws-kms';
 import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
 import type { Construct } from 'constructs';
@@ -50,22 +54,29 @@ export class ServiceStack extends Stack {
       enableKeyRotation: true,
       alias: `alias/${props.stage}/bill-chaser-logs`
     });
+    const logGroupArn = this.formatArn({
+      service: 'logs',
+      resource: 'log-group',
+      resourceName: `/bill-chaser-5000/${props.stage}/*`,
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME
+    });
     logKey.addToResourcePolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
-        principals: [new AnyPrincipal()],
+        principals: [
+          new ServicePrincipal(`logs.${this.region}.amazonaws.com`)
+        ],
         actions: [
           'kms:Encrypt',
           'kms:Decrypt',
           'kms:ReEncrypt*',
           'kms:GenerateDataKey*',
-          'kms:DescribeKey'
+          'kms:Describe*'
         ],
         resources: ['*'],
         conditions: {
-          StringEquals: {
-            'kms:ViaService': `logs.${this.region}.amazonaws.com`,
-            'kms:CallerAccount': this.account
+          ArnLike: {
+            'kms:EncryptionContext:aws:logs:arn': logGroupArn
           }
         }
       })
