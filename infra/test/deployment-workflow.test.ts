@@ -9,9 +9,15 @@ const workflow = readFileSync(
 );
 
 describe('deployment image scanning', () => {
-  it('uses scan-on-push results without requesting a redundant rescan', () => {
+  it('retries scan-on-push results through ECR eventual consistency', () => {
     expect(workflow).not.toContain('start-image-scan');
-    expect(workflow).toContain('aws ecr wait image-scan-complete');
+    expect(workflow).not.toContain('aws ecr wait image-scan-complete');
+    expect(workflow).toContain('for ATTEMPT in {1..30}; do');
+    expect(workflow).toContain('STATUS=$(aws ecr describe-image-scan-findings');
+    expect(workflow).toContain('if [[ "$STATUS" == "COMPLETE" ]]; then');
+    expect(workflow).toContain('if [[ "$STATUS" == "FAILED" ]]; then');
+    expect(workflow).toContain('sleep 5');
+    expect(workflow).toContain('if [[ "$STATUS" != "COMPLETE" ]]; then');
   });
 
   it('parses and rejects numeric critical or high findings', () => {

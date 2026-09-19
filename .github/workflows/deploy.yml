@@ -100,7 +100,22 @@ jobs:
           docker push ${REGISTRY}/staging-bill-chaser-web:${IMAGE_TAG}
           docker push ${REGISTRY}/staging-bill-chaser-worker:${IMAGE_TAG}
           for REPOSITORY in staging-bill-chaser-web staging-bill-chaser-worker; do
-            aws ecr wait image-scan-complete --repository-name "$REPOSITORY" --image-id imageTag=${IMAGE_TAG}
+            STATUS=""
+            for ATTEMPT in {1..30}; do
+              STATUS=$(aws ecr describe-image-scan-findings --repository-name "$REPOSITORY" --image-id imageTag=${IMAGE_TAG} --query 'imageScanStatus.status' --output text 2>/dev/null || true)
+              if [[ "$STATUS" == "COMPLETE" ]]; then
+                break
+              fi
+              if [[ "$STATUS" == "FAILED" ]]; then
+                echo "::error::$REPOSITORY image scan failed"
+                exit 1
+              fi
+              sleep 5
+            done
+            if [[ "$STATUS" != "COMPLETE" ]]; then
+              echo "::error::Timed out waiting for $REPOSITORY image scan"
+              exit 1
+            fi
             FINDINGS=$(aws ecr describe-image-scan-findings --repository-name "$REPOSITORY" --image-id imageTag=${IMAGE_TAG} --query 'imageScanFindings.findingSeverityCounts.[CRITICAL,HIGH]' --output text)
             read -r CRITICAL HIGH <<< "$FINDINGS"
             CRITICAL=${CRITICAL/None/0}
