@@ -102,6 +102,30 @@ describe('Bill Chaser 5000 AWS stacks', () => {
     expect(webPolicy).not.toContain('SinchApiSecret');
   });
 
+  it('generates parseable non-live provider placeholders', () => {
+    dataTemplate.hasResourceProperties('AWS::SecretsManager::Secret', {
+      Name: 'production/bill-chaser-5000/xero-api',
+      GenerateSecretString: {
+        GenerateStringKey: 'clientSecret',
+        SecretStringTemplate: '{"clientId":"not-configured"}'
+      }
+    });
+    dataTemplate.hasResourceProperties('AWS::SecretsManager::Secret', {
+      Name: 'production/bill-chaser-5000/sinch-api',
+      GenerateSecretString: {
+        GenerateStringKey: 'apiSecret',
+        SecretStringTemplate: '{"apiKey":"not-configured"}'
+      }
+    });
+    dataTemplate.hasResourceProperties('AWS::SecretsManager::Secret', {
+      Name: 'production/bill-chaser-5000/sinch-webhook-public-key',
+      GenerateSecretString: {
+        GenerateStringKey: 'not-configured',
+        SecretStringTemplate: '{}'
+      }
+    });
+  });
+
   it('allows regional CloudWatch Logs to use the log encryption key', () => {
     serviceTemplate.hasResourceProperties('AWS::KMS::Key', {
       KeyPolicy: {
@@ -127,8 +151,8 @@ describe('Bill Chaser 5000 AWS stacks', () => {
       (artifact): unknown => artifact.template as unknown
     );
     const serialised = JSON.stringify(templates);
-    expect(serialised).not.toContain('apiSecret');
-    expect(serialised).not.toContain('clientSecret');
+    expect(serialised).not.toContain('"apiSecret":"');
+    expect(serialised).not.toContain('"clientSecret":"');
     observabilityTemplate.resourceCountIs(
       'AWS::CloudWatch::Alarm',
       9

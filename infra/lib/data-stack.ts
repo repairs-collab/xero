@@ -41,6 +41,28 @@ const retainedSecret = (
   return secret;
 };
 
+const retainedJsonSecret = (
+  scope: Construct,
+  id: string,
+  stage: DeploymentStage,
+  name: string,
+  template: Record<string, string>,
+  generatedKey: string
+) => {
+  const secret = new Secret(scope, id, {
+    secretName: `${stage}/bill-chaser-5000/${name}`,
+    generateSecretString: {
+      secretStringTemplate: JSON.stringify(template),
+      generateStringKey: generatedKey,
+      passwordLength: 48,
+      excludePunctuation: false,
+      excludeCharacters: '"@/\\'
+    }
+  });
+  secret.applyRemovalPolicy(RemovalPolicy.RETAIN);
+  return secret;
+};
+
 export class DataStack extends Stack {
   readonly database: DatabaseInstance;
   readonly dataKey: Key;
@@ -101,10 +123,31 @@ export class DataStack extends Stack {
       }
     });
     this.sessionSecret.applyRemovalPolicy(RemovalPolicy.RETAIN);
-    this.xeroApiSecret = retainedSecret(this, 'XeroApiSecret', props.stage, 'xero-api');
+    this.xeroApiSecret = retainedJsonSecret(
+      this,
+      'XeroApiSecret',
+      props.stage,
+      'xero-api',
+      { clientId: 'not-configured' },
+      'clientSecret'
+    );
     this.xeroWebhookSecret = retainedSecret(this, 'XeroWebhookSecret', props.stage, 'xero-webhook');
-    this.sinchApiSecret = retainedSecret(this, 'SinchApiSecret', props.stage, 'sinch-api');
-    this.sinchWebhookKey = retainedSecret(this, 'SinchWebhookKey', props.stage, 'sinch-webhook-public-key');
+    this.sinchApiSecret = retainedJsonSecret(
+      this,
+      'SinchApiSecret',
+      props.stage,
+      'sinch-api',
+      { apiKey: 'not-configured' },
+      'apiSecret'
+    );
+    this.sinchWebhookKey = retainedJsonSecret(
+      this,
+      'SinchWebhookKey',
+      props.stage,
+      'sinch-webhook-public-key',
+      {},
+      'not-configured'
+    );
     this.webRepository = new Repository(this, 'WebRepository', {
       repositoryName: `${props.stage}-bill-chaser-web`,
       imageScanOnPush: true,
