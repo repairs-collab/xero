@@ -102,6 +102,26 @@ describe('Bill Chaser 5000 AWS stacks', () => {
     expect(webPolicy).not.toContain('SinchApiSecret');
   });
 
+  it('allows regional CloudWatch Logs to use the log encryption key', () => {
+    serviceTemplate.hasResourceProperties('AWS::KMS::Key', {
+      KeyPolicy: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: 'Allow',
+            Principal: {
+              Service: 'logs.ap-southeast-2.amazonaws.com'
+            },
+            Condition: {
+              ArnLike: {
+                'kms:EncryptionContext:aws:logs:arn': Match.anyValue()
+              }
+            }
+          })
+        ])
+      }
+    });
+  });
+
   it('creates operational alarms without embedding secret values', () => {
     const templates = assembly.stacks.map(
       (artifact): unknown => artifact.template as unknown
