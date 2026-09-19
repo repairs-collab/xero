@@ -33,6 +33,7 @@ import {
   databaseUrlFromEnvironment,
   parseProviderCredentials
 } from './runtime-config.js';
+import { waitForDatabaseMigrations } from './startup.js';
 
 const required = (name: string): string => {
   const value = process.env[name]?.trim();
@@ -73,14 +74,19 @@ async function main() {
     logger: console
   });
   const callbackUrl = `${required('PUBLIC_BASE_URL').replace(/\/$/, '')}/api/webhooks/sinch`;
-  const rows = await databaseClient.db
-    .select({ id: organisations.id })
-    .from(organisations)
-    .where(eq(organisations.sendMode, 'live'));
-  const allRows =
-    rows.length > 0
-      ? rows
-      : await databaseClient.db.select({ id: organisations.id }).from(organisations);
+  const allRows = await waitForDatabaseMigrations({
+    load: async () => {
+      const liveRows = await databaseClient.db
+        .select({ id: organisations.id })
+        .from(organisations)
+        .where(eq(organisations.sendMode, 'live'));
+      return liveRows.length > 0
+        ? liveRows
+        : databaseClient.db
+            .select({ id: organisations.id })
+            .from(organisations);
+    }
+  });
 
   await startWorker({
     queue,
