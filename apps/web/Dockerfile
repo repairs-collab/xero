@@ -11,6 +11,7 @@ COPY packages/db/package.json packages/db/package.json
 COPY packages/domain/package.json packages/domain/package.json
 COPY packages/integrations/package.json packages/integrations/package.json
 COPY packages/jobs/package.json packages/jobs/package.json
+COPY packages/testing/package.json packages/testing/package.json
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 
 FROM dependencies AS build
