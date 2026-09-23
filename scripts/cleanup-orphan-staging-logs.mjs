@@ -15,7 +15,7 @@ async function runCommand(command, args) {
 
 export async function cleanupOrphanStagingLogs(run = runCommand) {
   try {
-    await run('aws', [
+    const { stdout } = await run('aws', [
       'cloudformation',
       'describe-stacks',
       '--stack-name',
@@ -25,7 +25,25 @@ export async function cleanupOrphanStagingLogs(run = runCommand) {
       '--output',
       'text',
     ]);
-    return { deleted: [] };
+
+    const stackStatus = String(stdout).trim();
+    if (stackStatus !== 'ROLLBACK_COMPLETE') {
+      return { deleted: [] };
+    }
+
+    await run('aws', [
+      'cloudformation',
+      'delete-stack',
+      '--stack-name',
+      'staging-bill-chaser-services',
+    ]);
+    await run('aws', [
+      'cloudformation',
+      'wait',
+      'stack-delete-complete',
+      '--stack-name',
+      'staging-bill-chaser-services',
+    ]);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!message.includes('does not exist')) {
