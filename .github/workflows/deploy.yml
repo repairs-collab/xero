@@ -126,6 +126,8 @@ jobs:
               exit 1
             fi
           done
+      - name: Remove orphaned staging logs from a deleted service stack
+        run: node scripts/cleanup-orphan-staging-logs.mjs
       - name: Deploy staging services
         run: >-
           pnpm --filter @bc5000/infra cdk deploy --all
