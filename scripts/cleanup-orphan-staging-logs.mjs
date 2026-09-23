@@ -8,6 +8,10 @@ export const stagingLogGroups = [
 ];
 
 const execFileAsync = promisify(execFile);
+const recoverableStackStatuses = new Set([
+  'REVIEW_IN_PROGRESS',
+  'ROLLBACK_COMPLETE',
+]);
 
 async function runCommand(command, args) {
   return execFileAsync(command, args);
@@ -27,7 +31,7 @@ export async function cleanupOrphanStagingLogs(run = runCommand) {
     ]);
 
     const stackStatus = String(stdout).trim();
-    if (stackStatus !== 'ROLLBACK_COMPLETE') {
+    if (!recoverableStackStatuses.has(stackStatus)) {
       return { deleted: [] };
     }
 
