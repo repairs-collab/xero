@@ -27,4 +27,20 @@ describe('production container runtimes', () => {
       `--banner:js="import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);"`
     );
   });
+
+  it('verifies encrypted PostgreSQL connections against the AWS RDS CA', () => {
+    const entrypoint = readFileSync(
+      resolve(process.cwd(), 'apps/container-entrypoint.mjs'),
+      'utf8'
+    );
+
+    expect(entrypoint).toContain('sslmode=verify-full');
+    expect(entrypoint).toContain('sslrootcert=%2Fapp%2Frds-ca-bundle.pem');
+    for (const dockerfile of dockerfiles) {
+      const contents = readFileSync(resolve(process.cwd(), dockerfile), 'utf8');
+      expect(contents).toContain(
+        'https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem'
+      );
+    }
+  });
 });

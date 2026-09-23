@@ -19,6 +19,7 @@ FROM node:24.19.0-alpine3.23 AS runtime
 ENV NODE_ENV=production
 ENV MIGRATIONS_DIR=/app/migrations
 WORKDIR /app
+ADD --chown=node:node https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /app/rds-ca-bundle.pem
 RUN apk upgrade --no-cache \
   && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
   && rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg

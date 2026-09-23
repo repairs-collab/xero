@@ -12,7 +12,7 @@ if (!process.env.DATABASE_URL) {
   const host = required('DATABASE_HOST');
   const port = required('DATABASE_PORT');
   const database = required('DATABASE_NAME');
-  process.env.DATABASE_URL = `postgresql://${user}:${password}@${host}:${port}/${database}`;
+  process.env.DATABASE_URL = `postgresql://${user}:${password}@${host}:${port}/${database}?sslmode=verify-full&sslrootcert=%2Fapp%2Frds-ca-bundle.pem`;
 }
 
 const command = process.argv[2];
