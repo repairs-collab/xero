@@ -88,7 +88,7 @@ describe('Bill Chaser 5000 AWS stacks', () => {
     });
   });
 
-  it('runs the web container health probe directly without shell parsing', () => {
+  it('runs the web health probe directly against the container hostname', () => {
     serviceTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
       ContainerDefinitions: Match.arrayWith([
         Match.objectLike({
@@ -98,7 +98,7 @@ describe('Bill Chaser 5000 AWS stacks', () => {
               'CMD',
               'node',
               '-e',
-              "fetch('http://127.0.0.1:3000/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+              "fetch('http://'+process.env.HOSTNAME+':3000/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
             ],
             Interval: 30,
             Retries: 3,
