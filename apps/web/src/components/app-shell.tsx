@@ -52,7 +52,7 @@ export function AppShell({
         <div className="sidebar__footer">
           <div className="avatar">{initials || 'BC'}</div>
           <div><strong>{displayName}</strong><small>{role === 'ADMIN' ? 'Administrator' : 'Operator'} · {organisationName}</small></div>
-          <Link href="/auth/logout" aria-label="Sign out" className="signout">↗</Link>
+          <Link href="/auth/logout" prefetch={false} aria-label="Sign out" className="signout">↗</Link>
         </div>
       </aside>
       <main className="content" id="main-content">{children}</main>
