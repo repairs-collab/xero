@@ -159,8 +159,10 @@ export class ServiceStack extends Stack {
       },
       healthCheck: {
         command: [
-          'CMD-SHELL',
-          'node -e "fetch(\'http://127.0.0.1:3000/health/live\').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"'
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3000/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
         ],
         interval: Duration.seconds(30),
         timeout: Duration.seconds(5),

@@ -88,6 +88,28 @@ describe('Bill Chaser 5000 AWS stacks', () => {
     });
   });
 
+  it('runs the web container health probe directly without shell parsing', () => {
+    serviceTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
+      ContainerDefinitions: Match.arrayWith([
+        Match.objectLike({
+          Name: 'Web',
+          HealthCheck: {
+            Command: [
+              'CMD',
+              'node',
+              '-e',
+              "fetch('http://127.0.0.1:3000/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+            ],
+            Interval: 30,
+            Retries: 3,
+            StartPeriod: 45,
+            Timeout: 5
+          }
+        })
+      ])
+    });
+  });
+
   it('gives provider credential access to the worker role only', () => {
     const policies = serviceTemplate.findResources('AWS::IAM::Policy');
     const webPolicy = JSON.stringify(
