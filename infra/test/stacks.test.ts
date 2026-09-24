@@ -22,7 +22,8 @@ function synthesise() {
   });
   const identity = new IdentityStack(app, 'Identity', {
     env,
-    stage: 'production'
+    stage: 'production',
+    hostname: 'billchaser.example.com'
   });
   const services = new ServiceStack(app, 'Services', {
     env,
@@ -71,6 +72,13 @@ describe('Bill Chaser 5000 AWS stacks', () => {
         EnabledMfas: Match.arrayWith(['SOFTWARE_TOKEN_MFA'])
       }
     );
+  });
+
+  it('uses the deployed hostname for Cognito callbacks and logout', () => {
+    identityTemplate.hasResourceProperties('AWS::Cognito::UserPoolClient', {
+      CallbackURLs: ['https://billchaser.example.com/auth/callback'],
+      LogoutURLs: ['https://billchaser.example.com/auth/logout']
+    });
   });
 
   it('deploys separate private web and worker services behind HTTPS', () => {

@@ -21,9 +21,16 @@ const env = {
   region: 'ap-southeast-2'
 };
 const prefix = `${stage}-bill-chaser`;
+const hostname = String(
+  app.node.tryGetContext('hostname') ?? `${stage}.billchaser.example.com`
+);
 const network = new NetworkStack(app, `${prefix}-network`, { env, stage });
 const data = new DataStack(app, `${prefix}-data`, { env, stage, network });
-const identity = new IdentityStack(app, `${prefix}-identity`, { env, stage });
+const identity = new IdentityStack(app, `${prefix}-identity`, {
+  env,
+  stage,
+  hostname
+});
 const services = new ServiceStack(app, `${prefix}-services`, {
   env,
   stage,
@@ -34,10 +41,7 @@ const services = new ServiceStack(app, `${prefix}-services`, {
     app.node.tryGetContext('certificateArn') ??
       'arn:aws:acm:ap-southeast-2:000000000000:certificate/configure-before-deploy'
   ),
-  hostname: String(
-    app.node.tryGetContext('hostname') ??
-      `${stage}.billchaser.example.com`
-  ),
+  hostname,
   imageTag: String(app.node.tryGetContext('imageTag') ?? 'development')
 });
 new ObservabilityStack(app, `${prefix}-observability`, {

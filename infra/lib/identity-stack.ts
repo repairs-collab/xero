@@ -15,6 +15,7 @@ import type { DeploymentStage } from './network-stack.js';
 
 export interface IdentityStackProps extends StackProps {
   stage: DeploymentStage;
+  hostname: string;
 }
 
 export class IdentityStack extends Stack {
@@ -54,8 +55,8 @@ export class IdentityStack extends Stack {
       oAuth: {
         flows: { authorizationCodeGrant: true },
         scopes: [OAuthScope.OPENID, OAuthScope.EMAIL, OAuthScope.PROFILE],
-        callbackUrls: [`https://${props.stage}.billchaser.example.com/auth/callback`],
-        logoutUrls: [`https://${props.stage}.billchaser.example.com/auth/logout`]
+        callbackUrls: [`https://${props.hostname}/auth/callback`],
+        logoutUrls: [`https://${props.hostname}/auth/logout`]
       }
     });
     this.userPoolDomain = this.userPool.addDomain('Domain', {
