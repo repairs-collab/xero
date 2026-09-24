@@ -19,13 +19,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return new NextResponse('Invalid callback', { status: 400 });
   }
   const secret = getSessionSecret();
+  const configuration = getCognitoConfiguration();
   const transaction = await readCognitoTransaction(request, secret);
   const identity = await exchangeCognitoCode(
     { code, returnedState, transaction },
-    getCognitoConfiguration()
+    configuration
   );
   const response = NextResponse.redirect(
-    new URL(transaction.returnTo ?? '/', request.url),
+    new URL(transaction.returnTo ?? '/', configuration.redirectUri),
     303
   );
   response.headers.append(
