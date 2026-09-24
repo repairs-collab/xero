@@ -18,6 +18,7 @@ FROM dependencies AS build
 COPY apps/web apps/web
 COPY packages packages
 RUN pnpm --filter @bc5000/web build
+RUN pnpm exec esbuild apps/web/src/bootstrap-admin-entrypoint.ts --bundle --platform=node --format=esm --target=node24 --outfile=/workspace/bootstrap-admin.mjs --external:pg-native --banner:js="import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);"
 
 FROM node:24.19.0-alpine3.23 AS runtime
 ENV NODE_ENV=production
@@ -30,6 +31,7 @@ RUN apk upgrade --no-cache \
   && rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg
 COPY --from=build --chown=node:node /workspace/apps/web/.next/standalone ./
 COPY --from=build --chown=node:node /workspace/apps/web/.next/static ./apps/web/.next/static
+COPY --from=build --chown=node:node /workspace/bootstrap-admin.mjs /app/bootstrap-admin.mjs
 COPY --chown=node:node apps/container-entrypoint.mjs /app/container-entrypoint.mjs
 USER node
 EXPOSE 3000
