@@ -159,7 +159,16 @@ describe('SinchClient.checkConnection', () => {
     });
     expect(http.requests[0]).toMatchObject({
       method: 'GET',
-      url: 'https://au.app.api.sinch.com/v1/webhooks/messages?page=0&page_size=1'
+      url: 'https://au.app.api.sinch.com/v1/webhooks/messages?page=0&page_size=1',
+      headers: {
+        Date: 'Fri, 18 Sep 2026 01:02:03 GMT',
+        Accept: 'application/json'
+      }
     });
+    expect(http.requests[0]?.headers.Authorization).toContain(
+      'headers="Date request-line"'
+    );
+    expect(http.requests[0]?.headers).not.toHaveProperty('Content-MD5');
+    expect(http.requests[0]?.headers).not.toHaveProperty('Content-Type');
   });
 });

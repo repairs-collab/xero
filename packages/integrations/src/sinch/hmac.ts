@@ -10,7 +10,7 @@ export interface SignSinchRequestInput {
 }
 
 export interface SignedSinchRequest {
-  contentMd5: string;
+  contentMd5?: string;
   canonical: string;
   authorization: string;
 }
@@ -18,23 +18,26 @@ export interface SignedSinchRequest {
 export function signSinchRequest(
   input: SignSinchRequestInput
 ): SignedSinchRequest {
-  const contentMd5 = createHash('md5')
-    .update(Buffer.from(input.body, 'utf8'))
-    .digest('hex');
+  const hasBody = input.body.length > 0;
+  const contentMd5 = hasBody
+    ? createHash('md5')
+        .update(Buffer.from(input.body, 'utf8'))
+        .digest('hex')
+    : undefined;
   const canonical =
     `Date: ${input.date}\n` +
-    `Content-MD5: ${contentMd5}\n` +
+    (contentMd5 === undefined ? '' : `Content-MD5: ${contentMd5}\n`) +
     `${input.method.toUpperCase()} ${input.path} HTTP/1.1`;
-  const signature = createHmac('sha1', input.apiSecret)
+  const signature = createHmac('sha256', input.apiSecret)
     .update(canonical)
     .digest('base64');
 
   return {
-    contentMd5,
+    ...(contentMd5 === undefined ? {} : { contentMd5 }),
     canonical,
     authorization:
-      `hmac username="${input.apiKey}", algorithm="hmac-sha1", ` +
-      'headers="Date Content-MD5 request-line", ' +
+      `hmac username="${input.apiKey}", algorithm="hmac-sha256", ` +
+      `headers="${hasBody ? 'Date Content-MD5 request-line' : 'Date request-line'}", ` +
       `signature="${signature}"`
   };
 }

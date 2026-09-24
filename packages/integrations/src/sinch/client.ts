@@ -160,8 +160,12 @@ export class SinchClient {
       headers: {
         Authorization: signature.authorization,
         Date: date,
-        'Content-MD5': signature.contentMd5,
-        'Content-Type': 'application/json',
+        ...(signature.contentMd5 === undefined
+          ? {}
+          : {
+              'Content-MD5': signature.contentMd5,
+              'Content-Type': 'application/json'
+            }),
         Accept: 'application/json'
       },
       body
