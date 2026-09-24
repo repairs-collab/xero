@@ -96,6 +96,18 @@ describe('Bill Chaser 5000 AWS stacks', () => {
     });
   });
 
+  it('allows the worker task to roll when only one task is desired', () => {
+    serviceTemplate.hasResourceProperties('AWS::ECS::Service', {
+      TaskDefinition: {
+        Ref: Match.stringLikeRegexp('^WorkerTask')
+      },
+      DeploymentConfiguration: {
+        MinimumHealthyPercent: 50,
+        MaximumPercent: 200
+      }
+    });
+  });
+
   it('runs the web health probe directly against the container hostname', () => {
     serviceTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
       ContainerDefinitions: Match.arrayWith([

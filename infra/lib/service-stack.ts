@@ -229,7 +229,7 @@ export class ServiceStack extends Stack {
       circuitBreaker: { rollback: true },
       enableExecuteCommand: false,
       minHealthyPercent: 50,
-      maxHealthyPercent: 100
+      maxHealthyPercent: 200
     });
 
     this.loadBalancer = new ApplicationLoadBalancer(this, 'LoadBalancer', {
