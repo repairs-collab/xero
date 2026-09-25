@@ -55,6 +55,22 @@ const stringErrorProperty = (
   return typeof value === 'string' || value === null ? value : undefined;
 };
 
+const safeErrorMessages: Record<string, string> = {
+  XeroAuthenticationFailure: 'Xero authentication failed',
+  XeroRateLimited: 'Xero rate limit exceeded',
+  XeroRequestFailure: 'Xero request failed',
+  XeroTransientFailure: 'Xero temporarily unavailable',
+  SinchAuthenticationFailure: 'Sinch authentication failed',
+  SinchRateLimited: 'Sinch rate limit exceeded',
+  SinchRequestFailure: 'Sinch request failed',
+  SinchTransientFailure: 'Sinch temporarily unavailable'
+};
+
+const safeErrorMessage = (error: unknown): string =>
+  error instanceof Error
+    ? (safeErrorMessages[error.name] ?? 'Job handler failed')
+    : 'Unknown error';
+
 const failureDetails = (
   name: JobName,
   jobId: string,
@@ -63,7 +79,7 @@ const failureDetails = (
   jobName: name,
   jobId,
   errorName: error instanceof Error ? error.name : 'UnknownError',
-  errorMessage: error instanceof Error ? error.message : 'Unknown error',
+  errorMessage: safeErrorMessage(error),
   ...(numericErrorProperty(error, 'status') === undefined
     ? {}
     : { status: numericErrorProperty(error, 'status') }),

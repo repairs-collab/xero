@@ -25,6 +25,7 @@ export interface XeroClientOptions {
   http: HttpClient;
   tokenProvider: XeroTokenProvider;
   baseUrl?: string;
+  clock?: { now(): Date };
 }
 
 export interface ListOutstandingInvoicesOptions {
@@ -85,6 +86,13 @@ const responseMessage = (response: HttpResponse): string => {
 
 export class XeroClient {
   private readonly baseUrl: string;
+  private rateLimitBlock:
+    | {
+        until: number;
+        dailyRemaining: number | null;
+        problem: string | null;
+      }
+    | undefined;
 
   constructor(private readonly options: XeroClientOptions) {
     this.baseUrl = (
@@ -259,8 +267,22 @@ export class XeroClient {
     path: string,
     headers: Record<string, string> = {}
   ): Promise<HttpResponse> {
+    const now = (this.options.clock?.now() ?? new Date()).getTime();
+    if (this.rateLimitBlock !== undefined) {
+      const retryAfterSeconds = Math.ceil(
+        (this.rateLimitBlock.until - now) / 1000
+      );
+      if (retryAfterSeconds > 0) {
+        throw new XeroRateLimited(
+          retryAfterSeconds,
+          this.rateLimitBlock.dailyRemaining,
+          this.rateLimitBlock.problem
+        );
+      }
+      this.rateLimitBlock = undefined;
+    }
     const accessToken = await this.options.tokenProvider.getAccessToken();
-    return this.options.http.request({
+    const response = await this.options.http.request({
       method,
       url: `${this.baseUrl}${path}`,
       headers: {
@@ -269,6 +291,23 @@ export class XeroClient {
         ...headers
       }
     });
+    if (response.status === 429) {
+      const retryAfterSeconds = numericHeader(
+        response.headers,
+        'retry-after'
+      );
+      if (retryAfterSeconds !== null && retryAfterSeconds > 0) {
+        this.rateLimitBlock = {
+          until: now + retryAfterSeconds * 1000,
+          dailyRemaining: numericHeader(
+            response.headers,
+            'x-daylimit-remaining'
+          ),
+          problem: textHeader(response.headers, 'x-rate-limit-problem')
+        };
+      }
+    }
+    return response;
   }
 
   private throwForResponse(response: HttpResponse): void {

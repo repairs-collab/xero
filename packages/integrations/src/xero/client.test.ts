@@ -118,6 +118,49 @@ describe('XeroClient request contract', () => {
     );
   });
 
+  it('pauses all Xero requests until Retry-After expires', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push(
+      {
+        status: 429,
+        headers: {
+          'retry-after': '22135',
+          'x-daylimit-remaining': '0',
+          'x-rate-limit-problem': 'day'
+        },
+        body: ''
+      },
+      {
+        status: 200,
+        headers: { 'x-daylimit-remaining': '999' },
+        body: JSON.stringify({ Invoices: [rawInvoice()] })
+      }
+    );
+    let now = new Date('2026-09-26T00:00:00.000Z');
+    const client = new XeroClient({
+      http,
+      tokenProvider,
+      baseUrl: 'https://api.xero.test/api.xro/2.0',
+      clock: { now: () => now }
+    });
+
+    await expect(client.getInvoice('invoice-id')).rejects.toMatchObject({
+      retryAfterSeconds: 22_135,
+      problem: 'day'
+    });
+    await expect(client.getOrganisation()).rejects.toMatchObject({
+      retryAfterSeconds: 22_135,
+      problem: 'day'
+    });
+    expect(http.requests).toHaveLength(1);
+
+    now = new Date(now.getTime() + 22_135_000);
+    await expect(client.getInvoice('invoice-id')).resolves.toMatchObject({
+      data: { id: 'invoice-1' }
+    });
+    expect(http.requests).toHaveLength(2);
+  });
+
   it('maps 5xx responses to a transient failure', async () => {
     const http = new FakeHttpClient();
     http.responses.push({ status: 503, headers: {}, body: '' });

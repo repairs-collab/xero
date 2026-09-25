@@ -30,6 +30,8 @@ describe('nightly reconciliation', () => {
 
     expect(summary).toMatchObject({ remoteEligible: 1, confirmedTerminal: 1, upserted: 2 });
     expect(xero.getInvoice).toHaveBeenCalledWith(missingXeroId);
+    expect(xero.listContacts).toHaveBeenNthCalledWith(2, ['contact-local']);
+    expect(xero.getContact).not.toHaveBeenCalled();
     const [closed] = await client.db.select().from(invoices).where(eq(invoices.id, localInvoiceId)); expect(closed).toMatchObject({ status: 'PAID', amountDue: '0.0000' });
     const [chase] = await client.db.select().from(invoiceChases).where(eq(invoiceChases.id, chaseId)); expect(chase?.status).toBe('CLOSED');
     const [approval] = await client.db.select().from(approvals).where(eq(approvals.id, approvalId)); expect(approval?.status).toBe('EXPIRED');

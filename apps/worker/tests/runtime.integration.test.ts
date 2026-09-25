@@ -113,6 +113,41 @@ describe('worker runtime', () => {
     );
   });
 
+  it('does not log credentials embedded in an unknown error message', async () => {
+    const queue = new FakeWorkerQueue();
+    const logger = { error: vi.fn() };
+    const failure = new Error(
+      'request failed with Bearer super-secret-token and password=hunter2'
+    );
+    await registerHandlers(
+      queue,
+      {
+        [jobNames.xeroInitialSync]: () => Promise.reject(failure)
+      },
+      new InFlightJobs(),
+      logger
+    );
+
+    await expect(
+      queue.run(jobNames.xeroInitialSync, {
+        id: 'sanitised-job-id',
+        data: { organisationId: randomUUID() }
+      })
+    ).rejects.toBe(failure);
+
+    expect(logger.error).toHaveBeenCalledWith(
+      'Worker job failed',
+      expect.objectContaining({
+        errorName: 'Error',
+        errorMessage: 'Job handler failed'
+      })
+    );
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain(
+      'super-secret-token'
+    );
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('hunter2');
+  });
+
   it('stops claiming, waits for active work, and closes resources', async () => {
     const queue = new FakeWorkerQueue();
     const inFlight = new InFlightJobs();

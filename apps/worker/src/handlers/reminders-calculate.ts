@@ -293,7 +293,7 @@ export async function calculateReminderWork(
           onlineInvoiceUrl = online.data;
           await dependencies.database
             .update(invoices)
-            .set({ onlineInvoiceUrl, updatedAt: now })
+            .set({ onlineInvoiceUrl })
             .where(eq(invoices.id, row.invoice.id));
         }
 

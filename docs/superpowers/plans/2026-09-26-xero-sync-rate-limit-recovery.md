@@ -35,8 +35,8 @@
 
 ### Task 4: Verify and prepare deployment
 
-- [ ] Run formatting, lint, type-check, and the complete test suite.
-- [ ] Confirm the production deployment still pins `SEND_MODE=dry-run`.
-- [ ] Review the diff for secrets and unrelated changes.
+- [x] Run formatting, lint, type-check, and the complete test suite.
+- [x] Confirm the production deployment still pins `SEND_MODE=dry-run`.
+- [x] Review the diff for secrets and unrelated changes.
 - [ ] Commit and push the fix branch, then open a pull request for production deployment.
 - [ ] After deployment, wait for Xero's stated reset window, trigger one sync, and verify invoices plus `lastSuccessfulSyncAt` without sending reminders.

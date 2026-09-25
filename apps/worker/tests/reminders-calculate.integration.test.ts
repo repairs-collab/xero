@@ -140,6 +140,11 @@ describe('calculateReminderWork', () => {
       channel: 'SMS',
       onlineInvoiceUrl: null
     });
+    const staleUpdatedAt = new Date('2026-09-17T22:00:00.000Z');
+    await client.db
+      .update(invoices)
+      .set({ updatedAt: staleUpdatedAt })
+      .where(eq(invoices.id, seeded.invoiceId));
     const getOnlineInvoiceUrl = vi.fn(() =>
       Promise.resolve({
         data: 'https://in.xero.test/fetched-link',
@@ -164,12 +169,16 @@ describe('calculateReminderWork', () => {
 
     expect(getOnlineInvoiceUrl).toHaveBeenCalledOnce();
     const [storedInvoice] = await client.db
-      .select({ onlineInvoiceUrl: invoices.onlineInvoiceUrl })
+      .select({
+        onlineInvoiceUrl: invoices.onlineInvoiceUrl,
+        updatedAt: invoices.updatedAt
+      })
       .from(invoices)
       .where(eq(invoices.id, seeded.invoiceId));
     expect(storedInvoice?.onlineInvoiceUrl).toBe(
       'https://in.xero.test/fetched-link'
     );
+    expect(storedInvoice?.updatedAt).toEqual(staleUpdatedAt);
     const [approval] = await client.db
       .select({ renderedPreview: approvals.renderedPreview })
       .from(approvals)
