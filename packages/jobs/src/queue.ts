@@ -150,6 +150,28 @@ export class DurableJobQueue implements JobPublisher {
     const singletonKey =
       options.singletonKey ??
       createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+    if (options.deduplicateWhileActive) {
+      const data = parseJobPayload(name, payload);
+      const startOptions =
+        options.startAfter === undefined ? {} : { startAfter: options.startAfter };
+      const inserted = await this.#boss.send(name, data, {
+        ...optionsFor(name),
+        ...startOptions,
+        singletonKey
+      });
+      if (inserted !== null) return inserted;
+
+      const matching = await this.#boss.findJobs<JobPayloads[Name]>(name, {
+        key: singletonKey
+      });
+      const latest = matching.sort(
+        (left, right) => right.createdOn.getTime() - left.createdOn.getTime()
+      )[0];
+      if (latest === undefined) {
+        throw new Error('ACTIVE_SINGLETON_JOB_NOT_FOUND');
+      }
+      return latest.id;
+    }
     return this.enqueueUnique(
       name,
       payload,

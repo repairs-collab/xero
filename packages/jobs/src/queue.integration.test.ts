@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { PgBoss } from 'pg-boss';
 
 import { jobNames } from './names.js';
 import { DurableJobQueue } from './queue.js';
@@ -11,12 +12,15 @@ const databaseUrl =
   'postgres://bc5000:bc5000@localhost:5432/bc5000';
 
 const queue = new DurableJobQueue({ databaseUrl });
+const queueController = new PgBoss(databaseUrl);
 
 beforeAll(async () => {
   await queue.start();
+  await queueController.start();
 });
 
 afterAll(async () => {
+  await queueController.stop({ graceful: false, timeout: 5_000 });
   await queue.stop();
 });
 
@@ -51,6 +55,43 @@ describe('durable job queue', () => {
         `bad:${randomUUID()}`
       )
     ).rejects.toThrow(/organisationId/i);
+  });
+
+  it('deduplicates an active Xero sync but allows a fresh sync after completion', async () => {
+    const organisationId = randomUUID();
+    const singletonKey = `${jobNames.xeroIncrementalSync}:${organisationId}`;
+
+    const scheduledId = await queue.enqueueUnique(
+      jobNames.xeroIncrementalSync,
+      { organisationId },
+      singletonKey
+    );
+    const manualCollisionId = await queue.publish(
+      jobNames.xeroIncrementalSync,
+      { organisationId },
+      { singletonKey, deduplicateWhileActive: true }
+    );
+
+    expect(manualCollisionId).toBe(scheduledId);
+
+    await queueController.complete(
+      jobNames.xeroIncrementalSync,
+      scheduledId,
+      null,
+      { includeQueued: true }
+    );
+    const [completed] = await queue.findJobs(jobNames.xeroIncrementalSync, {
+      id: scheduledId
+    });
+    expect(completed?.state).toBe('completed');
+
+    const nextManualId = await queue.publish(
+      jobNames.xeroIncrementalSync,
+      { organisationId },
+      { singletonKey, deduplicateWhileActive: true }
+    );
+
+    expect(nextManualId).not.toBe(scheduledId);
   });
 
   it('never automatically retries an external reminder send', async () => {

@@ -12,6 +12,7 @@ export type { JobName } from './names.js';
 export interface PublishOptions {
   singletonKey?: string;
   startAfter?: Date;
+  deduplicateWhileActive?: boolean;
 }
 
 export interface JobPublisher {
