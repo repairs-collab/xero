@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import {
+  type Db,
   PgBoss,
   type FindJobsOptions,
   type Job,
@@ -8,6 +9,7 @@ import {
   type Schedule,
   type ScheduleOptions
 } from 'pg-boss';
+import { Client } from 'pg';
 
 import type { JobPublisher, PublishOptions } from './contracts.js';
 import { allJobNames, jobNames, type JobName } from './names.js';
@@ -77,11 +79,13 @@ export type QueueHandler<Name extends JobName> = (
 
 export class DurableJobQueue implements JobPublisher {
   readonly #boss: PgBoss;
+  readonly #databaseUrl: string;
   readonly #logger: JobQueueLogger;
   readonly #workers = new Map<JobName, string>();
   #started = false;
 
   constructor(options: DurableJobQueueOptions) {
+    this.#databaseUrl = options.databaseUrl;
     this.#logger = options.logger ?? silentLogger;
     this.#boss = new PgBoss(options.databaseUrl);
     this.#boss.on('error', (error) => {
@@ -154,23 +158,60 @@ export class DurableJobQueue implements JobPublisher {
       const data = parseJobPayload(name, payload);
       const startOptions =
         options.startAfter === undefined ? {} : { startAfter: options.startAfter };
-      const inserted = await this.#boss.send(name, data, {
-        ...optionsFor(name),
-        ...startOptions,
-        singletonKey
-      });
-      if (inserted !== null) return inserted;
+      const client = new Client({ connectionString: this.#databaseUrl });
+      await client.connect();
+      try {
+        await client.query('BEGIN');
+        const queue = await client.query<{ name: string }>(
+          'SELECT name FROM pgboss.queue WHERE name = $1 FOR UPDATE',
+          [name]
+        );
+        if (queue.rowCount !== 1) throw new Error('JOB_QUEUE_NOT_FOUND');
 
-      const matching = await this.#boss.findJobs<JobPayloads[Name]>(name, {
-        key: singletonKey
-      });
-      const latest = matching.sort(
-        (left, right) => right.createdOn.getTime() - left.createdOn.getTime()
-      )[0];
-      if (latest === undefined) {
-        throw new Error('ACTIVE_SINGLETON_JOB_NOT_FOUND');
+        const existing = await client.query<{ id: string }>(
+          `SELECT id
+             FROM pgboss.job
+            WHERE name = $1
+              AND singleton_key = $2
+              AND state IN ('created', 'retry', 'active')
+            ORDER BY CASE state
+              WHEN 'active' THEN 0
+              WHEN 'retry' THEN 1
+              ELSE 2
+            END, created_on DESC
+            LIMIT 1
+            FOR UPDATE`,
+          [name, singletonKey]
+        );
+        const existingId = existing.rows[0]?.id;
+        if (existingId !== undefined) {
+          await client.query('COMMIT');
+          return existingId;
+        }
+
+        const transactionalDatabase: Db = {
+          executeSql: async (text, values) => {
+            const result = await client.query(text, values);
+            return { rows: result.rows };
+          }
+        };
+        const inserted = await this.#boss.send(name, data, {
+          ...optionsFor(name),
+          ...startOptions,
+          singletonKey,
+          db: transactionalDatabase
+        });
+        if (inserted === null) {
+          throw new Error('ACTIVE_SINGLETON_JOB_NOT_ENQUEUED');
+        }
+        await client.query('COMMIT');
+        return inserted;
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        await client.end();
       }
-      return latest.id;
     }
     return this.enqueueUnique(
       name,

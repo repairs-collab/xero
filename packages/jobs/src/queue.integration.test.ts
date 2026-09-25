@@ -61,11 +61,18 @@ describe('durable job queue', () => {
     const organisationId = randomUUID();
     const singletonKey = `${jobNames.xeroIncrementalSync}:${organisationId}`;
 
-    const scheduledId = await queue.enqueueUnique(
+    const scheduledId = await queueController.send(
       jobNames.xeroIncrementalSync,
       { organisationId },
-      singletonKey
+      { singletonKey, priority: 1_000_000 }
     );
+    expect(scheduledId).not.toBeNull();
+    if (scheduledId === null) throw new Error('Scheduled job was not created');
+    const [active] = await queueController.fetch(
+      jobNames.xeroIncrementalSync
+    );
+    expect(active?.id).toBe(scheduledId);
+
     const manualCollisionId = await queue.publish(
       jobNames.xeroIncrementalSync,
       { organisationId },
@@ -73,12 +80,18 @@ describe('durable job queue', () => {
     );
 
     expect(manualCollisionId).toBe(scheduledId);
+    const inFlight = await queue.findJobs(jobNames.xeroIncrementalSync, {
+      key: singletonKey
+    });
+    expect(
+      inFlight.filter((job) =>
+        ['created', 'retry', 'active'].includes(job.state)
+      )
+    ).toHaveLength(1);
 
     await queueController.complete(
       jobNames.xeroIncrementalSync,
-      scheduledId,
-      null,
-      { includeQueued: true }
+      scheduledId
     );
     const [completed] = await queue.findJobs(jobNames.xeroIncrementalSync, {
       id: scheduledId
