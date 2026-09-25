@@ -38,6 +38,7 @@ async function context() {
   const database = getDatabaseClient().db;
   const settings = createIntegrationSettings({
     database,
+    publisher: await getJobQueue(),
     tester: {
       test: () => Promise.reject(new Error('Connection tests run in the worker'))
     },
@@ -105,4 +106,14 @@ export async function testConnection(formData: FormData): Promise<void> {
     occurredAt: now
   });
   revalidatePath('/settings/integrations');
+}
+
+export async function requestXeroSync(formData: FormData): Promise<void> {
+  const { session, settings } = await context();
+  await settings.requestXeroSync(session, {
+    organisationId: text(formData, 'organisationId')
+  });
+  revalidatePath('/');
+  revalidatePath('/settings/integrations');
+  revalidatePath('/settings/sending');
 }

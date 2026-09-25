@@ -35,6 +35,36 @@ function draft(organisationId: string, sequenceId: string): SequenceDraft {
 }
 
 describe('sequence administration', () => {
+  it('creates the approved standard review sequence once', async () => {
+    const organisationId = randomUUID();
+    const userId = randomUUID();
+    await client.db.insert(organisations).values({ id: organisationId, xeroOrganisationId: randomUUID(), name: 'Standard sequence test', timeZone: 'Australia/Sydney', baseCurrency: 'AUD' });
+    await client.db.insert(users).values({ id: userId, cognitoSubject: randomUUID(), email: `${userId}@example.invalid`, displayName: 'Admin' });
+    const session: AppSession = { userId, cognitoSubject: randomUUID(), displayName: 'Admin', expiresAt: '2026-09-18T10:00:00Z', memberships: [{ organisationId, role: 'ADMIN', active: true }] };
+    const service = createSequenceService({ database: client.db, clock: { now: () => now } });
+
+    const first = await service.createStandardSequence(session, { organisationId });
+    const second = await service.createStandardSequence(session, { organisationId });
+
+    expect(first.created).toBe(true);
+    expect(second).toEqual({ sequenceId: first.sequenceId, created: false });
+    const sequences = await client.db.select().from(reminderSequences).where(eq(reminderSequences.organisationId, organisationId));
+    expect(sequences).toHaveLength(1);
+    expect(sequences[0]).toMatchObject({ id: first.sequenceId, name: 'Standard bill chasing', mode: 'REVIEW', enabled: true });
+    const versions = await client.db.select().from(reminderSequenceVersions).where(eq(reminderSequenceVersions.sequenceId, first.sequenceId));
+    expect(versions).toHaveLength(1);
+    expect(versions[0]).toMatchObject({ versionNumber: 1, status: 'ACTIVE', dailyBasis: 'BUSINESS_DAYS', smsAggregation: 'CONSOLIDATED_CUSTOMER' });
+    const stages = await client.db.select().from(sequenceStages).where(eq(sequenceStages.sequenceVersionId, versions[0]!.id));
+    expect(stages.map(({ stageKey, offsetDays, channel }) => ({ stageKey, offsetDays, channel })).sort((left, right) => left.offsetDays - right.offsetDays || left.channel.localeCompare(right.channel))).toEqual([
+      { stageKey: 'due-date', offsetDays: 0, channel: 'SMS' },
+      { stageKey: 'seven-days', offsetDays: 7, channel: 'SMS' },
+      { stageKey: 'seven-days', offsetDays: 7, channel: 'XERO_EMAIL' },
+      { stageKey: 'twenty-one-days', offsetDays: 21, channel: 'SMS' },
+      { stageKey: 'thirty-days', offsetDays: 30, channel: 'SMS_DAILY' },
+      { stageKey: 'thirty-days', offsetDays: 30, channel: 'TASK' }
+    ]);
+  });
+
   it('allows only an Admin to activate automatic mode', async () => {
     const seeded = await seedSequence();
     const service = createSequenceService({ database: client.db, clock: { now: () => now } });

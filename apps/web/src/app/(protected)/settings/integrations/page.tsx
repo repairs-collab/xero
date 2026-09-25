@@ -14,6 +14,7 @@ import {
 } from '../../../../server/runtime.js';
 import {
   replaceSecretReference,
+  requestXeroSync,
   rotateCallbackKeyReference,
   testConnection
 } from './actions.js';
@@ -192,6 +193,22 @@ export default async function IntegrationsPage() {
                   Test connection
                 </button>
               </form>
+              {provider === 'XERO' && connection?.enabled && (
+                <form className="settings-form" action={requestXeroSync}>
+                  <input
+                    type="hidden"
+                    name="organisationId"
+                    value={organisationId}
+                  />
+                  <p>
+                    Import current receivables from Xero. This never sends a
+                    reminder.
+                  </p>
+                  <button className="button button--primary">
+                    Sync Xero now
+                  </button>
+                </form>
+              )}
             </article>
           );
         })}

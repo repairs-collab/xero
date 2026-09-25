@@ -59,6 +59,31 @@ export function createSequenceService(dependencies: { database: Database; clock:
     await dependencies.database.insert(auditEvents).values({ organisationId: input.organisationId, actorUserId: session.userId, eventType: 'SEQUENCE_MODE_CHANGED', entityType: 'SEQUENCE', entityId: input.sequenceId, afterValue: { mode: input.mode }, occurredAt: now });
   };
 
+  const createStandardSequence = async (session: AppSession, input: { organisationId: string }): Promise<{ sequenceId: string; created: boolean }> => {
+    authorise(session, 'sequence.manage', input.organisationId);
+    const now = dependencies.clock.now();
+    const stages: SequenceDraftStage[] = [
+      { key: 'due-date', offsetDays: 0, channels: ['SMS'], template: 'Hi {{customer_name}}, invoice {{invoice_number}} is due today. Amount due: {{amount_due}}.' },
+      { key: 'seven-days', offsetDays: 7, channels: ['XERO_EMAIL', 'SMS'], template: 'Hi {{customer_name}}, invoice {{invoice_number}} is now 7 days overdue. Amount due: {{amount_due}}.' },
+      { key: 'twenty-one-days', offsetDays: 21, channels: ['SMS'], template: 'Final warning: invoice {{invoice_number}} remains overdue. Please arrange payment or contact us today.' },
+      { key: 'thirty-days', offsetDays: 30, channels: ['TASK', 'SMS_DAILY'], template: 'Invoice {{invoice_number}} remains overdue. Please contact us today to avoid further escalation.' }
+    ];
+    validateSequenceDraft({ organisationId: input.organisationId, sequenceId: 'standard', dailyBasis: 'BUSINESS_DAYS', smsAggregation: 'CONSOLIDATED_CUSTOMER', sendTime: '09:00', socialWindowStart: '08:00', socialWindowEnd: '18:00', minimumBalance: '0', maxSmsSegments: 3, xeroEmailAfterSmsOptOut: true, allowedCurrencies: ['AUD'], exclusions: [], stages });
+    return dependencies.database.transaction(async (transaction) => {
+      const [createdSequence] = await transaction.insert(reminderSequences).values({ organisationId: input.organisationId, name: 'Standard bill chasing', mode: 'REVIEW', enabled: true, createdAt: now, updatedAt: now }).onConflictDoNothing({ target: [reminderSequences.organisationId, reminderSequences.name] }).returning({ id: reminderSequences.id });
+      if (createdSequence === undefined) {
+        const [existing] = await transaction.select({ id: reminderSequences.id }).from(reminderSequences).where(and(eq(reminderSequences.organisationId, input.organisationId), eq(reminderSequences.name, 'Standard bill chasing'))).limit(1);
+        if (existing === undefined) throw new Error('STANDARD_SEQUENCE_NOT_FOUND');
+        return { sequenceId: existing.id, created: false };
+      }
+      const [version] = await transaction.insert(reminderSequenceVersions).values({ organisationId: input.organisationId, sequenceId: createdSequence.id, versionNumber: 1, status: 'ACTIVE', dailyBasis: 'BUSINESS_DAYS', smsAggregation: 'CONSOLIDATED_CUSTOMER', sendTime: '09:00:00', socialWindowStart: '08:00:00', socialWindowEnd: '18:00:00', minimumBalance: '0', maxSmsSegments: 3, xeroEmailAfterSmsOptOut: true, configuration: { allowedCurrencies: ['AUD'] }, activatedAt: now, createdByUserId: session.userId, createdAt: now }).returning({ id: reminderSequenceVersions.id });
+      if (version === undefined) throw new Error('SEQUENCE_VERSION_NOT_CREATED');
+      await transaction.insert(sequenceStages).values(stages.flatMap((stage) => stage.channels.map((channel) => ({ organisationId: input.organisationId, sequenceVersionId: version.id, stageKey: stage.key, offsetDays: stage.offsetDays, channel, template: stage.template ?? null }))));
+      await transaction.insert(auditEvents).values({ organisationId: input.organisationId, actorUserId: session.userId, eventType: 'STANDARD_SEQUENCE_CREATED', entityType: 'SEQUENCE', entityId: createdSequence.id, afterValue: { mode: 'REVIEW', versionNumber: 1, dailyBasis: 'BUSINESS_DAYS' }, occurredAt: now });
+      return { sequenceId: createdSequence.id, created: true };
+    });
+  };
+
   const persistVersion = async (session: AppSession, draft: SequenceDraft, status: 'DRAFT' | 'ACTIVE') => {
     authorise(session, 'sequence.manage', draft.organisationId);
     validateSequenceDraft(draft);
@@ -79,6 +104,7 @@ export function createSequenceService(dependencies: { database: Database; clock:
   };
 
   return {
+    createStandardSequence,
     setSequenceMode,
     saveSequenceDraft: (session: AppSession, draft: SequenceDraft) => persistVersion(session, draft, 'DRAFT'),
     activateSequenceVersion: (session: AppSession, draft: SequenceDraft) => persistVersion(session, draft, 'ACTIVE')

@@ -69,3 +69,13 @@ export async function setSequenceMode(formData: FormData): Promise<void> {
   await sequences.setSequenceMode(session, { organisationId: requiredText(formData, 'organisationId'), sequenceId, mode: formData.get('mode') === 'AUTOMATIC' ? 'AUTOMATIC' : 'REVIEW' });
   revalidatePath(`/sequences/${sequenceId}`);
 }
+
+export async function createStandardSequence(formData: FormData): Promise<void> {
+  const { session, sequences } = await context();
+  const result = await sequences.createStandardSequence(session, {
+    organisationId: requiredText(formData, 'organisationId')
+  });
+  revalidatePath('/');
+  revalidatePath('/sequences');
+  redirect(`/sequences/${result.sequenceId}`);
+}
