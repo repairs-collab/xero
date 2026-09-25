@@ -29,10 +29,78 @@ export type JobHandlers = Partial<{
   [Name in JobName]: (payload: JobPayloads[Name]) => Promise<void>;
 }>;
 
+export interface WorkerFailureLogger {
+  error(message: string, details?: unknown): void;
+}
+
+const numericErrorProperty = (
+  error: unknown,
+  name: string
+): number | null | undefined => {
+  if (typeof error !== 'object' || error === null || !(name in error)) {
+    return undefined;
+  }
+  const value = (error as Record<string, unknown>)[name];
+  return typeof value === 'number' || value === null ? value : undefined;
+};
+
+const stringErrorProperty = (
+  error: unknown,
+  name: string
+): string | null | undefined => {
+  if (typeof error !== 'object' || error === null || !(name in error)) {
+    return undefined;
+  }
+  const value = (error as Record<string, unknown>)[name];
+  return typeof value === 'string' || value === null ? value : undefined;
+};
+
+const safeErrorMessages: Record<string, string> = {
+  XeroAuthenticationFailure: 'Xero authentication failed',
+  XeroRateLimited: 'Xero rate limit exceeded',
+  XeroRequestFailure: 'Xero request failed',
+  XeroTransientFailure: 'Xero temporarily unavailable',
+  SinchAuthenticationFailure: 'Sinch authentication failed',
+  SinchRateLimited: 'Sinch rate limit exceeded',
+  SinchRequestFailure: 'Sinch request failed',
+  SinchTransientFailure: 'Sinch temporarily unavailable'
+};
+
+const safeErrorMessage = (error: unknown): string =>
+  error instanceof Error
+    ? (safeErrorMessages[error.name] ?? 'Job handler failed')
+    : 'Unknown error';
+
+const failureDetails = (
+  name: JobName,
+  jobId: string,
+  error: unknown
+): Record<string, unknown> => ({
+  jobName: name,
+  jobId,
+  errorName: error instanceof Error ? error.name : 'UnknownError',
+  errorMessage: safeErrorMessage(error),
+  ...(numericErrorProperty(error, 'status') === undefined
+    ? {}
+    : { status: numericErrorProperty(error, 'status') }),
+  ...(numericErrorProperty(error, 'retryAfterSeconds') === undefined
+    ? {}
+    : {
+        retryAfterSeconds: numericErrorProperty(error, 'retryAfterSeconds')
+      }),
+  ...(numericErrorProperty(error, 'dailyRemaining') === undefined
+    ? {}
+    : { dailyRemaining: numericErrorProperty(error, 'dailyRemaining') }),
+  ...(stringErrorProperty(error, 'problem') === undefined
+    ? {}
+    : { rateLimitProblem: stringErrorProperty(error, 'problem') })
+});
+
 export async function registerHandlers(
   queue: WorkerQueue,
   handlers: JobHandlers,
-  inFlight: InFlightJobs
+  inFlight: InFlightJobs,
+  logger?: WorkerFailureLogger
 ): Promise<void> {
   for (const name of allJobNames) {
     const handler = handlers[name] as
@@ -45,6 +113,9 @@ export async function registerHandlers(
       inFlight.add(job.id);
       try {
         await handler(payload);
+      } catch (error) {
+        logger?.error('Worker job failed', failureDetails(name, job.id, error));
+        throw error;
       } finally {
         inFlight.delete(job.id);
       }

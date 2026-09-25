@@ -47,6 +47,8 @@ const now = new Date('2026-09-18T00:00:00.000Z');
 const noRateLimit = {
   limit: null,
   remaining: null,
+  dailyRemaining: null,
+  problem: null,
   retryAfterSeconds: null
 };
 const result = <T>(data: T): XeroResult<T> => ({

@@ -40,6 +40,14 @@ const rawInvoice = (index = 1) => ({
   UpdatedDateUTC: '2026-09-18T00:00:00Z'
 });
 
+const rawContact = (index: number) => ({
+  ContactID: `contact-${index}`,
+  Name: `Customer ${index}`,
+  ContactStatus: 'ACTIVE',
+  EmailAddress: `accounts-${index}@example.invalid`,
+  Phones: [{ PhoneType: 'MOBILE', PhoneNumber: '0400 000 000' }]
+});
+
 const createClient = (http: HttpClient) =>
   new XeroClient({
     http,
@@ -92,16 +100,65 @@ describe('XeroClient request contract', () => {
     const http = new FakeHttpClient();
     http.responses.push({
       status: 429,
-      headers: { 'retry-after': '17' },
+      headers: {
+        'retry-after': '22135',
+        'x-daylimit-remaining': '0',
+        'x-rate-limit-problem': 'day'
+      },
       body: ''
     });
 
     await expect(createClient(http).getInvoice('invoice-id')).rejects.toMatchObject(
       {
         name: 'XeroRateLimited',
-        retryAfterSeconds: 17
+        retryAfterSeconds: 22135,
+        dailyRemaining: 0,
+        problem: 'day'
       }
     );
+  });
+
+  it('pauses all Xero requests until Retry-After expires', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push(
+      {
+        status: 429,
+        headers: {
+          'retry-after': '22135',
+          'x-daylimit-remaining': '0',
+          'x-rate-limit-problem': 'day'
+        },
+        body: ''
+      },
+      {
+        status: 200,
+        headers: { 'x-daylimit-remaining': '999' },
+        body: JSON.stringify({ Invoices: [rawInvoice()] })
+      }
+    );
+    let now = new Date('2026-09-26T00:00:00.000Z');
+    const client = new XeroClient({
+      http,
+      tokenProvider,
+      baseUrl: 'https://api.xero.test/api.xro/2.0',
+      clock: { now: () => now }
+    });
+
+    await expect(client.getInvoice('invoice-id')).rejects.toMatchObject({
+      retryAfterSeconds: 22_135,
+      problem: 'day'
+    });
+    await expect(client.getOrganisation()).rejects.toMatchObject({
+      retryAfterSeconds: 22_135,
+      problem: 'day'
+    });
+    expect(http.requests).toHaveLength(1);
+
+    now = new Date(now.getTime() + 22_135_000);
+    await expect(client.getInvoice('invoice-id')).resolves.toMatchObject({
+      data: { id: 'invoice-1' }
+    });
+    expect(http.requests).toHaveLength(2);
   });
 
   it('maps 5xx responses to a transient failure', async () => {
@@ -115,6 +172,42 @@ describe('XeroClient request contract', () => {
 });
 
 describe('XeroClient data operations', () => {
+  it('loads unique contacts in batches of 100 IDs', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push(
+      {
+        status: 200,
+        headers: { 'x-minlimit-remaining': '55' },
+        body: JSON.stringify({
+          Contacts: Array.from({ length: 100 }, (_, index) =>
+            rawContact(index + 1)
+          )
+        })
+      },
+      {
+        status: 200,
+        headers: { 'x-minlimit-remaining': '54' },
+        body: JSON.stringify({ Contacts: [rawContact(101)] })
+      }
+    );
+    const ids = [
+      ...Array.from({ length: 101 }, (_, index) => `contact-${index + 1}`),
+      'contact-1'
+    ];
+
+    const result = await createClient(http).listContacts(ids);
+
+    expect(result.data).toHaveLength(101);
+    expect(result.rateLimit.remaining).toBe(54);
+    expect(http.requests).toHaveLength(2);
+    expect(
+      new URL(http.requests[0]?.url ?? '').searchParams.get('IDs')?.split(',')
+    ).toHaveLength(100);
+    expect(
+      new URL(http.requests[1]?.url ?? '').searchParams.get('IDs')
+    ).toBe('contact-101');
+  });
+
   it('pages outstanding invoices with the optimised Xero filters', async () => {
     const http = new FakeHttpClient();
     http.responses.push(

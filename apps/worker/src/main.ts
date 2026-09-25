@@ -33,7 +33,12 @@ export async function startWorker(
   const inFlight = new InFlightJobs();
   await options.queue.start();
   await ensureRecurringSchedules(options.queue, options.organisationIds);
-  await registerHandlers(options.queue, options.handlers, inFlight);
+  await registerHandlers(
+    options.queue,
+    options.handlers,
+    inFlight,
+    options.logger
+  );
 
   let shutdownPromise: Promise<ShutdownResult> | undefined;
   const shutdown = (): Promise<ShutdownResult> => {

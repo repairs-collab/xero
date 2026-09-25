@@ -38,6 +38,8 @@ const database = createDatabase(databaseUrl);
 const noRateLimit = {
   limit: null,
   remaining: null,
+  dailyRemaining: null,
+  problem: null,
   retryAfterSeconds: null
 };
 const result = <T>(data: T): XeroResult<T> => ({
@@ -50,6 +52,8 @@ class FakeXeroSyncClient implements XeroSyncClient {
   contacts = new Map<string, XeroContact>();
   listedInvoices: XeroInvoice[] = [];
   listOptions: ListOutstandingInvoicesOptions[] = [];
+  listContactsCalls: string[][] = [];
+  getOnlineInvoiceUrlCalls = 0;
   listError: Error | null = null;
 
   listOutstandingInvoices(
@@ -76,9 +80,23 @@ class FakeXeroSyncClient implements XeroSyncClient {
     return Promise.resolve(result(contact));
   }
 
+  listContacts(contactIds: string[]): Promise<XeroResult<XeroContact[]>> {
+    this.listContactsCalls.push(contactIds);
+    return Promise.resolve(
+      result(
+        contactIds.map((contactId) => {
+          const contact = this.contacts.get(contactId);
+          if (contact === undefined) throw new Error('Missing fake contact');
+          return contact;
+        })
+      )
+    );
+  }
+
   getOnlineInvoiceUrl(
     invoiceId: string
   ): Promise<XeroResult<string>> {
+    this.getOnlineInvoiceUrlCalls += 1;
     return Promise.resolve(
       result(`https://in.xero.test/${encodeURIComponent(invoiceId)}`)
     );
@@ -349,6 +367,29 @@ describe('targeted Xero invoice refresh', () => {
 });
 
 describe('Xero collection synchronisation', () => {
+  it('loads contacts once for a collection and de-duplicates their IDs', async () => {
+    const organisationId = await seedOrganisation();
+    const xero = new FakeXeroSyncClient();
+    const firstContactId = randomUUID();
+    const secondContactId = randomUUID();
+    xero.listedInvoices = [
+      xeroInvoice(randomUUID(), firstContactId),
+      xeroInvoice(randomUUID(), firstContactId),
+      xeroInvoice(randomUUID(), secondContactId)
+    ];
+    xero.contacts.set(firstContactId, xeroContact(firstContactId));
+    xero.contacts.set(secondContactId, xeroContact(secondContactId));
+
+    await runInitialSync(
+      { database: database.db, xero, clock: fixedClock },
+      { organisationId }
+    );
+
+    expect(xero.listContactsCalls).toEqual([
+      [firstContactId, secondContactId]
+    ]);
+  });
+
   it('stores invoices returned by an initial sync', async () => {
     const organisationId = await seedOrganisation();
     const xero = new FakeXeroSyncClient();
@@ -367,6 +408,40 @@ describe('Xero collection synchronisation', () => {
       .from(invoices)
       .where(eq(invoices.xeroInvoiceId, xeroInvoiceId));
     expect(stored).toHaveLength(1);
+    expect(xero.getOnlineInvoiceUrlCalls).toBe(0);
+  });
+
+  it('preserves a cached online-invoice URL during a targeted refresh', async () => {
+    const seeded = await seedApprovedReminder();
+    const cachedUrl = 'https://in.xero.test/cached-link';
+    await database.db
+      .update(invoices)
+      .set({ onlineInvoiceUrl: cachedUrl })
+      .where(eq(invoices.id, seeded.invoiceId));
+    const xero = new FakeXeroSyncClient();
+    xero.invoices.set(
+      seeded.xeroInvoiceId,
+      xeroInvoice(seeded.xeroInvoiceId, seeded.xeroContactId)
+    );
+    xero.contacts.set(
+      seeded.xeroContactId,
+      xeroContact(seeded.xeroContactId)
+    );
+
+    await runInvoiceRefresh(
+      { database: database.db, xero, clock: fixedClock },
+      {
+        organisationId: seeded.organisationId,
+        invoiceId: seeded.xeroInvoiceId
+      }
+    );
+
+    const [stored] = await database.db
+      .select({ onlineInvoiceUrl: invoices.onlineInvoiceUrl })
+      .from(invoices)
+      .where(eq(invoices.id, seeded.invoiceId));
+    expect(stored?.onlineInvoiceUrl).toBe(cachedUrl);
+    expect(xero.getOnlineInvoiceUrlCalls).toBe(0);
   });
 
   it('uses a two-minute cursor overlap and advances only after success', async () => {

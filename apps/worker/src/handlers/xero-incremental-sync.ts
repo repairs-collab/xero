@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 
 import {
   recordSuccessfulSync,
-  synchroniseInvoiceSnapshot,
+  synchroniseInvoiceCollection,
   type XeroSyncDependencies
 } from './xero-invoice-refresh.js';
 
@@ -32,12 +32,10 @@ export async function runIncrementalSync(
         };
   const response =
     await dependencies.xero.listOutstandingInvoices(options);
-  for (const invoice of response.data) {
-    await synchroniseInvoiceSnapshot(
-      dependencies,
-      payload.organisationId,
-      invoice
-    );
-  }
+  await synchroniseInvoiceCollection(
+    dependencies,
+    payload.organisationId,
+    response.data
+  );
   await recordSuccessfulSync(dependencies, payload.organisationId);
 }

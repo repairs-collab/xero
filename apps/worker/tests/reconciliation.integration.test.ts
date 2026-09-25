@@ -9,7 +9,7 @@ import type { XeroContact, XeroInvoice, XeroResult } from '@bc5000/integrations/
 import { reconcileNightly } from '../src/handlers/reconcile-nightly.js';
 
 const client = createDatabase(process.env.DATABASE_URL ?? 'postgres://bc5000:bc5000@localhost:5432/bc5000');
-const now = new Date('2026-09-18T00:00:00.000Z'); const rateLimit = { limit: 60, remaining: 40, retryAfterSeconds: null };
+const now = new Date('2026-09-18T00:00:00.000Z'); const rateLimit = { limit: 60, remaining: 40, dailyRemaining: 900, problem: null, retryAfterSeconds: null };
 beforeAll(async () => migrateDatabase(client.db)); afterAll(async () => client.pool.end());
 
 const result = <T>(data: T): XeroResult<T> => ({ data, rateLimit });
@@ -24,12 +24,14 @@ describe('nightly reconciliation', () => {
     await client.db.insert(invoices).values({ id: localInvoiceId, organisationId, xeroInvoiceId: missingXeroId, contactId, invoiceNumber: 'MISSING', type: 'ACCREC', status: 'AUTHORISED', issueDate: '2026-07-01', dueDate: '2026-08-01', amountDue: '50', currency: 'AUD', syncVersion: 1 });
     await client.db.insert(reminderSequences).values({ id: sequenceId, organisationId, name: 'Standard' }); await client.db.insert(reminderSequenceVersions).values({ id: versionId, organisationId, sequenceId, versionNumber: 1, status: 'ACTIVE' }); await client.db.insert(invoiceChases).values({ id: chaseId, organisationId, invoiceId: localInvoiceId, sequenceId, customerId: contactId, status: 'ACTIVE' }); await client.db.insert(stageInstances).values({ id: stageId, organisationId, invoiceChaseId: chaseId, sequenceVersionId: versionId, stageKey: 'seven-days', channel: 'SMS', status: 'PENDING_APPROVAL', scheduledAt: now, sourceVersion: 1 }); await client.db.insert(approvals).values({ id: approvalId, organisationId, stageInstanceId: stageId, renderedPreview: 'Old preview', sourceVersion: 1, status: 'PENDING', expiresAt: new Date('2026-09-19T00:00:00Z') });
     const remote = invoice(remoteXeroId, 'contact-remote', { amountDue: '225' });
-    const xero = { listOutstandingInvoices: vi.fn(() => Promise.resolve(result([remote]))), getInvoice: vi.fn((id: string) => Promise.resolve(result(invoice(id, 'contact-local', { status: 'PAID', amountDue: '0' })))), getContact: vi.fn((id: string) => Promise.resolve(result(contact(id)))), getOnlineInvoiceUrl: vi.fn((id: string) => Promise.resolve(result(`https://xero.example/${id}`))) };
+    const xero = { listOutstandingInvoices: vi.fn(() => Promise.resolve(result([remote]))), listContacts: vi.fn((ids: string[]) => Promise.resolve(result(ids.map((id) => contact(id))))), getInvoice: vi.fn((id: string) => Promise.resolve(result(invoice(id, 'contact-local', { status: 'PAID', amountDue: '0' })))), getContact: vi.fn((id: string) => Promise.resolve(result(contact(id)))), getOnlineInvoiceUrl: vi.fn((id: string) => Promise.resolve(result(`https://xero.example/${id}`))) };
 
     const summary = await reconcileNightly({ database: client.db, xero, clock: { now: () => now } }, { organisationId });
 
     expect(summary).toMatchObject({ remoteEligible: 1, confirmedTerminal: 1, upserted: 2 });
     expect(xero.getInvoice).toHaveBeenCalledWith(missingXeroId);
+    expect(xero.listContacts).toHaveBeenNthCalledWith(2, ['contact-local']);
+    expect(xero.getContact).not.toHaveBeenCalled();
     const [closed] = await client.db.select().from(invoices).where(eq(invoices.id, localInvoiceId)); expect(closed).toMatchObject({ status: 'PAID', amountDue: '0.0000' });
     const [chase] = await client.db.select().from(invoiceChases).where(eq(invoiceChases.id, chaseId)); expect(chase?.status).toBe('CLOSED');
     const [approval] = await client.db.select().from(approvals).where(eq(approvals.id, approvalId)); expect(approval?.status).toBe('EXPIRED');

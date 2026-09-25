@@ -25,6 +25,7 @@ export interface XeroClientOptions {
   http: HttpClient;
   tokenProvider: XeroTokenProvider;
   baseUrl?: string;
+  clock?: { now(): Date };
 }
 
 export interface ListOutstandingInvoicesOptions {
@@ -48,11 +49,24 @@ const numericHeader = (
   return Number.isFinite(parsed) ? parsed : null;
 };
 
+const textHeader = (
+  headers: Record<string, string>,
+  name: string
+): string | null => {
+  const entry = Object.entries(headers).find(
+    ([key]) => key.toLowerCase() === name.toLowerCase()
+  );
+  const value = entry?.[1].trim();
+  return value === undefined || value === '' ? null : value.toLowerCase();
+};
+
 const rateLimitFrom = (
   headers: Record<string, string>
 ): XeroRateLimit => ({
   limit: numericHeader(headers, 'x-minlimit-limit'),
   remaining: numericHeader(headers, 'x-minlimit-remaining'),
+  dailyRemaining: numericHeader(headers, 'x-daylimit-remaining'),
+  problem: textHeader(headers, 'x-rate-limit-problem'),
   retryAfterSeconds: numericHeader(headers, 'retry-after')
 });
 
@@ -72,6 +86,13 @@ const responseMessage = (response: HttpResponse): string => {
 
 export class XeroClient {
   private readonly baseUrl: string;
+  private rateLimitBlock:
+    | {
+        until: number;
+        dailyRemaining: number | null;
+        problem: string | null;
+      }
+    | undefined;
 
   constructor(private readonly options: XeroClientOptions) {
     this.baseUrl = (
@@ -101,6 +122,8 @@ export class XeroClient {
     let lastRateLimit: XeroRateLimit = {
       limit: null,
       remaining: null,
+      dailyRemaining: null,
+      problem: null,
       retryAfterSeconds: null
     };
 
@@ -155,6 +178,34 @@ export class XeroClient {
       data: mapXeroContact(contact),
       rateLimit: response.rateLimit
     };
+  }
+
+  async listContacts(
+    contactIds: string[]
+  ): Promise<XeroResult<XeroContact[]>> {
+    const uniqueIds = [...new Set(contactIds)];
+    const contacts: XeroContact[] = [];
+    let lastRateLimit: XeroRateLimit = {
+      limit: null,
+      remaining: null,
+      dailyRemaining: null,
+      problem: null,
+      retryAfterSeconds: null
+    };
+
+    for (let index = 0; index < uniqueIds.length; index += 100) {
+      const search = new URLSearchParams({
+        IDs: uniqueIds.slice(index, index + 100).join(','),
+        pageSize: '100'
+      });
+      const response = await this.requestJson<{
+        Contacts: RawXeroContact[];
+      }>('GET', `/Contacts?${search.toString()}`);
+      contacts.push(...response.data.Contacts.map(mapXeroContact));
+      lastRateLimit = response.rateLimit;
+    }
+
+    return { data: contacts, rateLimit: lastRateLimit };
   }
 
   async getOnlineInvoiceUrl(
@@ -216,8 +267,22 @@ export class XeroClient {
     path: string,
     headers: Record<string, string> = {}
   ): Promise<HttpResponse> {
+    const now = (this.options.clock?.now() ?? new Date()).getTime();
+    if (this.rateLimitBlock !== undefined) {
+      const retryAfterSeconds = Math.ceil(
+        (this.rateLimitBlock.until - now) / 1000
+      );
+      if (retryAfterSeconds > 0) {
+        throw new XeroRateLimited(
+          retryAfterSeconds,
+          this.rateLimitBlock.dailyRemaining,
+          this.rateLimitBlock.problem
+        );
+      }
+      this.rateLimitBlock = undefined;
+    }
     const accessToken = await this.options.tokenProvider.getAccessToken();
-    return this.options.http.request({
+    const response = await this.options.http.request({
       method,
       url: `${this.baseUrl}${path}`,
       headers: {
@@ -226,6 +291,23 @@ export class XeroClient {
         ...headers
       }
     });
+    if (response.status === 429) {
+      const retryAfterSeconds = numericHeader(
+        response.headers,
+        'retry-after'
+      );
+      if (retryAfterSeconds !== null && retryAfterSeconds > 0) {
+        this.rateLimitBlock = {
+          until: now + retryAfterSeconds * 1000,
+          dailyRemaining: numericHeader(
+            response.headers,
+            'x-daylimit-remaining'
+          ),
+          problem: textHeader(response.headers, 'x-rate-limit-problem')
+        };
+      }
+    }
+    return response;
   }
 
   private throwForResponse(response: HttpResponse): void {
@@ -233,7 +315,9 @@ export class XeroClient {
     if (response.status === 401) throw new XeroAuthenticationFailure();
     if (response.status === 429) {
       throw new XeroRateLimited(
-        numericHeader(response.headers, 'retry-after')
+        numericHeader(response.headers, 'retry-after'),
+        numericHeader(response.headers, 'x-daylimit-remaining'),
+        textHeader(response.headers, 'x-rate-limit-problem')
       );
     }
     if (response.status >= 500) {
