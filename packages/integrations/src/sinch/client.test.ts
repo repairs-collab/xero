@@ -170,5 +170,6 @@ describe('SinchClient.checkConnection', () => {
     );
     expect(http.requests[0]?.headers).not.toHaveProperty('Content-MD5');
     expect(http.requests[0]?.headers).not.toHaveProperty('Content-Type');
+    expect(http.requests[0]).not.toHaveProperty('body');
   });
 });

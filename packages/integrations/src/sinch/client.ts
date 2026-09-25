@@ -164,7 +164,7 @@ export class SinchClient {
             }),
         Accept: 'application/json'
       },
-      body
+      ...(body === '' ? {} : { body })
     });
   }
 
