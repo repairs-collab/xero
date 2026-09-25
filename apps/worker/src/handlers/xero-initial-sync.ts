@@ -2,7 +2,7 @@ import type { XeroInitialSyncJob } from '@bc5000/jobs';
 
 import {
   recordSuccessfulSync,
-  synchroniseInvoiceSnapshot,
+  synchroniseInvoiceCollection,
   type XeroSyncDependencies
 } from './xero-invoice-refresh.js';
 
@@ -11,12 +11,10 @@ export async function runInitialSync(
   payload: XeroInitialSyncJob
 ): Promise<void> {
   const response = await dependencies.xero.listOutstandingInvoices();
-  for (const invoice of response.data) {
-    await synchroniseInvoiceSnapshot(
-      dependencies,
-      payload.organisationId,
-      invoice
-    );
-  }
+  await synchroniseInvoiceCollection(
+    dependencies,
+    payload.organisationId,
+    response.data
+  );
   await recordSuccessfulSync(dependencies, payload.organisationId);
 }

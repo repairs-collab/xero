@@ -50,6 +50,7 @@ class FakeXeroSyncClient implements XeroSyncClient {
   contacts = new Map<string, XeroContact>();
   listedInvoices: XeroInvoice[] = [];
   listOptions: ListOutstandingInvoicesOptions[] = [];
+  listContactsCalls: string[][] = [];
   listError: Error | null = null;
 
   listOutstandingInvoices(
@@ -74,6 +75,19 @@ class FakeXeroSyncClient implements XeroSyncClient {
       return Promise.reject(new Error('Missing fake contact'));
     }
     return Promise.resolve(result(contact));
+  }
+
+  listContacts(contactIds: string[]): Promise<XeroResult<XeroContact[]>> {
+    this.listContactsCalls.push(contactIds);
+    return Promise.resolve(
+      result(
+        contactIds.map((contactId) => {
+          const contact = this.contacts.get(contactId);
+          if (contact === undefined) throw new Error('Missing fake contact');
+          return contact;
+        })
+      )
+    );
   }
 
   getOnlineInvoiceUrl(
@@ -349,6 +363,29 @@ describe('targeted Xero invoice refresh', () => {
 });
 
 describe('Xero collection synchronisation', () => {
+  it('loads contacts once for a collection and de-duplicates their IDs', async () => {
+    const organisationId = await seedOrganisation();
+    const xero = new FakeXeroSyncClient();
+    const firstContactId = randomUUID();
+    const secondContactId = randomUUID();
+    xero.listedInvoices = [
+      xeroInvoice(randomUUID(), firstContactId),
+      xeroInvoice(randomUUID(), firstContactId),
+      xeroInvoice(randomUUID(), secondContactId)
+    ];
+    xero.contacts.set(firstContactId, xeroContact(firstContactId));
+    xero.contacts.set(secondContactId, xeroContact(secondContactId));
+
+    await runInitialSync(
+      { database: database.db, xero, clock: fixedClock },
+      { organisationId }
+    );
+
+    expect(xero.listContactsCalls).toEqual([
+      [firstContactId, secondContactId]
+    ]);
+  });
+
   it('stores invoices returned by an initial sync', async () => {
     const organisationId = await seedOrganisation();
     const xero = new FakeXeroSyncClient();

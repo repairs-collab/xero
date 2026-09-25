@@ -4,7 +4,7 @@ import { auditEvents, invoices } from '@bc5000/db';
 import type { XeroInvoice } from '@bc5000/integrations/xero';
 import type { JobPayloads } from '@bc5000/jobs';
 
-import { recordSuccessfulSync, synchroniseInvoiceSnapshot, type XeroSyncDependencies } from './xero-invoice-refresh.js';
+import { recordSuccessfulSync, synchroniseInvoiceCollection, synchroniseInvoiceSnapshot, type XeroSyncDependencies } from './xero-invoice-refresh.js';
 
 async function mapWithConcurrency<T>(items: T[], concurrency: number, action: (item: T) => Promise<void>): Promise<void> {
   let index = 0;
@@ -22,7 +22,8 @@ export async function reconcileNightly(dependencies: XeroSyncDependencies, paylo
   const localEligible = await dependencies.database.select({ xeroInvoiceId: invoices.xeroInvoiceId }).from(invoices).where(and(eq(invoices.organisationId, payload.organisationId), eq(invoices.type, 'ACCREC'), eq(invoices.status, 'AUTHORISED'), gt(invoices.amountDue, '0')));
   const missing = localEligible.filter((invoice) => !remoteIds.has(invoice.xeroInvoiceId));
   let upserted = 0; let confirmedTerminal = 0;
-  await mapWithConcurrency(listed.data, 4, async (invoice) => { await synchroniseInvoiceSnapshot(dependencies, payload.organisationId, invoice); upserted += 1; });
+  await synchroniseInvoiceCollection(dependencies, payload.organisationId, listed.data);
+  upserted += listed.data.length;
   await mapWithConcurrency(missing, 4, async (local) => {
     const confirmed = await dependencies.xero.getInvoice(local.xeroInvoiceId);
     await synchroniseInvoiceSnapshot(dependencies, payload.organisationId, confirmed.data);

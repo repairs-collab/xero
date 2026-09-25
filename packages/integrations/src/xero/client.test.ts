@@ -40,6 +40,14 @@ const rawInvoice = (index = 1) => ({
   UpdatedDateUTC: '2026-09-18T00:00:00Z'
 });
 
+const rawContact = (index: number) => ({
+  ContactID: `contact-${index}`,
+  Name: `Customer ${index}`,
+  ContactStatus: 'ACTIVE',
+  EmailAddress: `accounts-${index}@example.invalid`,
+  Phones: [{ PhoneType: 'MOBILE', PhoneNumber: '0400 000 000' }]
+});
+
 const createClient = (http: HttpClient) =>
   new XeroClient({
     http,
@@ -115,6 +123,42 @@ describe('XeroClient request contract', () => {
 });
 
 describe('XeroClient data operations', () => {
+  it('loads unique contacts in batches of 100 IDs', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push(
+      {
+        status: 200,
+        headers: { 'x-minlimit-remaining': '55' },
+        body: JSON.stringify({
+          Contacts: Array.from({ length: 100 }, (_, index) =>
+            rawContact(index + 1)
+          )
+        })
+      },
+      {
+        status: 200,
+        headers: { 'x-minlimit-remaining': '54' },
+        body: JSON.stringify({ Contacts: [rawContact(101)] })
+      }
+    );
+    const ids = [
+      ...Array.from({ length: 101 }, (_, index) => `contact-${index + 1}`),
+      'contact-1'
+    ];
+
+    const result = await createClient(http).listContacts(ids);
+
+    expect(result.data).toHaveLength(101);
+    expect(result.rateLimit.remaining).toBe(54);
+    expect(http.requests).toHaveLength(2);
+    expect(
+      new URL(http.requests[0]?.url ?? '').searchParams.get('IDs')?.split(',')
+    ).toHaveLength(100);
+    expect(
+      new URL(http.requests[1]?.url ?? '').searchParams.get('IDs')
+    ).toBe('contact-101');
+  });
+
   it('pages outstanding invoices with the optimised Xero filters', async () => {
     const http = new FakeHttpClient();
     http.responses.push(

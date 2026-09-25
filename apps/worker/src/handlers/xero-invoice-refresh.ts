@@ -32,6 +32,7 @@ export interface XeroSyncClient {
   ): Promise<XeroResult<XeroInvoice[]>>;
   getInvoice(invoiceId: string): Promise<XeroResult<XeroInvoice>>;
   getContact(contactId: string): Promise<XeroResult<XeroContact>>;
+  listContacts(contactIds: string[]): Promise<XeroResult<XeroContact[]>>;
   getOnlineInvoiceUrl(
     invoiceId: string
   ): Promise<XeroResult<string>>;
@@ -95,9 +96,12 @@ const terminalReason = (
 export async function synchroniseInvoiceSnapshot(
   dependencies: XeroSyncDependencies,
   organisationId: string,
-  invoice: XeroInvoice
+  invoice: XeroInvoice,
+  preloadedContact?: XeroContact
 ): Promise<void> {
-  const contactResult = await dependencies.xero.getContact(invoice.contactId);
+  const contact =
+    preloadedContact ??
+    (await dependencies.xero.getContact(invoice.contactId)).data;
   const onlineInvoiceUrl =
     invoice.status === 'AUTHORISED' &&
     new Decimal(invoice.amountDue).greaterThan(0)
@@ -112,7 +116,7 @@ export async function synchroniseInvoiceSnapshot(
       .where(
         and(
           eq(contacts.organisationId, organisationId),
-          eq(contacts.xeroContactId, contactResult.data.id)
+          eq(contacts.xeroContactId, contact.id)
         )
       )
       .limit(1);
@@ -124,19 +128,19 @@ export async function synchroniseInvoiceSnapshot(
       .values({
         id: contactId,
         organisationId,
-        xeroContactId: contactResult.data.id,
-        name: contactResult.data.name,
-        active: contactResult.data.active,
-        email: contactResult.data.email,
+        xeroContactId: contact.id,
+        name: contact.name,
+        active: contact.active,
+        email: contact.email,
         sourceVersion: (existingContact?.sourceVersion ?? 0) + 1,
         updatedAt: now
       })
       .onConflictDoUpdate({
         target: [contacts.organisationId, contacts.xeroContactId],
         set: {
-          name: contactResult.data.name,
-          active: contactResult.data.active,
-          email: contactResult.data.email,
+          name: contact.name,
+          active: contact.active,
+          email: contact.email,
           sourceVersion: (existingContact?.sourceVersion ?? 0) + 1,
           updatedAt: now
         }
@@ -163,7 +167,7 @@ export async function synchroniseInvoiceSnapshot(
         : normalisePhone(approvedOverride.normalisedValue);
     const selectedXeroPhone =
       approvedNormalised === null
-        ? selectXeroPhone(contactResult.data)
+        ? selectXeroPhone(contact)
         : null;
 
     await transaction
@@ -319,6 +323,33 @@ export async function synchroniseInvoiceSnapshot(
         );
     }
   });
+}
+
+export async function synchroniseInvoiceCollection(
+  dependencies: XeroSyncDependencies,
+  organisationId: string,
+  invoiceSnapshots: XeroInvoice[]
+): Promise<void> {
+  const contactIds = [
+    ...new Set(invoiceSnapshots.map((invoice) => invoice.contactId))
+  ];
+  const contactResult = await dependencies.xero.listContacts(contactIds);
+  const contactsById = new Map(
+    contactResult.data.map((contact) => [contact.id, contact])
+  );
+
+  for (const invoice of invoiceSnapshots) {
+    const contact = contactsById.get(invoice.contactId);
+    if (contact === undefined) {
+      throw new Error(`Xero contact was not returned for invoice ${invoice.id}`);
+    }
+    await synchroniseInvoiceSnapshot(
+      dependencies,
+      organisationId,
+      invoice,
+      contact
+    );
+  }
 }
 
 export async function runInvoiceRefresh(

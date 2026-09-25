@@ -157,6 +157,32 @@ export class XeroClient {
     };
   }
 
+  async listContacts(
+    contactIds: string[]
+  ): Promise<XeroResult<XeroContact[]>> {
+    const uniqueIds = [...new Set(contactIds)];
+    const contacts: XeroContact[] = [];
+    let lastRateLimit: XeroRateLimit = {
+      limit: null,
+      remaining: null,
+      retryAfterSeconds: null
+    };
+
+    for (let index = 0; index < uniqueIds.length; index += 100) {
+      const search = new URLSearchParams({
+        IDs: uniqueIds.slice(index, index + 100).join(','),
+        pageSize: '100'
+      });
+      const response = await this.requestJson<{
+        Contacts: RawXeroContact[];
+      }>('GET', `/Contacts?${search.toString()}`);
+      contacts.push(...response.data.Contacts.map(mapXeroContact));
+      lastRateLimit = response.rateLimit;
+    }
+
+    return { data: contacts, rateLimit: lastRateLimit };
+  }
+
   async getOnlineInvoiceUrl(
     invoiceId: string
   ): Promise<XeroResult<string>> {
