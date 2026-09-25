@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { PgBoss } from 'pg-boss';
+import { Client } from 'pg';
+import { type Db, PgBoss } from 'pg-boss';
 
 import { jobNames } from './names.js';
 import { DurableJobQueue } from './queue.js';
@@ -105,6 +106,76 @@ describe('durable job queue', () => {
     );
 
     expect(nextManualId).not.toBe(scheduledId);
+  });
+
+  it('settles overlapping scheduled and manual sync inserts to one in-flight job', async () => {
+    const organisationId = randomUUID();
+    const singletonKey = `${jobNames.xeroIncrementalSync}:${organisationId}`;
+    const scheduledClient = new Client({ connectionString: databaseUrl });
+    const observer = new Client({ connectionString: databaseUrl });
+    await scheduledClient.connect();
+    await observer.connect();
+
+    try {
+      await scheduledClient.query('BEGIN');
+      const scheduledDatabase: Db = {
+        executeSql: async (text, values) => {
+          const result = await scheduledClient.query(text, values);
+          return { rows: result.rows };
+        }
+      };
+      const scheduledId = await queueController.send(
+        jobNames.xeroIncrementalSync,
+        { organisationId },
+        { singletonKey, db: scheduledDatabase }
+      );
+      expect(scheduledId).not.toBeNull();
+
+      const manualPublish = queue.publish(
+        jobNames.xeroIncrementalSync,
+        { organisationId },
+        { singletonKey, deduplicateWhileActive: true }
+      );
+
+      let manualIsWaiting = false;
+      const deadline = Date.now() + 3_000;
+      while (!manualIsWaiting && Date.now() < deadline) {
+        const waiting = await observer.query(
+          `SELECT 1
+             FROM pg_stat_activity
+            WHERE application_name = 'bill-chaser-active-singleton'
+              AND wait_event_type = 'Lock'
+            LIMIT 1`
+        );
+        manualIsWaiting = waiting.rowCount === 1;
+        if (!manualIsWaiting) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+      expect(manualIsWaiting).toBe(true);
+
+      const [manualResult, scheduledCommit] = await Promise.allSettled([
+        manualPublish,
+        scheduledClient.query('COMMIT')
+      ]);
+      if (scheduledCommit.status === 'rejected') {
+        await scheduledClient.query('ROLLBACK');
+      }
+
+      expect(manualResult.status).toBe('fulfilled');
+      const inFlight = (
+        await queue.findJobs(jobNames.xeroIncrementalSync, {
+          key: singletonKey
+        })
+      ).filter((job) => ['created', 'retry', 'active'].includes(job.state));
+      expect(inFlight).toHaveLength(1);
+      if (manualResult.status === 'fulfilled') {
+        expect(manualResult.value).toBe(inFlight[0]?.id);
+      }
+    } finally {
+      await scheduledClient.end();
+      await observer.end();
+    }
   });
 
   it('never automatically retries an external reminder send', async () => {

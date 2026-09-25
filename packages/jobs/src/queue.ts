@@ -17,6 +17,7 @@ import {
   parseJobPayload,
   type JobPayloads
 } from './payloads.js';
+import { runTransactionWithRetry } from './transaction-retry.js';
 
 export interface JobQueueLogger {
   error(message: string, error?: unknown): void;
@@ -158,60 +159,65 @@ export class DurableJobQueue implements JobPublisher {
       const data = parseJobPayload(name, payload);
       const startOptions =
         options.startAfter === undefined ? {} : { startAfter: options.startAfter };
-      const client = new Client({ connectionString: this.#databaseUrl });
-      await client.connect();
-      try {
-        await client.query('BEGIN');
-        const queue = await client.query<{ name: string }>(
-          'SELECT name FROM pgboss.queue WHERE name = $1 FOR UPDATE',
-          [name]
-        );
-        if (queue.rowCount !== 1) throw new Error('JOB_QUEUE_NOT_FOUND');
-
-        const existing = await client.query<{ id: string }>(
-          `SELECT id
-             FROM pgboss.job
-            WHERE name = $1
-              AND singleton_key = $2
-              AND state IN ('created', 'retry', 'active')
-            ORDER BY CASE state
-              WHEN 'active' THEN 0
-              WHEN 'retry' THEN 1
-              ELSE 2
-            END, created_on DESC
-            LIMIT 1
-            FOR UPDATE`,
-          [name, singletonKey]
-        );
-        const existingId = existing.rows[0]?.id;
-        if (existingId !== undefined) {
-          await client.query('COMMIT');
-          return existingId;
-        }
-
-        const transactionalDatabase: Db = {
-          executeSql: async (text, values) => {
-            const result = await client.query(text, values);
-            return { rows: result.rows };
-          }
-        };
-        const inserted = await this.#boss.send(name, data, {
-          ...optionsFor(name),
-          ...startOptions,
-          singletonKey,
-          db: transactionalDatabase
+      return runTransactionWithRetry(async () => {
+        const client = new Client({
+          connectionString: this.#databaseUrl,
+          application_name: 'bill-chaser-active-singleton'
         });
-        if (inserted === null) {
-          throw new Error('ACTIVE_SINGLETON_JOB_NOT_ENQUEUED');
+        await client.connect();
+        try {
+          await client.query('BEGIN');
+          const queue = await client.query<{ name: string }>(
+            'SELECT name FROM pgboss.queue WHERE name = $1 FOR UPDATE',
+            [name]
+          );
+          if (queue.rowCount !== 1) throw new Error('JOB_QUEUE_NOT_FOUND');
+
+          const existing = await client.query<{ id: string }>(
+            `SELECT id
+               FROM pgboss.job
+              WHERE name = $1
+                AND singleton_key = $2
+                AND state IN ('created', 'retry', 'active')
+              ORDER BY CASE state
+                WHEN 'active' THEN 0
+                WHEN 'retry' THEN 1
+                ELSE 2
+              END, created_on DESC
+              LIMIT 1
+              FOR UPDATE`,
+            [name, singletonKey]
+          );
+          const existingId = existing.rows[0]?.id;
+          if (existingId !== undefined) {
+            await client.query('COMMIT');
+            return existingId;
+          }
+
+          const transactionalDatabase: Db = {
+            executeSql: async (text, values) => {
+              const result = await client.query(text, values);
+              return { rows: result.rows };
+            }
+          };
+          const inserted = await this.#boss.send(name, data, {
+            ...optionsFor(name),
+            ...startOptions,
+            singletonKey,
+            db: transactionalDatabase
+          });
+          if (inserted === null) {
+            throw new Error('ACTIVE_SINGLETON_JOB_NOT_ENQUEUED');
+          }
+          await client.query('COMMIT');
+          return inserted;
+        } catch (error) {
+          await client.query('ROLLBACK').catch(() => undefined);
+          throw error;
+        } finally {
+          await client.end();
         }
-        await client.query('COMMIT');
-        return inserted;
-      } catch (error) {
-        await client.query('ROLLBACK');
-        throw error;
-      } finally {
-        await client.end();
-      }
+      });
     }
     return this.enqueueUnique(
       name,
