@@ -146,6 +146,8 @@ describe('calculateReminderWork', () => {
         rateLimit: {
           limit: 60,
           remaining: 59,
+          dailyRemaining: 999,
+          problem: null,
           retryAfterSeconds: null
         }
       })

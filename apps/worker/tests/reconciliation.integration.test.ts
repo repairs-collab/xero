@@ -9,7 +9,7 @@ import type { XeroContact, XeroInvoice, XeroResult } from '@bc5000/integrations/
 import { reconcileNightly } from '../src/handlers/reconcile-nightly.js';
 
 const client = createDatabase(process.env.DATABASE_URL ?? 'postgres://bc5000:bc5000@localhost:5432/bc5000');
-const now = new Date('2026-09-18T00:00:00.000Z'); const rateLimit = { limit: 60, remaining: 40, retryAfterSeconds: null };
+const now = new Date('2026-09-18T00:00:00.000Z'); const rateLimit = { limit: 60, remaining: 40, dailyRemaining: 900, problem: null, retryAfterSeconds: null };
 beforeAll(async () => migrateDatabase(client.db)); afterAll(async () => client.pool.end());
 
 const result = <T>(data: T): XeroResult<T> => ({ data, rateLimit });

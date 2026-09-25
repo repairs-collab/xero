@@ -100,14 +100,20 @@ describe('XeroClient request contract', () => {
     const http = new FakeHttpClient();
     http.responses.push({
       status: 429,
-      headers: { 'retry-after': '17' },
+      headers: {
+        'retry-after': '22135',
+        'x-daylimit-remaining': '0',
+        'x-rate-limit-problem': 'day'
+      },
       body: ''
     });
 
     await expect(createClient(http).getInvoice('invoice-id')).rejects.toMatchObject(
       {
         name: 'XeroRateLimited',
-        retryAfterSeconds: 17
+        retryAfterSeconds: 22135,
+        dailyRemaining: 0,
+        problem: 'day'
       }
     );
   });

@@ -67,6 +67,52 @@ describe('worker runtime', () => {
     expect(inFlight.ids()).toEqual([]);
   });
 
+  it('logs credential-safe job failure details including Xero retry timing', async () => {
+    const queue = new FakeWorkerQueue();
+    const logger = { error: vi.fn() };
+    const organisationId = randomUUID();
+    const failure = Object.assign(new Error('Xero rate limit exceeded'), {
+      name: 'XeroRateLimited',
+      status: 429,
+      retryAfterSeconds: 22_135,
+      dailyRemaining: 0,
+      problem: 'day',
+      secret: 'must-not-leak'
+    });
+    await registerHandlers(
+      queue,
+      {
+        [jobNames.xeroInitialSync]: () => Promise.reject(failure)
+      },
+      new InFlightJobs(),
+      logger
+    );
+
+    await expect(
+      queue.run(jobNames.xeroInitialSync, {
+        id: 'failed-job-id',
+        data: { organisationId }
+      })
+    ).rejects.toBe(failure);
+
+    expect(logger.error).toHaveBeenCalledWith('Worker job failed', {
+      jobName: jobNames.xeroInitialSync,
+      jobId: 'failed-job-id',
+      errorName: 'XeroRateLimited',
+      errorMessage: 'Xero rate limit exceeded',
+      status: 429,
+      retryAfterSeconds: 22_135,
+      dailyRemaining: 0,
+      rateLimitProblem: 'day'
+    });
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain(
+      'must-not-leak'
+    );
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain(
+      organisationId
+    );
+  });
+
   it('stops claiming, waits for active work, and closes resources', async () => {
     const queue = new FakeWorkerQueue();
     const inFlight = new InFlightJobs();

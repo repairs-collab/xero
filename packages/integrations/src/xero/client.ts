@@ -48,11 +48,24 @@ const numericHeader = (
   return Number.isFinite(parsed) ? parsed : null;
 };
 
+const textHeader = (
+  headers: Record<string, string>,
+  name: string
+): string | null => {
+  const entry = Object.entries(headers).find(
+    ([key]) => key.toLowerCase() === name.toLowerCase()
+  );
+  const value = entry?.[1].trim();
+  return value === undefined || value === '' ? null : value.toLowerCase();
+};
+
 const rateLimitFrom = (
   headers: Record<string, string>
 ): XeroRateLimit => ({
   limit: numericHeader(headers, 'x-minlimit-limit'),
   remaining: numericHeader(headers, 'x-minlimit-remaining'),
+  dailyRemaining: numericHeader(headers, 'x-daylimit-remaining'),
+  problem: textHeader(headers, 'x-rate-limit-problem'),
   retryAfterSeconds: numericHeader(headers, 'retry-after')
 });
 
@@ -101,6 +114,8 @@ export class XeroClient {
     let lastRateLimit: XeroRateLimit = {
       limit: null,
       remaining: null,
+      dailyRemaining: null,
+      problem: null,
       retryAfterSeconds: null
     };
 
@@ -165,6 +180,8 @@ export class XeroClient {
     let lastRateLimit: XeroRateLimit = {
       limit: null,
       remaining: null,
+      dailyRemaining: null,
+      problem: null,
       retryAfterSeconds: null
     };
 
@@ -259,7 +276,9 @@ export class XeroClient {
     if (response.status === 401) throw new XeroAuthenticationFailure();
     if (response.status === 429) {
       throw new XeroRateLimited(
-        numericHeader(response.headers, 'retry-after')
+        numericHeader(response.headers, 'retry-after'),
+        numericHeader(response.headers, 'x-daylimit-remaining'),
+        textHeader(response.headers, 'x-rate-limit-problem')
       );
     }
     if (response.status >= 500) {

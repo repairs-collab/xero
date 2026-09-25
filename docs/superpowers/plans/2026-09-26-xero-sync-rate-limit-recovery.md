@@ -28,10 +28,10 @@
 
 ### Task 3: Make Xero throttling visible and safe to diagnose
 
-- [ ] Add failing tests for Xero daily-limit metadata and credential-safe job failure logging.
-- [ ] Parse Xero daily remaining allowance and rate-limit type alongside `Retry-After`.
-- [ ] Log job name, job ID, error class/message, HTTP status, and retry delay without payloads, tokens, or credentials.
-- [ ] Run worker runtime and Xero client tests.
+- [x] Add failing tests for Xero daily-limit metadata and credential-safe job failure logging.
+- [x] Parse Xero daily remaining allowance and rate-limit type alongside `Retry-After`.
+- [x] Log job name, job ID, error class/message, HTTP status, and retry delay without payloads, tokens, or credentials.
+- [x] Run worker runtime and Xero client tests.
 
 ### Task 4: Verify and prepare deployment
 

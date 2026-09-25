@@ -38,6 +38,8 @@ const database = createDatabase(databaseUrl);
 const noRateLimit = {
   limit: null,
   remaining: null,
+  dailyRemaining: null,
+  problem: null,
   retryAfterSeconds: null
 };
 const result = <T>(data: T): XeroResult<T> => ({

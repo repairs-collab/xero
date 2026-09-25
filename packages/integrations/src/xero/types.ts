@@ -6,8 +6,12 @@ export class XeroAuthenticationFailure extends Error {
 }
 
 export class XeroRateLimited extends Error {
+  public readonly status = 429;
+
   constructor(
     public readonly retryAfterSeconds: number | null,
+    public readonly dailyRemaining: number | null = null,
+    public readonly problem: string | null = null,
     message = 'Xero rate limit exceeded'
   ) {
     super(message);
@@ -45,6 +49,8 @@ export class XeroRequestFailure extends Error {
 export interface XeroRateLimit {
   limit: number | null;
   remaining: number | null;
+  dailyRemaining: number | null;
+  problem: string | null;
   retryAfterSeconds: number | null;
 }
 
