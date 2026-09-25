@@ -20,11 +20,11 @@
 
 ### Task 2: Remove online-invoice URL amplification
 
-- [ ] Add a failing sync test proving invoice import does not request an online-invoice URL.
-- [ ] Preserve an already cached URL when invoice financial fields are refreshed.
-- [ ] Add a failing reminder-calculation test proving a missing URL is fetched and cached only for a review SMS template that uses `{{online_invoice_url}}`.
-- [ ] Fetch the URL before creating the stage/approval so a rate-limit failure cannot leave an incomplete approval record.
-- [ ] Run the focused sync and reminder-calculation tests.
+- [x] Add a failing sync test proving invoice import does not request an online-invoice URL.
+- [x] Preserve an already cached URL when invoice financial fields are refreshed.
+- [x] Add a failing reminder-calculation test proving a missing URL is fetched and cached only for a review SMS template that uses `{{online_invoice_url}}`.
+- [x] Fetch the URL before creating the stage/approval so a rate-limit failure cannot leave an incomplete approval record.
+- [x] Run the focused sync and reminder-calculation tests.
 
 ### Task 3: Make Xero throttling visible and safe to diagnose
 

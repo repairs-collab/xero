@@ -102,11 +102,6 @@ export async function synchroniseInvoiceSnapshot(
   const contact =
     preloadedContact ??
     (await dependencies.xero.getContact(invoice.contactId)).data;
-  const onlineInvoiceUrl =
-    invoice.status === 'AUTHORISED' &&
-    new Decimal(invoice.amountDue).greaterThan(0)
-      ? (await dependencies.xero.getOnlineInvoiceUrl(invoice.id)).data
-      : null;
   const now = dependencies.clock.now();
 
   await dependencies.database.transaction(async (transaction) => {
@@ -230,6 +225,7 @@ export async function synchroniseInvoiceSnapshot(
       )
       .limit(1);
     const existingInvoice = existingInvoices[0];
+    const onlineInvoiceUrl = existingInvoice?.onlineInvoiceUrl ?? null;
     const changed = invoiceChanged(
       existingInvoice,
       invoice,

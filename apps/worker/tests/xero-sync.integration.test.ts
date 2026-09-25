@@ -51,6 +51,7 @@ class FakeXeroSyncClient implements XeroSyncClient {
   listedInvoices: XeroInvoice[] = [];
   listOptions: ListOutstandingInvoicesOptions[] = [];
   listContactsCalls: string[][] = [];
+  getOnlineInvoiceUrlCalls = 0;
   listError: Error | null = null;
 
   listOutstandingInvoices(
@@ -93,6 +94,7 @@ class FakeXeroSyncClient implements XeroSyncClient {
   getOnlineInvoiceUrl(
     invoiceId: string
   ): Promise<XeroResult<string>> {
+    this.getOnlineInvoiceUrlCalls += 1;
     return Promise.resolve(
       result(`https://in.xero.test/${encodeURIComponent(invoiceId)}`)
     );
@@ -404,6 +406,40 @@ describe('Xero collection synchronisation', () => {
       .from(invoices)
       .where(eq(invoices.xeroInvoiceId, xeroInvoiceId));
     expect(stored).toHaveLength(1);
+    expect(xero.getOnlineInvoiceUrlCalls).toBe(0);
+  });
+
+  it('preserves a cached online-invoice URL during a targeted refresh', async () => {
+    const seeded = await seedApprovedReminder();
+    const cachedUrl = 'https://in.xero.test/cached-link';
+    await database.db
+      .update(invoices)
+      .set({ onlineInvoiceUrl: cachedUrl })
+      .where(eq(invoices.id, seeded.invoiceId));
+    const xero = new FakeXeroSyncClient();
+    xero.invoices.set(
+      seeded.xeroInvoiceId,
+      xeroInvoice(seeded.xeroInvoiceId, seeded.xeroContactId)
+    );
+    xero.contacts.set(
+      seeded.xeroContactId,
+      xeroContact(seeded.xeroContactId)
+    );
+
+    await runInvoiceRefresh(
+      { database: database.db, xero, clock: fixedClock },
+      {
+        organisationId: seeded.organisationId,
+        invoiceId: seeded.xeroInvoiceId
+      }
+    );
+
+    const [stored] = await database.db
+      .select({ onlineInvoiceUrl: invoices.onlineInvoiceUrl })
+      .from(invoices)
+      .where(eq(invoices.id, seeded.invoiceId));
+    expect(stored?.onlineInvoiceUrl).toBe(cachedUrl);
+    expect(xero.getOnlineInvoiceUrlCalls).toBe(0);
   });
 
   it('uses a two-minute cursor overlap and advances only after success', async () => {

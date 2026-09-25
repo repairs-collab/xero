@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { and, eq } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
   approvals,
@@ -26,6 +26,10 @@ const databaseUrl =
   'postgres://bc5000:bc5000@localhost:5432/bc5000';
 const client = createDatabase(databaseUrl);
 const now = new Date('2026-09-18T00:00:00.000Z');
+const unusedXero = {
+  getOnlineInvoiceUrl: () =>
+    Promise.reject(new Error('Online invoice URL was not expected'))
+};
 
 beforeAll(async () => {
   await migrateDatabase(client.db);
@@ -40,6 +44,8 @@ const seedInvoiceAndSequence = async (options: {
   dueDate: string;
   offsetDays: number;
   channel: 'SMS' | 'XERO_EMAIL' | 'TASK' | 'SMS_DAILY';
+  onlineInvoiceUrl?: string | null;
+  template?: string;
 }) => {
   const organisationId = randomUUID();
   const contactId = randomUUID();
@@ -82,7 +88,10 @@ const seedInvoiceAndSequence = async (options: {
     dueDate: options.dueDate,
     amountDue: '125.5000',
     currency: 'AUD',
-    onlineInvoiceUrl: 'https://in.xero.test/INV-5000',
+    onlineInvoiceUrl:
+      options.onlineInvoiceUrl === undefined
+        ? 'https://in.xero.test/INV-5000'
+        : options.onlineInvoiceUrl,
     syncVersion: 3,
     updatedAt: now
   });
@@ -108,7 +117,8 @@ const seedInvoiceAndSequence = async (options: {
     channel: options.channel,
     template:
       options.channel === 'SMS' || options.channel === 'SMS_DAILY'
-        ? 'Hi {{customer_name}}, invoice {{invoice_number}} for {{amount_due}} {{currency}} is due. {{online_invoice_url}}'
+        ? (options.template ??
+          'Hi {{customer_name}}, invoice {{invoice_number}} for {{amount_due}} {{currency}} is due. {{online_invoice_url}}')
         : null
   });
 
@@ -122,6 +132,109 @@ const seedInvoiceAndSequence = async (options: {
 };
 
 describe('calculateReminderWork', () => {
+  it('fetches and caches a missing URL before creating a review SMS preview', async () => {
+    const seeded = await seedInvoiceAndSequence({
+      mode: 'REVIEW',
+      dueDate: '2026-09-18',
+      offsetDays: 0,
+      channel: 'SMS',
+      onlineInvoiceUrl: null
+    });
+    const getOnlineInvoiceUrl = vi.fn(() =>
+      Promise.resolve({
+        data: 'https://in.xero.test/fetched-link',
+        rateLimit: {
+          limit: 60,
+          remaining: 59,
+          retryAfterSeconds: null
+        }
+      })
+    );
+
+    await calculateReminderWork(
+      {
+        database: client.db,
+        clock: { now: () => now },
+        xero: { getOnlineInvoiceUrl }
+      },
+      seeded.organisationId
+    );
+
+    expect(getOnlineInvoiceUrl).toHaveBeenCalledOnce();
+    const [storedInvoice] = await client.db
+      .select({ onlineInvoiceUrl: invoices.onlineInvoiceUrl })
+      .from(invoices)
+      .where(eq(invoices.id, seeded.invoiceId));
+    expect(storedInvoice?.onlineInvoiceUrl).toBe(
+      'https://in.xero.test/fetched-link'
+    );
+    const [approval] = await client.db
+      .select({ renderedPreview: approvals.renderedPreview })
+      .from(approvals)
+      .where(eq(approvals.organisationId, seeded.organisationId));
+    expect(approval?.renderedPreview).toContain(
+      'https://in.xero.test/fetched-link'
+    );
+  });
+
+  it('does not create a stage when fetching a required preview URL fails', async () => {
+    const seeded = await seedInvoiceAndSequence({
+      mode: 'REVIEW',
+      dueDate: '2026-09-18',
+      offsetDays: 0,
+      channel: 'SMS',
+      onlineInvoiceUrl: null
+    });
+    const failure = new Error('Xero rate limited');
+
+    await expect(
+      calculateReminderWork(
+        {
+          database: client.db,
+          clock: { now: () => now },
+          xero: {
+            getOnlineInvoiceUrl: () => Promise.reject(failure)
+          }
+        },
+        seeded.organisationId
+      )
+    ).rejects.toBe(failure);
+
+    const stages = await client.db
+      .select()
+      .from(stageInstances)
+      .where(eq(stageInstances.organisationId, seeded.organisationId));
+    const approvalRows = await client.db
+      .select()
+      .from(approvals)
+      .where(eq(approvals.organisationId, seeded.organisationId));
+    expect(stages).toHaveLength(0);
+    expect(approvalRows).toHaveLength(0);
+  });
+
+  it('does not fetch a URL when the review SMS template does not use it', async () => {
+    const seeded = await seedInvoiceAndSequence({
+      mode: 'REVIEW',
+      dueDate: '2026-09-18',
+      offsetDays: 0,
+      channel: 'SMS',
+      onlineInvoiceUrl: null,
+      template: 'Hi {{customer_name}}, invoice {{invoice_number}} is due.'
+    });
+    const getOnlineInvoiceUrl = vi.fn();
+
+    await calculateReminderWork(
+      {
+        database: client.db,
+        clock: { now: () => now },
+        xero: { getOnlineInvoiceUrl }
+      },
+      seeded.organisationId
+    );
+
+    expect(getOnlineInvoiceUrl).not.toHaveBeenCalled();
+  });
+
   it('creates an exact pending preview for a review-mode SMS', async () => {
     const seeded = await seedInvoiceAndSequence({
       mode: 'REVIEW',
@@ -131,7 +244,7 @@ describe('calculateReminderWork', () => {
     });
 
     const summary = await calculateReminderWork(
-      { database: client.db, clock: { now: () => now } },
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
       seeded.organisationId
     );
 
@@ -162,11 +275,11 @@ describe('calculateReminderWork', () => {
     });
 
     await calculateReminderWork(
-      { database: client.db, clock: { now: () => now } },
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
       seeded.organisationId
     );
     const second = await calculateReminderWork(
-      { database: client.db, clock: { now: () => now } },
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
       seeded.organisationId
     );
 
@@ -206,7 +319,7 @@ describe('calculateReminderWork', () => {
       channel: 'SMS'
     });
     await calculateReminderWork(
-      { database: client.db, clock: { now: () => now } },
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
       seeded.organisationId
     );
     await client.db
@@ -215,7 +328,7 @@ describe('calculateReminderWork', () => {
       .where(eq(approvals.organisationId, seeded.organisationId));
 
     await calculateReminderWork(
-      { database: client.db, clock: { now: () => now } },
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
       seeded.organisationId
     );
 

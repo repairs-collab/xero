@@ -28,6 +28,7 @@ import {
   renderSms,
   type ReminderStageChannel
 } from '@bc5000/domain';
+import type { XeroResult } from '@bc5000/integrations/xero';
 
 export interface ReminderCalculationClock {
   now(): Date;
@@ -36,6 +37,9 @@ export interface ReminderCalculationClock {
 export interface ReminderCalculationDependencies {
   database: Database;
   clock: ReminderCalculationClock;
+  xero: {
+    getOnlineInvoiceUrl(invoiceId: string): Promise<XeroResult<string>>;
+  };
 }
 
 export interface CalculationSummary {
@@ -244,6 +248,7 @@ export async function calculateReminderWork(
           holidays: []
         })
       );
+      let onlineInvoiceUrl = row.invoice.onlineInvoiceUrl;
 
       for (const occurrence of occurrences) {
         const configured = configuredStages.find(
@@ -274,6 +279,22 @@ export async function calculateReminderWork(
         if (!eligibility.eligible) {
           summary.skippedOccurrences += 1;
           continue;
+        }
+
+        if (
+          sequence.mode === 'REVIEW' &&
+          occurrence.channel === 'SMS' &&
+          configured.template?.includes('{{online_invoice_url}}') === true &&
+          onlineInvoiceUrl === null
+        ) {
+          const online = await dependencies.xero.getOnlineInvoiceUrl(
+            row.invoice.xeroInvoiceId
+          );
+          onlineInvoiceUrl = online.data;
+          await dependencies.database
+            .update(invoices)
+            .set({ onlineInvoiceUrl, updatedAt: now })
+            .where(eq(invoices.id, row.invoice.id));
         }
 
         const stageId = randomUUID();
@@ -320,7 +341,7 @@ export async function calculateReminderWork(
             amountDue: row.invoice.amountDue,
             currency: row.invoice.currency,
             dueDate: row.invoice.dueDate,
-            onlineInvoiceUrl: row.invoice.onlineInvoiceUrl,
+            onlineInvoiceUrl,
             organisationName: organisation.name,
             maxSmsSegments: sequence.maxSmsSegments
           });

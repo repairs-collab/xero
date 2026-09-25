@@ -104,7 +104,7 @@ async function main() {
         reconcileNightly(syncDependencies, payload).then(() => undefined),
       [jobNames.remindersCalculate]: (payload) =>
         calculateReminderWork(
-          { database: databaseClient.db, clock },
+          { database: databaseClient.db, clock, xero },
           payload.organisationId
         ).then(() => undefined),
       [jobNames.reminderExecute]: (payload) =>
