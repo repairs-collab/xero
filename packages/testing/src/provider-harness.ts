@@ -360,9 +360,9 @@ export class ProviderHarness {
         });
         return;
       }
-      if (url.pathname === '/v1/webhooks/messages' && method === 'GET') {
+      if (url.pathname === '/v1/replies' && method === 'GET') {
         this.record(method, url, body);
-        json(response, 200, { webhooks: [] });
+        json(response, 200, { replies: [] });
         return;
       }
       this.record(method, url, body);

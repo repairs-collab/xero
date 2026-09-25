@@ -131,11 +131,7 @@ export class SinchClient {
   }
 
   async checkConnection(): Promise<{ kind: 'healthy' }> {
-    const response = await this.request(
-      'GET',
-      '/v1/webhooks/messages?page=0&page_size=1',
-      ''
-    );
+    const response = await this.request('GET', '/v1/replies', '');
     if (response.status !== 200) this.throwForResponse(response);
     return { kind: 'healthy' };
   }
