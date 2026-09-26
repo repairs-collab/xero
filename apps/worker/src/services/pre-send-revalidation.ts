@@ -19,12 +19,16 @@ import {
   pauses,
   paymentPromises,
   reminderSequences,
+  reminderSequenceVersions,
   sequenceStages,
   stageInstances,
   suppressions
 } from '@bc5000/db';
-import { evaluateEligibility } from '@bc5000/domain';
-import { selectPreferredSmsChannel } from '@bc5000/domain';
+import {
+  evaluateEligibility,
+  renderSms,
+  selectPreferredSmsChannel
+} from '@bc5000/domain';
 import type {
   XeroInvoice,
   XeroResult
@@ -368,8 +372,24 @@ export async function revalidateReminder(
   let content = approval?.renderedPreview;
   if (content === undefined) {
     const [configured] = await dependencies.database
-      .select({ template: sequenceStages.template })
+      .select({
+        template: sequenceStages.template,
+        maxSmsSegments: reminderSequenceVersions.maxSmsSegments
+      })
       .from(sequenceStages)
+      .innerJoin(
+        reminderSequenceVersions,
+        and(
+          eq(
+            reminderSequenceVersions.id,
+            sequenceStages.sequenceVersionId
+          ),
+          eq(
+            reminderSequenceVersions.organisationId,
+            input.organisationId
+          )
+        )
+      )
       .where(
         and(
           eq(sequenceStages.organisationId, input.organisationId),
@@ -383,20 +403,46 @@ export async function revalidateReminder(
         )
       )
       .limit(1);
-    content =
-      row.stage.channel === 'XERO_EMAIL'
-        ? `Xero invoice email for ${row.invoice.invoiceNumber}`
-        : configured?.template
-            ?.replaceAll('{{customer_name}}', row.contact.name)
-            .replaceAll('{{invoice_number}}', row.invoice.invoiceNumber)
-            .replaceAll('{{amount_due}}', currentAmountDue)
-            .replaceAll('{{currency}}', row.invoice.currency)
-            .replaceAll('{{due_date}}', row.invoice.dueDate)
-            .replaceAll('{{online_invoice_url}}', onlineInvoiceUrl)
-            .replaceAll('{{organisation_name}}', row.organisation.name);
+    const configuredTemplate = configured?.template;
+    const smsTemplate =
+      configuredTemplate === null || configuredTemplate === undefined
+        ? configuredTemplate
+        : configuredTemplate.includes('{{online_invoice_url}}')
+          ? configuredTemplate
+          : `${configuredTemplate.trim()} Pay securely: {{online_invoice_url}}`;
+    try {
+      content =
+        row.stage.channel === 'XERO_EMAIL'
+          ? `Xero invoice email for ${row.invoice.invoiceNumber}`
+          : smsTemplate === null ||
+              smsTemplate === undefined ||
+              configured === undefined
+            ? undefined
+            : renderSms(
+                smsTemplate,
+                {
+                  customer_name: row.contact.name,
+                  invoice_number: row.invoice.invoiceNumber,
+                  amount_due: currentAmountDue,
+                  currency: row.invoice.currency,
+                  due_date: row.invoice.dueDate,
+                  online_invoice_url: onlineInvoiceUrl,
+                  organisation_name: row.organisation.name
+                },
+                { maxSegments: configured.maxSmsSegments }
+              ).content;
+    } catch {
+      return { kind: 'blocked', reason: 'SOURCE_CHANGED' };
+    }
     if (content === undefined) {
       throw new Error('Reminder content could not be rendered');
     }
+  }
+  if (
+    row.stage.channel === 'SMS' &&
+    (onlineInvoiceUrl === '' || !content.includes(onlineInvoiceUrl))
+  ) {
+    return { kind: 'blocked', reason: 'SOURCE_CHANGED' };
   }
 
   return {

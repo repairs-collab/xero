@@ -19,6 +19,7 @@ import {
   paymentPromises,
   reminderSequences,
   reminderSequenceVersions,
+  sequenceStages,
   stageInstances,
   suppressions,
   tasks
@@ -110,6 +111,9 @@ const seedApprovedReminder = async (options: {
   invoiceSourceVersion?: number;
   approvalSourceVersion?: number;
   approvalStatus?: 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXPIRED';
+  renderedPreview?: string;
+  createApproval?: boolean;
+  template?: string;
   sequenceMode?: 'REVIEW' | 'AUTOMATIC';
   stageKey?: string;
   email?: string;
@@ -184,6 +188,19 @@ const seedApprovedReminder = async (options: {
     status: 'ACTIVE',
     configuration: {}
   });
+  if (options.createApproval === false) {
+    await client.db.insert(sequenceStages).values({
+      organisationId,
+      sequenceVersionId,
+      stageKey: options.stageKey ?? 'seven-days',
+      offsetDays: 7,
+      channel,
+      template:
+        channel === 'SMS'
+          ? (options.template ?? 'Hi {{customer_name}}, invoice {{invoice_number}} is overdue.')
+          : null
+    });
+  }
   await client.db.insert(invoiceChases).values({
     id: chaseId,
     organisationId,
@@ -204,17 +221,20 @@ const seedApprovedReminder = async (options: {
     sourceVersion,
     updatedAt: now
   });
-  await client.db.insert(approvals).values({
-    organisationId,
-    stageInstanceId,
-    renderedPreview:
-      channel === 'SMS'
-        ? 'Hi Alex, invoice INV-5000 is overdue. https://in.xero.test/INV-5000'
-        : 'Xero invoice email for INV-5000',
-    sourceVersion: options.approvalSourceVersion ?? sourceVersion,
-    status: options.approvalStatus ?? 'APPROVED',
-    expiresAt: new Date(now.getTime() + 60 * 60 * 1000)
-  });
+  if (options.createApproval !== false) {
+    await client.db.insert(approvals).values({
+      organisationId,
+      stageInstanceId,
+      renderedPreview:
+        options.renderedPreview ??
+        (channel === 'SMS'
+          ? 'Hi Alex, invoice INV-5000 is overdue. https://in.xero.test/INV-5000'
+          : 'Xero invoice email for INV-5000'),
+      sourceVersion: options.approvalSourceVersion ?? sourceVersion,
+      status: options.approvalStatus ?? 'APPROVED',
+      expiresAt: new Date(now.getTime() + 60 * 60 * 1000)
+    });
+  }
 
   return {
     organisationId,
@@ -440,6 +460,63 @@ describe('executeReminder', () => {
 
   it('expires a stale approval before sending', async () => {
     const seeded = await seedApprovedReminder({ approvalSourceVersion: 2 });
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    const sinch = new FakeSinch();
+
+    await expect(
+      executeReminder(dependencies(xero, sinch), {
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId
+      })
+    ).resolves.toEqual({ kind: 'cancelled', reason: 'SOURCE_CHANGED' });
+    expect(sinch.sendCalls).toHaveLength(0);
+  });
+
+  it('expires an approved SMS when its reviewed content omits the payment link', async () => {
+    const seeded = await seedApprovedReminder({
+      renderedPreview: 'Hi Alex, invoice INV-5000 is overdue.'
+    });
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    const sinch = new FakeSinch();
+
+    await expect(
+      executeReminder(dependencies(xero, sinch), {
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId
+      })
+    ).resolves.toEqual({ kind: 'cancelled', reason: 'SOURCE_CHANGED' });
+    expect(sinch.sendCalls).toHaveLength(0);
+  });
+
+  it('appends the payment link for an automatic SMS template that omits it', async () => {
+    const seeded = await seedApprovedReminder({
+      sequenceMode: 'AUTOMATIC',
+      createApproval: false,
+      template: 'Hi {{customer_name}}, invoice {{invoice_number}} is overdue.'
+    });
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    const sinch = new FakeSinch();
+
+    await expect(
+      executeReminder(dependencies(xero, sinch), {
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId
+      })
+    ).resolves.toMatchObject({ kind: 'sent', provider: 'SINCH' });
+    expect(sinch.sendCalls[0]?.content).toBe(
+      'Hi Alex Customer, invoice INV-5000 is overdue. Pay securely: https://in.xero.test/INV-5000'
+    );
+  });
+
+  it('cancels an automatic SMS when adding the payment link exceeds the segment limit', async () => {
+    const seeded = await seedApprovedReminder({
+      sequenceMode: 'AUTOMATIC',
+      createApproval: false,
+      template: 'A'.repeat(500)
+    });
     const xero = new FakeXero();
     xero.invoice = xeroInvoice(seeded);
     const sinch = new FakeSinch();

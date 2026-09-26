@@ -210,7 +210,7 @@ describe('calculateReminderWork', () => {
         },
         seeded.organisationId
       )
-    ).rejects.toBe(failure);
+    ).resolves.toMatchObject({ createdStages: 0, createdApprovals: 0 });
 
     const stages = await client.db
       .select()
@@ -224,7 +224,7 @@ describe('calculateReminderWork', () => {
     expect(approvalRows).toHaveLength(0);
   });
 
-  it('does not fetch a URL when the review SMS template does not use it', async () => {
+  it('fetches and appends a payment URL when the review SMS template omits the token', async () => {
     const seeded = await seedInvoiceAndSequence({
       mode: 'REVIEW',
       dueDate: '2026-09-18',
@@ -233,7 +233,18 @@ describe('calculateReminderWork', () => {
       onlineInvoiceUrl: null,
       template: 'Hi {{customer_name}}, invoice {{invoice_number}} is due.'
     });
-    const getOnlineInvoiceUrl = vi.fn();
+    const getOnlineInvoiceUrl = vi.fn(() =>
+      Promise.resolve({
+        data: 'https://in.xero.test/fetched-link',
+        rateLimit: {
+          limit: 60,
+          remaining: 59,
+          dailyRemaining: 999,
+          problem: null,
+          retryAfterSeconds: null
+        }
+      })
+    );
 
     await calculateReminderWork(
       {
@@ -244,7 +255,97 @@ describe('calculateReminderWork', () => {
       seeded.organisationId
     );
 
-    expect(getOnlineInvoiceUrl).not.toHaveBeenCalled();
+    expect(getOnlineInvoiceUrl).toHaveBeenCalledOnce();
+    const [approval] = await client.db
+      .select({ renderedPreview: approvals.renderedPreview })
+      .from(approvals)
+      .where(eq(approvals.organisationId, seeded.organisationId));
+    expect(approval?.renderedPreview).toBe(
+      'Hi Alex Customer, invoice INV-5000 is due. Pay securely: https://in.xero.test/fetched-link'
+    );
+  });
+
+  it('repairs a current pending SMS preview that is missing its payment URL', async () => {
+    const seeded = await seedInvoiceAndSequence({
+      mode: 'REVIEW',
+      dueDate: '2026-09-18',
+      offsetDays: 0,
+      channel: 'SMS',
+      template: 'Hi {{customer_name}}, invoice {{invoice_number}} is due.'
+    });
+
+    await calculateReminderWork(
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+      seeded.organisationId
+    );
+    await client.db
+      .update(approvals)
+      .set({ renderedPreview: 'Hi Alex Customer, invoice INV-5000 is due.' })
+      .where(eq(approvals.organisationId, seeded.organisationId));
+
+    await calculateReminderWork(
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+      seeded.organisationId
+    );
+
+    const approvalRows = await client.db
+      .select({
+        renderedPreview: approvals.renderedPreview,
+        status: approvals.status
+      })
+      .from(approvals)
+      .where(eq(approvals.organisationId, seeded.organisationId));
+    expect(approvalRows).toHaveLength(2);
+    expect(approvalRows).toContainEqual({
+      renderedPreview: 'Hi Alex Customer, invoice INV-5000 is due.',
+      status: 'EXPIRED'
+    });
+    expect(approvalRows).toContainEqual({
+      renderedPreview:
+        'Hi Alex Customer, invoice INV-5000 is due. Pay securely: https://in.xero.test/INV-5000',
+      status: 'PENDING'
+    });
+  });
+
+  it('expires a linkless current preview even when Xero cannot fetch the payment URL', async () => {
+    const seeded = await seedInvoiceAndSequence({
+      mode: 'REVIEW',
+      dueDate: '2026-09-18',
+      offsetDays: 0,
+      channel: 'SMS',
+      template: 'Hi {{customer_name}}, invoice {{invoice_number}} is due.'
+    });
+    await calculateReminderWork(
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+      seeded.organisationId
+    );
+    await client.db
+      .update(invoices)
+      .set({ onlineInvoiceUrl: null })
+      .where(eq(invoices.id, seeded.invoiceId));
+    await client.db
+      .update(approvals)
+      .set({ renderedPreview: 'Hi Alex Customer, invoice INV-5000 is due.' })
+      .where(eq(approvals.organisationId, seeded.organisationId));
+
+    await expect(
+      calculateReminderWork(
+        {
+          database: client.db,
+          clock: { now: () => now },
+          xero: {
+            getOnlineInvoiceUrl: () => Promise.reject(new Error('Xero rate limited'))
+          }
+        },
+        seeded.organisationId
+      )
+    ).resolves.toMatchObject({ createdApprovals: 0 });
+
+    const approvalRows = await client.db
+      .select({ status: approvals.status })
+      .from(approvals)
+      .where(eq(approvals.organisationId, seeded.organisationId));
+    expect(approvalRows).toEqual([{ status: 'EXPIRED' }]);
   });
 
   it('creates an exact pending preview for a review-mode SMS', async () => {

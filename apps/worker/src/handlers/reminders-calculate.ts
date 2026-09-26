@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import {
   and,
+  desc,
   eq,
   gt,
   inArray,
@@ -97,15 +98,21 @@ const previewFor = (input: {
   if (input.template === null) {
     throw new Error('An SMS stage must have a template');
   }
+  if (input.onlineInvoiceUrl === null) {
+    throw new Error('An SMS reminder requires a Xero payment link');
+  }
+  const template = input.template.includes('{{online_invoice_url}}')
+    ? input.template
+    : `${input.template.trim()} Pay securely: {{online_invoice_url}}`;
   return renderSms(
-    input.template,
+    template,
     {
       customer_name: input.customerName,
       invoice_number: input.invoiceNumber,
       amount_due: input.amountDue,
       currency: input.currency,
       due_date: input.dueDate,
-      online_invoice_url: input.onlineInvoiceUrl ?? '' ,
+      online_invoice_url: input.onlineInvoiceUrl,
       organisation_name: input.organisationName
     },
     { maxSegments: input.maxSmsSegments }
@@ -415,7 +422,7 @@ export async function calculateReminderWork(
           holidays: []
         })
       );
-      const eligibleOccurrences = occurrences.flatMap((occurrence) => {
+      let eligibleOccurrences = occurrences.flatMap((occurrence) => {
         const configured = configuredStages.find(
           (stage) =>
             (stage.stageKey === occurrence.stageId &&
@@ -459,6 +466,7 @@ export async function calculateReminderWork(
         }
         return [{ occurrence, configured }];
       });
+      let onlineInvoiceUrl = row.invoice.onlineInvoiceUrl;
       const currentOccurrenceKeys = new Set(
         eligibleOccurrences.map(
           ({ occurrence }) =>
@@ -473,7 +481,8 @@ export async function calculateReminderWork(
             sequenceVersionId: stageInstances.sequenceVersionId,
             stageKey: stageInstances.stageKey,
             channel: stageInstances.channel,
-            scheduledAt: stageInstances.scheduledAt
+            scheduledAt: stageInstances.scheduledAt,
+            renderedPreview: approvals.renderedPreview
           })
           .from(approvals)
           .innerJoin(
@@ -491,6 +500,31 @@ export async function calculateReminderWork(
             )
           )
           .for('update');
+        const unsafeCurrentSms = pendingForChase.filter(
+          (pending) =>
+            pending.stageKey !== 'manual' &&
+            pending.channel === 'SMS' &&
+            currentOccurrenceKeys.has(
+              `${pending.sequenceVersionId}:${pending.stageKey}:${pending.channel}:${pending.scheduledAt.getTime().toString()}`
+            ) &&
+            (onlineInvoiceUrl === null ||
+              !pending.renderedPreview.includes(onlineInvoiceUrl))
+        );
+        if (unsafeCurrentSms.length > 0) {
+          await transaction
+            .update(approvals)
+            .set({ status: 'EXPIRED' })
+            .where(
+              and(
+                eq(approvals.organisationId, organisationId),
+                eq(approvals.status, 'PENDING'),
+                inArray(
+                  approvals.id,
+                  unsafeCurrentSms.map((pending) => pending.approvalId)
+                )
+              )
+            );
+        }
         const obsoletePending = pendingForChase.filter(
           (pending) =>
             pending.stageKey !== 'manual' &&
@@ -498,42 +532,42 @@ export async function calculateReminderWork(
               `${pending.sequenceVersionId}:${pending.stageKey}:${pending.channel}:${pending.scheduledAt.getTime().toString()}`
             )
         );
-        if (obsoletePending.length === 0) return;
-        const expired = await transaction
-          .update(approvals)
-          .set({ status: 'EXPIRED' })
-          .where(
-            and(
-              eq(approvals.organisationId, organisationId),
-              eq(approvals.status, 'PENDING'),
-              inArray(
-                approvals.id,
-                obsoletePending.map((pending) => pending.approvalId)
+        if (obsoletePending.length > 0) {
+          const expired = await transaction
+            .update(approvals)
+            .set({ status: 'EXPIRED' })
+            .where(
+              and(
+                eq(approvals.organisationId, organisationId),
+                eq(approvals.status, 'PENDING'),
+                inArray(
+                  approvals.id,
+                  obsoletePending.map((pending) => pending.approvalId)
+                )
               )
             )
-          )
-          .returning({ stageId: approvals.stageInstanceId });
-        if (expired.length > 0) {
-          await transaction
-            .update(stageInstances)
-            .set({ status: 'CANCELLED', updatedAt: now })
-            .where(
-              inArray(
-                stageInstances.id,
-                expired.map((pending) => pending.stageId)
-              )
-            );
+            .returning({ stageId: approvals.stageInstanceId });
+          if (expired.length > 0) {
+            await transaction
+              .update(stageInstances)
+              .set({ status: 'CANCELLED', updatedAt: now })
+              .where(
+                inArray(
+                  stageInstances.id,
+                  expired.map((pending) => pending.stageId)
+                )
+              );
+          }
         }
       });
-      let onlineInvoiceUrl = row.invoice.onlineInvoiceUrl;
-
-      for (const { occurrence, configured } of eligibleOccurrences) {
-        if (
-          sequence.mode === 'REVIEW' &&
-          occurrence.channel === 'SMS' &&
-          configured.template?.includes('{{online_invoice_url}}') === true &&
-          onlineInvoiceUrl === null
-        ) {
+      if (
+        sequence.mode === 'REVIEW' &&
+        eligibleOccurrences.some(
+          ({ occurrence }) => occurrence.channel === 'SMS'
+        ) &&
+        onlineInvoiceUrl === null
+      ) {
+        try {
           const online = await dependencies.xero.getOnlineInvoiceUrl(
             row.invoice.xeroInvoiceId
           );
@@ -542,8 +576,105 @@ export async function calculateReminderWork(
             .update(invoices)
             .set({ onlineInvoiceUrl })
             .where(eq(invoices.id, row.invoice.id));
+        } catch {
+          const unavailableSmsCount = eligibleOccurrences.filter(
+            ({ occurrence }) => occurrence.channel === 'SMS'
+          ).length;
+          eligibleOccurrences = eligibleOccurrences.filter(
+            ({ occurrence }) => occurrence.channel !== 'SMS'
+          );
+          summary.skippedOccurrences += unavailableSmsCount;
         }
-
+      }
+      if (sequence.mode === 'REVIEW' && onlineInvoiceUrl !== null) {
+        for (const { occurrence, configured } of eligibleOccurrences) {
+          if (occurrence.channel !== 'SMS') continue;
+          await dependencies.database.transaction(async (transaction) => {
+            const [lockedApproval] = await transaction
+              .select({
+                id: approvals.id,
+                renderedPreview: approvals.renderedPreview,
+                status: approvals.status,
+                stageId: stageInstances.id
+              })
+              .from(approvals)
+              .innerJoin(
+                stageInstances,
+                and(
+                  eq(stageInstances.id, approvals.stageInstanceId),
+                  eq(stageInstances.organisationId, organisationId)
+                )
+              )
+              .where(
+                and(
+                  eq(approvals.organisationId, organisationId),
+                  eq(stageInstances.organisationId, organisationId),
+                  eq(stageInstances.invoiceChaseId, chaseId),
+                  eq(stageInstances.sequenceVersionId, sequence.versionId),
+                  eq(stageInstances.stageKey, occurrence.stageId),
+                  eq(stageInstances.channel, 'SMS'),
+                  eq(
+                    stageInstances.scheduledAt,
+                    new Date(occurrence.scheduledAtUtc)
+                  ),
+                  eq(stageInstances.status, 'AWAITING_APPROVAL')
+                )
+              )
+              .orderBy(desc(approvals.createdAt))
+              .limit(1)
+              .for('update');
+            if (lockedApproval === undefined) return;
+            const expectedPreview = previewFor({
+              channel: 'SMS',
+              template: configured.template,
+              customerName: row.contact.name,
+              invoiceNumber: row.invoice.invoiceNumber,
+              amountDue: row.invoice.amountDue,
+              currency: row.invoice.currency,
+              dueDate: row.invoice.dueDate,
+              onlineInvoiceUrl,
+              organisationName: organisation.name,
+              maxSmsSegments: sequence.maxSmsSegments
+            });
+            if (
+              lockedApproval.status === 'APPROVED' ||
+              lockedApproval.status === 'REJECTED' ||
+              (lockedApproval.status === 'EXPIRED' &&
+                lockedApproval.renderedPreview === expectedPreview)
+            ) {
+              return;
+            }
+            if (
+              lockedApproval.status === 'PENDING' &&
+              lockedApproval.renderedPreview === expectedPreview
+            ) {
+              return;
+            }
+            if (lockedApproval.status === 'PENDING') {
+              await transaction
+                .update(approvals)
+                .set({ status: 'EXPIRED' })
+                .where(
+                  and(
+                    eq(approvals.organisationId, organisationId),
+                    eq(approvals.id, lockedApproval.id),
+                    eq(approvals.status, 'PENDING')
+                  )
+                );
+            }
+            await transaction.insert(approvals).values({
+              organisationId,
+              stageInstanceId: lockedApproval.stageId,
+              renderedPreview: expectedPreview,
+              sourceVersion: row.invoice.syncVersion,
+              status: 'PENDING',
+              expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000)
+            });
+            summary.createdApprovals += 1;
+          });
+        }
+      }
+      for (const { occurrence, configured } of eligibleOccurrences) {
         const stageId = randomUUID();
         const isTask = occurrence.channel === 'TASK';
         const status = isTask
