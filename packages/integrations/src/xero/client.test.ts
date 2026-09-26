@@ -254,6 +254,36 @@ describe('XeroClient data operations', () => {
     );
   });
 
+  it("stops invoice pagination at Xero's reported final page", async () => {
+    const http = new FakeHttpClient();
+    http.responses.push(
+      {
+        status: 200,
+        headers: { 'x-minlimit-remaining': '55' },
+        body: JSON.stringify({
+          Invoices: [rawInvoice(1)],
+          pagination: {
+            page: 1,
+            pageSize: 100,
+            pageCount: 1,
+            itemCount: 1
+          }
+        })
+      },
+      {
+        status: 404,
+        headers: {},
+        body: ''
+      }
+    );
+
+    const result = await createClient(http).listOutstandingInvoices();
+
+    expect(result.data).toHaveLength(1);
+    expect(result.rateLimit.remaining).toBe(55);
+    expect(http.requests).toHaveLength(1);
+  });
+
   it('uses If-Modified-Since for an incremental invoice scan', async () => {
     const http = new FakeHttpClient();
     http.responses.push({

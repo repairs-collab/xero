@@ -136,6 +136,12 @@ export class XeroClient {
       });
       const response = await this.requestJson<{
         Invoices: RawXeroInvoice[];
+        pagination?: {
+          page: number;
+          pageSize: number;
+          pageCount: number;
+          itemCount: number;
+        };
       }>(
         'GET',
         `/Invoices?${search.toString()}`,
@@ -145,6 +151,12 @@ export class XeroClient {
       );
       invoices.push(...response.data.Invoices.map(mapXeroInvoice));
       lastRateLimit = response.rateLimit;
+      if (
+        response.data.pagination !== undefined &&
+        response.data.pagination.page >= response.data.pagination.pageCount
+      ) {
+        break;
+      }
       if (response.data.Invoices.length === 0) break;
       page += 1;
     }
