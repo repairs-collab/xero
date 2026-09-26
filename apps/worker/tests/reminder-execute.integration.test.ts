@@ -110,6 +110,10 @@ const seedApprovedReminder = async (options: {
   invoiceSourceVersion?: number;
   approvalSourceVersion?: number;
   approvalStatus?: 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXPIRED';
+  sequenceMode?: 'REVIEW' | 'AUTOMATIC';
+  stageKey?: string;
+  email?: string;
+  allowlistEmail?: string;
 } = {}) => {
   const organisationId = randomUUID();
   const contactId = randomUUID();
@@ -122,7 +126,7 @@ const seedApprovedReminder = async (options: {
   const channel = options.channel ?? 'SMS';
   const sourceVersion = options.invoiceSourceVersion ?? 3;
   const phone = '+61400000001';
-  const email = 'accounts@example.invalid';
+  const email = options.email ?? 'accounts@example.invalid';
 
   await client.db.insert(organisations).values({
     id: organisationId,
@@ -132,7 +136,7 @@ const seedApprovedReminder = async (options: {
     baseCurrency: 'AUD',
     sendMode: 'live',
     liveSendAcknowledged: true,
-    recipientAllowlist: [phone, email]
+    recipientAllowlist: [phone, options.allowlistEmail ?? email]
   });
   await client.db.insert(contacts).values({
     id: contactId,
@@ -170,7 +174,7 @@ const seedApprovedReminder = async (options: {
     id: sequenceId,
     organisationId,
     name: `Execution sequence ${sequenceId}`,
-    mode: 'REVIEW'
+    mode: options.sequenceMode ?? 'REVIEW'
   });
   await client.db.insert(reminderSequenceVersions).values({
     id: sequenceVersionId,
@@ -193,7 +197,7 @@ const seedApprovedReminder = async (options: {
     organisationId,
     invoiceChaseId: chaseId,
     sequenceVersionId,
-    stageKey: 'seven-days',
+    stageKey: options.stageKey ?? 'seven-days',
     channel,
     status: 'QUEUED',
     scheduledAt: now,
@@ -449,6 +453,25 @@ describe('executeReminder', () => {
     expect(sinch.sendCalls).toHaveLength(0);
   });
 
+  it('expires a stale manual approval even when its sequence is automatic', async () => {
+    const seeded = await seedApprovedReminder({
+      approvalSourceVersion: 2,
+      sequenceMode: 'AUTOMATIC',
+      stageKey: 'manual'
+    });
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    const sinch = new FakeSinch();
+
+    await expect(
+      executeReminder(dependencies(xero, sinch), {
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId
+      })
+    ).resolves.toEqual({ kind: 'cancelled', reason: 'SOURCE_CHANGED' });
+    expect(sinch.sendCalls).toHaveLength(0);
+  });
+
   it('refuses a Xero email when allowance has no safe headroom', async () => {
     const seeded = await seedApprovedReminder({ channel: 'XERO_EMAIL' });
     const xero = new FakeXero();
@@ -465,6 +488,25 @@ describe('executeReminder', () => {
       reason: 'XERO_EMAIL_ALLOWANCE'
     });
     expect(xero.emailCalls).toBe(0);
+  });
+
+  it('matches an allowlisted Xero email address without case sensitivity', async () => {
+    const seeded = await seedApprovedReminder({
+      channel: 'XERO_EMAIL',
+      email: 'Accounts@Example.Invalid',
+      allowlistEmail: 'accounts@example.invalid'
+    });
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    const sinch = new FakeSinch();
+
+    await expect(
+      executeReminder(dependencies(xero, sinch), {
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId
+      })
+    ).resolves.toEqual({ kind: 'sent', provider: 'XERO', providerMessageId: null });
+    expect(xero.emailCalls).toBe(1);
   });
 
   it('maps an explicit Sinch rejection without retrying', async () => {

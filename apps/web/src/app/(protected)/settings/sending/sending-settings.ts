@@ -6,10 +6,20 @@ import { auditEvents, type Database, organisations, providerConnections } from '
 
 export const LIVE_ACKNOWLEDGEMENT = 'I understand live reminders will be sent to customers';
 
+const normaliseAllowlistRecipient = (rawValue: string): string => {
+  const value = rawValue.trim();
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+    return value.toLowerCase();
+  }
+  const parsed = parsePhoneNumberFromString(value, 'AU');
+  if (!parsed?.isValid()) throw new Error(`INVALID_ALLOWLIST_RECIPIENT:${rawValue}`);
+  return parsed.number;
+};
+
 export function createSendingSettings(dependencies: { database: Database; clock: { now(): Date } }) {
   const updateAllowlist = async (session: AppSession, input: { organisationId: string; recipients: string[] }) => {
     authorise(session, 'provider.configure', input.organisationId);
-    const normalised = [...new Set(input.recipients.filter((value) => value.trim() !== '').map((value) => { const parsed = parsePhoneNumberFromString(value, 'AU'); if (!parsed?.isValid()) throw new Error(`INVALID_ALLOWLIST_NUMBER:${value}`); return parsed.number; }))];
+    const normalised = [...new Set(input.recipients.filter((value) => value.trim() !== '').map(normaliseAllowlistRecipient))];
     const [before] = await dependencies.database.select({ recipientAllowlist: organisations.recipientAllowlist }).from(organisations).where(eq(organisations.id, input.organisationId)).limit(1); if (!before) throw new Error('ORGANISATION_NOT_FOUND');
     const now = dependencies.clock.now(); await dependencies.database.transaction(async (transaction) => { await transaction.update(organisations).set({ recipientAllowlist: normalised, updatedAt: now }).where(eq(organisations.id, input.organisationId)); await transaction.insert(auditEvents).values({ organisationId: input.organisationId, actorUserId: session.userId, eventType: 'SEND_ALLOWLIST_UPDATED', entityType: 'ORGANISATION', entityId: input.organisationId, beforeValue: { count: before.recipientAllowlist.length }, afterValue: { count: normalised.length }, occurredAt: now }); });
     return { recipients: normalised };

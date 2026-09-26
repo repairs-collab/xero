@@ -3,7 +3,10 @@ import { randomUUID } from 'node:crypto';
 import {
   and,
   eq,
-  inArray
+  gt,
+  inArray,
+  isNull,
+  or
 } from 'drizzle-orm';
 
 import {
@@ -11,14 +14,18 @@ import {
   contactChannels,
   contacts,
   type Database,
+  disputes,
   invoiceChases,
   invoices,
   organisations,
+  pauses,
+  paymentPromises,
   PostgresApprovalRepository,
   reminderSequences,
   reminderSequenceVersions,
   sequenceStages,
   stageInstances,
+  suppressions,
   tasks
 } from '@bc5000/db';
 import {
@@ -26,6 +33,7 @@ import {
   createBusinessCalendar,
   evaluateEligibility,
   renderSms,
+  selectPreferredSmsChannel,
   type ReminderStageChannel
 } from '@bc5000/domain';
 import type { XeroResult } from '@bc5000/integrations/xero';
@@ -59,6 +67,16 @@ const localDate = (instant: Date, timeZone: string): string => {
   const part = (type: Intl.DateTimeFormatPartTypes): string =>
     parts.find((value) => value.type === type)?.value ?? '';
   return `${part('year')}-${part('month')}-${part('day')}`;
+};
+
+const promiseStillActive = (
+  promisedDate: string,
+  graceDays: number,
+  now: Date
+): boolean => {
+  const end = new Date(`${promisedDate}T23:59:59.999Z`);
+  end.setUTCDate(end.getUTCDate() + graceDays);
+  return end >= now;
 };
 
 const previewFor = (input: {
@@ -144,6 +162,71 @@ export async function calculateReminderWork(
       )
     );
 
+  const activeSequenceIds = new Set(
+    sequenceRows.map((sequence) => sequence.sequenceId)
+  );
+  await dependencies.database.transaction(async (transaction) => {
+    const pending = await transaction
+      .select({
+        approvalId: approvals.id,
+        stageId: stageInstances.id,
+        stageKey: stageInstances.stageKey,
+        sequenceId: invoiceChases.sequenceId
+      })
+      .from(approvals)
+      .innerJoin(
+        stageInstances,
+        and(
+          eq(stageInstances.id, approvals.stageInstanceId),
+          eq(stageInstances.organisationId, organisationId)
+        )
+      )
+      .innerJoin(
+        invoiceChases,
+        and(
+          eq(invoiceChases.id, stageInstances.invoiceChaseId),
+          eq(invoiceChases.organisationId, organisationId)
+        )
+      )
+      .where(
+        and(
+          eq(approvals.organisationId, organisationId),
+          eq(approvals.status, 'PENDING')
+        )
+      )
+      .for('update');
+    const inactive = pending.filter(
+      (row) =>
+        row.stageKey !== 'manual' && !activeSequenceIds.has(row.sequenceId)
+    );
+    if (inactive.length === 0) return;
+    const expired = await transaction
+      .update(approvals)
+      .set({ status: 'EXPIRED' })
+      .where(
+        and(
+          eq(approvals.organisationId, organisationId),
+          eq(approvals.status, 'PENDING'),
+          inArray(
+            approvals.id,
+            inactive.map((row) => row.approvalId)
+          )
+        )
+      )
+      .returning({ stageId: approvals.stageInstanceId });
+    if (expired.length > 0) {
+      await transaction
+        .update(stageInstances)
+        .set({ status: 'CANCELLED', updatedAt: now })
+        .where(
+          inArray(
+            stageInstances.id,
+            expired.map((row) => row.stageId)
+          )
+        );
+    }
+  });
+
   const invoiceRows = await dependencies.database
     .select({ invoice: invoices, contact: contacts })
     .from(invoices)
@@ -182,9 +265,6 @@ export async function calculateReminderWork(
     }
 
     for (const row of invoiceRows) {
-      if (Number(row.invoice.amountDue) < Number(sequence.minimumBalance)) {
-        continue;
-      }
       const smsChannels = await dependencies.database
         .select()
         .from(contactChannels)
@@ -196,6 +276,7 @@ export async function calculateReminderWork(
             eq(contactChannels.usable, true)
           )
         );
+      const smsChannel = selectPreferredSmsChannel(smsChannels);
       const [existingChase] = await dependencies.database
         .select()
         .from(invoiceChases)
@@ -209,6 +290,9 @@ export async function calculateReminderWork(
         .limit(1);
       const chaseId = existingChase?.id ?? randomUUID();
       if (existingChase === undefined) {
+        if (Number(row.invoice.amountDue) < Number(sequence.minimumBalance)) {
+          continue;
+        }
         await dependencies.database.insert(invoiceChases).values({
           id: chaseId,
           organisationId,
@@ -219,6 +303,89 @@ export async function calculateReminderWork(
           updatedAt: now
         });
       }
+
+      const [activePauses, openDisputes, activePromises, channelSuppressions] =
+        await Promise.all([
+          dependencies.database
+            .select()
+            .from(pauses)
+            .where(
+              and(
+                eq(pauses.organisationId, organisationId),
+                eq(pauses.active, true),
+                or(isNull(pauses.expiresAt), gt(pauses.expiresAt, now)),
+                or(
+                  and(
+                    eq(pauses.scope, 'customer'),
+                    eq(pauses.contactId, row.contact.id)
+                  ),
+                  and(
+                    eq(pauses.scope, 'invoice'),
+                    eq(pauses.invoiceId, row.invoice.id)
+                  ),
+                  and(
+                    eq(pauses.scope, 'sequence'),
+                    eq(pauses.sequenceId, sequence.sequenceId)
+                  )
+                )
+              )
+            ),
+          dependencies.database
+            .select({ id: disputes.id })
+            .from(disputes)
+            .where(
+              and(
+                eq(disputes.organisationId, organisationId),
+                eq(disputes.contactId, row.contact.id),
+                eq(disputes.status, 'OPEN'),
+                or(
+                  isNull(disputes.invoiceId),
+                  eq(disputes.invoiceId, row.invoice.id)
+                )
+              )
+            ),
+          dependencies.database
+            .select()
+            .from(paymentPromises)
+            .where(
+              and(
+                eq(paymentPromises.organisationId, organisationId),
+                eq(paymentPromises.contactId, row.contact.id),
+                eq(paymentPromises.status, 'ACTIVE')
+              )
+            ),
+          dependencies.database
+            .select()
+            .from(suppressions)
+            .where(
+              and(
+                eq(suppressions.organisationId, organisationId),
+                eq(suppressions.consentState, 'SUPPRESSED'),
+                or(
+                  eq(
+                    suppressions.normalisedDestination,
+                    smsChannel?.normalisedValue ?? ''
+                  ),
+                  eq(
+                    suppressions.normalisedDestination,
+                    row.contact.email ?? ''
+                  )
+                )
+              )
+            )
+        ]);
+      const customerPaused = activePauses.some(
+        (pause) => pause.scope === 'customer'
+      );
+      const invoicePaused = activePauses.some(
+        (pause) => pause.scope === 'invoice'
+      );
+      const sequencePaused = activePauses.some(
+        (pause) => pause.scope === 'sequence'
+      );
+      const promiseActive = activePromises.some((promise) =>
+        promiseStillActive(promise.promisedDate, promise.graceDays, now)
+      );
 
       const occurrences = calculateStageOccurrences(
         {
@@ -248,9 +415,7 @@ export async function calculateReminderWork(
           holidays: []
         })
       );
-      let onlineInvoiceUrl = row.invoice.onlineInvoiceUrl;
-
-      for (const occurrence of occurrences) {
+      const eligibleOccurrences = occurrences.flatMap((occurrence) => {
         const configured = configuredStages.find(
           (stage) =>
             (stage.stageKey === occurrence.stageId &&
@@ -258,29 +423,111 @@ export async function calculateReminderWork(
             (occurrence.stageId === 'daily-after-30' &&
               stage.channel === 'SMS_DAILY')
         );
-        if (configured === undefined) continue;
+        if (configured === undefined) return [];
         const channelUsable =
           occurrence.channel === 'TASK' ||
           (occurrence.channel === 'SMS'
-            ? smsChannels.length > 0
+            ? smsChannel !== undefined
             : row.contact.email !== null);
         const eligibility = evaluateEligibility({
           type: row.invoice.type,
           status: row.invoice.status,
           amountDue: row.invoice.amountDue,
           contactActive: row.contact.active,
-          invoicePaused: false,
-          customerPaused: false,
-          sequencePaused: false,
+          invoicePaused,
+          customerPaused,
+          sequencePaused,
           channelUsable,
-          channelSuppressed: false,
+          channelSuppressed: channelSuppressions.some(
+            (suppression) =>
+              suppression.channel === occurrence.channel &&
+              suppression.normalisedDestination ===
+                (occurrence.channel === 'SMS'
+                  ? smsChannel?.normalisedValue
+                  : row.contact.email)
+          ),
           stageCompleted: false
         });
-        if (!eligibility.eligible) {
+        if (
+          Number(row.invoice.amountDue) < Number(sequence.minimumBalance) ||
+          openDisputes.length > 0 ||
+          promiseActive ||
+          !eligibility.eligible
+        ) {
           summary.skippedOccurrences += 1;
-          continue;
+          return [];
         }
+        return [{ occurrence, configured }];
+      });
+      const currentOccurrenceKeys = new Set(
+        eligibleOccurrences.map(
+          ({ occurrence }) =>
+            `${sequence.versionId}:${occurrence.stageId}:${occurrence.channel}:${new Date(occurrence.scheduledAtUtc).getTime().toString()}`
+        )
+      );
+      await dependencies.database.transaction(async (transaction) => {
+        const pendingForChase = await transaction
+          .select({
+            approvalId: approvals.id,
+            stageId: stageInstances.id,
+            sequenceVersionId: stageInstances.sequenceVersionId,
+            stageKey: stageInstances.stageKey,
+            channel: stageInstances.channel,
+            scheduledAt: stageInstances.scheduledAt
+          })
+          .from(approvals)
+          .innerJoin(
+            stageInstances,
+            and(
+              eq(stageInstances.id, approvals.stageInstanceId),
+              eq(stageInstances.organisationId, organisationId),
+              eq(stageInstances.invoiceChaseId, chaseId)
+            )
+          )
+          .where(
+            and(
+              eq(approvals.organisationId, organisationId),
+              eq(approvals.status, 'PENDING')
+            )
+          )
+          .for('update');
+        const obsoletePending = pendingForChase.filter(
+          (pending) =>
+            pending.stageKey !== 'manual' &&
+            !currentOccurrenceKeys.has(
+              `${pending.sequenceVersionId}:${pending.stageKey}:${pending.channel}:${pending.scheduledAt.getTime().toString()}`
+            )
+        );
+        if (obsoletePending.length === 0) return;
+        const expired = await transaction
+          .update(approvals)
+          .set({ status: 'EXPIRED' })
+          .where(
+            and(
+              eq(approvals.organisationId, organisationId),
+              eq(approvals.status, 'PENDING'),
+              inArray(
+                approvals.id,
+                obsoletePending.map((pending) => pending.approvalId)
+              )
+            )
+          )
+          .returning({ stageId: approvals.stageInstanceId });
+        if (expired.length > 0) {
+          await transaction
+            .update(stageInstances)
+            .set({ status: 'CANCELLED', updatedAt: now })
+            .where(
+              inArray(
+                stageInstances.id,
+                expired.map((pending) => pending.stageId)
+              )
+            );
+        }
+      });
+      let onlineInvoiceUrl = row.invoice.onlineInvoiceUrl;
 
+      for (const { occurrence, configured } of eligibleOccurrences) {
         if (
           sequence.mode === 'REVIEW' &&
           occurrence.channel === 'SMS' &&

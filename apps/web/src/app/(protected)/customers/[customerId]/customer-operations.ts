@@ -4,7 +4,8 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
 
 import { authorise, type AppSession } from '@bc5000/auth';
-import { approvals, auditEvents, contactChannels, type Database, disputes, invoiceChases, invoices, pauses, paymentPromises, stageInstances } from '@bc5000/db/web';
+import { approvals, auditEvents, contactChannels, contacts, type Database, disputes, invoiceChases, invoices, pauses, paymentPromises, reminderSequences, reminderSequenceVersions, stageInstances } from '@bc5000/db/web';
+import { renderSms, selectPreferredSmsChannel } from '@bc5000/domain';
 import { jobNames, type JobPublisher } from '@bc5000/jobs';
 
 export function createCustomerOperations(dependencies: { database: Database; publisher: JobPublisher; clock: { now(): Date } }) {
@@ -102,5 +103,184 @@ export function createCustomerOperations(dependencies: { database: Database; pub
     await dependencies.database.insert(auditEvents).values({ organisationId: input.organisationId, actorUserId: session.userId, eventType: 'CUSTOMER_NOTE_ADDED', entityType: 'CONTACT', entityId: input.customerId, afterValue: { note }, occurredAt: dependencies.clock.now() });
   };
 
-  return { setApprovedPhoneOverride, clearApprovedPhoneOverride, pauseChasing, recordDispute, recordPromiseToPay, resumeChasing, addCustomerNote };
+  const sendManualReminder = async (
+    session: AppSession,
+    input: {
+      organisationId: string;
+      customerId: string;
+      invoiceId: string;
+      channel: 'SMS' | 'XERO_EMAIL';
+      message?: string;
+      confirmed: boolean;
+      requestId: string;
+    }
+  ) => {
+    authorise(session, 'chase.operate', input.organisationId);
+    if (!input.confirmed) throw new Error('MANUAL_SEND_CONFIRMATION_REQUIRED');
+
+    const [target] = await dependencies.database
+      .select({
+        invoice: invoices,
+        contact: contacts,
+        chase: invoiceChases,
+        sequenceVersionId: reminderSequenceVersions.id,
+        maxSmsSegments: reminderSequenceVersions.maxSmsSegments
+      })
+      .from(invoices)
+      .innerJoin(
+        contacts,
+        and(
+          eq(contacts.id, invoices.contactId),
+          eq(contacts.organisationId, input.organisationId)
+        )
+      )
+      .innerJoin(
+        invoiceChases,
+        and(
+          eq(invoiceChases.invoiceId, invoices.id),
+          eq(invoiceChases.organisationId, input.organisationId),
+          eq(invoiceChases.status, 'ACTIVE')
+        )
+      )
+      .innerJoin(
+        reminderSequences,
+        and(
+          eq(reminderSequences.id, invoiceChases.sequenceId),
+          eq(reminderSequences.organisationId, input.organisationId),
+          eq(reminderSequences.enabled, true)
+        )
+      )
+      .innerJoin(
+        reminderSequenceVersions,
+        and(
+          eq(reminderSequenceVersions.sequenceId, reminderSequences.id),
+          eq(reminderSequenceVersions.organisationId, input.organisationId),
+          eq(reminderSequenceVersions.status, 'ACTIVE')
+        )
+      )
+      .where(
+        and(
+          eq(invoices.organisationId, input.organisationId),
+          eq(invoices.id, input.invoiceId),
+          eq(invoices.contactId, input.customerId)
+        )
+      )
+      .limit(1);
+    if (target === undefined) throw new Error('INVOICE_NOT_SENDABLE');
+    if (
+      target.invoice.type !== 'ACCREC' ||
+      target.invoice.status !== 'AUTHORISED' ||
+      Number(target.invoice.amountDue) <= 0
+    ) {
+      throw new Error('INVOICE_NOT_OUTSTANDING');
+    }
+
+    let preview: string;
+    if (input.channel === 'SMS') {
+      const message = input.message?.trim() ?? '';
+      if (message === '') throw new Error('SMS_MESSAGE_REQUIRED');
+      if (target.invoice.onlineInvoiceUrl === null) {
+        throw new Error('PAYMENT_LINK_REQUIRED');
+      }
+      if (!message.includes(target.invoice.onlineInvoiceUrl)) {
+        throw new Error('PAYMENT_LINK_REQUIRED');
+      }
+      const smsChannels = await dependencies.database
+        .select()
+        .from(contactChannels)
+        .where(
+          and(
+            eq(contactChannels.organisationId, input.organisationId),
+            eq(contactChannels.contactId, input.customerId),
+            eq(contactChannels.kind, 'SMS'),
+            eq(contactChannels.usable, true)
+          )
+        );
+      const smsChannel = selectPreferredSmsChannel(smsChannels);
+      if (smsChannel === undefined) throw new Error('SMS_CHANNEL_UNAVAILABLE');
+      preview = renderSms(message, {}, { maxSegments: target.maxSmsSegments }).content;
+    } else {
+      if (target.contact.email === null) throw new Error('EMAIL_CHANNEL_UNAVAILABLE');
+      preview = `Xero invoice email for ${target.invoice.invoiceNumber} to ${target.contact.name}`;
+    }
+
+    const now = dependencies.clock.now();
+    const readyToPublish = await dependencies.database.transaction(async (transaction) => {
+      const created = await transaction
+        .insert(stageInstances)
+        .values({
+          id: input.requestId,
+          organisationId: input.organisationId,
+          invoiceChaseId: target.chase.id,
+          sequenceVersionId: target.sequenceVersionId,
+          stageKey: 'manual',
+          channel: input.channel,
+          status: 'QUEUED',
+          scheduledAt: now,
+          sourceVersion: target.invoice.syncVersion,
+          updatedAt: now
+        })
+        .onConflictDoNothing()
+        .returning({ id: stageInstances.id });
+      if (created.length === 0) {
+        const [existing] = await transaction
+          .select({
+            organisationId: stageInstances.organisationId,
+            invoiceChaseId: stageInstances.invoiceChaseId,
+            stageKey: stageInstances.stageKey,
+            channel: stageInstances.channel,
+            sourceVersion: stageInstances.sourceVersion
+          })
+          .from(stageInstances)
+          .where(eq(stageInstances.id, input.requestId))
+          .limit(1);
+        if (
+          existing === undefined ||
+          existing.organisationId !== input.organisationId ||
+          existing.invoiceChaseId !== target.chase.id ||
+          existing.stageKey !== 'manual' ||
+          existing.channel !== input.channel ||
+          existing.sourceVersion !== target.invoice.syncVersion
+        ) {
+          throw new Error('MANUAL_REQUEST_CONFLICT');
+        }
+        return true;
+      }
+
+      await transaction.insert(approvals).values({
+        organisationId: input.organisationId,
+        stageInstanceId: input.requestId,
+        renderedPreview: preview,
+        sourceVersion: target.invoice.syncVersion,
+        status: 'APPROVED',
+        decidedByUserId: session.userId,
+        decidedAt: now,
+        expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000)
+      });
+      await transaction.insert(auditEvents).values({
+        organisationId: input.organisationId,
+        actorUserId: session.userId,
+        eventType: 'MANUAL_REMINDER_QUEUED',
+        entityType: 'INVOICE',
+        entityId: input.invoiceId,
+        afterValue: { channel: input.channel, stageInstanceId: input.requestId },
+        occurredAt: now
+      });
+      return true;
+    });
+
+    if (readyToPublish) {
+      await dependencies.publisher.publish(
+        jobNames.reminderExecute,
+        {
+          organisationId: input.organisationId,
+          stageInstanceId: input.requestId
+        },
+        { singletonKey: `manual:${input.requestId}` }
+      );
+    }
+    return { queued: readyToPublish, stageInstanceId: input.requestId };
+  };
+
+  return { setApprovedPhoneOverride, clearApprovedPhoneOverride, pauseChasing, recordDispute, recordPromiseToPay, resumeChasing, addCustomerNote, sendManualReminder };
 }

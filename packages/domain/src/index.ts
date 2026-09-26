@@ -1,5 +1,6 @@
 export * from './aggregation.js';
 export * from './calendar.js';
+export * from './channels.js';
 export * from './eligibility.js';
 export * from './invoices.js';
 export * from './pauses.js';
