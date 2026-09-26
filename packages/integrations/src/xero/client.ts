@@ -33,6 +33,7 @@ export interface ListOutstandingInvoicesOptions {
 }
 
 const XERO_INVOICE_PAGE_SIZE = 100;
+const XERO_CONTACT_BATCH_SIZE = 50;
 
 interface XeroEnvelope<T> {
   data: T;
@@ -221,10 +222,16 @@ export class XeroClient {
       retryAfterSeconds: null
     };
 
-    for (let index = 0; index < uniqueIds.length; index += 100) {
+    for (
+      let index = 0;
+      index < uniqueIds.length;
+      index += XERO_CONTACT_BATCH_SIZE
+    ) {
       const search = new URLSearchParams({
-        IDs: uniqueIds.slice(index, index + 100).join(','),
-        pageSize: '100'
+        IDs: uniqueIds
+          .slice(index, index + XERO_CONTACT_BATCH_SIZE)
+          .join(','),
+        pageSize: String(XERO_CONTACT_BATCH_SIZE)
       });
       const response = await this.requestJson<{
         Contacts: RawXeroContact[];

@@ -172,14 +172,14 @@ describe('XeroClient request contract', () => {
 });
 
 describe('XeroClient data operations', () => {
-  it('loads unique contacts in batches of 100 IDs', async () => {
+  it('loads unique contacts in URL-safe batches of 50 IDs', async () => {
     const http = new FakeHttpClient();
     http.responses.push(
       {
         status: 200,
         headers: { 'x-minlimit-remaining': '55' },
         body: JSON.stringify({
-          Contacts: Array.from({ length: 100 }, (_, index) =>
+          Contacts: Array.from({ length: 50 }, (_, index) =>
             rawContact(index + 1)
           )
         })
@@ -187,6 +187,15 @@ describe('XeroClient data operations', () => {
       {
         status: 200,
         headers: { 'x-minlimit-remaining': '54' },
+        body: JSON.stringify({
+          Contacts: Array.from({ length: 50 }, (_, index) =>
+            rawContact(index + 51)
+          )
+        })
+      },
+      {
+        status: 200,
+        headers: { 'x-minlimit-remaining': '53' },
         body: JSON.stringify({ Contacts: [rawContact(101)] })
       }
     );
@@ -198,13 +207,16 @@ describe('XeroClient data operations', () => {
     const result = await createClient(http).listContacts(ids);
 
     expect(result.data).toHaveLength(101);
-    expect(result.rateLimit.remaining).toBe(54);
-    expect(http.requests).toHaveLength(2);
+    expect(result.rateLimit.remaining).toBe(53);
+    expect(http.requests).toHaveLength(3);
     expect(
       new URL(http.requests[0]?.url ?? '').searchParams.get('IDs')?.split(',')
-    ).toHaveLength(100);
+    ).toHaveLength(50);
     expect(
-      new URL(http.requests[1]?.url ?? '').searchParams.get('IDs')
+      new URL(http.requests[1]?.url ?? '').searchParams.get('IDs')?.split(',')
+    ).toHaveLength(50);
+    expect(
+      new URL(http.requests[2]?.url ?? '').searchParams.get('IDs')
     ).toBe('contact-101');
   });
 
