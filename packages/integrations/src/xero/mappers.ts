@@ -46,6 +46,17 @@ const isoLocalDate = (value: string): string => {
   return match[1];
 };
 
+const isoInstant = (value: string): string => {
+  const legacyMatch = /^\/Date\((-?\d+)(?:[+-]\d{4})?\)\/$/.exec(value);
+  const instant = new Date(
+    legacyMatch?.[1] === undefined ? value : Number(legacyMatch[1])
+  );
+  if (!Number.isFinite(instant.getTime())) {
+    throw new Error(`Invalid Xero timestamp: ${value}`);
+  }
+  return instant.toISOString();
+};
+
 export const mapXeroInvoice = (invoice: RawXeroInvoice): XeroInvoice => ({
   id: invoice.InvoiceID,
   invoiceNumber: invoice.InvoiceNumber,
@@ -57,7 +68,10 @@ export const mapXeroInvoice = (invoice: RawXeroInvoice): XeroInvoice => ({
   dueDate: isoLocalDate(invoice.DueDateString),
   amountDue: String(invoice.AmountDue),
   currency: invoice.CurrencyCode,
-  updatedAt: invoice.UpdatedDateUTC ?? null
+  updatedAt:
+    invoice.UpdatedDateUTC === undefined
+      ? null
+      : isoInstant(invoice.UpdatedDateUTC)
 });
 
 export const mapXeroContact = (contact: RawXeroContact): XeroContact => ({
