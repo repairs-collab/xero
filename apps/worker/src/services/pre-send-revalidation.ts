@@ -24,6 +24,7 @@ import {
   suppressions
 } from '@bc5000/db';
 import { evaluateEligibility } from '@bc5000/domain';
+import { selectPreferredSmsChannel } from '@bc5000/domain';
 import type {
   XeroInvoice,
   XeroResult
@@ -266,7 +267,7 @@ export async function revalidateReminder(
     return { kind: 'blocked', reason: 'PROMISE_TO_PAY' };
   }
 
-  const [smsChannel] =
+  const smsChannels =
     row.stage.channel === 'SMS'
       ? await dependencies.database
           .select()
@@ -279,8 +280,8 @@ export async function revalidateReminder(
               eq(contactChannels.usable, true)
             )
           )
-          .limit(1)
       : [];
+  const smsChannel = selectPreferredSmsChannel(smsChannels);
   const destination =
     row.stage.channel === 'SMS' ? smsChannel?.normalisedValue : row.contact.email;
   const [suppression] =

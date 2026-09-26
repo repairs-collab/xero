@@ -18,6 +18,7 @@ import {
   reminderSequenceVersions,
   suppressions
 } from '@bc5000/db/web';
+import { selectPreferredSmsChannel } from '@bc5000/domain';
 
 import { CustomerTimeline } from '../../../../components/customer-timeline.js';
 import {
@@ -127,12 +128,9 @@ export default async function CustomerPage({
   ]);
   if (organisation === undefined) throw new Error('Organisation not found');
 
-  const approvedPhone = channels.find(
-    (channel) => channel.kind === 'SMS' && channel.approvedOverride
-  );
-  const usablePhone =
-    approvedPhone ??
-    channels.find((channel) => channel.kind === 'SMS' && channel.usable);
+  const smsChannels = channels.filter((channel) => channel.kind === 'SMS');
+  const approvedPhone = smsChannels.find((channel) => channel.approvedOverride);
+  const usablePhone = selectPreferredSmsChannel(smsChannels);
   const phone = usablePhone?.normalisedValue ?? null;
   const invoiceIds = invoiceRows.map((invoice) => invoice.id);
   const activeChases =

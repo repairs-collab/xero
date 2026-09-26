@@ -532,6 +532,34 @@ describe('calculateReminderWork', () => {
     expect(retiredApproval?.status).toBe('EXPIRED');
   });
 
+  it('expires pending reminders when their entire sequence is disabled', async () => {
+    const seeded = await seedInvoiceAndSequence({
+      mode: 'REVIEW',
+      dueDate: '2026-09-18',
+      offsetDays: 0,
+      channel: 'SMS'
+    });
+    await calculateReminderWork(
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+      seeded.organisationId
+    );
+    await client.db
+      .update(reminderSequences)
+      .set({ enabled: false })
+      .where(eq(reminderSequences.id, seeded.sequenceId));
+
+    await calculateReminderWork(
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+      seeded.organisationId
+    );
+
+    const [approval] = await client.db
+      .select()
+      .from(approvals)
+      .where(eq(approvals.organisationId, seeded.organisationId));
+    expect(approval?.status).toBe('EXPIRED');
+  });
+
   it('expires an approval whose review window elapsed', async () => {
     const seeded = await seedInvoiceAndSequence({
       mode: 'REVIEW',

@@ -33,6 +33,7 @@ import {
   createBusinessCalendar,
   evaluateEligibility,
   renderSms,
+  selectPreferredSmsChannel,
   type ReminderStageChannel
 } from '@bc5000/domain';
 import type { XeroResult } from '@bc5000/integrations/xero';
@@ -161,6 +162,71 @@ export async function calculateReminderWork(
       )
     );
 
+  const activeSequenceIds = new Set(
+    sequenceRows.map((sequence) => sequence.sequenceId)
+  );
+  await dependencies.database.transaction(async (transaction) => {
+    const pending = await transaction
+      .select({
+        approvalId: approvals.id,
+        stageId: stageInstances.id,
+        stageKey: stageInstances.stageKey,
+        sequenceId: invoiceChases.sequenceId
+      })
+      .from(approvals)
+      .innerJoin(
+        stageInstances,
+        and(
+          eq(stageInstances.id, approvals.stageInstanceId),
+          eq(stageInstances.organisationId, organisationId)
+        )
+      )
+      .innerJoin(
+        invoiceChases,
+        and(
+          eq(invoiceChases.id, stageInstances.invoiceChaseId),
+          eq(invoiceChases.organisationId, organisationId)
+        )
+      )
+      .where(
+        and(
+          eq(approvals.organisationId, organisationId),
+          eq(approvals.status, 'PENDING')
+        )
+      )
+      .for('update');
+    const inactive = pending.filter(
+      (row) =>
+        row.stageKey !== 'manual' && !activeSequenceIds.has(row.sequenceId)
+    );
+    if (inactive.length === 0) return;
+    const expired = await transaction
+      .update(approvals)
+      .set({ status: 'EXPIRED' })
+      .where(
+        and(
+          eq(approvals.organisationId, organisationId),
+          eq(approvals.status, 'PENDING'),
+          inArray(
+            approvals.id,
+            inactive.map((row) => row.approvalId)
+          )
+        )
+      )
+      .returning({ stageId: approvals.stageInstanceId });
+    if (expired.length > 0) {
+      await transaction
+        .update(stageInstances)
+        .set({ status: 'CANCELLED', updatedAt: now })
+        .where(
+          inArray(
+            stageInstances.id,
+            expired.map((row) => row.stageId)
+          )
+        );
+    }
+  });
+
   const invoiceRows = await dependencies.database
     .select({ invoice: invoices, contact: contacts })
     .from(invoices)
@@ -210,6 +276,7 @@ export async function calculateReminderWork(
             eq(contactChannels.usable, true)
           )
         );
+      const smsChannel = selectPreferredSmsChannel(smsChannels);
       const [existingChase] = await dependencies.database
         .select()
         .from(invoiceChases)
@@ -297,7 +364,7 @@ export async function calculateReminderWork(
                 or(
                   eq(
                     suppressions.normalisedDestination,
-                    smsChannels[0]?.normalisedValue ?? ''
+                    smsChannel?.normalisedValue ?? ''
                   ),
                   eq(
                     suppressions.normalisedDestination,
@@ -360,7 +427,7 @@ export async function calculateReminderWork(
         const channelUsable =
           occurrence.channel === 'TASK' ||
           (occurrence.channel === 'SMS'
-            ? smsChannels.length > 0
+            ? smsChannel !== undefined
             : row.contact.email !== null);
         const eligibility = evaluateEligibility({
           type: row.invoice.type,
@@ -376,7 +443,7 @@ export async function calculateReminderWork(
               suppression.channel === occurrence.channel &&
               suppression.normalisedDestination ===
                 (occurrence.channel === 'SMS'
-                  ? smsChannels[0]?.normalisedValue
+                  ? smsChannel?.normalisedValue
                   : row.contact.email)
           ),
           stageCompleted: false

@@ -5,7 +5,7 @@ import { parsePhoneNumberFromString } from 'libphonenumber-js';
 
 import { authorise, type AppSession } from '@bc5000/auth';
 import { approvals, auditEvents, contactChannels, contacts, type Database, disputes, invoiceChases, invoices, pauses, paymentPromises, reminderSequences, reminderSequenceVersions, stageInstances } from '@bc5000/db/web';
-import { renderSms } from '@bc5000/domain';
+import { renderSms, selectPreferredSmsChannel } from '@bc5000/domain';
 import { jobNames, type JobPublisher } from '@bc5000/jobs';
 
 export function createCustomerOperations(dependencies: { database: Database; publisher: JobPublisher; clock: { now(): Date } }) {
@@ -185,8 +185,8 @@ export function createCustomerOperations(dependencies: { database: Database; pub
       if (!message.includes(target.invoice.onlineInvoiceUrl)) {
         throw new Error('PAYMENT_LINK_REQUIRED');
       }
-      const [smsChannel] = await dependencies.database
-        .select({ id: contactChannels.id })
+      const smsChannels = await dependencies.database
+        .select()
         .from(contactChannels)
         .where(
           and(
@@ -195,8 +195,8 @@ export function createCustomerOperations(dependencies: { database: Database; pub
             eq(contactChannels.kind, 'SMS'),
             eq(contactChannels.usable, true)
           )
-        )
-        .limit(1);
+        );
+      const smsChannel = selectPreferredSmsChannel(smsChannels);
       if (smsChannel === undefined) throw new Error('SMS_CHANNEL_UNAVAILABLE');
       preview = renderSms(message, {}, { maxSegments: target.maxSmsSegments }).content;
     } else {
