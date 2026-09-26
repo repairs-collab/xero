@@ -241,8 +241,8 @@ describe('XeroClient data operations', () => {
       dueDate: '2026-08-31',
       amountDue: '120.5000'
     });
-    expect(result.rateLimit.remaining).toBe(53);
-    expect(http.requests).toHaveLength(3);
+    expect(result.rateLimit.remaining).toBe(54);
+    expect(http.requests).toHaveLength(2);
     const firstUrl = new URL(http.requests[0]?.url ?? '');
     expect(firstUrl.searchParams.get('summaryOnly')).toBe('true');
     expect(firstUrl.searchParams.get('page')).toBe('1');
@@ -281,6 +281,67 @@ describe('XeroClient data operations', () => {
 
     expect(result.data).toHaveLength(1);
     expect(result.rateLimit.remaining).toBe(55);
+    expect(http.requests).toHaveLength(1);
+  });
+
+  it('stops invoice pagination on a partial page when metadata is omitted', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push(
+      {
+        status: 200,
+        headers: { 'x-minlimit-remaining': '55' },
+        body: JSON.stringify({ Invoices: [rawInvoice(1)] })
+      },
+      {
+        status: 404,
+        headers: {},
+        body: ''
+      }
+    );
+
+    const result = await createClient(http).listOutstandingInvoices();
+
+    expect(result.data).toHaveLength(1);
+    expect(result.rateLimit.remaining).toBe(55);
+    expect(http.requests).toHaveLength(1);
+    expect(
+      new URL(http.requests[0]?.url ?? '').searchParams.get('pageSize')
+    ).toBe('100');
+  });
+
+  it('treats a later-page 404 as the end of invoice pagination', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push(
+      {
+        status: 200,
+        headers: { 'x-minlimit-remaining': '55' },
+        body: JSON.stringify({
+          Invoices: Array.from({ length: 100 }, (_, index) =>
+            rawInvoice(index + 1)
+          )
+        })
+      },
+      {
+        status: 404,
+        headers: {},
+        body: ''
+      }
+    );
+
+    const result = await createClient(http).listOutstandingInvoices();
+
+    expect(result.data).toHaveLength(100);
+    expect(result.rateLimit.remaining).toBe(55);
+    expect(http.requests).toHaveLength(2);
+  });
+
+  it('still surfaces a first-page 404 from Xero', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push({ status: 404, headers: {}, body: '' });
+
+    await expect(
+      createClient(http).listOutstandingInvoices()
+    ).rejects.toMatchObject({ name: 'XeroRequestFailure', status: 404 });
     expect(http.requests).toHaveLength(1);
   });
 
