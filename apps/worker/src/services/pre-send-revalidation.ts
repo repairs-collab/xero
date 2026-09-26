@@ -329,7 +329,7 @@ export async function revalidateReminder(
     )
     .orderBy(desc(approvals.createdAt))
     .limit(1);
-  if (row.sequence.mode === 'REVIEW') {
+  if (row.sequence.mode === 'REVIEW' || row.stage.stageKey === 'manual') {
     if (
       approval === undefined ||
       approval.status !== 'APPROVED' ||

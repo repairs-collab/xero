@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNull, or } from 'drizzle-orm';
 import { headers } from 'next/headers';
 import { notFound } from 'next/navigation';
 
@@ -8,10 +8,15 @@ import {
   contactChannels,
   contacts,
   disputes,
+  invoiceChases,
   invoices,
+  organisations,
   pauses,
   paymentPromises,
-  PostgresActivityRepository
+  PostgresActivityRepository,
+  reminderSequences,
+  reminderSequenceVersions,
+  suppressions
 } from '@bc5000/db/web';
 
 import { CustomerTimeline } from '../../../../components/customer-timeline.js';
@@ -65,10 +70,10 @@ export default async function CustomerPage({
   const [
     channels,
     invoiceRows,
-    activePauses,
     openDisputes,
     promises,
-    activity
+    activity,
+    organisation
   ] = await Promise.all([
     db
       .select()
@@ -89,16 +94,6 @@ export default async function CustomerPage({
         )
       )
       .orderBy(desc(invoices.dueDate)),
-    db
-      .select()
-      .from(pauses)
-      .where(
-        and(
-          eq(pauses.organisationId, organisationId),
-          eq(pauses.contactId, customerId),
-          eq(pauses.active, true)
-        )
-      ),
     db
       .select()
       .from(disputes)
@@ -122,8 +117,15 @@ export default async function CustomerPage({
     new PostgresActivityRepository(db).customerTimeline(
       organisationId,
       customerId
-    )
+    ),
+    db
+      .select()
+      .from(organisations)
+      .where(eq(organisations.id, organisationId))
+      .limit(1)
+      .then((rows) => rows[0])
   ]);
+  if (organisation === undefined) throw new Error('Organisation not found');
 
   const approvedPhone = channels.find(
     (channel) => channel.kind === 'SMS' && channel.approvedOverride
@@ -132,7 +134,77 @@ export default async function CustomerPage({
     approvedPhone ??
     channels.find((channel) => channel.kind === 'SMS' && channel.usable);
   const phone = usablePhone?.normalisedValue ?? null;
+  const invoiceIds = invoiceRows.map((invoice) => invoice.id);
+  const activeChases =
+    invoiceIds.length === 0
+      ? []
+      : await db
+          .select({
+            invoiceId: invoiceChases.invoiceId,
+            sequenceId: invoiceChases.sequenceId
+          })
+          .from(invoiceChases)
+          .innerJoin(
+            reminderSequences,
+            and(
+              eq(reminderSequences.id, invoiceChases.sequenceId),
+              eq(reminderSequences.enabled, true)
+            )
+          )
+          .innerJoin(
+            reminderSequenceVersions,
+            and(
+              eq(reminderSequenceVersions.sequenceId, reminderSequences.id),
+              eq(reminderSequenceVersions.status, 'ACTIVE')
+            )
+          )
+          .where(
+            and(
+              eq(invoiceChases.organisationId, organisationId),
+              eq(invoiceChases.status, 'ACTIVE'),
+              inArray(invoiceChases.invoiceId, invoiceIds)
+            )
+          );
+  const sequenceIds = [...new Set(activeChases.map((chase) => chase.sequenceId))];
+  const pauseScopes = [
+    eq(pauses.contactId, customerId),
+    ...(invoiceIds.length > 0 ? [inArray(pauses.invoiceId, invoiceIds)] : []),
+    ...(sequenceIds.length > 0 ? [inArray(pauses.sequenceId, sequenceIds)] : [])
+  ];
+  const destinations = [phone, customer.email].filter(
+    (value): value is string => value !== null
+  );
+  const [activePauses, activeSuppressions] = await Promise.all([
+    db
+      .select()
+      .from(pauses)
+      .where(
+        and(
+          eq(pauses.organisationId, organisationId),
+          eq(pauses.active, true),
+          or(isNull(pauses.expiresAt), gt(pauses.expiresAt, new Date())),
+          or(...pauseScopes)
+        )
+      ),
+    destinations.length === 0
+      ? Promise.resolve([])
+      : db
+          .select()
+          .from(suppressions)
+          .where(
+            and(
+              eq(suppressions.organisationId, organisationId),
+              eq(suppressions.consentState, 'SUPPRESSED'),
+              inArray(suppressions.normalisedDestination, destinations)
+            )
+          )
+  ]);
   const isPaused = activePauses.length > 0;
+  const hasActivePromise = promises.some((promise) => {
+    const until = new Date(`${promise.promisedDate}T23:59:59.999Z`);
+    until.setUTCDate(until.getUTCDate() + promise.graceDays);
+    return until >= new Date();
+  });
 
   return (
     <div className="page-stack">
@@ -166,6 +238,28 @@ export default async function CustomerPage({
             </div>
             <div className="invoice-list invoice-list--actions">
               {invoiceRows.map((invoice) => {
+                const activeChase = activeChases.find(
+                  (chase) => chase.invoiceId === invoice.id
+                );
+                const activePause = activePauses.find(
+                  (pause) =>
+                    pause.scope === 'customer' ||
+                    (pause.scope === 'invoice' && pause.invoiceId === invoice.id) ||
+                    (pause.scope === 'sequence' &&
+                      pause.sequenceId === activeChase?.sequenceId)
+                );
+                const openDispute = openDisputes.find(
+                  (dispute) =>
+                    dispute.invoiceId === null || dispute.invoiceId === invoice.id
+                );
+                const blockingReason =
+                  activePause !== undefined
+                    ? `Chasing is paused${activePause.reason ? `: ${activePause.reason}` : ''}`
+                    : openDispute !== undefined
+                      ? 'Resolve the open dispute before sending'
+                      : hasActivePromise
+                        ? 'Payment promise is still active'
+                        : null;
                 const view = createManualReminderView({
                   customerName: customer.name,
                   invoiceNumber: invoice.invoiceNumber,
@@ -177,7 +271,23 @@ export default async function CustomerPage({
                   onlineInvoiceUrl: invoice.onlineInvoiceUrl,
                   email: customer.email,
                   phone,
-                  chasingPaused: isPaused
+                  chasingPaused: activePause !== undefined,
+                  customerActive: customer.active,
+                  hasActiveChase: activeChase !== undefined,
+                  smsSuppressed: activeSuppressions.some(
+                    (suppression) =>
+                      suppression.channel === 'SMS' &&
+                      suppression.normalisedDestination === phone
+                  ),
+                  emailSuppressed: activeSuppressions.some(
+                    (suppression) =>
+                      suppression.channel === 'XERO_EMAIL' &&
+                      suppression.normalisedDestination.toLowerCase() ===
+                        customer.email?.toLowerCase()
+                  ),
+                  sendMode: organisation.sendMode,
+                  recipientAllowlist: organisation.recipientAllowlist,
+                  blockingReason
                 });
                 return (
                   <article className="invoice-action-card" key={invoice.id}>

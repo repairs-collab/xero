@@ -15,7 +15,13 @@ describe('createManualReminderView', () => {
       onlineInvoiceUrl: 'https://in.xero.test/INV-200',
       email: 'accounts@example.invalid',
       phone: '+61400000000',
-      chasingPaused: false
+      chasingPaused: false,
+      customerActive: true,
+      hasActiveChase: true,
+      smsSuppressed: false,
+      emailSuppressed: false,
+      sendMode: 'live',
+      recipientAllowlist: ['+61400000000', 'accounts@example.invalid']
     });
 
     expect(view.sms).toEqual({
@@ -40,7 +46,13 @@ describe('createManualReminderView', () => {
       onlineInvoiceUrl: null,
       email: null,
       phone: '+61400000000',
-      chasingPaused: true
+      chasingPaused: true,
+      customerActive: true,
+      hasActiveChase: true,
+      smsSuppressed: false,
+      emailSuppressed: false,
+      sendMode: 'live',
+      recipientAllowlist: ['+61400000000']
     });
 
     expect(view.sms).toMatchObject({
@@ -52,5 +64,41 @@ describe('createManualReminderView', () => {
       disabledReason: 'Resume chasing before sending a reminder'
     });
     expect(view.call).toEqual({ available: true, href: 'tel:+61400000000' });
+  });
+
+  it('disables suppressed and non-allowlisted destinations with specific reasons', () => {
+    const base = {
+      customerName: 'Customer',
+      invoiceNumber: 'INV-200',
+      amountDue: '100.0000',
+      currency: 'AUD',
+      dueDate: '2026-08-20',
+      type: 'ACCREC',
+      status: 'AUTHORISED',
+      onlineInvoiceUrl: 'https://in.xero.test/INV-200',
+      email: 'accounts@example.invalid',
+      phone: '+61400000000',
+      chasingPaused: false,
+      customerActive: true,
+      hasActiveChase: true,
+      emailSuppressed: false,
+      sendMode: 'live' as const
+    };
+
+    const suppressed = createManualReminderView({
+      ...base,
+      smsSuppressed: true,
+      recipientAllowlist: ['+61400000000', 'accounts@example.invalid']
+    });
+    expect(suppressed.sms.disabledReason).toBe('Customer has opted out of SMS reminders');
+    expect(suppressed.email.available).toBe(true);
+
+    const notAllowlisted = createManualReminderView({
+      ...base,
+      smsSuppressed: false,
+      recipientAllowlist: []
+    });
+    expect(notAllowlisted.sms.disabledReason).toBe('Mobile is not on the live-send allowlist');
+    expect(notAllowlisted.email.disabledReason).toBe('Email is not on the live-send allowlist');
   });
 });

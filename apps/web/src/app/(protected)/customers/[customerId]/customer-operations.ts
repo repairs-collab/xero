@@ -205,7 +205,7 @@ export function createCustomerOperations(dependencies: { database: Database; pub
     }
 
     const now = dependencies.clock.now();
-    const inserted = await dependencies.database.transaction(async (transaction) => {
+    const readyToPublish = await dependencies.database.transaction(async (transaction) => {
       const created = await transaction
         .insert(stageInstances)
         .values({
@@ -222,7 +222,30 @@ export function createCustomerOperations(dependencies: { database: Database; pub
         })
         .onConflictDoNothing()
         .returning({ id: stageInstances.id });
-      if (created.length === 0) return false;
+      if (created.length === 0) {
+        const [existing] = await transaction
+          .select({
+            organisationId: stageInstances.organisationId,
+            invoiceChaseId: stageInstances.invoiceChaseId,
+            stageKey: stageInstances.stageKey,
+            channel: stageInstances.channel,
+            sourceVersion: stageInstances.sourceVersion
+          })
+          .from(stageInstances)
+          .where(eq(stageInstances.id, input.requestId))
+          .limit(1);
+        if (
+          existing === undefined ||
+          existing.organisationId !== input.organisationId ||
+          existing.invoiceChaseId !== target.chase.id ||
+          existing.stageKey !== 'manual' ||
+          existing.channel !== input.channel ||
+          existing.sourceVersion !== target.invoice.syncVersion
+        ) {
+          throw new Error('MANUAL_REQUEST_CONFLICT');
+        }
+        return true;
+      }
 
       await transaction.insert(approvals).values({
         organisationId: input.organisationId,
@@ -246,7 +269,7 @@ export function createCustomerOperations(dependencies: { database: Database; pub
       return true;
     });
 
-    if (inserted) {
+    if (readyToPublish) {
       await dependencies.publisher.publish(
         jobNames.reminderExecute,
         {
@@ -256,7 +279,7 @@ export function createCustomerOperations(dependencies: { database: Database; pub
         { singletonKey: `manual:${input.requestId}` }
       );
     }
-    return { queued: inserted, stageInstanceId: input.requestId };
+    return { queued: readyToPublish, stageInstanceId: input.requestId };
   };
 
   return { setApprovedPhoneOverride, clearApprovedPhoneOverride, pauseChasing, recordDispute, recordPromiseToPay, resumeChasing, addCustomerNote, sendManualReminder };

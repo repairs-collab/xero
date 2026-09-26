@@ -259,7 +259,11 @@ export async function executeReminder(
   const liveAllowed =
     reminder.sendMode === 'live' &&
     reminder.liveSendAcknowledged &&
-    reminder.recipientAllowlist.includes(reminder.destination);
+    reminder.recipientAllowlist.some((recipient) =>
+      reminder.channel === 'XERO_EMAIL'
+        ? recipient.toLowerCase() === reminder.destination.toLowerCase()
+        : recipient === reminder.destination
+    );
   if (!liveAllowed) {
     await repository.markDryRun({
       outboundId: claim.outboundId,

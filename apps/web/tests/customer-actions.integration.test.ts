@@ -85,7 +85,31 @@ describe('customer chase controls', () => {
     expect(jobs.publish).toHaveBeenCalledOnce();
   });
 
-  it('queues a confirmed Xero invoice email only once for a repeated request', async () => {
+  it('retries queue publication after the first attempt fails without duplicating the reminder', async () => {
+    const seeded = await seedCustomer();
+    const publish = vi.fn()
+      .mockRejectedValueOnce(new Error('Queue unavailable'))
+      .mockResolvedValue(randomUUID());
+    const jobs = { publish } as unknown as JobPublisher;
+    const service = createCustomerOperations({ database: client.db, publisher: jobs, clock: { now: () => now } });
+    const input = {
+      organisationId: seeded.organisationId,
+      customerId: seeded.customerId,
+      invoiceId: seeded.invoiceId,
+      channel: 'XERO_EMAIL' as const,
+      confirmed: true,
+      requestId: randomUUID()
+    };
+
+    await expect(service.sendManualReminder(seeded.session, input)).rejects.toThrow('Queue unavailable');
+    await expect(service.sendManualReminder(seeded.session, input)).resolves.toMatchObject({ queued: true });
+
+    const stages = await client.db.select().from(stageInstances).where(eq(stageInstances.id, input.requestId));
+    expect(stages).toHaveLength(1);
+    expect(publish).toHaveBeenCalledTimes(2);
+  });
+
+  it('stores one Xero email reminder and safely republishes a repeated request', async () => {
     const seeded = await seedCustomer();
     const jobs = publisher();
     const service = createCustomerOperations({ database: client.db, publisher: jobs, clock: { now: () => now } });
@@ -107,7 +131,7 @@ describe('customer chase controls', () => {
     expect(stages[0]).toMatchObject({ stageKey: 'manual', channel: 'XERO_EMAIL', status: 'QUEUED' });
     expect(approvalsForRequest).toHaveLength(1);
     expect(approvalsForRequest[0]?.renderedPreview).toBe('Xero invoice email for INV-200 to Customer');
-    expect(jobs.publish).toHaveBeenCalledOnce();
+    expect(jobs.publish).toHaveBeenCalledTimes(2);
   });
 
   it('rejects a manual reminder without explicit confirmation', async () => {

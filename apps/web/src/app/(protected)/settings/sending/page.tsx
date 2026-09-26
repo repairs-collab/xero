@@ -96,8 +96,8 @@ export default async function SendingSettingsPage() {
           <span className="eyebrow">Recipient allowlist</span>
           <h2>Controlled destinations</h2>
           <p className="settings-copy">
-            Only normalised numbers on this list can receive live SMS during
-            launch.
+            Only phone numbers and email addresses on this list can receive
+            live reminders during launch.
           </p>
           <form className="settings-form" action={updateAllowlist}>
             <input
@@ -106,12 +106,12 @@ export default async function SendingSettingsPage() {
               value={organisationId}
             />
             <label>
-              Mobile numbers
+              Mobile numbers or email addresses
               <textarea
                 name="recipients"
                 rows={6}
                 defaultValue={organisation.recipientAllowlist.join('\n')}
-                placeholder="0400 000 001"
+                placeholder={'0400 000 001\naccounts@example.com'}
               />
             </label>
             <button className="button button--primary">Save allowlist</button>

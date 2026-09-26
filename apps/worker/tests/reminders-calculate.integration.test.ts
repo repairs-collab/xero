@@ -16,6 +16,7 @@ import {
   reminderSequenceVersions,
   sequenceStages,
   stageInstances,
+  suppressions,
   tasks
 } from '@bc5000/db';
 
@@ -383,6 +384,152 @@ describe('calculateReminderWork', () => {
     expect(approvalRows.filter((row) => row.status === 'EXPIRED')).toHaveLength(2);
     expect(stageRows.filter((row) => row.status === 'AWAITING_APPROVAL')).toHaveLength(1);
     expect(stageRows.filter((row) => row.status === 'CANCELLED')).toHaveLength(2);
+  });
+
+  it('expires pending reminders when the invoice falls below the sequence minimum', async () => {
+    const seeded = await seedInvoiceAndSequence({
+      mode: 'REVIEW',
+      dueDate: '2026-09-18',
+      offsetDays: 0,
+      channel: 'SMS'
+    });
+    await calculateReminderWork(
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+      seeded.organisationId
+    );
+    await client.db
+      .update(reminderSequenceVersions)
+      .set({ minimumBalance: '500.0000' })
+      .where(eq(reminderSequenceVersions.id, seeded.sequenceVersionId));
+
+    await calculateReminderWork(
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+      seeded.organisationId
+    );
+
+    const [approval] = await client.db
+      .select()
+      .from(approvals)
+      .where(eq(approvals.organisationId, seeded.organisationId));
+    expect(approval?.status).toBe('EXPIRED');
+  });
+
+  it('expires current-date reminders when their channel becomes unusable', async () => {
+    const seeded = await seedInvoiceAndSequence({
+      mode: 'REVIEW',
+      dueDate: '2026-09-18',
+      offsetDays: 0,
+      channel: 'SMS'
+    });
+    await calculateReminderWork(
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+      seeded.organisationId
+    );
+    await client.db
+      .update(contactChannels)
+      .set({ usable: false })
+      .where(eq(contactChannels.contactId, seeded.contactId));
+
+    await calculateReminderWork(
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+      seeded.organisationId
+    );
+
+    const [approval] = await client.db
+      .select()
+      .from(approvals)
+      .where(eq(approvals.organisationId, seeded.organisationId));
+    expect(approval?.status).toBe('EXPIRED');
+  });
+
+  it('expires current-date SMS reminders after the customer opts out', async () => {
+    const seeded = await seedInvoiceAndSequence({
+      mode: 'REVIEW',
+      dueDate: '2026-09-18',
+      offsetDays: 0,
+      channel: 'SMS'
+    });
+    await calculateReminderWork(
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+      seeded.organisationId
+    );
+    await client.db.insert(suppressions).values({
+      organisationId: seeded.organisationId,
+      channel: 'SMS',
+      normalisedDestination: '+61400000001',
+      source: 'SINCH_OPT_OUT',
+      reason: 'Customer opted out',
+      consentState: 'SUPPRESSED'
+    });
+
+    await calculateReminderWork(
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+      seeded.organisationId
+    );
+
+    const [approval] = await client.db
+      .select()
+      .from(approvals)
+      .where(eq(approvals.organisationId, seeded.organisationId));
+    expect(approval?.status).toBe('EXPIRED');
+  });
+
+  it('expires pending reminders from an inactive sequence version', async () => {
+    const seeded = await seedInvoiceAndSequence({
+      mode: 'REVIEW',
+      dueDate: '2026-09-18',
+      offsetDays: 0,
+      channel: 'SMS'
+    });
+    await calculateReminderWork(
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+      seeded.organisationId
+    );
+    const [chase] = await client.db
+      .select()
+      .from(invoiceChases)
+      .where(eq(invoiceChases.invoiceId, seeded.invoiceId));
+    if (chase === undefined) throw new Error('Expected an invoice chase');
+    const retiredVersionId = randomUUID();
+    await client.db.insert(reminderSequenceVersions).values({
+      id: retiredVersionId,
+      organisationId: seeded.organisationId,
+      sequenceId: seeded.sequenceId,
+      versionNumber: 2,
+      status: 'RETIRED',
+      configuration: {}
+    });
+    const retiredStageId = randomUUID();
+    await client.db.insert(stageInstances).values({
+      id: retiredStageId,
+      organisationId: seeded.organisationId,
+      invoiceChaseId: chase.id,
+      sequenceVersionId: retiredVersionId,
+      stageKey: 'due-date',
+      channel: 'SMS',
+      status: 'AWAITING_APPROVAL',
+      scheduledAt: new Date('2026-09-16T23:00:00.000Z'),
+      sourceVersion: 3
+    });
+    await client.db.insert(approvals).values({
+      organisationId: seeded.organisationId,
+      stageInstanceId: retiredStageId,
+      renderedPreview: 'Retired version reminder',
+      sourceVersion: 3,
+      status: 'PENDING',
+      expiresAt: new Date('2026-09-19T00:00:00.000Z')
+    });
+
+    await calculateReminderWork(
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+      seeded.organisationId
+    );
+
+    const [retiredApproval] = await client.db
+      .select()
+      .from(approvals)
+      .where(eq(approvals.stageInstanceId, retiredStageId));
+    expect(retiredApproval?.status).toBe('EXPIRED');
   });
 
   it('expires an approval whose review window elapsed', async () => {

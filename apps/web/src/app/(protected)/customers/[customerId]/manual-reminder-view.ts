@@ -10,12 +10,22 @@ export interface ManualReminderViewInput {
   email: string | null;
   phone: string | null;
   chasingPaused: boolean;
+  customerActive: boolean;
+  hasActiveChase: boolean;
+  smsSuppressed: boolean;
+  emailSuppressed: boolean;
+  sendMode: 'dry-run' | 'live';
+  recipientAllowlist: string[];
+  blockingReason?: string | null;
 }
 
 const sendingUnavailableReason = (
   input: ManualReminderViewInput
 ): string | null => {
+  if (input.blockingReason) return input.blockingReason;
   if (input.chasingPaused) return 'Resume chasing before sending a reminder';
+  if (!input.customerActive) return 'Customer is inactive in Xero';
+  if (!input.hasActiveChase) return 'No active reminder sequence for this invoice';
   if (
     input.type !== 'ACCREC' ||
     input.status !== 'AUTHORISED' ||
@@ -34,9 +44,24 @@ export function createManualReminderView(input: ManualReminderViewInput) {
       ? 'No usable mobile number'
       : input.onlineInvoiceUrl === null
         ? 'Sync Xero to retrieve the payment link'
+        : input.smsSuppressed
+          ? 'Customer has opted out of SMS reminders'
+          : input.sendMode === 'live' &&
+              !input.recipientAllowlist.includes(input.phone)
+            ? 'Mobile is not on the live-send allowlist'
         : null);
   const emailUnavailable =
-    unavailable ?? (input.email === null ? 'No customer email address' : null);
+    unavailable ??
+    (input.email === null
+      ? 'No customer email address'
+      : input.emailSuppressed
+        ? 'Customer email is suppressed'
+        : input.sendMode === 'live' &&
+            !input.recipientAllowlist.some(
+              (recipient) => recipient.toLowerCase() === input.email?.toLowerCase()
+            )
+          ? 'Email is not on the live-send allowlist'
+          : null);
   const amount = Number(input.amountDue).toFixed(2);
 
   return {
