@@ -172,6 +172,28 @@ describe('XeroClient request contract', () => {
 });
 
 describe('XeroClient data operations', () => {
+  it('normalises Xero legacy JSON timestamps', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push({
+      status: 200,
+      headers: {},
+      body: JSON.stringify({
+        Invoices: [
+          {
+            ...rawInvoice(),
+            UpdatedDateUTC: '/Date(1721795573787+0000)/'
+          }
+        ]
+      })
+    });
+
+    await expect(
+      createClient(http).getInvoice('invoice-1')
+    ).resolves.toMatchObject({
+      data: { updatedAt: '2024-07-24T04:32:53.787Z' }
+    });
+  });
+
   it('loads unique contacts in URL-safe batches of 50 IDs', async () => {
     const http = new FakeHttpClient();
     http.responses.push(
