@@ -32,6 +32,8 @@ export interface ListOutstandingInvoicesOptions {
   ifModifiedSince?: string;
 }
 
+const XERO_INVOICE_PAGE_SIZE = 100;
+
 interface XeroEnvelope<T> {
   data: T;
   rateLimit: XeroRateLimit;
@@ -131,10 +133,11 @@ export class XeroClient {
       const search = new URLSearchParams({
         summaryOnly: 'true',
         page: String(page),
+        pageSize: String(XERO_INVOICE_PAGE_SIZE),
         where:
           'Type=="ACCREC" AND Status=="AUTHORISED" AND AmountDue>0'
       });
-      const response = await this.requestJson<{
+      type InvoicePage = {
         Invoices: RawXeroInvoice[];
         pagination?: {
           page: number;
@@ -142,13 +145,26 @@ export class XeroClient {
           pageCount: number;
           itemCount: number;
         };
-      }>(
-        'GET',
-        `/Invoices?${search.toString()}`,
-        options.ifModifiedSince === undefined
-          ? {}
-          : { 'If-Modified-Since': options.ifModifiedSince }
-      );
+      };
+      let response: XeroEnvelope<InvoicePage>;
+      try {
+        response = await this.requestJson<InvoicePage>(
+          'GET',
+          `/Invoices?${search.toString()}`,
+          options.ifModifiedSince === undefined
+            ? {}
+            : { 'If-Modified-Since': options.ifModifiedSince }
+        );
+      } catch (error) {
+        if (
+          page > 1 &&
+          error instanceof XeroRequestFailure &&
+          error.status === 404
+        ) {
+          break;
+        }
+        throw error;
+      }
       invoices.push(...response.data.Invoices.map(mapXeroInvoice));
       lastRateLimit = response.rateLimit;
       if (
@@ -157,7 +173,7 @@ export class XeroClient {
       ) {
         break;
       }
-      if (response.data.Invoices.length === 0) break;
+      if (response.data.Invoices.length < XERO_INVOICE_PAGE_SIZE) break;
       page += 1;
     }
 
