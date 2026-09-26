@@ -139,34 +139,39 @@ export function calculateStageOccurrences(
   const occurrences: StageOccurrence[] = [];
 
   for (const invoice of invoices) {
-    for (const stage of sequence.stages) {
+    const eligibleStages = sequence.stages.filter(
+      (stage) =>
+        localDateAtOffset(invoice.dueDate, stage.offsetDays, sequence.zone) <=
+        sequence.asOfLocalDate!
+    );
+    const latestOffset = Math.max(
+      ...eligibleStages.map((stage) => stage.offsetDays)
+    );
+
+    for (const stage of eligibleStages.filter(
+      (candidate) => candidate.offsetDays === latestOffset
+    )) {
       const stageDate = localDateAtOffset(
         invoice.dueDate,
         stage.offsetDays,
         sequence.zone
       );
 
-      if (stageDate > sequence.asOfLocalDate) continue;
-
       for (const channel of stage.channels) {
         if (channel === 'SMS_DAILY') {
-          let dailyDate = stageDate;
-          while (dailyDate <= sequence.asOfLocalDate) {
-            if (
-              sequence.dailyBasis === 'CALENDAR_DAYS' ||
-              calendar.isBusinessDate(dailyDate)
-            ) {
-              occurrences.push(
-                createOccurrence(
-                  sequence,
-                  invoice,
-                  'daily-after-30',
-                  'SMS',
-                  dailyDate
-                )
-              );
-            }
-            dailyDate = localDateAtOffset(dailyDate, 1, sequence.zone);
+          if (
+            sequence.dailyBasis === 'CALENDAR_DAYS' ||
+            calendar.isBusinessDate(sequence.asOfLocalDate)
+          ) {
+            occurrences.push(
+              createOccurrence(
+                sequence,
+                invoice,
+                'daily-after-30',
+                'SMS',
+                sequence.asOfLocalDate
+              )
+            );
           }
         } else {
           occurrences.push(

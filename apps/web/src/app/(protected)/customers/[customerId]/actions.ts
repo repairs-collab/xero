@@ -20,3 +20,22 @@ export async function resumeChasing(formData: FormData): Promise<void> { const {
 export async function setApprovedPhoneOverride(formData: FormData): Promise<void> { const { session, operations } = await context(); const ids = identifiers(formData); await operations.setApprovedPhoneOverride(session, { ...ids, phone: requiredText(formData, 'phone'), reason: requiredText(formData, 'reason') }); refresh(ids.customerId); }
 export async function clearApprovedPhoneOverride(formData: FormData): Promise<void> { const { session, operations } = await context(); const ids = identifiers(formData); await operations.clearApprovedPhoneOverride(session, { ...ids, reason: requiredText(formData, 'reason') }); refresh(ids.customerId); }
 export async function addCustomerNote(formData: FormData): Promise<void> { const { session, operations } = await context(); const ids = identifiers(formData); await operations.addCustomerNote(session, { ...ids, note: requiredText(formData, 'note') }); refresh(ids.customerId); }
+export async function sendManualReminder(formData: FormData): Promise<void> {
+  const { session, operations } = await context();
+  const ids = identifiers(formData);
+  const channel = requiredText(formData, 'channel');
+  if (channel !== 'SMS' && channel !== 'XERO_EMAIL') {
+    throw new Error('Invalid reminder channel');
+  }
+  await operations.sendManualReminder(session, {
+    ...ids,
+    invoiceId: requiredText(formData, 'invoiceId'),
+    channel,
+    ...(channel === 'SMS'
+      ? { message: requiredText(formData, 'message') }
+      : {}),
+    confirmed: formData.get('confirmed') === 'yes',
+    requestId: requiredText(formData, 'requestId')
+  });
+  refresh(ids.customerId);
+}

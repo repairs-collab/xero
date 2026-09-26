@@ -248,6 +248,65 @@ export async function calculateReminderWork(
           holidays: []
         })
       );
+      const currentOccurrenceKeys = new Set(
+        occurrences.map(
+          (occurrence) =>
+            `${occurrence.stageId}:${occurrence.channel}:${new Date(occurrence.scheduledAtUtc).getTime().toString()}`
+        )
+      );
+      const pendingForChase = await dependencies.database
+        .select({
+          approvalId: approvals.id,
+          stageId: stageInstances.id,
+          stageKey: stageInstances.stageKey,
+          channel: stageInstances.channel,
+          scheduledAt: stageInstances.scheduledAt
+        })
+        .from(approvals)
+        .innerJoin(
+          stageInstances,
+          and(
+            eq(stageInstances.id, approvals.stageInstanceId),
+            eq(stageInstances.organisationId, organisationId),
+            eq(stageInstances.invoiceChaseId, chaseId),
+            eq(stageInstances.sequenceVersionId, sequence.versionId)
+          )
+        )
+        .where(
+          and(
+            eq(approvals.organisationId, organisationId),
+            eq(approvals.status, 'PENDING')
+          )
+        );
+      const obsoletePending = pendingForChase.filter(
+        (pending) =>
+          pending.stageKey !== 'manual' &&
+          !currentOccurrenceKeys.has(
+            `${pending.stageKey}:${pending.channel}:${pending.scheduledAt.getTime().toString()}`
+          )
+      );
+      if (obsoletePending.length > 0) {
+        await dependencies.database.transaction(async (transaction) => {
+          await transaction
+            .update(approvals)
+            .set({ status: 'EXPIRED' })
+            .where(
+              inArray(
+                approvals.id,
+                obsoletePending.map((pending) => pending.approvalId)
+              )
+            );
+          await transaction
+            .update(stageInstances)
+            .set({ status: 'CANCELLED', updatedAt: now })
+            .where(
+              inArray(
+                stageInstances.id,
+                obsoletePending.map((pending) => pending.stageId)
+              )
+            );
+        });
+      }
       let onlineInvoiceUrl = row.invoice.onlineInvoiceUrl;
 
       for (const occurrence of occurrences) {

@@ -322,6 +322,69 @@ describe('calculateReminderWork', () => {
     expect(chase?.sequenceId).toBe(seeded.sequenceId);
   });
 
+  it('expires historical pending daily reminders while preserving the current review item', async () => {
+    const seeded = await seedInvoiceAndSequence({
+      mode: 'REVIEW',
+      dueDate: '2026-08-01',
+      offsetDays: 30,
+      channel: 'SMS_DAILY'
+    });
+
+    await calculateReminderWork(
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+      seeded.organisationId
+    );
+    const [chase] = await client.db
+      .select()
+      .from(invoiceChases)
+      .where(eq(invoiceChases.invoiceId, seeded.invoiceId));
+    if (chase === undefined) throw new Error('Expected an invoice chase');
+
+    for (const scheduledAt of [
+      new Date('2026-09-15T23:00:00.000Z'),
+      new Date('2026-09-16T23:00:00.000Z')
+    ]) {
+      const stageId = randomUUID();
+      await client.db.insert(stageInstances).values({
+        id: stageId,
+        organisationId: seeded.organisationId,
+        invoiceChaseId: chase.id,
+        sequenceVersionId: seeded.sequenceVersionId,
+        stageKey: 'daily-after-30',
+        channel: 'SMS',
+        status: 'AWAITING_APPROVAL',
+        scheduledAt,
+        sourceVersion: 3
+      });
+      await client.db.insert(approvals).values({
+        organisationId: seeded.organisationId,
+        stageInstanceId: stageId,
+        renderedPreview: 'Historical reminder',
+        sourceVersion: 3,
+        status: 'PENDING',
+        expiresAt: new Date('2026-09-19T00:00:00.000Z')
+      });
+    }
+
+    await calculateReminderWork(
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+      seeded.organisationId
+    );
+
+    const approvalRows = await client.db
+      .select({ status: approvals.status })
+      .from(approvals)
+      .where(eq(approvals.organisationId, seeded.organisationId));
+    const stageRows = await client.db
+      .select({ status: stageInstances.status })
+      .from(stageInstances)
+      .where(eq(stageInstances.organisationId, seeded.organisationId));
+    expect(approvalRows.filter((row) => row.status === 'PENDING')).toHaveLength(1);
+    expect(approvalRows.filter((row) => row.status === 'EXPIRED')).toHaveLength(2);
+    expect(stageRows.filter((row) => row.status === 'AWAITING_APPROVAL')).toHaveLength(1);
+    expect(stageRows.filter((row) => row.status === 'CANCELLED')).toHaveLength(2);
+  });
+
   it('expires an approval whose review window elapsed', async () => {
     const seeded = await seedInvoiceAndSequence({
       mode: 'REVIEW',
