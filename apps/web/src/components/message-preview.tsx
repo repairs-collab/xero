@@ -26,7 +26,7 @@ export function MessagePreview({
         <span><small>Source</small><strong>{invoiceNumber} · version {sourceVersion}</strong></span>
       </div>
       <div className="message-bubble">{content}</div>
-      {isXero && <p className="preview-note">Xero uses its configured invoice email template and recipients. Bill Chaser records “Submitted to Xero”; it does not claim downstream delivery.</p>}
+      {isXero && <p className="preview-note">Xero uses its configured invoice email template and recipients. AccountPulse records “Submitted to Xero”; it does not claim downstream delivery.</p>}
     </details>
   );
 }

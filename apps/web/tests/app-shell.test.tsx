@@ -28,6 +28,21 @@ vi.mock('next/navigation', () => ({
 import { AppShell } from '../src/components/app-shell.js';
 
 describe('AppShell', () => {
+  it('uses AccountPulse as the accessible product identity', () => {
+    const html = renderToStaticMarkup(
+      createElement(AppShell, {
+        displayName: 'Mott Appliance Repairs Admin',
+        role: 'ADMIN',
+        children: createElement('p', null, 'Dashboard')
+      })
+    );
+
+    expect(html).toContain('aria-label="AccountPulse overview"');
+    expect(html).toContain('src="/accountpulse-logo.png"');
+    expect(html).toContain('alt="AccountPulse"');
+    expect(html).not.toContain('Bill Chaser 5000');
+  });
+
   it('does not prefetch the state-changing sign-out route', () => {
     const html = renderToStaticMarkup(
       createElement(AppShell, {

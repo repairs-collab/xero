@@ -41,7 +41,7 @@ async function main() {
 
 void main().catch((error: unknown) => {
   console.error(
-    'Bill Chaser administrator bootstrap failed',
+    'AccountPulse administrator bootstrap failed',
     error instanceof Error ? error.message : 'Unknown error'
   );
   process.exitCode = 1;
