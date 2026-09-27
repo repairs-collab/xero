@@ -1,5 +1,6 @@
 .worktrees/
 .superpowers/
+.codex-preview/
 work/
 outputs/
 .env*

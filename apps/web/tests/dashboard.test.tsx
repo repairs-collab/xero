@@ -24,6 +24,8 @@ describe('DashboardView', () => {
 
     expect(html).toContain('$84,260');
     expect(html).toContain('Awaiting approval');
+    expect(html).toContain('Today&#x27;s action ledger');
+    expect(html).toContain('Review reminders');
     expect(html).toContain('Paid after reminders');
     expect(html).not.toContain('Recovered because of reminders');
     expect(html).toContain('Xero connected');

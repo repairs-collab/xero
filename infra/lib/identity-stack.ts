@@ -42,7 +42,7 @@ export class IdentityStack extends Stack {
       accountRecovery: AccountRecovery.EMAIL_ONLY,
       email: UserPoolEmail.withCognito(),
       userVerification: {
-        emailSubject: 'Verify your Bill Chaser 5000 account',
+        emailSubject: 'Verify your AccountPulse account',
         emailStyle: VerificationEmailStyle.CODE
       },
       removalPolicy: RemovalPolicy.RETAIN

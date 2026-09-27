@@ -69,7 +69,7 @@ export default async function SendingSettingsPage() {
         <span className="eyebrow">Delivery safety</span>
         <h1>Sending controls</h1>
         <p>
-          Bill Chaser starts in dry-run. Live mode is deliberately difficult
+          AccountPulse starts in dry-run. Live mode is deliberately difficult
           to enable.
         </p>
       </header>
