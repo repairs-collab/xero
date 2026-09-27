@@ -31,6 +31,7 @@ RUN apk upgrade --no-cache \
   && rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg
 COPY --from=build --chown=node:node /workspace/apps/web/.next/standalone ./
 COPY --from=build --chown=node:node /workspace/apps/web/.next/static ./apps/web/.next/static
+COPY --from=build --chown=node:node /workspace/apps/web/public ./apps/web/public
 COPY --from=build --chown=node:node /workspace/bootstrap-admin.mjs /app/bootstrap-admin.mjs
 COPY --chown=node:node apps/container-entrypoint.mjs /app/container-entrypoint.mjs
 USER node

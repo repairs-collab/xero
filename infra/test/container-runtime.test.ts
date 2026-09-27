@@ -28,6 +28,17 @@ describe('production container runtimes', () => {
     );
   });
 
+  it('ships web public assets in the production image', () => {
+    const contents = readFileSync(
+      resolve(process.cwd(), 'apps/web/Dockerfile'),
+      'utf8'
+    );
+
+    expect(contents).toContain(
+      'COPY --from=build --chown=node:node /workspace/apps/web/public ./apps/web/public'
+    );
+  });
+
   it('verifies encrypted PostgreSQL connections against the AWS RDS CA', () => {
     const entrypoint = readFileSync(
       resolve(process.cwd(), 'apps/container-entrypoint.mjs'),
