@@ -59,33 +59,33 @@
 - Produces: `PostgresMessageRepository.beginReminder(input)`, `.queueDirect(input)`, `.claimDirect(input)`, and stage-optional terminal state methods.
 - Produces permissions `outbox.read`, `reminder-whitelist.add`, `reminder-whitelist.remove`, and `message.test-sms`.
 
-- [ ] **Step 1: Write failing schema, repository, and permission tests**
+- [x] **Step 1: Write failing schema, repository, and permission tests**
 
   Assert active-entry uniqueness, removed-entry history, client/invoice target constraints, stage-less Outbox rows, `ON DELETE SET NULL`, exact-content persistence, direct-send idempotency, and the approved role matrix.
 
-- [ ] **Step 2: Run the focused tests and verify they fail**
+- [x] **Step 2: Run the focused tests and verify they fail**
 
   Run: `pnpm vitest run packages/db/src/schema/schema.integration.test.ts packages/db/src/repositories/message-repository.integration.test.ts packages/auth/src/authorise.test.ts`
 
   Expected: FAIL because the new schema, repository APIs, columns, and permissions do not exist.
 
-- [ ] **Step 3: Implement the schema and repository contracts**
+- [x] **Step 3: Implement the schema and repository contracts**
 
   `reminder_whitelist_entries` retains removed rows and uses partial unique indexes for active client and invoice targets. `outbound_messages` gains source, content, actor/contact/invoice associations, nullable stage/source version, and failure reason. `operator_replies.outbound_message_id` is nullable and unique. Stage origin defaults to `AUTOMATION`.
 
-- [ ] **Step 4: Generate and inspect the named migration**
+- [x] **Step 4: Generate and inspect the named migration**
 
   Run: `pnpm --filter @bc5000/db db:generate -- --name accountpulse_operations`
 
   Expected: migration and snapshot contain additive/backfilled changes, preserve existing rows, and change the stage foreign key to `ON DELETE SET NULL`.
 
-- [ ] **Step 5: Run the focused tests and verify they pass**
+- [x] **Step 5: Run the focused tests and verify they pass**
 
   Run: `pnpm vitest run packages/db/src/schema/schema.integration.test.ts packages/db/src/repositories/message-repository.integration.test.ts packages/auth/src/authorise.test.ts`
 
   Expected: PASS.
 
-- [ ] **Step 6: Commit the persistence foundation**
+- [x] **Step 6: Commit the persistence foundation**
 
   Run: `git add packages/db packages/auth && git commit -m "feat: add operations persistence contracts"`
 
@@ -101,27 +101,27 @@
 - `add` input: `{ organisationId, scope, contactId, invoiceId?, reason? }`; output includes `{ entryId, created, cancelledApprovals, cancelledStages, cancelledMessages, cancelledTasks }`.
 - `remove` input: `{ organisationId, entryId }`; output includes `{ removed, recalculationJobId? }`.
 
-- [ ] **Step 1: Write failing service integration tests**
+- [x] **Step 1: Write failing service integration tests**
 
   Cover client-wide cancellation, invoice-only cancellation, pending and approved approvals, queued but not provider-accepted messages, open escalation cancellation, repeated add as a no-op, overlapping entries, Administrator-only removal, fresh recalculation publication, and foreign-organisation identifiers.
 
-- [ ] **Step 2: Run the service tests and verify they fail**
+- [x] **Step 2: Run the service tests and verify they fail**
 
   Run: `pnpm vitest run apps/web/tests/reminder-whitelist.integration.test.ts`
 
   Expected: FAIL because the service does not exist.
 
-- [ ] **Step 3: Implement transactional add, remove, and list operations**
+- [x] **Step 3: Implement transactional add, remove, and list operations**
 
   Use `lockTarget` before inserting/removing or cancelling. Expire `PENDING` and `APPROVED` approvals; cancel only unsent stages/messages and matching `OPEN` tasks; leave accepted/delivered history unchanged. Write correlated audit events with affected counts. Removal publishes `reminders.calculate` with an organisation singleton key.
 
-- [ ] **Step 4: Run the service tests and verify they pass**
+- [x] **Step 4: Run the service tests and verify they pass**
 
   Run: `pnpm vitest run apps/web/tests/reminder-whitelist.integration.test.ts`
 
   Expected: PASS.
 
-- [ ] **Step 5: Commit the whitelist service**
+- [x] **Step 5: Commit the whitelist service**
 
   Run: `git add apps/web/src/server/reminder-whitelist-service.ts apps/web/tests/reminder-whitelist.integration.test.ts && git commit -m "feat: add reminder whitelist lifecycle"`
 
@@ -139,27 +139,27 @@
 - Produces: `StopReason` value `REMINDER_WHITELISTED`.
 - Produces the invariant that `beginReminder` obtains the target lock and repeats the active-whitelist check in the same transaction as the idempotent send claim.
 
-- [ ] **Step 1: Write failing calculator and execution tests**
+- [x] **Step 1: Write failing calculator and execution tests**
 
   Assert client and invoice entries prevent approvals, daily SMS and escalation tasks; overlapping entries remain blocked; pre-send revalidation returns `REMINDER_WHITELISTED`; and a deterministic concurrent add/send test proves a whitelist that wins the lock prevents claim/provider submission.
 
-- [ ] **Step 2: Run the worker tests and verify they fail**
+- [x] **Step 2: Run the worker tests and verify they fail**
 
   Run: `pnpm vitest run apps/worker/tests/reminders-calculate.integration.test.ts apps/worker/tests/reminder-execute.integration.test.ts`
 
   Expected: FAIL because eligibility and send claiming do not consult the whitelist.
 
-- [ ] **Step 3: Add calculation, revalidation, and atomic-claim checks**
+- [x] **Step 3: Add calculation, revalidation, and atomic-claim checks**
 
   Filter covered invoices before occurrence creation. Revalidate before rendering and treat the repository's locked claim as authoritative. If the claim reports a new whitelist entry, cancel the stage/approval with `REMINDER_WHITELISTED` and never call Sinch or Xero.
 
-- [ ] **Step 4: Run the worker tests and verify they pass**
+- [x] **Step 4: Run the worker tests and verify they pass**
 
   Run: `pnpm vitest run apps/worker/tests/reminders-calculate.integration.test.ts apps/worker/tests/reminder-execute.integration.test.ts`
 
   Expected: PASS.
 
-- [ ] **Step 5: Commit worker enforcement**
+- [x] **Step 5: Commit worker enforcement**
 
   Run: `git add apps/worker && git commit -m "feat: enforce reminder whitelist before sends"`
 
@@ -180,27 +180,27 @@
 - Produces: each automated/manual reminder and Inbox reply has one `outbound_messages` row with source, exact SMS content, associations, actor when applicable, and provider attempts.
 - Produces: delivery callbacks update both canonical Outbox state and linked `operator_replies` state transactionally.
 
-- [ ] **Step 1: Write failing transport-history tests**
+- [x] **Step 1: Write failing transport-history tests**
 
   Assert automated, customer-manual, Xero-email and Inbox-reply sources; exact SMS content; Xero request description; actor/contact/invoice links; one row on repeated jobs; nullable stage delivery handling; and linked Inbox reply callback state.
 
-- [ ] **Step 2: Run the focused transport tests and verify they fail**
+- [x] **Step 2: Run the focused transport tests and verify they fail**
 
   Run: `pnpm vitest run apps/worker/tests/reminder-execute.integration.test.ts apps/worker/tests/operator-reply-execute.integration.test.ts apps/web/tests/customer-actions.integration.test.ts apps/web/tests/webhooks.integration.test.ts`
 
   Expected: FAIL on missing canonical associations and reply linkage.
 
-- [ ] **Step 3: Route existing transports through the canonical repository**
+- [x] **Step 3: Route existing transports through the canonical repository**
 
   Preserve current reminder stage state transitions. Set manual stage origin/actor when customer operations create the stage. Link Inbox replies to their canonical row. Skip stage updates for stage-less messages and retain the existing unknown-outcome rule.
 
-- [ ] **Step 4: Run the focused transport tests and verify they pass**
+- [x] **Step 4: Run the focused transport tests and verify they pass**
 
   Run: `pnpm vitest run apps/worker/tests/reminder-execute.integration.test.ts apps/worker/tests/operator-reply-execute.integration.test.ts apps/web/tests/customer-actions.integration.test.ts apps/web/tests/webhooks.integration.test.ts`
 
   Expected: PASS.
 
-- [ ] **Step 5: Commit canonical transport history**
+- [x] **Step 5: Commit canonical transport history**
 
   Run: `git add apps/worker apps/web/src/app/'(protected)'/customers apps/web/tests && git commit -m "feat: record outgoing activity in Outbox"`
 
@@ -220,27 +220,27 @@
 - Produces `createTestSmsService({ database, publisher, clock }).queue(session, { organisationId, destination, content, confirmed, requestId })`.
 - Produces `executeTestSms(dependencies, payload)` returning `dry-run | cancelled | sent | rejected | unknown | in-progress`.
 
-- [ ] **Step 1: Write failing service, payload, and worker tests**
+- [x] **Step 1: Write failing service, payload, and worker tests**
 
   Assert Administrator-only access, AU number normalisation, confirmation, segment cap, suppression, technical allowlist dry run, live accepted send, provider rejection, exact content, `TEST_SMS_QUEUED` audit history, repeated request/job idempotency, unknown outcome without retry, and foreign-organisation outbound IDs.
 
-- [ ] **Step 2: Run the test-SMS tests and verify they fail**
+- [x] **Step 2: Run the test-SMS tests and verify they fail**
 
   Run: `pnpm vitest run packages/jobs/src/queue.integration.test.ts apps/web/tests/test-sms.integration.test.ts apps/worker/tests/test-sms-execute.integration.test.ts`
 
   Expected: FAIL because the contract and handler do not exist.
 
-- [ ] **Step 3: Implement queued test SMS and worker registration**
+- [x] **Step 3: Implement queued test SMS and worker registration**
 
   The web service writes a `QUEUED` `TEST_SMS` Outbox record before publishing. The worker atomically claims it, rechecks suppression and organisation sending controls, records one attempt, and calls Sinch only when live sending is allowed.
 
-- [ ] **Step 4: Run the test-SMS tests and verify they pass**
+- [x] **Step 4: Run the test-SMS tests and verify they pass**
 
   Run: `pnpm vitest run packages/jobs/src/queue.integration.test.ts apps/web/tests/test-sms.integration.test.ts apps/worker/tests/test-sms-execute.integration.test.ts`
 
   Expected: PASS.
 
-- [ ] **Step 5: Commit the test-SMS pipeline**
+- [x] **Step 5: Commit the test-SMS pipeline**
 
   Run: `git add packages/jobs apps/worker apps/web/src/app/'(protected)'/settings/test-sms apps/web/tests/test-sms.integration.test.ts && git commit -m "feat: add safe test SMS pipeline"`
 
@@ -260,33 +260,33 @@
 - Produces: `queryOutbox(database, { organisationId, search?, channel?, source?, status?, from?, to?, cursor?, limit })` returning `{ rows, nextCursor }`.
 - Produces `/outbox` and primary navigation item immediately after Inbox.
 
-- [ ] **Step 1: Read the bundled Next.js App Router and server-component guides relevant to search parameters and links**
+- [x] **Step 1: Read the bundled Next.js App Router and server-component guides relevant to search parameters and links**
 
   Run: `rg -n "searchParams|Server Component|Link" node_modules/next/dist/docs -g '*.md'`
 
   Expected: identify and read the exact installed-version guidance before page code is written.
 
-- [ ] **Step 2: Write failing query and navigation tests**
+- [x] **Step 2: Write failing query and navigation tests**
 
   Assert organisation isolation, source/channel/status/date filters, client/invoice/recipient search, stable cursor pagination, historical null-content fallback, Xero body disclaimer, foreign identifiers not leaking, and Outbox placement after Inbox.
 
-- [ ] **Step 3: Run the Outbox tests and verify they fail**
+- [x] **Step 3: Run the Outbox tests and verify they fail**
 
   Run: `pnpm vitest run apps/web/tests/outbox.integration.test.ts apps/web/tests/app-shell.test.tsx`
 
   Expected: FAIL because the query, page and navigation item do not exist.
 
-- [ ] **Step 4: Implement the query, page, table, filters, and AccountPulse styling**
+- [x] **Step 4: Implement the query, page, table, filters, and AccountPulse styling**
 
   Render newest first; include recipient, linked client/invoice, source, actor, timestamps, provider result and safe content. Use created-time plus ID cursor semantics and preserve active filters in pagination links.
 
-- [ ] **Step 5: Run the Outbox tests and verify they pass**
+- [x] **Step 5: Run the Outbox tests and verify they pass**
 
   Run: `pnpm vitest run apps/web/tests/outbox.integration.test.ts apps/web/tests/app-shell.test.tsx`
 
   Expected: PASS.
 
-- [ ] **Step 6: Commit the Outbox UI**
+- [x] **Step 6: Commit the Outbox UI**
 
   Run: `git add apps/web && git commit -m "feat: add unified Outbox"`
 
@@ -309,27 +309,27 @@
 - Produces server actions `addApprovalTargetToWhitelist(formData)`, `addWhitelistEntry(formData)`, and `removeWhitelistEntry(formData)`.
 - Produces reusable controls whose confirmation copy says that current and future reminders will stop immediately.
 
-- [ ] **Step 1: Write failing permission, action, and page-model tests**
+- [x] **Step 1: Write failing permission, action, and page-model tests**
 
   Assert approval rows include contact/invoice IDs and links; both stop-reminder scopes require confirmation and accept an optional reason; Operators can add; only Administrators can access/remove in Settings; client and invoice lists are separate and searchable; reason/actor/date are shown; overlapping entries are separately listed; and foreign IDs are rejected.
 
-- [ ] **Step 2: Run the whitelist UI tests and verify they fail**
+- [x] **Step 2: Run the whitelist UI tests and verify they fail**
 
   Run: `pnpm vitest run apps/web/tests/approvals.integration.test.ts apps/web/tests/reminder-whitelist-ui.integration.test.ts`
 
   Expected: FAIL because the actions and settings page do not exist.
 
-- [ ] **Step 3: Implement approval controls and Administrator settings management**
+- [x] **Step 3: Implement approval controls and Administrator settings management**
 
   Revalidate Approvals, Escalations, client/invoice pages, Outbox, and whitelist Settings after mutations. Label actions **Stop reminders for invoice/client**; reserve **Reminder Whitelist** for the management page.
 
-- [ ] **Step 4: Run the whitelist UI tests and verify they pass**
+- [x] **Step 4: Run the whitelist UI tests and verify they pass**
 
   Run: `pnpm vitest run apps/web/tests/approvals.integration.test.ts apps/web/tests/reminder-whitelist-ui.integration.test.ts`
 
   Expected: PASS.
 
-- [ ] **Step 5: Commit whitelist UI controls**
+- [x] **Step 5: Commit whitelist UI controls**
 
   Run: `git add apps/web && git commit -m "feat: add reminder whitelist controls"`
 
@@ -346,27 +346,27 @@
 - Consumes: canonical Outbox and active whitelist fields.
 - Produces `/invoices/[invoiceId]`, showing only stored Xero fields, related outgoing history, whitelist/chase state, client link, and optional online-invoice link.
 
-- [ ] **Step 1: Write failing invoice-page tests**
+- [x] **Step 1: Write failing invoice-page tests**
 
   Assert accurate stored fields, no fabricated line items, optional Xero link, message history, whitelist state, client link, organisation isolation, and not-found behaviour for foreign/unknown IDs.
 
-- [ ] **Step 2: Run the invoice tests and verify they fail**
+- [x] **Step 2: Run the invoice tests and verify they fail**
 
   Run: `pnpm vitest run apps/web/tests/invoice-details.integration.test.ts`
 
   Expected: FAIL because the route does not exist.
 
-- [ ] **Step 3: Implement invoice details and add invoice links to customer/escalation surfaces**
+- [x] **Step 3: Implement invoice details and add invoice links to customer/escalation surfaces**
 
   Reuse the AccountPulse page/card styling and money/date formatters. Keep existing customer links and make invoice numbers clickable wherever the page has the required ID.
 
-- [ ] **Step 4: Run the invoice tests and verify they pass**
+- [x] **Step 4: Run the invoice tests and verify they pass**
 
   Run: `pnpm vitest run apps/web/tests/invoice-details.integration.test.ts`
 
   Expected: PASS.
 
-- [ ] **Step 5: Commit linked invoice details**
+- [x] **Step 5: Commit linked invoice details**
 
   Run: `git add apps/web && git commit -m "feat: add linked invoice details"`
 
@@ -388,27 +388,27 @@
 - `origin` is `CUSTOMER_PAGE | ESCALATION`; it maps to `MANUAL_REMINDER | ESCALATION_SMS` stage/Outbox source.
 - Produces escalation actions `sendEscalationSms(formData)` and `recordCallLinkOpened(formData)`.
 
-- [ ] **Step 1: Write failing shared-service and escalation tests**
+- [x] **Step 1: Write failing shared-service and escalation tests**
 
   Assert escalation SMS is editable and confirmed, contains the current payment link, obeys whitelist/suppression/segment/live controls, queues idempotently with `ESCALATION_SMS`, records `ESCALATION_SMS_QUEUED`, and rejects stale or foreign invoices. Assert the call action requires a usable phone, authorises `chase.operate`, records `CALL_LINK_OPENED`, and returns a normalised `tel:` target without claiming call completion.
 
-- [ ] **Step 2: Run the escalation tests and verify they fail**
+- [x] **Step 2: Run the escalation tests and verify they fail**
 
   Run: `pnpm vitest run apps/web/tests/customer-actions.integration.test.ts apps/web/tests/escalations.integration.test.ts`
 
   Expected: FAIL because shared manual service and escalation actions do not exist.
 
-- [ ] **Step 3: Extract the existing customer manual-send rules and add escalation controls**
+- [x] **Step 3: Extract the existing customer manual-send rules and add escalation controls**
 
   Keep customer behaviour unchanged while delegating both surfaces to the shared service. Add View client, View invoice, Call client, Send SMS, and both stop-reminders controls to each escalation card with clear unavailable reasons. The call component durably records the launch intent before assigning the browser to the returned `tel:` target; it never labels that event as a completed call.
 
-- [ ] **Step 4: Run the escalation tests and verify they pass**
+- [x] **Step 4: Run the escalation tests and verify they pass**
 
   Run: `pnpm vitest run apps/web/tests/customer-actions.integration.test.ts apps/web/tests/escalations.integration.test.ts`
 
   Expected: PASS.
 
-- [ ] **Step 5: Commit escalation operations**
+- [x] **Step 5: Commit escalation operations**
 
   Run: `git add apps/web && git commit -m "feat: add escalation contact actions"`
 
@@ -426,27 +426,27 @@
 - Consumes: Task 5 `createTestSmsService`.
 - Produces `queueTestSms(formData)` and an Administrator-only form with phone, editable content, encoding/segment preview, confirmation, and queued result guidance.
 
-- [ ] **Step 1: Write failing page/action tests**
+- [x] **Step 1: Write failing page/action tests**
 
   Assert Administrator-only rendering, required confirmation, stable page-generated request ID, segment preview, validation feedback, successful queueing, dry-run explanation, and no secret/provider credentials in rendered output.
 
-- [ ] **Step 2: Run the test-SMS web tests and verify they fail**
+- [x] **Step 2: Run the test-SMS web tests and verify they fail**
 
   Run: `pnpm vitest run apps/web/tests/test-sms.integration.test.ts`
 
   Expected: FAIL because the page, form and action do not exist.
 
-- [ ] **Step 3: Implement the Settings card, form, action, and result copy**
+- [x] **Step 3: Implement the Settings card, form, action, and result copy**
 
   Generate the idempotency request ID once per rendered form and submit it unchanged on repeated clicks. Explain that non-allowlisted recipients become dry runs and direct the user to Outbox for final provider status.
 
-- [ ] **Step 4: Run the test-SMS web tests and verify they pass**
+- [x] **Step 4: Run the test-SMS web tests and verify they pass**
 
   Run: `pnpm vitest run apps/web/tests/test-sms.integration.test.ts`
 
   Expected: PASS.
 
-- [ ] **Step 5: Commit the Test SMS settings UI**
+- [x] **Step 5: Commit the Test SMS settings UI**
 
   Run: `git add apps/web && git commit -m "feat: add Test SMS settings"`
 
@@ -460,35 +460,35 @@
 - Consumes every prior task.
 - Produces a clean branch ready for review, push, and the existing deployment pipeline.
 
-- [ ] **Step 1: Run formatting and static verification**
+- [x] **Step 1: Run formatting and static verification**
 
   Run: `pnpm lint && pnpm typecheck`
 
   Expected: PASS with no warnings promoted to errors.
 
-- [ ] **Step 2: Run all automated tests**
+- [x] **Step 2: Run all automated tests**
 
   Run: `pnpm test`
 
   Expected: all unit and integration tests pass; count is greater than the 264-test baseline.
 
-- [ ] **Step 3: Build every package and application**
+- [x] **Step 3: Build every package and application**
 
   Run: `pnpm build`
 
   Expected: PASS, including the Next.js production build and worker packages.
 
-- [ ] **Step 4: Inspect the migration and branch diff**
+- [x] **Step 4: Inspect the migration and branch diff**
 
   Run: `git diff origin/main...HEAD --check && git status --short && git log --oneline origin/main..HEAD`
 
   Expected: no whitespace errors, no unexpected generated/secrets files, and only approved feature changes.
 
-- [ ] **Step 5: Run the required whole-branch review**
+- [x] **Step 5: Run the required whole-branch review**
 
   Use `superpowers:requesting-code-review`, resolve findings with test-first changes, and rerun affected verification.
 
-- [ ] **Step 6: Commit any verification fixes**
+- [x] **Step 6: Commit any verification fixes**
 
   Run: `git add <reviewed-files> && git commit -m "fix: address AccountPulse operations review"`
 
