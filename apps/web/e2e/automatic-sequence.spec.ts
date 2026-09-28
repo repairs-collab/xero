@@ -27,9 +27,11 @@ test('an administrator switches one sequence to automatic with the 7-day email a
   await expect(page.getByText('SEQUENCE_MODE_CHANGED')).toBeVisible();
 });
 
-test('dry-run and allowlist gates are visible before live sending', async ({ page }) => {
+test('dry-run and controlled-launch gates are visible before live testing', async ({ page }) => {
   await page.goto('/settings/sending');
   await expect(page.getByRole('heading', { name: 'Dry-run only' })).toBeVisible();
   await expect(page.getByLabel('Mobile numbers')).toHaveValue('+61400000001');
-  await expect(page.getByText('Controlled end-to-end test passed')).toHaveClass(/passed/);
+  await expect(page.getByRole('heading', { name: 'Controlled launch readiness' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Enable controlled live testing' })).toBeVisible();
+  await expect(page.getByText(/Only destinations on the technical recipient allowlist/)).toBeVisible();
 });

@@ -1,10 +1,85 @@
-import { and, desc, eq, gte } from 'drizzle-orm';
+import { and, eq, gte } from 'drizzle-orm';
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
 
 import { authorise, type AppSession } from '@bc5000/auth';
 import { auditEvents, type Database, organisations, providerConnections } from '@bc5000/db/web';
 
 export const LIVE_ACKNOWLEDGEMENT = 'I understand live reminders will be sent to customers';
+
+export interface LiveActivationFeedback {
+  tone: 'error' | 'success';
+  title: string;
+  detail: string;
+}
+
+const activationErrors = new Set([
+  'ACKNOWLEDGEMENT_MISMATCH',
+  'PROVIDERS_UNHEALTHY',
+  'XERO_SYNC_STALE',
+  'ALLOWLIST_REQUIRED',
+  'FORBIDDEN'
+]);
+
+export const liveActivationStatusForError = (error: unknown): string =>
+  error instanceof Error && activationErrors.has(error.message)
+    ? error.message
+    : 'ACTIVATION_FAILED';
+
+export const liveActivationFeedback = (
+  status: string | string[] | undefined
+): LiveActivationFeedback | null => {
+  const value = Array.isArray(status) ? status[0] : status;
+  switch (value) {
+    case 'enabled':
+      return {
+        tone: 'success',
+        title: 'Controlled live mode enabled',
+        detail:
+          'Provider calls are open only for destinations on the technical recipient allowlist. Complete the controlled tests before the final customer rollout.'
+      };
+    case 'ACKNOWLEDGEMENT_MISMATCH':
+      return {
+        tone: 'error',
+        title: 'The acknowledgement did not match',
+        detail: 'Type the acknowledgement exactly as shown, then try again.'
+      };
+    case 'PROVIDERS_UNHEALTHY':
+      return {
+        tone: 'error',
+        title: 'Provider checks are out of date',
+        detail:
+          'Run successful Xero and Sinch connection tests, then try again within 24 hours.'
+      };
+    case 'XERO_SYNC_STALE':
+      return {
+        tone: 'error',
+        title: 'Xero data is not fresh enough',
+        detail: 'Run a Xero sync, then try again within 15 minutes.'
+      };
+    case 'ALLOWLIST_REQUIRED':
+      return {
+        tone: 'error',
+        title: 'Add a controlled recipient first',
+        detail:
+          'Add at least one company-controlled phone number or email address to the recipient allowlist.'
+      };
+    case 'FORBIDDEN':
+      return {
+        tone: 'error',
+        title: 'Administrator access is required',
+        detail: 'Only an AccountPulse administrator can enable live sending.'
+      };
+    case undefined:
+      return null;
+    default:
+      return {
+        tone: 'error',
+        title: 'Live sending was not enabled',
+        detail:
+          'No provider calls were opened. Refresh the page and check each launch-readiness item before trying again.'
+      };
+  }
+};
 
 const normaliseAllowlistRecipient = (rawValue: string): string => {
   const value = rawValue.trim();
@@ -33,7 +108,6 @@ export function createSendingSettings(dependencies: { database: Database; clock:
     if (!['XERO','SINCH'].every((provider) => providers.some((connection) => connection.provider === provider && connection.connectedAt !== null))) throw new Error('PROVIDERS_UNHEALTHY');
     if (organisation.lastSuccessfulSyncAt === null || now.getTime() - organisation.lastSuccessfulSyncAt.getTime() > 15 * 60 * 1000) throw new Error('XERO_SYNC_STALE');
     if (organisation.recipientAllowlist.length === 0) throw new Error('ALLOWLIST_REQUIRED');
-    const [controlledTest] = await dependencies.database.select({ id: auditEvents.id }).from(auditEvents).where(and(eq(auditEvents.organisationId, input.organisationId), eq(auditEvents.eventType, 'CONTROLLED_TEST_PASSED'))).orderBy(desc(auditEvents.occurredAt)).limit(1); if (!controlledTest) throw new Error('CONTROLLED_TEST_REQUIRED');
     await dependencies.database.transaction(async (transaction) => { await transaction.update(organisations).set({ sendMode: 'live', liveSendAcknowledged: true, updatedAt: now }).where(eq(organisations.id, input.organisationId)); await transaction.insert(auditEvents).values({ organisationId: input.organisationId, actorUserId: session.userId, eventType: 'LIVE_SENDING_ACTIVATED', entityType: 'ORGANISATION', entityId: input.organisationId, beforeValue: { sendMode: organisation.sendMode }, afterValue: { sendMode: 'live', acknowledgement: LIVE_ACKNOWLEDGEMENT }, occurredAt: now }); });
   };
 
