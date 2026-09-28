@@ -16,6 +16,7 @@ COPY packages packages
 RUN pnpm exec esbuild apps/worker/src/entrypoint.ts --bundle --platform=node --format=esm --target=node24 --outfile=/workspace/worker.mjs --external:pg-native --banner:js="import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);"
 
 FROM node:24.19.0-alpine3.23 AS runtime
+LABEL org.opencontainers.image.description="AccountPulse worker with protected operational-reset commands"
 ENV NODE_ENV=production
 ENV MIGRATIONS_DIR=/app/migrations
 WORKDIR /app

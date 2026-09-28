@@ -1,5 +1,35 @@
 type Environment = Record<string, string | undefined>;
 
+export type OperationalResetCommand =
+  | {
+      kind: 'prepare';
+      input: {
+        organisationId: string;
+        resetRunId: string;
+        deployedCommit: string;
+        adminEmail: string;
+        acknowledgement: string;
+        expectedVersion: number;
+      };
+    }
+  | {
+      kind: 'execute';
+      input: {
+        organisationId: string;
+        resetRunId: string;
+        snapshotIdentifier: string;
+      };
+    }
+  | {
+      kind: 'abort';
+      input: {
+        organisationId: string;
+        resetRunId: string;
+        adminEmail: string;
+        reason: string;
+      };
+    };
+
 const required = (environment: Environment, name: string): string => {
   const value = environment[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
@@ -57,4 +87,106 @@ export function parseProviderCredentials(environment: Environment) {
       apiSecret: field(sinch, 'apiSecret', 'SINCH_API_CREDENTIALS')
     }
   };
+}
+
+const parseFlags = (arguments_: string[]): Map<string, string> => {
+  if (arguments_.length % 2 !== 0) {
+    throw new Error('Operational reset flags require values');
+  }
+  const flags = new Map<string, string>();
+  for (let index = 0; index < arguments_.length; index += 2) {
+    const name = arguments_[index];
+    const value = arguments_[index + 1];
+    if (name === undefined || !name.startsWith('--') || value === undefined) {
+      throw new Error('Operational reset flags are invalid');
+    }
+    const key = name.slice(2);
+    if (flags.has(key)) throw new Error(`${key} was supplied more than once`);
+    flags.set(key, value);
+  }
+  return flags;
+};
+
+const flag = (flags: Map<string, string>, name: string): string => {
+  const value = flags.get(name)?.trim();
+  if (!value) throw new Error(`${name} is required`);
+  return value;
+};
+
+const rejectUnknownFlags = (
+  flags: Map<string, string>,
+  allowed: readonly string[]
+): void => {
+  for (const name of flags.keys()) {
+    if (!allowed.includes(name)) throw new Error(`${name} is not supported`);
+  }
+};
+
+export function parseOperationalResetCommand(
+  arguments_: string[]
+): OperationalResetCommand | null {
+  if (arguments_.length === 0) return null;
+  if (arguments_[0] !== 'operational-reset') {
+    throw new Error('Unsupported worker command');
+  }
+  const subcommand = arguments_[1];
+  const flags = parseFlags(arguments_.slice(2));
+  if (subcommand === 'prepare') {
+    rejectUnknownFlags(flags, [
+      'organisation-id',
+      'run-id',
+      'deployed-commit',
+      'admin-email',
+      'acknowledgement',
+      'expected-version'
+    ]);
+    const expectedVersionSource = flag(flags, 'expected-version');
+    if (!/^\d+$/.test(expectedVersionSource)) {
+      throw new Error('expected-version is invalid');
+    }
+    const expectedVersion = Number(expectedVersionSource);
+    if (!Number.isSafeInteger(expectedVersion)) {
+      throw new Error('expected-version is invalid');
+    }
+    return {
+      kind: 'prepare',
+      input: {
+        organisationId: flag(flags, 'organisation-id'),
+        resetRunId: flag(flags, 'run-id'),
+        deployedCommit: flag(flags, 'deployed-commit'),
+        adminEmail: flag(flags, 'admin-email'),
+        acknowledgement: flag(flags, 'acknowledgement'),
+        expectedVersion
+      }
+    };
+  }
+  if (subcommand === 'execute') {
+    rejectUnknownFlags(flags, ['organisation-id', 'run-id', 'snapshot-id']);
+    return {
+      kind: 'execute',
+      input: {
+        organisationId: flag(flags, 'organisation-id'),
+        resetRunId: flag(flags, 'run-id'),
+        snapshotIdentifier: flag(flags, 'snapshot-id')
+      }
+    };
+  }
+  if (subcommand === 'abort') {
+    rejectUnknownFlags(flags, [
+      'organisation-id',
+      'run-id',
+      'admin-email',
+      'reason'
+    ]);
+    return {
+      kind: 'abort',
+      input: {
+        organisationId: flag(flags, 'organisation-id'),
+        resetRunId: flag(flags, 'run-id'),
+        adminEmail: flag(flags, 'admin-email'),
+        reason: flag(flags, 'reason')
+      }
+    };
+  }
+  throw new Error('Operational reset subcommand must be prepare, execute, or abort');
 }
