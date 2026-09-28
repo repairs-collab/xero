@@ -118,8 +118,11 @@ const seedApprovedReminder = async (options: {
   template?: string;
   sequenceMode?: 'REVIEW' | 'AUTOMATIC';
   stageKey?: string;
+  stageOrigin?: 'AUTOMATION' | 'MANUAL_REMINDER' | 'ESCALATION_SMS';
   email?: string;
   allowlistEmail?: string;
+  rolloutScope?: 'CONTROLLED' | 'CUSTOMER';
+  allowlisted?: boolean;
 } = {}) => {
   const organisationId = randomUUID();
   const contactId = randomUUID();
@@ -142,7 +145,11 @@ const seedApprovedReminder = async (options: {
     baseCurrency: 'AUD',
     sendMode: 'live',
     liveSendAcknowledged: true,
-    recipientAllowlist: [phone, options.allowlistEmail ?? email]
+    rolloutScope: options.rolloutScope ?? 'CONTROLLED',
+    recipientAllowlist:
+      options.allowlisted === false
+        ? []
+        : [phone, options.allowlistEmail ?? email]
   });
   await client.db.insert(contacts).values({
     id: contactId,
@@ -217,6 +224,7 @@ const seedApprovedReminder = async (options: {
     invoiceChaseId: chaseId,
     sequenceVersionId,
     stageKey: options.stageKey ?? 'seven-days',
+    origin: options.stageOrigin ?? 'AUTOMATION',
     channel,
     status: 'QUEUED',
     scheduledAt: now,
@@ -299,11 +307,25 @@ const waitUntil = async (condition: () => boolean): Promise<void> => {
   throw new Error('Timed out waiting for test condition');
 };
 
+const waitUntilAsync = async (
+  condition: () => Promise<boolean>
+): Promise<void> => {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (await condition()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error('Timed out waiting for async test condition');
+};
+
 describe('executeReminder', () => {
   it.each(['CLIENT', 'INVOICE'] as const)(
     'cancels before sending when the %s target is whitelisted',
     async (scope) => {
-      const seeded = await seedApprovedReminder();
+      const seeded = await seedApprovedReminder({
+        rolloutScope: 'CUSTOMER',
+        allowlisted: false
+      });
       await client.db.insert(reminderWhitelistEntries).values({
         organisationId: seeded.organisationId,
         scope,
@@ -328,7 +350,10 @@ describe('executeReminder', () => {
   );
 
   it('does not submit when a concurrent whitelist transaction wins the target lock', async () => {
-    const seeded = await seedApprovedReminder();
+    const seeded = await seedApprovedReminder({
+      rolloutScope: 'CUSTOMER',
+      allowlisted: false
+    });
     const xero = new FakeXero();
     xero.invoice = xeroInvoice(seeded);
     const sinch = new FakeSinch();
@@ -405,7 +430,10 @@ describe('executeReminder', () => {
   });
 
   it('sends exactly once and returns the stored outcome for a duplicate job', async () => {
-    const seeded = await seedApprovedReminder();
+    const seeded = await seedApprovedReminder({
+      rolloutScope: 'CUSTOMER',
+      allowlisted: false
+    });
     const xero = new FakeXero();
     xero.invoice = xeroInvoice(seeded);
     const sinch = new FakeSinch();
@@ -447,6 +475,57 @@ describe('executeReminder', () => {
         'Hi Alex, invoice INV-5000 is overdue. https://in.xero.test/INV-5000'
     });
   });
+
+  it.each([
+    {
+      label: 'manual customer SMS',
+      channel: 'SMS' as const,
+      stageOrigin: 'MANUAL_REMINDER' as const,
+      stageKey: 'manual',
+      source: 'MANUAL_REMINDER'
+    },
+    {
+      label: 'escalation SMS',
+      channel: 'SMS' as const,
+      stageOrigin: 'ESCALATION_SMS' as const,
+      stageKey: 'escalation-sms',
+      source: 'ESCALATION_SMS'
+    },
+    {
+      label: 'manual customer Xero email',
+      channel: 'XERO_EMAIL' as const,
+      stageOrigin: 'MANUAL_REMINDER' as const,
+      stageKey: 'manual',
+      source: 'XERO_EMAIL'
+    }
+  ])(
+    'submits $label outside the technical allowlist in customer scope',
+    async ({ channel, stageOrigin, stageKey, source }) => {
+      const seeded = await seedApprovedReminder({
+        channel,
+        stageOrigin,
+        stageKey,
+        rolloutScope: 'CUSTOMER',
+        allowlisted: false
+      });
+      const xero = new FakeXero();
+      xero.invoice = xeroInvoice(seeded);
+      const sinch = new FakeSinch();
+
+      await expect(
+        executeReminder(dependencies(xero, sinch), {
+          organisationId: seeded.organisationId,
+          stageInstanceId: seeded.stageInstanceId
+        })
+      ).resolves.toMatchObject({ kind: 'sent' });
+      expect(channel === 'SMS' ? sinch.sendCalls.length : xero.emailCalls).toBe(1);
+      const [outbound] = await client.db
+        .select()
+        .from(outboundMessages)
+        .where(eq(outboundMessages.organisationId, seeded.organisationId));
+      expect(outbound?.source).toBe(source);
+    }
+  );
 
   it('stops on a customer reply pause', async () => {
     const seeded = await seedApprovedReminder();
@@ -496,7 +575,10 @@ describe('executeReminder', () => {
   });
 
   it('stops on an SMS opt-out suppression', async () => {
-    const seeded = await seedApprovedReminder();
+    const seeded = await seedApprovedReminder({
+      rolloutScope: 'CUSTOMER',
+      allowlisted: false
+    });
     await client.db.insert(suppressions).values({
       organisationId: seeded.organisationId,
       channel: 'SMS',
@@ -699,6 +781,53 @@ describe('executeReminder', () => {
       content: 'Xero invoice email for INV-5000'
     });
   });
+
+  it.each(['SMS', 'XERO_EMAIL'] as const)(
+    're-reads maintenance after claiming a %s reminder and prevents provider submission',
+    async (channel) => {
+      const seeded = await seedApprovedReminder({ channel });
+      const xero = new FakeXero();
+      xero.invoice = xeroInvoice(seeded);
+      const sinch = new FakeSinch();
+      const locked = deferred();
+      const release = deferred();
+      const policyChange = client.db.transaction(async (transaction) => {
+        await transaction
+          .update(organisations)
+          .set({ maintenanceMode: true })
+          .where(eq(organisations.id, seeded.organisationId));
+        locked.resolve();
+        await release.promise;
+      });
+      await locked.promise;
+
+      const execution = executeReminder(dependencies(xero, sinch), {
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId
+      });
+      try {
+        await waitUntilAsync(async () => {
+          if (sinch.sendCalls.length > 0 || xero.emailCalls > 0) return true;
+          const [outbound] = await client.db
+            .select({ status: outboundMessages.status })
+            .from(outboundMessages)
+            .where(eq(outboundMessages.organisationId, seeded.organisationId))
+            .limit(1);
+          return outbound?.status === 'SENDING';
+        });
+        expect(sinch.sendCalls).toHaveLength(0);
+        expect(xero.emailCalls).toBe(0);
+      } finally {
+        release.resolve();
+        await policyChange;
+      }
+
+      await expect(execution).resolves.toEqual({
+        kind: 'cancelled',
+        reason: 'OPERATIONAL_MAINTENANCE'
+      });
+    }
+  );
 
   it('maps an explicit Sinch rejection without retrying', async () => {
     const seeded = await seedApprovedReminder();

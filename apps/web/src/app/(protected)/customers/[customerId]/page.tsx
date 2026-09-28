@@ -285,6 +285,9 @@ export default async function CustomerPage({
                         customer.email?.toLowerCase()
                   ),
                   sendMode: organisation.sendMode,
+                  liveSendAcknowledged: organisation.liveSendAcknowledged,
+                  rolloutScope: organisation.rolloutScope,
+                  maintenanceMode: organisation.maintenanceMode,
                   recipientAllowlist: organisation.recipientAllowlist,
                   blockingReason
                 });

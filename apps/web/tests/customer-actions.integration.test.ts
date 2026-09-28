@@ -135,6 +135,45 @@ describe('customer chase controls', () => {
     expect(jobs.publish).toHaveBeenCalledTimes(2);
   });
 
+  it.each(['SMS', 'XERO_EMAIL'] as const)(
+    'queues a customer-scope manual %s outside the technical allowlist',
+    async (channel) => {
+      const seeded = await seedCustomer();
+      await client.db
+        .update(organisations)
+        .set({
+          sendMode: 'live',
+          liveSendAcknowledged: true,
+          rolloutScope: 'CUSTOMER',
+          recipientAllowlist: []
+        })
+        .where(eq(organisations.id, seeded.organisationId));
+      const jobs = publisher();
+      const service = createManualReminderService({
+        database: client.db,
+        publisher: jobs,
+        clock: { now: () => now }
+      });
+      const requestId = randomUUID();
+
+      await expect(
+        service.queue(seeded.session, {
+          organisationId: seeded.organisationId,
+          customerId: seeded.customerId,
+          invoiceId: seeded.invoiceId,
+          channel,
+          ...(channel === 'SMS'
+            ? { message: 'Pay https://in.xero.test/INV-200' }
+            : {}),
+          confirmed: true,
+          requestId,
+          origin: 'CUSTOMER_PAGE'
+        })
+      ).resolves.toEqual({ queued: true, stageInstanceId: requestId });
+      expect(jobs.publish).toHaveBeenCalledOnce();
+    }
+  );
+
   it('rejects a manual reminder without explicit confirmation', async () => {
     const seeded = await seedCustomer();
     const service = createCustomerOperations({ database: client.db, publisher: publisher(), clock: { now: () => now } });
@@ -243,6 +282,15 @@ describe('customer chase controls', () => {
     ).rejects.toThrow(/1-segment limit/);
 
     const suppressed = await seedCustomer();
+    await client.db
+      .update(organisations)
+      .set({
+        sendMode: 'live',
+        liveSendAcknowledged: true,
+        rolloutScope: 'CUSTOMER',
+        recipientAllowlist: []
+      })
+      .where(eq(organisations.id, suppressed.organisationId));
     await client.db.insert(suppressions).values({
       organisationId: suppressed.organisationId,
       channel: 'SMS',
@@ -263,6 +311,15 @@ describe('customer chase controls', () => {
     ).rejects.toThrow('SMS_SUPPRESSED:SINCH_OPT_OUT');
 
     const whitelisted = await seedCustomer();
+    await client.db
+      .update(organisations)
+      .set({
+        sendMode: 'live',
+        liveSendAcknowledged: true,
+        rolloutScope: 'CUSTOMER',
+        recipientAllowlist: []
+      })
+      .where(eq(organisations.id, whitelisted.organisationId));
     await client.db.insert(reminderWhitelistEntries).values({
       organisationId: whitelisted.organisationId,
       scope: 'INVOICE',

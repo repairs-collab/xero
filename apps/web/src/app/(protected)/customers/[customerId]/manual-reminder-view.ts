@@ -1,3 +1,5 @@
+import { evaluateProviderSendPolicy } from '@bc5000/domain';
+
 export interface ManualReminderViewInput {
   customerName: string;
   invoiceNumber: string;
@@ -15,6 +17,9 @@ export interface ManualReminderViewInput {
   smsSuppressed: boolean;
   emailSuppressed: boolean;
   sendMode: 'dry-run' | 'live';
+  liveSendAcknowledged: boolean;
+  rolloutScope: 'CONTROLLED' | 'CUSTOMER';
+  maintenanceMode: boolean;
   recipientAllowlist: string[];
   blockingReason?: string | null;
 }
@@ -36,6 +41,36 @@ const sendingUnavailableReason = (
   return null;
 };
 
+const policyUnavailableReason = (
+  input: ManualReminderViewInput,
+  channel: 'SMS' | 'XERO_EMAIL',
+  destination: string
+): string | null => {
+  const decision = evaluateProviderSendPolicy({
+    sendMode: input.sendMode,
+    liveSendAcknowledged: input.liveSendAcknowledged,
+    rolloutScope: input.rolloutScope,
+    maintenanceMode: input.maintenanceMode,
+    source: channel === 'SMS' ? 'MANUAL_REMINDER' : 'XERO_EMAIL',
+    channel,
+    destination,
+    recipientAllowlist: input.recipientAllowlist
+  });
+  if (decision.kind === 'provider-call') return null;
+  if (decision.kind === 'blocked') {
+    return decision.reason === 'OPERATIONAL_MAINTENANCE'
+      ? 'Sending is paused for maintenance'
+      : 'Sending configuration needs attention';
+  }
+  if (decision.reason === 'GLOBAL_DRY_RUN') return null;
+  if (decision.reason === 'LIVE_NOT_ACKNOWLEDGED') {
+    return 'Live sending has not been acknowledged';
+  }
+  return channel === 'SMS'
+    ? 'Mobile is not on the live-send allowlist'
+    : 'Email is not on the live-send allowlist';
+};
+
 export function createManualReminderView(input: ManualReminderViewInput) {
   const unavailable = sendingUnavailableReason(input);
   const smsUnavailable =
@@ -46,22 +81,14 @@ export function createManualReminderView(input: ManualReminderViewInput) {
         ? 'Sync Xero to retrieve the payment link'
         : input.smsSuppressed
           ? 'Customer has opted out of SMS reminders'
-          : input.sendMode === 'live' &&
-              !input.recipientAllowlist.includes(input.phone)
-            ? 'Mobile is not on the live-send allowlist'
-        : null);
+          : policyUnavailableReason(input, 'SMS', input.phone));
   const emailUnavailable =
     unavailable ??
     (input.email === null
       ? 'No customer email address'
       : input.emailSuppressed
         ? 'Customer email is suppressed'
-        : input.sendMode === 'live' &&
-            !input.recipientAllowlist.some(
-              (recipient) => recipient.toLowerCase() === input.email?.toLowerCase()
-            )
-          ? 'Email is not on the live-send allowlist'
-          : null);
+        : policyUnavailableReason(input, 'XERO_EMAIL', input.email));
   const amount = Number(input.amountDue).toFixed(2);
 
   return {

@@ -20,6 +20,11 @@ import {
 } from '@bc5000/integrations/sinch';
 import type { JobPayloads } from '@bc5000/jobs';
 
+import {
+  loadProviderSendDecision,
+  markProviderSendBlocked
+} from '../services/provider-send-policy.js';
+
 export interface TestSmsExecutionDependencies {
   database: Database;
   clock: { now(): Date };
@@ -29,7 +34,13 @@ export interface TestSmsExecutionDependencies {
 
 export type TestSmsOutcome =
   | { kind: 'dry-run' }
-  | { kind: 'cancelled'; reason: 'SUPPRESSED' }
+  | {
+      kind: 'cancelled';
+      reason:
+        | 'SUPPRESSED'
+        | 'OPERATIONAL_MAINTENANCE'
+        | 'UNSUPPORTED_SENDING_STATE';
+    }
   | { kind: 'sent'; providerMessageId: string }
   | { kind: 'rejected'; reason: 'PROVIDER_REJECTED' | 'RATE_LIMITED' }
   | { kind: 'unknown' }
@@ -102,12 +113,6 @@ export async function executeTestSms(
     throw new Error('TEST_SMS_UNEXPECTED_WHITELIST_BLOCK');
   }
 
-  const [controls] = await dependencies.database
-    .select()
-    .from(organisations)
-    .where(eq(organisations.id, payload.organisationId))
-    .limit(1);
-  if (controls === undefined) throw new Error('TEST_SMS_NOT_FOUND');
   const [suppression] = await dependencies.database
     .select()
     .from(suppressions)
@@ -146,11 +151,13 @@ export async function executeTestSms(
     return { kind: 'cancelled', reason: 'SUPPRESSED' };
   }
 
-  const liveAllowed =
-    controls.sendMode === 'live' &&
-    controls.liveSendAcknowledged &&
-    controls.recipientAllowlist.includes(candidate.outbound.recipientKey);
-  if (!liveAllowed) {
+  const sendDecision = await loadProviderSendDecision(dependencies.database, {
+    organisationId: payload.organisationId,
+    source: 'TEST_SMS',
+    channel: 'SMS',
+    destination: candidate.outbound.recipientKey
+  });
+  if (sendDecision.kind === 'dry-run') {
     await repository.markDryRun({
       outboundId: claim.outboundId,
       attemptId: claim.attemptId,
@@ -158,6 +165,17 @@ export async function executeTestSms(
       now
     });
     return { kind: 'dry-run' };
+  }
+  if (sendDecision.kind === 'blocked') {
+    await markProviderSendBlocked(dependencies.database, {
+      organisationId: payload.organisationId,
+      outboundId: claim.outboundId,
+      attemptId: claim.attemptId,
+      stageInstanceId: null,
+      reason: sendDecision.reason,
+      now
+    });
+    return { kind: 'cancelled', reason: sendDecision.reason };
   }
 
   try {

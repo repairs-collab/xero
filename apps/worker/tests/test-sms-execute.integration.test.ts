@@ -32,6 +32,7 @@ async function seedTestSms(options: {
   sendMode?: 'dry-run' | 'live';
   allowlisted?: boolean;
   suppressed?: boolean;
+  rolloutScope?: 'CONTROLLED' | 'CUSTOMER';
 } = {}) {
   const organisationId = randomUUID();
   const outboundMessageId = randomUUID();
@@ -45,6 +46,7 @@ async function seedTestSms(options: {
     baseCurrency: 'AUD',
     sendMode,
     liveSendAcknowledged: sendMode === 'live',
+    rolloutScope: options.rolloutScope ?? 'CONTROLLED',
     recipientAllowlist: options.allowlisted === false ? [] : [number]
   });
   await client.db.insert(outboundMessages).values({
@@ -81,9 +83,31 @@ const dependencies = (sendSms = vi.fn()) => ({
   callbackUrl: 'https://example.invalid/api/webhooks/sinch'
 });
 
+const deferred = () => {
+  let resolve!: () => void;
+  const promise = new Promise<void>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+};
+
+const waitUntilAsync = async (
+  condition: () => Promise<boolean>
+): Promise<void> => {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (await condition()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error('Timed out waiting for test SMS state');
+};
+
 describe('test SMS execution', () => {
   it('records a dry run when the destination is outside the technical allowlist', async () => {
-    const seeded = await seedTestSms({ allowlisted: false });
+    const seeded = await seedTestSms({
+      allowlisted: false,
+      rolloutScope: 'CUSTOMER'
+    });
     const sendSms = vi.fn();
 
     await expect(executeTestSms(dependencies(sendSms), seeded)).resolves.toEqual({
@@ -153,6 +177,49 @@ describe('test SMS execution', () => {
       .from(messageAttempts)
       .where(eq(messageAttempts.outboundMessageId, seeded.outboundMessageId));
     expect(attempts).toHaveLength(1);
+  });
+
+  it('re-reads maintenance after claiming and prevents the Test SMS provider call', async () => {
+    const seeded = await seedTestSms();
+    const sendSms = vi.fn(() =>
+      Promise.resolve({
+        kind: 'accepted' as const,
+        messageId: 'too-late',
+        status: 'ACCEPTED'
+      })
+    );
+    const locked = deferred();
+    const release = deferred();
+    const policyChange = client.db.transaction(async (transaction) => {
+      await transaction
+        .update(organisations)
+        .set({ maintenanceMode: true })
+        .where(eq(organisations.id, seeded.organisationId));
+      locked.resolve();
+      await release.promise;
+    });
+    await locked.promise;
+
+    const execution = executeTestSms(dependencies(sendSms), seeded);
+    try {
+      await waitUntilAsync(async () => {
+        if (sendSms.mock.calls.length > 0) return true;
+        const [message] = await client.db
+          .select({ status: outboundMessages.status })
+          .from(outboundMessages)
+          .where(eq(outboundMessages.id, seeded.outboundMessageId));
+        return message?.status === 'SENDING';
+      });
+      expect(sendSms).not.toHaveBeenCalled();
+    } finally {
+      release.resolve();
+      await policyChange;
+    }
+
+    await expect(execution).resolves.toEqual({
+      kind: 'cancelled',
+      reason: 'OPERATIONAL_MAINTENANCE'
+    });
   });
 
   it('records known rejection and unknown outcome without resubmitting', async () => {

@@ -62,6 +62,8 @@ export interface RevalidatedReminder {
   organisationName: string;
   sendMode: 'dry-run' | 'live';
   liveSendAcknowledged: boolean;
+  rolloutScope: 'CONTROLLED' | 'CUSTOMER';
+  maintenanceMode: boolean;
   recipientAllowlist: string[];
   stageInstanceId: string;
   stageKey: string;
@@ -467,6 +469,8 @@ export async function revalidateReminder(
       organisationName: row.organisation.name,
       sendMode: row.organisation.sendMode,
       liveSendAcknowledged: row.organisation.liveSendAcknowledged,
+      rolloutScope: row.organisation.rolloutScope,
+      maintenanceMode: row.organisation.maintenanceMode,
       recipientAllowlist: row.organisation.recipientAllowlist,
       stageInstanceId: row.stage.id,
       stageKey: row.stage.stageKey,

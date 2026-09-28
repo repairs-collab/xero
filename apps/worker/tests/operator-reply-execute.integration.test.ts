@@ -13,9 +13,14 @@ const now = new Date('2026-09-18T02:00:00.000Z');
 beforeAll(async () => migrateDatabase(client.db));
 afterAll(async () => client.pool.end());
 
-async function seedReply(sendMode: 'dry-run' | 'live') {
+async function seedReply(options: {
+  sendMode: 'dry-run' | 'live';
+  rolloutScope?: 'CONTROLLED' | 'CUSTOMER';
+  allowlisted?: boolean;
+}) {
+  const sendMode = options.sendMode;
   const organisationId = randomUUID(); const userId = randomUUID(); const contactId = randomUUID(); const conversationId = randomUUID(); const replyId = randomUUID(); const number = '+61400000001';
-  await client.db.insert(organisations).values({ id: organisationId, xeroOrganisationId: randomUUID(), name: 'Reply execution', timeZone: 'Australia/Sydney', baseCurrency: 'AUD', sendMode, liveSendAcknowledged: sendMode === 'live', recipientAllowlist: sendMode === 'live' ? [number] : [] });
+  await client.db.insert(organisations).values({ id: organisationId, xeroOrganisationId: randomUUID(), name: 'Reply execution', timeZone: 'Australia/Sydney', baseCurrency: 'AUD', sendMode, liveSendAcknowledged: sendMode === 'live', rolloutScope: options.rolloutScope ?? 'CONTROLLED', recipientAllowlist: sendMode === 'live' && options.allowlisted !== false ? [number] : [] });
   await client.db.insert(users).values({ id: userId, cognitoSubject: randomUUID(), email: `${userId}@example.invalid`, displayName: 'Operator' });
   await client.db.insert(contacts).values({ id: contactId, organisationId, xeroContactId: randomUUID(), name: 'Customer' });
   await client.db.insert(conversations).values({ id: conversationId, organisationId, contactId, normalisedNumber: number, lastMessageAt: now });
@@ -23,9 +28,28 @@ async function seedReply(sendMode: 'dry-run' | 'live') {
   return { organisationId, contactId, userId, replyId };
 }
 
+const deferred = () => {
+  let resolve!: () => void;
+  const promise = new Promise<void>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+};
+
+const waitUntilAsync = async (
+  condition: () => Promise<boolean>
+): Promise<void> => {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (await condition()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error('Timed out waiting for operator reply state');
+};
+
 describe('operator reply execution', () => {
   it('honours dry-run safety without calling Sinch', async () => {
-    const seeded = await seedReply('dry-run'); const sendSms = vi.fn();
+    const seeded = await seedReply({ sendMode: 'dry-run' }); const sendSms = vi.fn();
     const outcome = await executeOperatorReply({ database: client.db, clock: { now: () => now }, sinch: { sendSms }, callbackUrl: 'https://example.invalid/sinch' }, seeded);
     const [reply] = await client.db.select().from(operatorReplies).where(eq(operatorReplies.id, seeded.replyId));
     const [outbound] = await client.db.select().from(outboundMessages).where(eq(outboundMessages.organisationId, seeded.organisationId));
@@ -35,7 +59,7 @@ describe('operator reply execution', () => {
   });
 
   it('sends an allowlisted live reply once', async () => {
-    const seeded = await seedReply('live'); const sendSms = vi.fn(() => Promise.resolve({ kind: 'accepted' as const, messageId: 'sinch-1', status: 'ACCEPTED' })); const dependencies = { database: client.db, clock: { now: () => now }, sinch: { sendSms }, callbackUrl: 'https://example.invalid/sinch' };
+    const seeded = await seedReply({ sendMode: 'live' }); const sendSms = vi.fn(() => Promise.resolve({ kind: 'accepted' as const, messageId: 'sinch-1', status: 'ACCEPTED' })); const dependencies = { database: client.db, clock: { now: () => now }, sinch: { sendSms }, callbackUrl: 'https://example.invalid/sinch' };
     const first = await executeOperatorReply(dependencies, seeded); const second = await executeOperatorReply(dependencies, seeded);
     expect(first).toMatchObject({ kind: 'sent', providerMessageId: 'sinch-1' }); expect(second).toMatchObject({ kind: 'sent', providerMessageId: 'sinch-1' }); expect(sendSms).toHaveBeenCalledOnce();
     const [reply] = await client.db.select().from(operatorReplies).where(eq(operatorReplies.id, seeded.replyId));
@@ -60,8 +84,90 @@ describe('operator reply execution', () => {
     expect(deliveredOutbound?.status).toBe('DELIVERED');
   });
 
+  it('sends a customer-scope Inbox reply outside the technical allowlist', async () => {
+    const seeded = await seedReply({
+      sendMode: 'live',
+      rolloutScope: 'CUSTOMER',
+      allowlisted: false
+    });
+    const sendSms = vi.fn(() =>
+      Promise.resolve({
+        kind: 'accepted' as const,
+        messageId: 'sinch-customer-1',
+        status: 'ACCEPTED'
+      })
+    );
+
+    await expect(
+      executeOperatorReply(
+        {
+          database: client.db,
+          clock: { now: () => now },
+          sinch: { sendSms },
+          callbackUrl: 'https://example.invalid/sinch'
+        },
+        seeded
+      )
+    ).resolves.toEqual({
+      kind: 'sent',
+      providerMessageId: 'sinch-customer-1'
+    });
+    expect(sendSms).toHaveBeenCalledOnce();
+  });
+
+  it('re-reads maintenance after claiming and prevents the Inbox reply provider call', async () => {
+    const seeded = await seedReply({ sendMode: 'live' });
+    const sendSms = vi.fn(() =>
+      Promise.resolve({
+        kind: 'accepted' as const,
+        messageId: 'too-late',
+        status: 'ACCEPTED'
+      })
+    );
+    const locked = deferred();
+    const release = deferred();
+    const policyChange = client.db.transaction(async (transaction) => {
+      await transaction
+        .update(organisations)
+        .set({ maintenanceMode: true })
+        .where(eq(organisations.id, seeded.organisationId));
+      locked.resolve();
+      await release.promise;
+    });
+    await locked.promise;
+
+    const execution = executeOperatorReply(
+      {
+        database: client.db,
+        clock: { now: () => now },
+        sinch: { sendSms },
+        callbackUrl: 'https://example.invalid/sinch'
+      },
+      seeded
+    );
+    try {
+      await waitUntilAsync(async () => {
+        if (sendSms.mock.calls.length > 0) return true;
+        const [outbound] = await client.db
+          .select({ status: outboundMessages.status })
+          .from(outboundMessages)
+          .where(eq(outboundMessages.organisationId, seeded.organisationId));
+        return outbound?.status === 'SENDING';
+      });
+      expect(sendSms).not.toHaveBeenCalled();
+    } finally {
+      release.resolve();
+      await policyChange;
+    }
+
+    await expect(execution).resolves.toEqual({
+      kind: 'cancelled',
+      reason: 'OPERATIONAL_MAINTENANCE'
+    });
+  });
+
   it('retains the provider delivery failure in both Inbox and Outbox', async () => {
-    const seeded = await seedReply('live');
+    const seeded = await seedReply({ sendMode: 'live' });
     const sendSms = vi.fn(() =>
       Promise.resolve({
         kind: 'accepted' as const,

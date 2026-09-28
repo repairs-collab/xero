@@ -32,6 +32,10 @@ import {
   type RevalidationXeroClient,
   type StopReason
 } from '../services/pre-send-revalidation.js';
+import {
+  loadProviderSendDecision,
+  markProviderSendBlocked
+} from '../services/provider-send-policy.js';
 
 export interface ReminderExecutionClock {
   now(): Date;
@@ -65,7 +69,14 @@ export type ExecutionOutcome =
       providerMessageId: string | null;
     }
   | { kind: 'dry-run' }
-  | { kind: 'cancelled'; reason: StopReason | 'XERO_EMAIL_ALLOWANCE' }
+  | {
+      kind: 'cancelled';
+      reason:
+        | StopReason
+        | 'XERO_EMAIL_ALLOWANCE'
+        | 'OPERATIONAL_MAINTENANCE'
+        | 'UNSUPPORTED_SENDING_STATE';
+    }
   | { kind: 'rejected'; reason: 'PROVIDER_REJECTED' | 'RATE_LIMITED' }
   | { kind: 'unknown' }
   | { kind: 'in-progress' };
@@ -285,15 +296,13 @@ export async function executeReminder(
     });
   }
 
-  const liveAllowed =
-    reminder.sendMode === 'live' &&
-    reminder.liveSendAcknowledged &&
-    reminder.recipientAllowlist.some((recipient) =>
-      reminder.channel === 'XERO_EMAIL'
-        ? recipient.toLowerCase() === reminder.destination.toLowerCase()
-        : recipient === reminder.destination
-    );
-  if (!liveAllowed) {
+  const sendDecision = await loadProviderSendDecision(dependencies.database, {
+    organisationId: payload.organisationId,
+    source,
+    channel: reminder.channel,
+    destination: reminder.destination
+  });
+  if (sendDecision.kind === 'dry-run') {
     await repository.markDryRun({
       outboundId: claim.outboundId,
       attemptId: claim.attemptId,
@@ -301,6 +310,17 @@ export async function executeReminder(
       now
     });
     return { kind: 'dry-run' };
+  }
+  if (sendDecision.kind === 'blocked') {
+    await markProviderSendBlocked(dependencies.database, {
+      organisationId: payload.organisationId,
+      outboundId: claim.outboundId,
+      attemptId: claim.attemptId,
+      stageInstanceId: payload.stageInstanceId,
+      reason: sendDecision.reason,
+      now
+    });
+    return { kind: 'cancelled', reason: sendDecision.reason };
   }
 
   try {

@@ -21,6 +21,9 @@ describe('createManualReminderView', () => {
       smsSuppressed: false,
       emailSuppressed: false,
       sendMode: 'live',
+      liveSendAcknowledged: true,
+      rolloutScope: 'CONTROLLED',
+      maintenanceMode: false,
       recipientAllowlist: ['+61400000000', 'accounts@example.invalid']
     });
 
@@ -52,6 +55,9 @@ describe('createManualReminderView', () => {
       smsSuppressed: false,
       emailSuppressed: false,
       sendMode: 'live',
+      liveSendAcknowledged: true,
+      rolloutScope: 'CONTROLLED',
+      maintenanceMode: false,
       recipientAllowlist: ['+61400000000']
     });
 
@@ -82,7 +88,10 @@ describe('createManualReminderView', () => {
       customerActive: true,
       hasActiveChase: true,
       emailSuppressed: false,
-      sendMode: 'live' as const
+      sendMode: 'live' as const,
+      liveSendAcknowledged: true,
+      rolloutScope: 'CONTROLLED' as const,
+      maintenanceMode: false
     };
 
     const suppressed = createManualReminderView({
@@ -100,5 +109,33 @@ describe('createManualReminderView', () => {
     });
     expect(notAllowlisted.sms.disabledReason).toBe('Mobile is not on the live-send allowlist');
     expect(notAllowlisted.email.disabledReason).toBe('Email is not on the live-send allowlist');
+  });
+
+  it('offers SMS and Xero email outside the technical allowlist in customer scope', () => {
+    const view = createManualReminderView({
+      customerName: 'Customer',
+      invoiceNumber: 'INV-200',
+      amountDue: '100.0000',
+      currency: 'AUD',
+      dueDate: '2026-08-20',
+      type: 'ACCREC',
+      status: 'AUTHORISED',
+      onlineInvoiceUrl: 'https://in.xero.test/INV-200',
+      email: 'accounts@example.invalid',
+      phone: '+61400000000',
+      chasingPaused: false,
+      customerActive: true,
+      hasActiveChase: true,
+      smsSuppressed: false,
+      emailSuppressed: false,
+      sendMode: 'live',
+      liveSendAcknowledged: true,
+      rolloutScope: 'CUSTOMER',
+      maintenanceMode: false,
+      recipientAllowlist: []
+    });
+
+    expect(view.sms).toMatchObject({ available: true, disabledReason: null });
+    expect(view.email).toEqual({ available: true, disabledReason: null });
   });
 });

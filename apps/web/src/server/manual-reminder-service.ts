@@ -16,7 +16,11 @@ import {
   stageInstances,
   suppressions
 } from '@bc5000/db/web';
-import { renderSms, selectPreferredSmsChannel } from '@bc5000/domain';
+import {
+  evaluateProviderSendPolicy,
+  renderSms,
+  selectPreferredSmsChannel
+} from '@bc5000/domain';
 import { jobNames, type JobPublisher } from '@bc5000/jobs';
 
 export type ManualReminderOrigin = 'CUSTOMER_PAGE' | 'ESCALATION';
@@ -173,22 +177,34 @@ export function createManualReminderService(
         `${input.channel === 'SMS' ? 'SMS' : 'EMAIL'}_SUPPRESSED:${suppression.source}`
       );
     }
-    if (target.organisation.sendMode === 'live') {
-      if (!target.organisation.liveSendAcknowledged) {
-        throw new Error('LIVE_SEND_NOT_ACKNOWLEDGED');
-      }
-      const allowed = target.organisation.recipientAllowlist.some((recipient) =>
+    const policy = evaluateProviderSendPolicy({
+      sendMode: target.organisation.sendMode,
+      liveSendAcknowledged: target.organisation.liveSendAcknowledged,
+      rolloutScope: target.organisation.rolloutScope,
+      maintenanceMode: target.organisation.maintenanceMode,
+      source:
+        input.channel === 'XERO_EMAIL'
+          ? 'XERO_EMAIL'
+          : input.origin === 'ESCALATION'
+            ? 'ESCALATION_SMS'
+            : 'MANUAL_REMINDER',
+      channel: input.channel,
+      destination,
+      recipientAllowlist: target.organisation.recipientAllowlist
+    });
+    if (policy.kind === 'blocked') throw new Error(policy.reason);
+    if (policy.kind === 'dry-run' && policy.reason === 'LIVE_NOT_ACKNOWLEDGED') {
+      throw new Error('LIVE_SEND_NOT_ACKNOWLEDGED');
+    }
+    if (
+      policy.kind === 'dry-run' &&
+      policy.reason === 'CONTROLLED_RECIPIENT_NOT_ALLOWLISTED'
+    ) {
+      throw new Error(
         input.channel === 'SMS'
-          ? recipient === destination
-          : recipient.toLocaleLowerCase('en-AU') === destination
+          ? 'SMS_DESTINATION_NOT_ALLOWLISTED'
+          : 'EMAIL_DESTINATION_NOT_ALLOWLISTED'
       );
-      if (!allowed) {
-        throw new Error(
-          input.channel === 'SMS'
-            ? 'SMS_DESTINATION_NOT_ALLOWLISTED'
-            : 'EMAIL_DESTINATION_NOT_ALLOWLISTED'
-        );
-      }
     }
 
     const stageOrigin =
