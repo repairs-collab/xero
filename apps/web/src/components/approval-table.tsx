@@ -1,11 +1,15 @@
 import { CheckIcon } from '@heroicons/react/24/outline';
+import Link from 'next/link';
 
-import { approveReminder, bulkApproveReminders, rejectReminder, snoozeReminder } from '../app/(protected)/approvals/actions.js';
+import { addApprovalTargetToWhitelist, approveReminder, bulkApproveReminders, rejectReminder, snoozeReminder } from '../app/(protected)/approvals/actions.js';
 import { MessagePreview } from './message-preview.js';
+import { ReminderWhitelistControls } from './reminder-whitelist-controls.js';
 
 export interface ApprovalRow {
   id: string;
   organisationId: string;
+  contactId: string;
+  invoiceId: string;
   customer: string;
   invoiceNumber: string;
   amount: string;
@@ -30,7 +34,7 @@ export function ApprovalTable({ rows }: { rows: ApprovalRow[] }) {
           <article className="approval-card" key={row.id}>
             <label className="approval-check"><input form="bulk-approval-form" type="checkbox" name="approvalId" value={row.id} aria-label={`Select ${row.invoiceNumber}`} /></label>
             <div className="approval-main">
-              <div className="approval-title"><div><strong>{row.customer}</strong><span>{row.invoiceNumber} · {row.amount} · {row.ageDays} days overdue</span></div><span className={`channel-pill channel-pill--${row.channel.toLowerCase()}`}>{row.channel === 'XERO_EMAIL' ? 'Xero email' : row.channel}</span></div>
+              <div className="approval-title"><div><strong><Link href={`/customers/${row.contactId}`}>{row.customer}</Link></strong><span><Link href={`/invoices/${row.invoiceId}`}>{row.invoiceNumber}</Link> · {row.amount} · {row.ageDays} days overdue</span></div><span className={`channel-pill channel-pill--${row.channel.toLowerCase()}`}>{row.channel === 'XERO_EMAIL' ? 'Xero email' : row.channel}</span></div>
               <div className="eligibility"><span aria-hidden="true"><CheckIcon /></span>{row.eligibility}</div>
               <MessagePreview {...row} />
             </div>
@@ -42,6 +46,12 @@ export function ApprovalTable({ rows }: { rows: ApprovalRow[] }) {
               <label className="snooze-label">Snooze until<input name="until" type="datetime-local" /></label>
               <button className="button button--quiet" formAction={snoozeReminder}>Snooze</button>
             </form>
+            <ReminderWhitelistControls
+              organisationId={row.organisationId}
+              contactId={row.contactId}
+              invoiceId={row.invoiceId}
+              action={addApprovalTargetToWhitelist}
+            />
           </article>
         ))}
       </div>
