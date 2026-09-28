@@ -10,6 +10,7 @@ import {
   Cog6ToothIcon,
   ExclamationTriangleIcon,
   HomeIcon,
+  PaperAirplaneIcon,
   UserGroupIcon
 } from '@heroicons/react/24/outline';
 import Link from 'next/link';
@@ -20,6 +21,7 @@ const navigation = [
   ['Overview', '/', HomeIcon],
   ['Approvals', '/approvals', CheckCircleIcon],
   ['Inbox', '/inbox', ChatBubbleLeftRightIcon],
+  ['Outbox', '/outbox', PaperAirplaneIcon],
   ['Escalations', '/escalations', ExclamationTriangleIcon],
   ['Customers', '/customers', UserGroupIcon],
   ['Sequences', '/sequences', BoltIcon],

@@ -19,6 +19,8 @@ import {
   paymentPromises,
   reminderSequences,
   reminderSequenceVersions,
+  reminderWhitelistEntries,
+  PostgresReminderWhitelistRepository,
   sequenceStages,
   stageInstances,
   suppressions,
@@ -280,7 +282,96 @@ const xeroInvoice = (
   ...patch
 });
 
+const deferred = <T = void>() => {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+};
+
+const waitUntil = async (condition: () => boolean): Promise<void> => {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error('Timed out waiting for test condition');
+};
+
 describe('executeReminder', () => {
+  it.each(['CLIENT', 'INVOICE'] as const)(
+    'cancels before sending when the %s target is whitelisted',
+    async (scope) => {
+      const seeded = await seedApprovedReminder();
+      await client.db.insert(reminderWhitelistEntries).values({
+        organisationId: seeded.organisationId,
+        scope,
+        contactId: seeded.contactId,
+        ...(scope === 'INVOICE' ? { invoiceId: seeded.invoiceId } : {})
+      });
+      const xero = new FakeXero();
+      xero.invoice = xeroInvoice(seeded);
+      const sinch = new FakeSinch();
+
+      await expect(
+        executeReminder(dependencies(xero, sinch), {
+          organisationId: seeded.organisationId,
+          stageInstanceId: seeded.stageInstanceId
+        })
+      ).resolves.toEqual({
+        kind: 'cancelled',
+        reason: 'REMINDER_WHITELISTED'
+      });
+      expect(sinch.sendCalls).toHaveLength(0);
+    }
+  );
+
+  it('does not submit when a concurrent whitelist transaction wins the target lock', async () => {
+    const seeded = await seedApprovedReminder();
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    const sinch = new FakeSinch();
+    const locked = deferred();
+    const release = deferred();
+    const repository = new PostgresReminderWhitelistRepository(client.db);
+
+    const whitelistWrite = client.db.transaction(async (transaction) => {
+      await repository.lockTarget(transaction, {
+        organisationId: seeded.organisationId,
+        contactId: seeded.contactId,
+        invoiceId: seeded.invoiceId
+      });
+      await transaction.insert(reminderWhitelistEntries).values({
+        organisationId: seeded.organisationId,
+        scope: 'INVOICE',
+        contactId: seeded.contactId,
+        invoiceId: seeded.invoiceId
+      });
+      locked.resolve();
+      await release.promise;
+    });
+    await locked.promise;
+
+    const execution = executeReminder(dependencies(xero, sinch), {
+      organisationId: seeded.organisationId,
+      stageInstanceId: seeded.stageInstanceId
+    });
+    try {
+      await waitUntil(() => xero.getOnlineInvoiceUrlCalls === 1);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(sinch.sendCalls).toHaveLength(0);
+    } finally {
+      release.resolve();
+      await whitelistWrite;
+    }
+    await expect(execution).resolves.toEqual({
+      kind: 'cancelled',
+      reason: 'REMINDER_WHITELISTED'
+    });
+    expect(sinch.sendCalls).toHaveLength(0);
+  });
+
   it('cancels without calling Sinch when payment arrives after approval', async () => {
     const seeded = await seedApprovedReminder({
       invoiceUpdatedAt: new Date(now.getTime() - 6 * 60 * 1000)
@@ -342,6 +433,19 @@ describe('executeReminder', () => {
       .from(messageAttempts)
       .where(eq(messageAttempts.organisationId, seeded.organisationId));
     expect(attempts).toHaveLength(1);
+    const [outbound] = await client.db
+      .select()
+      .from(outboundMessages)
+      .where(eq(outboundMessages.organisationId, seeded.organisationId));
+    expect(outbound).toMatchObject({
+      stageInstanceId: seeded.stageInstanceId,
+      contactId: seeded.contactId,
+      invoiceId: seeded.invoiceId,
+      actorUserId: null,
+      source: 'AUTOMATED_REMINDER',
+      content:
+        'Hi Alex, invoice INV-5000 is overdue. https://in.xero.test/INV-5000'
+    });
   });
 
   it('stops on a customer reply pause', async () => {
@@ -584,6 +688,16 @@ describe('executeReminder', () => {
       })
     ).resolves.toEqual({ kind: 'sent', provider: 'XERO', providerMessageId: null });
     expect(xero.emailCalls).toBe(1);
+    const [outbound] = await client.db
+      .select()
+      .from(outboundMessages)
+      .where(eq(outboundMessages.organisationId, seeded.organisationId));
+    expect(outbound).toMatchObject({
+      source: 'XERO_EMAIL',
+      contactId: seeded.contactId,
+      invoiceId: seeded.invoiceId,
+      content: 'Xero invoice email for INV-5000'
+    });
   });
 
   it('maps an explicit Sinch rejection without retrying', async () => {

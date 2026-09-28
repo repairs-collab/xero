@@ -68,17 +68,34 @@ export async function processDeliveryEvent(
       .update(outboundMessages)
       .set({
         status: delivered ? 'DELIVERED' : 'FAILED',
+        failureReason: delivered ? null : event.status,
         completedAt: occurredAt,
         updatedAt: occurredAt
       })
       .where(eq(outboundMessages.id, row.outbound.id));
     await transaction
-      .update(stageInstances)
+      .update(operatorReplies)
       .set({
-        status: delivered ? 'DELIVERED' : 'REJECTED',
-        completedAt: occurredAt,
+        status: delivered ? 'DELIVERED' : 'FAILED',
+        failureReason: delivered ? null : event.status,
+        sentAt: occurredAt,
         updatedAt: occurredAt
       })
-      .where(eq(stageInstances.id, row.outbound.stageInstanceId));
+      .where(
+        and(
+          eq(operatorReplies.organisationId, organisationId),
+          eq(operatorReplies.outboundMessageId, row.outbound.id)
+        )
+      );
+    if (row.outbound.stageInstanceId !== null) {
+      await transaction
+        .update(stageInstances)
+        .set({
+          status: delivered ? 'DELIVERED' : 'REJECTED',
+          completedAt: occurredAt,
+          updatedAt: occurredAt
+        })
+        .where(eq(stageInstances.id, row.outbound.stageInstanceId));
+    }
   });
 }

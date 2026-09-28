@@ -11,6 +11,11 @@ export interface BusinessCalendarOptions {
   holidays: string[];
 }
 
+export interface LocalDateInterval {
+  from: Date;
+  before: Date;
+}
+
 const parseLocalDate = (localDate: string, zone: string): DateTime => {
   const parsed = DateTime.fromISO(localDate, { zone });
   if (!parsed.isValid || parsed.toISODate() !== localDate) {
@@ -18,6 +23,17 @@ const parseLocalDate = (localDate: string, zone: string): DateTime => {
   }
   return parsed;
 };
+
+export function localDateInterval(
+  localDate: string,
+  zone: string
+): LocalDateInterval {
+  const from = parseLocalDate(localDate, zone).startOf('day');
+  return {
+    from: from.toJSDate(),
+    before: from.plus({ days: 1 }).toJSDate()
+  };
+}
 
 export function createBusinessCalendar(
   options: BusinessCalendarOptions

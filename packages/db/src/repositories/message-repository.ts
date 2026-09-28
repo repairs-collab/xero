@@ -4,9 +4,11 @@ import type { Database } from '../client.js';
 import {
   messageAttempts,
   outboundMessages,
+  type OutboundSource,
   type OutboundStatus
 } from '../schema/messaging.js';
 import { stageInstances } from '../schema/reminders.js';
+import { PostgresReminderWhitelistRepository } from './reminder-whitelist-repository.js';
 
 export interface StoredOutboundOutcome {
   outboundId: string;
@@ -14,21 +16,47 @@ export interface StoredOutboundOutcome {
   providerMessageId: string | null;
 }
 
-export interface BeginOutboundInput {
+export interface BeginReminderOutboundInput {
   organisationId: string;
   stageInstanceId: string;
+  contactId?: string;
+  invoiceId?: string;
+  actorUserId?: string;
   channel: 'SMS' | 'XERO_EMAIL';
+  source?: OutboundSource;
   recipientKey: string;
   sourceVersion: number;
+  content?: string;
   contentHash: string;
   idempotencyKey: string;
   provider: 'SINCH' | 'XERO';
   now: Date;
 }
 
+export type BeginOutboundInput = BeginReminderOutboundInput;
+
+export interface QueueDirectOutboundInput {
+  organisationId: string;
+  contactId?: string;
+  invoiceId?: string;
+  actorUserId?: string;
+  channel: 'SMS' | 'XERO_EMAIL';
+  source: OutboundSource;
+  recipientKey: string;
+  content: string;
+  contentHash: string;
+  idempotencyKey: string;
+  now: Date;
+}
+
 export type BeginOutboundResult =
   | { kind: 'claimed'; outboundId: string; attemptId: string }
+  | { kind: 'blocked'; reason: 'REMINDER_WHITELISTED' }
   | { kind: 'existing'; outcome: StoredOutboundOutcome };
+
+export type QueueDirectOutboundResult =
+  | { kind: 'queued'; outboundId: string }
+  | { kind: 'existing'; outboundId: string; status: OutboundStatus };
 
 export class PostgresMessageRepository {
   constructor(private readonly database: Database) {}
@@ -67,7 +95,25 @@ export class PostgresMessageRepository {
   }
 
   async begin(input: BeginOutboundInput): Promise<BeginOutboundResult> {
+    return this.beginReminder(input);
+  }
+
+  async beginReminder(
+    input: BeginReminderOutboundInput
+  ): Promise<BeginOutboundResult> {
     return this.database.transaction(async (transaction) => {
+      if (input.contactId !== undefined && input.invoiceId !== undefined) {
+        const whitelist = new PostgresReminderWhitelistRepository(this.database);
+        const target = {
+          organisationId: input.organisationId,
+          contactId: input.contactId,
+          invoiceId: input.invoiceId
+        };
+        await whitelist.lockTarget(transaction, target);
+        if ((await whitelist.findActive(target, transaction)).length > 0) {
+          return { kind: 'blocked', reason: 'REMINDER_WHITELISTED' };
+        }
+      }
       await transaction
         .select({ id: stageInstances.id })
         .from(stageInstances)
@@ -84,9 +130,14 @@ export class PostgresMessageRepository {
         .values({
           organisationId: input.organisationId,
           stageInstanceId: input.stageInstanceId,
+          contactId: input.contactId,
+          invoiceId: input.invoiceId,
+          actorUserId: input.actorUserId,
           channel: input.channel,
+          source: input.source ?? 'AUTOMATED_REMINDER',
           recipientKey: input.recipientKey,
           sourceVersion: input.sourceVersion,
+          content: input.content,
           contentHash: input.contentHash,
           idempotencyKey: input.idempotencyKey,
           status: 'SENDING',
@@ -142,9 +193,116 @@ export class PostgresMessageRepository {
     });
   }
 
+  async queueDirect(
+    input: QueueDirectOutboundInput
+  ): Promise<QueueDirectOutboundResult> {
+    return this.database.transaction(async (transaction) => {
+      const [created] = await transaction
+        .insert(outboundMessages)
+        .values({
+          organisationId: input.organisationId,
+          contactId: input.contactId,
+          invoiceId: input.invoiceId,
+          actorUserId: input.actorUserId,
+          channel: input.channel,
+          source: input.source,
+          recipientKey: input.recipientKey,
+          content: input.content,
+          contentHash: input.contentHash,
+          idempotencyKey: input.idempotencyKey,
+          status: 'QUEUED',
+          queuedAt: input.now,
+          updatedAt: input.now
+        })
+        .onConflictDoNothing({
+          target: [
+            outboundMessages.organisationId,
+            outboundMessages.idempotencyKey
+          ]
+        })
+        .returning({ id: outboundMessages.id });
+      if (created !== undefined) {
+        return { kind: 'queued', outboundId: created.id };
+      }
+      const [existing] = await transaction
+        .select({ id: outboundMessages.id, status: outboundMessages.status })
+        .from(outboundMessages)
+        .where(
+          and(
+            eq(outboundMessages.organisationId, input.organisationId),
+            eq(outboundMessages.idempotencyKey, input.idempotencyKey)
+          )
+        )
+        .limit(1);
+      if (existing === undefined) {
+        throw new Error('Outbound conflict could not be resolved');
+      }
+      return {
+        kind: 'existing',
+        outboundId: existing.id,
+        status: existing.status
+      };
+    });
+  }
+
+  async claimDirect(input: {
+    organisationId: string;
+    outboundId: string;
+    provider: 'SINCH' | 'XERO';
+    now: Date;
+  }): Promise<BeginOutboundResult> {
+    return this.database.transaction(async (transaction) => {
+      const [outbound] = await transaction
+        .select()
+        .from(outboundMessages)
+        .where(
+          and(
+            eq(outboundMessages.organisationId, input.organisationId),
+            eq(outboundMessages.id, input.outboundId)
+          )
+        )
+        .for('update')
+        .limit(1);
+      if (outbound === undefined) throw new Error('Outbound message was not found');
+      if (outbound.status !== 'QUEUED') {
+        const [attempt] = await transaction
+          .select({ providerMessageId: messageAttempts.providerMessageId })
+          .from(messageAttempts)
+          .where(eq(messageAttempts.outboundMessageId, outbound.id))
+          .orderBy(desc(messageAttempts.attemptNumber))
+          .limit(1);
+        return {
+          kind: 'existing',
+          outcome: {
+            outboundId: outbound.id,
+            status: outbound.status,
+            providerMessageId: attempt?.providerMessageId ?? null
+          }
+        };
+      }
+      const [attempt] = await transaction
+        .insert(messageAttempts)
+        .values({
+          organisationId: input.organisationId,
+          outboundMessageId: outbound.id,
+          attemptNumber: 1,
+          provider: input.provider,
+          status: 'SENDING',
+          requestDispatchedAt: input.now
+        })
+        .returning({ id: messageAttempts.id });
+      if (attempt === undefined) throw new Error('Message attempt was not created');
+      await transaction
+        .update(outboundMessages)
+        .set({ status: 'SENDING', updatedAt: input.now })
+        .where(eq(outboundMessages.id, outbound.id));
+      return { kind: 'claimed', outboundId: outbound.id, attemptId: attempt.id };
+    });
+  }
+
   async markAccepted(input: {
     organisationId: string;
-    stageInstanceId: string;
+    stageInstanceId: string | null;
     outboundId: string;
     attemptId: string;
     providerMessageId?: string;
@@ -174,17 +332,19 @@ export class PostgresMessageRepository {
           updatedAt: input.now
         })
         .where(eq(outboundMessages.id, input.outboundId));
-      await transaction
-        .update(stageInstances)
-        .set({ status: 'SENT', completedAt: input.now, updatedAt: input.now })
-        .where(eq(stageInstances.id, input.stageInstanceId));
+      if (input.stageInstanceId !== null) {
+        await transaction
+          .update(stageInstances)
+          .set({ status: 'SENT', completedAt: input.now, updatedAt: input.now })
+          .where(eq(stageInstances.id, input.stageInstanceId));
+      }
     });
   }
 
   async markDryRun(input: {
     outboundId: string;
     attemptId: string;
-    stageInstanceId: string;
+    stageInstanceId: string | null;
     now: Date;
   }): Promise<void> {
     await this.database.transaction(async (transaction) => {
@@ -196,17 +356,19 @@ export class PostgresMessageRepository {
         .update(outboundMessages)
         .set({ status: 'DRY_RUN', completedAt: input.now, updatedAt: input.now })
         .where(eq(outboundMessages.id, input.outboundId));
-      await transaction
-        .update(stageInstances)
-        .set({ status: 'SENT', completedAt: input.now, updatedAt: input.now })
-        .where(eq(stageInstances.id, input.stageInstanceId));
+      if (input.stageInstanceId !== null) {
+        await transaction
+          .update(stageInstances)
+          .set({ status: 'SENT', completedAt: input.now, updatedAt: input.now })
+          .where(eq(stageInstances.id, input.stageInstanceId));
+      }
     });
   }
 
   async markRejected(input: {
     outboundId: string;
     attemptId: string;
-    stageInstanceId: string;
+    stageInstanceId: string | null;
     errorCode: string;
     now: Date;
   }): Promise<void> {
@@ -221,19 +383,26 @@ export class PostgresMessageRepository {
         .where(eq(messageAttempts.id, input.attemptId));
       await transaction
         .update(outboundMessages)
-        .set({ status: 'FAILED', completedAt: input.now, updatedAt: input.now })
+        .set({
+          status: 'FAILED',
+          failureReason: input.errorCode,
+          completedAt: input.now,
+          updatedAt: input.now
+        })
         .where(eq(outboundMessages.id, input.outboundId));
-      await transaction
-        .update(stageInstances)
-        .set({ status: 'REJECTED', completedAt: input.now, updatedAt: input.now })
-        .where(eq(stageInstances.id, input.stageInstanceId));
+      if (input.stageInstanceId !== null) {
+        await transaction
+          .update(stageInstances)
+          .set({ status: 'REJECTED', completedAt: input.now, updatedAt: input.now })
+          .where(eq(stageInstances.id, input.stageInstanceId));
+      }
     });
   }
 
   async markUnknown(input: {
     outboundId: string;
     attemptId: string;
-    stageInstanceId: string;
+    stageInstanceId: string | null;
     now: Date;
   }): Promise<void> {
     await this.database.transaction(async (transaction) => {
@@ -243,12 +412,14 @@ export class PostgresMessageRepository {
         .where(eq(messageAttempts.id, input.attemptId));
       await transaction
         .update(outboundMessages)
-        .set({ status: 'UNKNOWN', updatedAt: input.now })
+        .set({ status: 'UNKNOWN', failureReason: 'UNKNOWN_OUTCOME', updatedAt: input.now })
         .where(eq(outboundMessages.id, input.outboundId));
-      await transaction
-        .update(stageInstances)
-        .set({ status: 'UNKNOWN', updatedAt: input.now })
-        .where(eq(stageInstances.id, input.stageInstanceId));
+      if (input.stageInstanceId !== null) {
+        await transaction
+          .update(stageInstances)
+          .set({ status: 'UNKNOWN', updatedAt: input.now })
+          .where(eq(stageInstances.id, input.stageInstanceId));
+      }
     });
   }
 }

@@ -18,6 +18,7 @@ import {
   organisations,
   pauses,
   paymentPromises,
+  PostgresReminderWhitelistRepository,
   reminderSequences,
   reminderSequenceVersions,
   sequenceStages,
@@ -52,6 +53,7 @@ export type StopReason =
   | 'STAGE_COMPLETED'
   | 'DISPUTE_OPEN'
   | 'PROMISE_TO_PAY'
+  | 'REMINDER_WHITELISTED'
   | 'SOURCE_CHANGED'
   | 'APPROVAL_REQUIRED';
 
@@ -63,6 +65,8 @@ export interface RevalidatedReminder {
   recipientAllowlist: string[];
   stageInstanceId: string;
   stageKey: string;
+  stageOrigin: 'AUTOMATION' | 'MANUAL_REMINDER' | 'ESCALATION_SMS';
+  actorUserId: string | null;
   channel: 'SMS' | 'XERO_EMAIL';
   sourceVersion: number;
   sequenceMode: 'REVIEW' | 'AUTOMATIC';
@@ -164,6 +168,17 @@ export async function revalidateReminder(
   if (row === undefined) throw new Error('Reminder stage was not found');
   if (row.stage.channel === 'TASK') {
     return { kind: 'blocked', reason: 'CHANNEL_UNUSABLE' };
+  }
+
+  const activeWhitelist = await new PostgresReminderWhitelistRepository(
+    dependencies.database
+  ).findActive({
+    organisationId: input.organisationId,
+    contactId: row.contact.id,
+    invoiceId: row.invoice.id
+  });
+  if (activeWhitelist.length > 0) {
+    return { kind: 'blocked', reason: 'REMINDER_WHITELISTED' };
   }
 
   let currentStatus = row.invoice.status;
@@ -455,6 +470,8 @@ export async function revalidateReminder(
       recipientAllowlist: row.organisation.recipientAllowlist,
       stageInstanceId: row.stage.id,
       stageKey: row.stage.stageKey,
+      stageOrigin: row.stage.origin,
+      actorUserId: row.stage.createdByUserId,
       channel: row.stage.channel,
       sourceVersion: currentSourceVersion,
       sequenceMode: row.sequence.mode,

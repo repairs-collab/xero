@@ -4,10 +4,11 @@ import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { AppSession } from '@bc5000/auth';
-import { approvals, auditEvents, contactChannels, contacts, createDatabase, invoiceChases, invoices, migrateDatabase, organisations, pauses, paymentPromises, reminderSequenceVersions, reminderSequences, stageInstances, users } from '@bc5000/db';
+import { approvals, auditEvents, contactChannels, contacts, createDatabase, invoiceChases, invoices, migrateDatabase, organisations, pauses, paymentPromises, reminderSequenceVersions, reminderSequences, reminderWhitelistEntries, stageInstances, suppressions, users } from '@bc5000/db';
 import type { JobPublisher } from '@bc5000/jobs';
 
 import { createCustomerOperations } from '../src/app/(protected)/customers/[customerId]/customer-operations.js';
+import { createManualReminderService } from '../src/server/manual-reminder-service.js';
 
 const client = createDatabase(process.env.DATABASE_URL ?? 'postgres://bc5000:bc5000@localhost:5432/bc5000');
 const now = new Date('2026-09-18T02:00:00.000Z');
@@ -80,7 +81,7 @@ describe('customer chase controls', () => {
 
     const [stage] = await client.db.select().from(stageInstances).where(eq(stageInstances.id, requestId));
     const [approval] = await client.db.select().from(approvals).where(eq(approvals.stageInstanceId, requestId));
-    expect(stage).toMatchObject({ stageKey: 'manual', channel: 'SMS', status: 'QUEUED' });
+    expect(stage).toMatchObject({ stageKey: 'manual', origin: 'MANUAL_REMINDER', createdByUserId: seeded.userId, channel: 'SMS', status: 'QUEUED' });
     expect(approval).toMatchObject({ renderedPreview: message, status: 'APPROVED', decidedByUserId: seeded.userId });
     expect(jobs.publish).toHaveBeenCalledOnce();
   });
@@ -128,7 +129,7 @@ describe('customer chase controls', () => {
     const stages = await client.db.select().from(stageInstances).where(eq(stageInstances.id, input.requestId));
     const approvalsForRequest = await client.db.select().from(approvals).where(eq(approvals.stageInstanceId, input.requestId));
     expect(stages).toHaveLength(1);
-    expect(stages[0]).toMatchObject({ stageKey: 'manual', channel: 'XERO_EMAIL', status: 'QUEUED' });
+    expect(stages[0]).toMatchObject({ stageKey: 'manual', origin: 'MANUAL_REMINDER', createdByUserId: seeded.userId, channel: 'XERO_EMAIL', status: 'QUEUED' });
     expect(approvalsForRequest).toHaveLength(1);
     expect(approvalsForRequest[0]?.renderedPreview).toBe('Xero invoice email for INV-200 to Customer');
     expect(jobs.publish).toHaveBeenCalledTimes(2);
@@ -147,5 +148,186 @@ describe('customer chase controls', () => {
       confirmed: false,
       requestId: randomUUID()
     })).rejects.toThrow('MANUAL_SEND_CONFIRMATION_REQUIRED');
+  });
+
+  it('queues one editable escalation SMS with the current payment link and escalation audit source', async () => {
+    const seeded = await seedCustomer();
+    const jobs = publisher();
+    const service = createManualReminderService({
+      database: client.db,
+      publisher: jobs,
+      clock: { now: () => now }
+    });
+    const requestId = randomUUID();
+    const message =
+      'Final reminder for INV-200. Pay securely: https://in.xero.test/INV-200';
+    const input = {
+      organisationId: seeded.organisationId,
+      customerId: seeded.customerId,
+      invoiceId: seeded.invoiceId,
+      channel: 'SMS' as const,
+      message,
+      confirmed: true,
+      requestId,
+      origin: 'ESCALATION' as const
+    };
+
+    await service.queue(seeded.session, input);
+    await service.queue(seeded.session, input);
+
+    const [stage] = await client.db
+      .select()
+      .from(stageInstances)
+      .where(eq(stageInstances.id, requestId));
+    const storedApprovals = await client.db
+      .select()
+      .from(approvals)
+      .where(eq(approvals.stageInstanceId, requestId));
+    const events = await client.db
+      .select()
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.organisationId, seeded.organisationId),
+          eq(auditEvents.eventType, 'ESCALATION_SMS_QUEUED')
+        )
+      );
+    expect(stage).toMatchObject({
+      origin: 'ESCALATION_SMS',
+      stageKey: 'escalation-sms',
+      createdByUserId: seeded.userId,
+      status: 'QUEUED'
+    });
+    expect(storedApprovals).toHaveLength(1);
+    expect(storedApprovals[0]?.renderedPreview).toBe(message);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.afterValue).toMatchObject({
+      stageInstanceId: requestId,
+      source: 'ESCALATION_SMS'
+    });
+    expect(jobs.publish).toHaveBeenCalledTimes(2);
+  });
+
+  it('enforces confirmation, payment-link, segment, suppression, whitelist, and live controls', async () => {
+    const confirmation = await seedCustomer();
+    const service = createManualReminderService({
+      database: client.db,
+      publisher: publisher(),
+      clock: { now: () => now }
+    });
+    const input = {
+      organisationId: confirmation.organisationId,
+      customerId: confirmation.customerId,
+      invoiceId: confirmation.invoiceId,
+      channel: 'SMS' as const,
+      message: 'Pay https://in.xero.test/INV-200',
+      confirmed: true,
+      requestId: randomUUID(),
+      origin: 'ESCALATION' as const
+    };
+    await expect(service.queue(confirmation.session, { ...input, confirmed: false })).rejects.toThrow(
+      'MANUAL_SEND_CONFIRMATION_REQUIRED'
+    );
+    await expect(service.queue(confirmation.session, { ...input, message: 'No link' })).rejects.toThrow(
+      'PAYMENT_LINK_REQUIRED'
+    );
+    await client.db
+      .update(reminderSequenceVersions)
+      .set({ maxSmsSegments: 1 })
+      .where(eq(reminderSequenceVersions.organisationId, confirmation.organisationId));
+    await expect(
+      service.queue(confirmation.session, {
+        ...input,
+        message: `${'A'.repeat(180)} https://in.xero.test/INV-200`
+      })
+    ).rejects.toThrow(/1-segment limit/);
+
+    const suppressed = await seedCustomer();
+    await client.db.insert(suppressions).values({
+      organisationId: suppressed.organisationId,
+      channel: 'SMS',
+      normalisedDestination: '+61400000000',
+      source: 'SINCH_OPT_OUT',
+      reason: 'STOP reply',
+      consentState: 'SUPPRESSED',
+      recordedAt: now
+    });
+    await expect(
+      service.queue(suppressed.session, {
+        ...input,
+        organisationId: suppressed.organisationId,
+        customerId: suppressed.customerId,
+        invoiceId: suppressed.invoiceId,
+        requestId: randomUUID()
+      })
+    ).rejects.toThrow('SMS_SUPPRESSED:SINCH_OPT_OUT');
+
+    const whitelisted = await seedCustomer();
+    await client.db.insert(reminderWhitelistEntries).values({
+      organisationId: whitelisted.organisationId,
+      scope: 'INVOICE',
+      contactId: whitelisted.customerId,
+      invoiceId: whitelisted.invoiceId,
+      reason: 'Do not chase'
+    });
+    await expect(
+      service.queue(whitelisted.session, {
+        ...input,
+        organisationId: whitelisted.organisationId,
+        customerId: whitelisted.customerId,
+        invoiceId: whitelisted.invoiceId,
+        requestId: randomUUID()
+      })
+    ).rejects.toThrow('REMINDER_WHITELISTED');
+
+    const live = await seedCustomer();
+    await client.db
+      .update(organisations)
+      .set({ sendMode: 'live', liveSendAcknowledged: true, recipientAllowlist: [] })
+      .where(eq(organisations.id, live.organisationId));
+    await expect(
+      service.queue(live.session, {
+        ...input,
+        organisationId: live.organisationId,
+        customerId: live.customerId,
+        invoiceId: live.invoiceId,
+        requestId: randomUUID()
+      })
+    ).rejects.toThrow('SMS_DESTINATION_NOT_ALLOWLISTED');
+  });
+
+  it('rejects stale and foreign invoice targets immediately before queueing', async () => {
+    const seeded = await seedCustomer();
+    const service = createManualReminderService({
+      database: client.db,
+      publisher: publisher(),
+      clock: { now: () => now }
+    });
+    const input = {
+      organisationId: seeded.organisationId,
+      customerId: seeded.customerId,
+      invoiceId: seeded.invoiceId,
+      channel: 'SMS' as const,
+      message: 'Pay https://in.xero.test/INV-200',
+      confirmed: true,
+      requestId: randomUUID(),
+      origin: 'ESCALATION' as const
+    };
+    await client.db
+      .update(invoices)
+      .set({ status: 'PAID', amountDue: '0' })
+      .where(eq(invoices.id, seeded.invoiceId));
+    await expect(service.queue(seeded.session, input)).rejects.toThrow(
+      'INVOICE_NOT_OUTSTANDING'
+    );
+
+    const foreign = await seedCustomer();
+    await expect(
+      service.queue(seeded.session, {
+        ...input,
+        invoiceId: foreign.invoiceId,
+        requestId: randomUUID()
+      })
+    ).rejects.toThrow('INVOICE_NOT_SENDABLE');
   });
 });

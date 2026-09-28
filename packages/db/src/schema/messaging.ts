@@ -11,7 +11,7 @@ import {
 } from 'drizzle-orm/pg-core';
 
 import { organisations, users } from './organisation.js';
-import { contacts } from './receivables.js';
+import { contacts, invoices } from './receivables.js';
 import { stageInstances } from './reminders.js';
 
 export type OutboundStatus =
@@ -25,6 +25,14 @@ export type OutboundStatus =
   | 'UNKNOWN'
   | 'CANCELLED';
 
+export type OutboundSource =
+  | 'AUTOMATED_REMINDER'
+  | 'MANUAL_REMINDER'
+  | 'ESCALATION_SMS'
+  | 'INBOX_REPLY'
+  | 'TEST_SMS'
+  | 'XERO_EMAIL';
+
 export const outboundMessages = pgTable(
   'outbound_messages',
   {
@@ -33,14 +41,28 @@ export const outboundMessages = pgTable(
       .notNull()
       .references(() => organisations.id, { onDelete: 'cascade' }),
     stageInstanceId: uuid('stage_instance_id')
-      .notNull()
-      .references(() => stageInstances.id, { onDelete: 'cascade' }),
+      .references(() => stageInstances.id, { onDelete: 'set null' }),
+    contactId: uuid('contact_id').references(() => contacts.id, {
+      onDelete: 'set null'
+    }),
+    invoiceId: uuid('invoice_id').references(() => invoices.id, {
+      onDelete: 'set null'
+    }),
+    actorUserId: uuid('actor_user_id').references(() => users.id, {
+      onDelete: 'set null'
+    }),
     channel: varchar('channel', { length: 16 })
       .$type<'SMS' | 'XERO_EMAIL'>()
       .notNull(),
+    source: varchar('source', { length: 32 })
+      .$type<OutboundSource>()
+      .notNull()
+      .default('AUTOMATED_REMINDER'),
     recipientKey: text('recipient_key').notNull(),
-    sourceVersion: integer('source_version').notNull(),
+    sourceVersion: integer('source_version'),
+    content: text('content'),
     contentHash: text('content_hash'),
+    failureReason: text('failure_reason'),
     status: varchar('status', { length: 24 })
       .$type<OutboundStatus>()
       .notNull()
@@ -63,6 +85,21 @@ export const outboundMessages = pgTable(
     index('outbound_messages_status_idx').on(
       table.organisationId,
       table.status,
+      table.createdAt
+    ),
+    index('outbound_messages_source_idx').on(
+      table.organisationId,
+      table.source,
+      table.createdAt
+    ),
+    index('outbound_messages_contact_idx').on(
+      table.organisationId,
+      table.contactId,
+      table.createdAt
+    ),
+    index('outbound_messages_invoice_idx').on(
+      table.organisationId,
+      table.invoiceId,
       table.createdAt
     )
   ]
@@ -216,6 +253,7 @@ export const operatorReplies = pgTable(
     organisationId: uuid('organisation_id').notNull().references(() => organisations.id, { onDelete: 'cascade' }),
     conversationId: uuid('conversation_id').notNull().references(() => conversations.id, { onDelete: 'cascade' }),
     actorUserId: uuid('actor_user_id').notNull().references(() => users.id),
+    outboundMessageId: uuid('outbound_message_id').unique().references(() => outboundMessages.id, { onDelete: 'set null' }),
     content: text('content').notNull(),
     contentHash: text('content_hash').notNull(),
     status: varchar('status', { length: 24 }).$type<'PENDING' | 'DRY_RUN' | 'SENDING' | 'ACCEPTED' | 'DELIVERED' | 'FAILED' | 'UNKNOWN' | 'CANCELLED'>().notNull().default('PENDING'),

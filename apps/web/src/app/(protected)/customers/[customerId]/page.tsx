@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { and, desc, eq, gt, inArray, isNull, or } from 'drizzle-orm';
 import { headers } from 'next/headers';
+import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
 import {
@@ -291,7 +292,7 @@ export default async function CustomerPage({
                   <article className="invoice-action-card" key={invoice.id}>
                     <div className="invoice-action-card__summary">
                       <div>
-                        <strong>{invoice.invoiceNumber}</strong>
+                        <strong><Link href={`/invoices/${invoice.id}`}>{invoice.invoiceNumber}</Link></strong>
                         <span>
                           Due {invoice.dueDate} · {invoice.status}
                         </span>

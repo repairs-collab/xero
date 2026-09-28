@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { createElement, type ReactNode } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -20,6 +22,12 @@ import {
 import type { JobPublisher } from '@bc5000/jobs';
 
 import { createApprovalService } from '../src/app/(protected)/approvals/approval-service.js';
+import { ApprovalTable } from '../src/components/approval-table.js';
+
+vi.mock('next/link', () => ({
+  default: ({ children, href, ...props }: { children: ReactNode; href: string }) =>
+    createElement('a', { ...props, href, children })
+}));
 
 const client = createDatabase(process.env.DATABASE_URL ?? 'postgres://bc5000:bc5000@localhost:5432/bc5000');
 const now = new Date('2026-09-18T02:00:00.000Z');
@@ -53,6 +61,43 @@ async function seedApproval(sourceVersion = 4) {
 const publisher = () => ({ publish: vi.fn(() => Promise.resolve(randomUUID())) }) satisfies JobPublisher;
 
 describe('approval decisions', () => {
+  it('links approval targets and offers confirmed invoice and client stop controls', () => {
+    const contactId = randomUUID();
+    const invoiceId = randomUUID();
+    const html = renderToStaticMarkup(
+      createElement(ApprovalTable, {
+        rows: [
+          {
+            id: randomUUID(),
+            organisationId: randomUUID(),
+            contactId,
+            invoiceId,
+            customer: 'Test Customer',
+            invoiceNumber: 'INV-100',
+            amount: '$250.00',
+            ageDays: 28,
+            stage: 'seven-days',
+            channel: 'SMS',
+            destination: '+61400000001',
+            content: 'Reminder preview',
+            encoding: 'GSM-7',
+            segmentCount: 1,
+            sourceVersion: 4,
+            eligibility: 'Eligible'
+          }
+        ]
+      })
+    );
+
+    expect(html).toContain(`/customers/${contactId}`);
+    expect(html).toContain(`/invoices/${invoiceId}`);
+    expect(html).toContain('Stop reminders for invoice');
+    expect(html).toContain('Stop reminders for client');
+    expect(html.match(/name="confirmed"/g)).toHaveLength(2);
+    expect(html).toContain('Current and future reminders will stop immediately');
+    expect(html).toContain('name="reason"');
+  });
+
   it('expires an approval when its invoice source version changed', async () => {
     const seeded = await seedApproval();
     await client.db.update(invoices).set({ syncVersion: 5 }).where(eq(invoices.id, seeded.invoiceId));

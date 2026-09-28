@@ -23,6 +23,10 @@ export const jobPayloadSchemas = {
     organisationId: identifier,
     replyId: identifier
   }),
+  [jobNames.testSmsExecute]: z.object({
+    organisationId: identifier,
+    outboundMessageId: identifier
+  }),
   [jobNames.providerConnectionTest]: z.object({
     organisationId: identifier,
     provider: z.enum(['XERO', 'SINCH'])

@@ -55,4 +55,21 @@ describe('AppShell', () => {
     expect(html).toContain('href="/auth/logout"');
     expect(html).toContain('data-prefetch="false"');
   });
+
+  it('places Outbox immediately after Inbox in primary navigation', () => {
+    const html = renderToStaticMarkup(
+      createElement(AppShell, {
+        displayName: 'Mott Appliance Repairs Admin',
+        role: 'ADMIN',
+        children: createElement('p', null, 'Dashboard')
+      })
+    );
+
+    const inbox = html.indexOf('href="/inbox"');
+    const outbox = html.indexOf('href="/outbox"');
+    const escalations = html.indexOf('href="/escalations"');
+    expect(inbox).toBeGreaterThan(-1);
+    expect(outbox).toBeGreaterThan(inbox);
+    expect(escalations).toBeGreaterThan(outbox);
+  });
 });

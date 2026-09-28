@@ -1,3 +1,39 @@
-import Link from 'next/link';
 import { ChevronRightIcon } from '@heroicons/react/24/outline';
-export default function SettingsPage(){return <div className="page-stack"><header className="page-heading"><span className="eyebrow">Administration</span><h1>Admin Settings</h1><p>Manage users, providers, and the safeguards around live sending.</p></header><div className="settings-home"><Link href="/settings/sending" className="sequence-card"><div><span className="eyebrow">Safety</span><h2>Sending controls</h2><p>Dry-run, controlled allowlist, and live-mode gates</p></div><ChevronRightIcon className="sequence-card__arrow" aria-hidden="true" /></Link><Link href="/settings/integrations" className="sequence-card"><div><span className="eyebrow">Connections</span><h2>Integrations</h2><p>Xero, Sinch, webhooks, and secret references</p></div><ChevronRightIcon className="sequence-card__arrow" aria-hidden="true" /></Link><Link href="/settings/users" className="sequence-card"><div><span className="eyebrow">Access</span><h2>Users and roles</h2><p>Administrators, Operators, invitations, and access</p></div><ChevronRightIcon className="sequence-card__arrow" aria-hidden="true" /></Link></div></div>}
+import { headers } from 'next/headers';
+import Link from 'next/link';
+
+import { requireWebSession } from '../../../server/runtime.js';
+import { settingsCardsForRole } from './settings-cards.js';
+
+export default async function SettingsPage() {
+  const session = await requireWebSession(
+    new Request('http://localhost/', { headers: await headers() })
+  );
+  const role = session.memberships[0]?.role;
+  if (role === undefined) throw new Error('No active organisation membership');
+
+  return (
+    <div className="page-stack">
+      <header className="page-heading">
+        <span className="eyebrow">Administration</span>
+        <h1>Admin Settings</h1>
+        <p>Manage users, providers, and the safeguards around live sending.</p>
+      </header>
+      <div className="settings-home">
+        {settingsCardsForRole(role).map((card) => (
+          <Link href={card.href} className="sequence-card" key={card.href}>
+            <div>
+              <span className="eyebrow">{card.eyebrow}</span>
+              <h2>{card.title}</h2>
+              <p>{card.description}</p>
+            </div>
+            <ChevronRightIcon
+              className="sequence-card__arrow"
+              aria-hidden="true"
+            />
+          </Link>
+        ))}
+      </div>
+    </div>
+  );
+}

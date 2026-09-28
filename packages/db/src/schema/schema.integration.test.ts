@@ -1,9 +1,12 @@
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 
+import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createDatabase, migrateDatabase } from '../client.js';
 import {
+  approvals,
   auditEvents,
   contacts,
   invoiceChases,
@@ -12,8 +15,10 @@ import {
   outboundMessages,
   reminderSequenceVersions,
   reminderSequences,
-  stageInstances
+  stageInstances,
+  users
 } from './index.js';
+import * as schema from './index.js';
 
 const databaseUrl =
   process.env.DATABASE_URL ??
@@ -98,7 +103,7 @@ const seedStageInstance = async () => {
     sourceVersion: 1
   });
 
-  return { organisationId, stageInstanceId };
+  return { organisationId, contactId, invoiceId, stageInstanceId };
 };
 
 describe('database invariants', () => {
@@ -129,6 +134,165 @@ describe('database invariants', () => {
         [randomUUID(), null, randomUUID(), 'No owner', true]
       )
     ).rejects.toMatchObject({ code: '23502' });
+  });
+
+  it('exports the reminder whitelist schema', () => {
+    expect(schema).toHaveProperty('reminderWhitelistEntries');
+  });
+
+  it('keeps one active whitelist entry per target while retaining removed history', async () => {
+    const { organisationId, contactId, invoiceId } = await seedStageInstance();
+    const firstId = randomUUID();
+    const insert = () =>
+      database.pool.query(
+        `insert into reminder_whitelist_entries
+          (id, organisation_id, scope, contact_id, invoice_id, reason)
+         values ($1, $2, 'INVOICE', $3, $4, 'Requested by customer')`,
+        [randomUUID(), organisationId, contactId, invoiceId]
+      );
+
+    await database.pool.query(
+      `insert into reminder_whitelist_entries
+        (id, organisation_id, scope, contact_id, invoice_id, reason)
+       values ($1, $2, 'INVOICE', $3, $4, 'Requested by customer')`,
+      [firstId, organisationId, contactId, invoiceId]
+    );
+    await expect(insert()).rejects.toMatchObject({ code: '23505' });
+
+    await database.pool.query(
+      'update reminder_whitelist_entries set removed_at = now() where id = $1',
+      [firstId]
+    );
+    await expect(insert()).resolves.toMatchObject({ rowCount: 1 });
+    const history = await database.pool.query(
+      'select id from reminder_whitelist_entries where organisation_id = $1 and invoice_id = $2',
+      [organisationId, invoiceId]
+    );
+    expect(history.rowCount).toBe(2);
+  });
+
+  it('enforces client and invoice whitelist target shapes', async () => {
+    const { organisationId, contactId, invoiceId } = await seedStageInstance();
+    await expect(
+      database.pool.query(
+        `insert into reminder_whitelist_entries
+          (id, organisation_id, scope, contact_id, invoice_id)
+         values ($1, $2, 'CLIENT', $3, $4)`,
+        [randomUUID(), organisationId, contactId, invoiceId]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+    await expect(
+      database.pool.query(
+        `insert into reminder_whitelist_entries
+          (id, organisation_id, scope, contact_id)
+         values ($1, $2, 'INVOICE', $3)`,
+        [randomUUID(), organisationId, contactId]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+  });
+
+  it('preserves Outbox history when its reminder stage is removed', async () => {
+    const { organisationId, contactId, invoiceId, stageInstanceId } =
+      await seedStageInstance();
+    const outboundId = randomUUID();
+    await database.pool.query(
+      `insert into outbound_messages
+        (id, organisation_id, stage_instance_id, contact_id, invoice_id,
+         channel, source, recipient_key, source_version, content,
+         content_hash, status, idempotency_key)
+       values ($1, $2, $3, $4, $5, 'SMS', 'AUTOMATED_REMINDER',
+         '+61400000000', 1, 'Please pay', 'sha256:test', 'DELIVERED', $6)`,
+      [
+        outboundId,
+        organisationId,
+        stageInstanceId,
+        contactId,
+        invoiceId,
+        `history:${outboundId}`
+      ]
+    );
+
+    await database.db
+      .delete(stageInstances)
+      .where(eq(stageInstances.id, stageInstanceId));
+    const history = await database.pool.query<{
+      stage_instance_id: string | null;
+    }>(
+      'select stage_instance_id from outbound_messages where id = $1',
+      [outboundId]
+    );
+    expect(history.rows[0]?.stage_instance_id).toBeNull();
+  });
+
+  it('backfills reliable historical Outbox associations and source classification', async () => {
+    const { organisationId, contactId, invoiceId, stageInstanceId } =
+      await seedStageInstance();
+    const userId = randomUUID();
+    const outboundId = randomUUID();
+    await database.db.insert(users).values({
+      id: userId,
+      cognitoSubject: randomUUID(),
+      email: `${userId}@example.invalid`,
+      displayName: 'Historical operator'
+    });
+    await database.db
+      .update(stageInstances)
+      .set({ stageKey: 'manual', origin: 'AUTOMATION', createdByUserId: null })
+      .where(eq(stageInstances.id, stageInstanceId));
+    await database.db.insert(approvals).values({
+      organisationId,
+      stageInstanceId,
+      renderedPreview: 'Historical approved reminder',
+      sourceVersion: 1,
+      status: 'APPROVED',
+      decidedByUserId: userId,
+      decidedAt: new Date('2026-09-18T00:01:00Z'),
+      expiresAt: new Date('2026-09-19T00:00:00Z')
+    });
+    await database.db.insert(outboundMessages).values({
+      id: outboundId,
+      organisationId,
+      stageInstanceId,
+      channel: 'SMS',
+      recipientKey: '+61400000000',
+      sourceVersion: 1,
+      status: 'DELIVERED',
+      idempotencyKey: `historical:${outboundId}`
+    });
+    const migration = await readFile(
+      new URL('../../drizzle/0005_accountpulse_operations.sql', import.meta.url),
+      'utf8'
+    );
+    const backfill = migration
+      .split('-- accountpulse-history-backfill:start')[1]
+      ?.split('-- accountpulse-history-backfill:end')[0];
+    expect(backfill).toBeDefined();
+    for (const statement of (backfill ?? '')
+      .split('--> statement-breakpoint')
+      .map((value) => value.trim())
+      .filter(Boolean)) {
+      await database.pool.query(statement);
+    }
+
+    const [stage] = await database.db
+      .select()
+      .from(stageInstances)
+      .where(eq(stageInstances.id, stageInstanceId));
+    const [outbound] = await database.db
+      .select()
+      .from(outboundMessages)
+      .where(eq(outboundMessages.id, outboundId));
+    expect(stage).toMatchObject({
+      origin: 'MANUAL_REMINDER',
+      createdByUserId: userId
+    });
+    expect(outbound).toMatchObject({
+      contactId,
+      invoiceId,
+      actorUserId: userId,
+      source: 'MANUAL_REMINDER',
+      content: 'Historical approved reminder'
+    });
   });
 
   it.each(['update', 'delete'] as const)(

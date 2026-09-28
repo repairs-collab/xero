@@ -113,7 +113,11 @@ const cancelStage = async (
           eq(stageInstances.id, stageInstanceId)
         )
       );
-    if (reason === 'SOURCE_CHANGED' || reason === 'APPROVAL_REQUIRED') {
+    if (
+      reason === 'SOURCE_CHANGED' ||
+      reason === 'APPROVAL_REQUIRED' ||
+      reason === 'REMINDER_WHITELISTED'
+    ) {
       await transaction
         .update(approvals)
         .set({ status: 'EXPIRED' })
@@ -237,17 +241,42 @@ export async function executeReminder(
   const contentHash = createHash('sha256')
     .update(reminder.content)
     .digest('hex');
-  const claim = await repository.begin({
+  const source =
+    reminder.channel === 'XERO_EMAIL'
+      ? 'XERO_EMAIL'
+      : reminder.stageOrigin === 'ESCALATION_SMS'
+        ? 'ESCALATION_SMS'
+        : reminder.stageOrigin === 'MANUAL_REMINDER'
+          ? 'MANUAL_REMINDER'
+          : 'AUTOMATED_REMINDER';
+  const claim = await repository.beginReminder({
     organisationId: payload.organisationId,
     stageInstanceId: payload.stageInstanceId,
+    contactId: reminder.contactId,
+    invoiceId: reminder.invoiceId,
+    ...(reminder.actorUserId === null
+      ? {}
+      : { actorUserId: reminder.actorUserId }),
     channel: reminder.channel,
+    source,
     recipientKey: reminder.destination,
     sourceVersion: reminder.sourceVersion,
+    content: reminder.content,
     contentHash,
     idempotencyKey: key,
     provider: reminder.channel === 'SMS' ? 'SINCH' : 'XERO',
     now
   });
+  if (claim.kind === 'blocked') {
+    await cancelStage(
+      dependencies.database,
+      payload.organisationId,
+      payload.stageInstanceId,
+      claim.reason,
+      now
+    );
+    return { kind: 'cancelled', reason: claim.reason };
+  }
   if (claim.kind === 'existing') {
     return outcomeFromStored({
       status: claim.outcome.status,
