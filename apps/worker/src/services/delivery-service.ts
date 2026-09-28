@@ -72,13 +72,15 @@ export async function processDeliveryEvent(
         updatedAt: occurredAt
       })
       .where(eq(outboundMessages.id, row.outbound.id));
-    await transaction
-      .update(stageInstances)
-      .set({
-        status: delivered ? 'DELIVERED' : 'REJECTED',
-        completedAt: occurredAt,
-        updatedAt: occurredAt
-      })
-      .where(eq(stageInstances.id, row.outbound.stageInstanceId));
+    if (row.outbound.stageInstanceId !== null) {
+      await transaction
+        .update(stageInstances)
+        .set({
+          status: delivered ? 'DELIVERED' : 'REJECTED',
+          completedAt: occurredAt,
+          updatedAt: occurredAt
+        })
+        .where(eq(stageInstances.id, row.outbound.stageInstanceId));
+    }
   });
 }

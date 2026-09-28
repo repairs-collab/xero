@@ -6,9 +6,19 @@ export const permissions = {
     'sequence.set-automatic',
     'reminder.approve',
     'chase.operate',
-    'audit.read'
+    'audit.read',
+    'outbox.read',
+    'reminder-whitelist.add',
+    'reminder-whitelist.remove',
+    'message.test-sms'
   ],
-  OPERATOR: ['reminder.approve', 'chase.operate', 'audit.read']
+  OPERATOR: [
+    'reminder.approve',
+    'chase.operate',
+    'audit.read',
+    'outbox.read',
+    'reminder-whitelist.add'
+  ]
 } as const;
 
 export type Role = keyof typeof permissions;

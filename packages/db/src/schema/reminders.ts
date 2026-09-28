@@ -214,6 +214,11 @@ export const stageInstances = pgTable(
       .notNull()
       .references(() => reminderSequenceVersions.id),
     stageKey: varchar('stage_key', { length: 64 }).notNull(),
+    origin: varchar('origin', { length: 24 })
+      .$type<'AUTOMATION' | 'MANUAL_REMINDER' | 'ESCALATION_SMS'>()
+      .notNull()
+      .default('AUTOMATION'),
+    createdByUserId: uuid('created_by_user_id').references(() => users.id),
     channel: varchar('channel', { length: 24 })
       .$type<'SMS' | 'XERO_EMAIL' | 'TASK'>()
       .notNull(),

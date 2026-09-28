@@ -33,7 +33,15 @@ describe('authorise', () => {
     ['OPERATOR', 'reminder.approve', true],
     ['OPERATOR', 'provider.configure', false],
     ['ADMIN', 'user.manage', true],
-    ['OPERATOR', 'chase.operate', true]
+    ['OPERATOR', 'chase.operate', true],
+    ['ADMIN', 'outbox.read', true],
+    ['OPERATOR', 'outbox.read', true],
+    ['ADMIN', 'reminder-whitelist.add', true],
+    ['OPERATOR', 'reminder-whitelist.add', true],
+    ['ADMIN', 'reminder-whitelist.remove', true],
+    ['OPERATOR', 'reminder-whitelist.remove', false],
+    ['ADMIN', 'message.test-sms', true],
+    ['OPERATOR', 'message.test-sms', false]
   ] as const)('%s permission for %s is %s', (role, action, allowed) => {
     const attempt = () =>
       authorise(sessionFixture({ role }), action, 'org-1');
@@ -60,5 +68,7 @@ describe('authorise', () => {
   it('keeps the permission list closed and explicit', () => {
     expect(permissions.ADMIN).toContain('sequence.set-automatic');
     expect(permissions.OPERATOR).not.toContain('sequence.set-automatic');
+    expect(permissions.OPERATOR).not.toContain('reminder-whitelist.remove');
+    expect(permissions.OPERATOR).not.toContain('message.test-sms');
   });
 });
