@@ -65,6 +65,8 @@ export interface RevalidatedReminder {
   recipientAllowlist: string[];
   stageInstanceId: string;
   stageKey: string;
+  stageOrigin: 'AUTOMATION' | 'MANUAL_REMINDER' | 'ESCALATION_SMS';
+  actorUserId: string | null;
   channel: 'SMS' | 'XERO_EMAIL';
   sourceVersion: number;
   sequenceMode: 'REVIEW' | 'AUTOMATIC';
@@ -468,6 +470,8 @@ export async function revalidateReminder(
       recipientAllowlist: row.organisation.recipientAllowlist,
       stageInstanceId: row.stage.id,
       stageKey: row.stage.stageKey,
+      stageOrigin: row.stage.origin,
+      actorUserId: row.stage.createdByUserId,
       channel: row.stage.channel,
       sourceVersion: currentSourceVersion,
       sequenceMode: row.sequence.mode,

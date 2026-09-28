@@ -80,7 +80,7 @@ describe('customer chase controls', () => {
 
     const [stage] = await client.db.select().from(stageInstances).where(eq(stageInstances.id, requestId));
     const [approval] = await client.db.select().from(approvals).where(eq(approvals.stageInstanceId, requestId));
-    expect(stage).toMatchObject({ stageKey: 'manual', channel: 'SMS', status: 'QUEUED' });
+    expect(stage).toMatchObject({ stageKey: 'manual', origin: 'MANUAL_REMINDER', createdByUserId: seeded.userId, channel: 'SMS', status: 'QUEUED' });
     expect(approval).toMatchObject({ renderedPreview: message, status: 'APPROVED', decidedByUserId: seeded.userId });
     expect(jobs.publish).toHaveBeenCalledOnce();
   });
@@ -128,7 +128,7 @@ describe('customer chase controls', () => {
     const stages = await client.db.select().from(stageInstances).where(eq(stageInstances.id, input.requestId));
     const approvalsForRequest = await client.db.select().from(approvals).where(eq(approvals.stageInstanceId, input.requestId));
     expect(stages).toHaveLength(1);
-    expect(stages[0]).toMatchObject({ stageKey: 'manual', channel: 'XERO_EMAIL', status: 'QUEUED' });
+    expect(stages[0]).toMatchObject({ stageKey: 'manual', origin: 'MANUAL_REMINDER', createdByUserId: seeded.userId, channel: 'XERO_EMAIL', status: 'QUEUED' });
     expect(approvalsForRequest).toHaveLength(1);
     expect(approvalsForRequest[0]?.renderedPreview).toBe('Xero invoice email for INV-200 to Customer');
     expect(jobs.publish).toHaveBeenCalledTimes(2);

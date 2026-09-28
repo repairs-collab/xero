@@ -433,6 +433,19 @@ describe('executeReminder', () => {
       .from(messageAttempts)
       .where(eq(messageAttempts.organisationId, seeded.organisationId));
     expect(attempts).toHaveLength(1);
+    const [outbound] = await client.db
+      .select()
+      .from(outboundMessages)
+      .where(eq(outboundMessages.organisationId, seeded.organisationId));
+    expect(outbound).toMatchObject({
+      stageInstanceId: seeded.stageInstanceId,
+      contactId: seeded.contactId,
+      invoiceId: seeded.invoiceId,
+      actorUserId: null,
+      source: 'AUTOMATED_REMINDER',
+      content:
+        'Hi Alex, invoice INV-5000 is overdue. https://in.xero.test/INV-5000'
+    });
   });
 
   it('stops on a customer reply pause', async () => {
@@ -675,6 +688,16 @@ describe('executeReminder', () => {
       })
     ).resolves.toEqual({ kind: 'sent', provider: 'XERO', providerMessageId: null });
     expect(xero.emailCalls).toBe(1);
+    const [outbound] = await client.db
+      .select()
+      .from(outboundMessages)
+      .where(eq(outboundMessages.organisationId, seeded.organisationId));
+    expect(outbound).toMatchObject({
+      source: 'XERO_EMAIL',
+      contactId: seeded.contactId,
+      invoiceId: seeded.invoiceId,
+      content: 'Xero invoice email for INV-5000'
+    });
   });
 
   it('maps an explicit Sinch rejection without retrying', async () => {

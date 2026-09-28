@@ -72,6 +72,20 @@ export async function processDeliveryEvent(
         updatedAt: occurredAt
       })
       .where(eq(outboundMessages.id, row.outbound.id));
+    await transaction
+      .update(operatorReplies)
+      .set({
+        status: delivered ? 'DELIVERED' : 'FAILED',
+        failureReason: delivered ? null : event.status,
+        sentAt: occurredAt,
+        updatedAt: occurredAt
+      })
+      .where(
+        and(
+          eq(operatorReplies.organisationId, organisationId),
+          eq(operatorReplies.outboundMessageId, row.outbound.id)
+        )
+      );
     if (row.outbound.stageInstanceId !== null) {
       await transaction
         .update(stageInstances)

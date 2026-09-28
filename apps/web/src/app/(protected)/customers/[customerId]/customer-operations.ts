@@ -214,6 +214,8 @@ export function createCustomerOperations(dependencies: { database: Database; pub
           invoiceChaseId: target.chase.id,
           sequenceVersionId: target.sequenceVersionId,
           stageKey: 'manual',
+          origin: 'MANUAL_REMINDER',
+          createdByUserId: session.userId,
           channel: input.channel,
           status: 'QUEUED',
           scheduledAt: now,
