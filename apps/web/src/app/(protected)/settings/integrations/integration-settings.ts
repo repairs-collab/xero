@@ -20,10 +20,72 @@ export function createIntegrationSettings(dependencies: { database: Database; te
   const replaceSecretReference = async (session: AppSession, input: { organisationId: string; provider: Provider; secretArn: string }) => {
     authorise(session, 'provider.configure', input.organisationId); if (!validSecretArn(input.secretArn)) throw new Error('SECRET_REFERENCE_REQUIRED'); const now=dependencies.clock.now();
     const [before]=await dependencies.database.select().from(providerConnections).where(and(eq(providerConnections.organisationId,input.organisationId),eq(providerConnections.provider,input.provider))).limit(1);
-    await dependencies.database.transaction(async(transaction)=>{await transaction.insert(providerConnections).values({organisationId:input.organisationId,provider:input.provider,secretArn:input.secretArn,enabled:true,updatedAt:now}).onConflictDoUpdate({target:[providerConnections.organisationId,providerConnections.provider],set:{secretArn:input.secretArn,enabled:true,updatedAt:now}});await transaction.insert(auditEvents).values({organisationId:input.organisationId,actorUserId:session.userId,eventType:'PROVIDER_SECRET_REFERENCE_CHANGED',entityType:'PROVIDER_CONNECTION',entityId:input.provider,beforeValue:{referenceSuffix:before?referenceSuffix(before.secretArn):null},afterValue:{referenceSuffix:referenceSuffix(input.secretArn)},occurredAt:now});});
+    await dependencies.database.transaction(async(transaction)=>{await transaction.insert(providerConnections).values({organisationId:input.organisationId,provider:input.provider,secretArn:input.secretArn,enabled:true,updatedAt:now}).onConflictDoUpdate({target:[providerConnections.organisationId,providerConnections.provider],set:{secretArn:input.secretArn,enabled:true,connectedAt:null,lastSuccessfulAuthenticationAt:null,updatedAt:now}});await transaction.insert(auditEvents).values({organisationId:input.organisationId,actorUserId:session.userId,eventType:'PROVIDER_SECRET_REFERENCE_CHANGED',entityType:'PROVIDER_CONNECTION',entityId:input.provider,beforeValue:{referenceSuffix:before?referenceSuffix(before.secretArn):null},afterValue:{referenceSuffix:referenceSuffix(input.secretArn),healthEvidenceInvalidated:true},occurredAt:now});});
   };
   const rotateCallbackKeyReference = async(session:AppSession,input:{organisationId:string;keyId:string})=>{authorise(session,'provider.configure',input.organisationId);const keyId=input.keyId.trim();if(!/^[A-Za-z0-9._:/-]{3,128}$/.test(keyId)||keyId.includes('BEGIN'))throw new Error('CALLBACK_KEY_REFERENCE_REQUIRED');const now=dependencies.clock.now();const [before]=await dependencies.database.select().from(providerConnections).where(and(eq(providerConnections.organisationId,input.organisationId),eq(providerConnections.provider,'SINCH'))).limit(1);if(!before)throw new Error('SINCH_CONNECTION_NOT_FOUND');await dependencies.database.transaction(async(transaction)=>{await transaction.update(providerConnections).set({callbackKeyId:keyId,updatedAt:now}).where(eq(providerConnections.id,before.id));await transaction.insert(auditEvents).values({organisationId:input.organisationId,actorUserId:session.userId,eventType:'SINCH_CALLBACK_KEY_ROTATED',entityType:'PROVIDER_CONNECTION',entityId:before.id,beforeValue:{keyId:before.callbackKeyId},afterValue:{keyId},occurredAt:now});});};
-  const testConnection=async(session:AppSession,input:{organisationId:string;provider:Provider})=>{authorise(session,'provider.configure',input.organisationId);const [connection]=await dependencies.database.select().from(providerConnections).where(and(eq(providerConnections.organisationId,input.organisationId),eq(providerConnections.provider,input.provider))).limit(1);if(!connection)throw new Error('PROVIDER_CONNECTION_NOT_FOUND');const result=await dependencies.tester.test({provider:input.provider,secretArn:connection.secretArn,organisationId:input.organisationId});const now=dependencies.clock.now();if(result.healthy)await dependencies.database.update(providerConnections).set({connectedAt:connection.connectedAt??now,lastSuccessfulAuthenticationAt:now,updatedAt:now}).where(eq(providerConnections.id,connection.id));await dependencies.database.insert(auditEvents).values({organisationId:input.organisationId,actorUserId:session.userId,eventType:'PROVIDER_CONNECTION_TESTED',entityType:'PROVIDER_CONNECTION',entityId:connection.id,afterValue:{provider:input.provider,healthy:result.healthy,requiredScopes:result.requiredScopes??[],referenceSuffix:referenceSuffix(connection.secretArn)},occurredAt:now});return result;};
+  const testConnection = async (
+    session: AppSession,
+    input: { organisationId: string; provider: Provider }
+  ) => {
+    authorise(session, 'provider.configure', input.organisationId);
+    const [connection] = await dependencies.database
+      .select()
+      .from(providerConnections)
+      .where(
+        and(
+          eq(providerConnections.organisationId, input.organisationId),
+          eq(providerConnections.provider, input.provider)
+        )
+      )
+      .limit(1);
+    if (!connection) throw new Error('PROVIDER_CONNECTION_NOT_FOUND');
+    const result = await dependencies.tester.test({
+      provider: input.provider,
+      secretArn: connection.secretArn,
+      organisationId: input.organisationId
+    });
+    const now = dependencies.clock.now();
+    let staleResult = false;
+    await dependencies.database.transaction(async (transaction) => {
+      if (result.healthy) {
+        const updated = await transaction
+          .update(providerConnections)
+          .set({
+            connectedAt: connection.connectedAt ?? now,
+            lastSuccessfulAuthenticationAt: now,
+            updatedAt: now
+          })
+          .where(
+            and(
+              eq(providerConnections.id, connection.id),
+              eq(providerConnections.secretArn, connection.secretArn)
+            )
+          )
+          .returning({ id: providerConnections.id });
+        staleResult = updated.length === 0;
+      }
+      await transaction.insert(auditEvents).values({
+        organisationId: input.organisationId,
+        actorUserId: session.userId,
+        eventType: 'PROVIDER_CONNECTION_TESTED',
+        entityType: 'PROVIDER_CONNECTION',
+        entityId: connection.id,
+        afterValue: {
+          provider: input.provider,
+          healthy: result.healthy && !staleResult,
+          probeHealthy: result.healthy,
+          staleResult,
+          requiredScopes: result.requiredScopes ?? [],
+          referenceSuffix: referenceSuffix(connection.secretArn)
+        },
+        occurredAt: now
+      });
+    });
+    if (staleResult) {
+      throw new Error('PROVIDER_CONNECTION_CHANGED_DURING_TEST');
+    }
+    return result;
+  };
   const requestXeroSync = async (
     session: AppSession,
     input: { organisationId: string }

@@ -19,6 +19,14 @@ const client = createDatabase(
 );
 const now = new Date('2026-09-18T02:00:00.000Z');
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
+
 beforeAll(async () => migrateDatabase(client.db));
 afterAll(async () => client.pool.end());
 
@@ -79,5 +87,80 @@ describe('provider connection worker', () => {
       .where(eq(auditEvents.organisationId, organisationId));
     expect(event?.afterValue).toMatchObject({ healthy: true, provider: 'XERO' });
     expect(JSON.stringify(event)).not.toContain('secret:xero');
+  });
+
+  it('discards a successful worker probe if its tested secret was replaced in flight', async () => {
+    const organisationId = randomUUID();
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: randomUUID(),
+      name: 'Provider race test',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    const [connection] = await client.db
+      .insert(providerConnections)
+      .values({
+        organisationId,
+        provider: 'SINCH',
+        secretArn:
+          'arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:old'
+      })
+      .returning({ id: providerConnections.id });
+    if (!connection) throw new Error('TEST_CONNECTION_NOT_CREATED');
+    const started = deferred();
+    const resume = deferred();
+    const outcome = testProviderConnection(
+      {
+        database: client.db,
+        probe: {
+          test: async () => {
+            started.resolve();
+            await resume.promise;
+            return { healthy: true };
+          }
+        },
+        clock: { now: () => now }
+      },
+      { organisationId, provider: 'SINCH' }
+    ).then(
+      () => ({ error: null }),
+      (error: unknown) => ({ error })
+    );
+    await started.promise;
+    await client.db
+      .update(providerConnections)
+      .set({
+        secretArn:
+          'arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:new',
+        connectedAt: null,
+        lastSuccessfulAuthenticationAt: null
+      })
+      .where(eq(providerConnections.id, connection.id));
+    resume.resolve();
+
+    const result = await outcome;
+    expect(result.error).toBeInstanceOf(Error);
+    expect((result.error as Error).message).toBe(
+      'PROVIDER_CONNECTION_CHANGED_DURING_TEST'
+    );
+    const [after] = await client.db
+      .select()
+      .from(providerConnections)
+      .where(eq(providerConnections.id, connection.id));
+    expect(after).toMatchObject({
+      secretArn:
+        'arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:new',
+      connectedAt: null,
+      lastSuccessfulAuthenticationAt: null
+    });
+    const events = await client.db
+      .select()
+      .from(auditEvents)
+      .where(eq(auditEvents.organisationId, organisationId));
+    expect(events.at(-1)?.afterValue).toMatchObject({
+      healthy: false,
+      staleResult: true
+    });
   });
 });
