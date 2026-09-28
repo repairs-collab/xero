@@ -1,6 +1,6 @@
 import { and, eq, inArray, lt } from 'drizzle-orm';
 
-import type { Database } from '../client.js';
+import type { Database, DbTransaction } from '../client.js';
 import { approvals, stageInstances } from '../schema/reminders.js';
 
 export interface CreatePendingApprovalInput {
@@ -25,8 +25,13 @@ export class PostgresApprovalRepository {
     return created.id;
   }
 
-  async expirePastDue(organisationId: string, now: Date): Promise<number> {
-    const expired = await this.database
+  async expirePastDue(
+    organisationId: string,
+    now: Date,
+    transaction?: DbTransaction
+  ): Promise<number> {
+    const expire = async (executor: DbTransaction): Promise<number> => {
+    const expired = await executor
       .update(approvals)
       .set({ status: 'EXPIRED' })
       .where(
@@ -39,7 +44,7 @@ export class PostgresApprovalRepository {
       .returning({ stageInstanceId: approvals.stageInstanceId });
 
     if (expired.length > 0) {
-      await this.database
+      await executor
         .update(stageInstances)
         .set({ status: 'CANCELLED', updatedAt: now })
         .where(
@@ -53,6 +58,10 @@ export class PostgresApprovalRepository {
         );
     }
     return expired.length;
+    };
+    return transaction === undefined
+      ? this.database.transaction(expire)
+      : expire(transaction);
   }
 
   async expireForStage(

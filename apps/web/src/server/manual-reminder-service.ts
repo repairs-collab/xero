@@ -10,6 +10,7 @@ import {
   invoiceChases,
   invoices,
   organisations,
+  PostgresOrganisationSafetyRepository,
   PostgresReminderWhitelistRepository,
   reminderSequences,
   reminderSequenceVersions,
@@ -45,6 +46,7 @@ export interface ManualReminderServiceDependencies {
 export function createManualReminderService(
   dependencies: ManualReminderServiceDependencies
 ) {
+  const safety = new PostgresOrganisationSafetyRepository(dependencies.database);
   const queue = async (
     session: AppSession,
     input: QueueManualReminderInput
@@ -217,6 +219,10 @@ export function createManualReminderService(
         : 'MANUAL_REMINDER_QUEUED';
     const now = dependencies.clock.now();
     await dependencies.database.transaction(async (transaction) => {
+      await safety.assertOperationalMutationAllowed(
+        transaction,
+        input.organisationId
+      );
       const created = await transaction
         .insert(stageInstances)
         .values({

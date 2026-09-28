@@ -387,4 +387,43 @@ describe('customer chase controls', () => {
       })
     ).rejects.toThrow('INVOICE_NOT_SENDABLE');
   });
+
+  it('refuses a manual reminder during maintenance without creating or queueing it', async () => {
+    const seeded = await seedCustomer();
+    await client.db
+      .update(organisations)
+      .set({ maintenanceMode: true })
+      .where(eq(organisations.id, seeded.organisationId));
+    const jobs = publisher();
+    const service = createManualReminderService({
+      database: client.db,
+      publisher: jobs,
+      clock: { now: () => now }
+    });
+
+    await expect(
+      service.queue(seeded.session, {
+        organisationId: seeded.organisationId,
+        customerId: seeded.customerId,
+        invoiceId: seeded.invoiceId,
+        channel: 'SMS',
+        message: 'Pay https://in.xero.test/INV-200',
+        confirmed: true,
+        requestId: randomUUID(),
+        origin: 'CUSTOMER_PAGE'
+      })
+    ).rejects.toThrow('OPERATIONAL_MAINTENANCE');
+
+    const manualStages = await client.db
+      .select()
+      .from(stageInstances)
+      .where(
+        and(
+          eq(stageInstances.organisationId, seeded.organisationId),
+          eq(stageInstances.stageKey, 'manual')
+        )
+      );
+    expect(manualStages).toHaveLength(0);
+    expect(jobs.publish).not.toHaveBeenCalled();
+  });
 });

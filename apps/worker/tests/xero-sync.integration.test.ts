@@ -53,6 +53,8 @@ class FakeXeroSyncClient implements XeroSyncClient {
   listedInvoices: XeroInvoice[] = [];
   listOptions: ListOutstandingInvoicesOptions[] = [];
   listContactsCalls: string[][] = [];
+  getInvoiceCalls = 0;
+  getContactCalls = 0;
   getOnlineInvoiceUrlCalls = 0;
   listError: Error | null = null;
 
@@ -65,6 +67,7 @@ class FakeXeroSyncClient implements XeroSyncClient {
   }
 
   getInvoice(invoiceId: string): Promise<XeroResult<XeroInvoice>> {
+    this.getInvoiceCalls += 1;
     const invoice = this.invoices.get(invoiceId);
     if (invoice === undefined) {
       return Promise.reject(new Error('Missing fake invoice'));
@@ -73,6 +76,7 @@ class FakeXeroSyncClient implements XeroSyncClient {
   }
 
   getContact(contactId: string): Promise<XeroResult<XeroContact>> {
+    this.getContactCalls += 1;
     const contact = this.contacts.get(contactId);
     if (contact === undefined) {
       return Promise.reject(new Error('Missing fake contact'));
@@ -485,5 +489,129 @@ describe('Xero collection synchronisation', () => {
       .from(organisations)
       .where(eq(organisations.id, organisationId));
     expect(organisation?.xeroSyncCursor).toBe(originalCursor);
+  });
+
+  it.each([
+    {
+      label: 'initial',
+      run: (xero: FakeXeroSyncClient, organisationId: string) =>
+        runInitialSync(
+          { database: database.db, xero, clock: fixedClock },
+          { organisationId }
+        )
+    },
+    {
+      label: 'no-cursor incremental',
+      run: (xero: FakeXeroSyncClient, organisationId: string) =>
+        runIncrementalSync(
+          { database: database.db, xero, clock: fixedClock },
+          { organisationId }
+        )
+    }
+  ])(
+    'marks reconciliation required only after a successful $label sync',
+    async ({ run }) => {
+      const organisationId = await seedOrganisation(null);
+      const previousReconciliation = new Date('2026-09-17T01:00:00.000Z');
+      await database.db
+        .update(organisations)
+        .set({
+          operationalState: 'SYNC_REQUIRED',
+          latestReconciledSyncAt: previousReconciliation
+        })
+        .where(eq(organisations.id, organisationId));
+      const xero = new FakeXeroSyncClient();
+
+      await run(xero, organisationId);
+
+      expect(xero.listOptions).toEqual([{}]);
+      const [organisation] = await database.db
+        .select()
+        .from(organisations)
+        .where(eq(organisations.id, organisationId));
+      expect(organisation).toMatchObject({
+        operationalState: 'RECONCILIATION_REQUIRED',
+        operationalStateVersion: 1,
+        xeroSyncCursor: fixedClock.now().toISOString(),
+        lastSuccessfulSyncAt: fixedClock.now(),
+        latestReconciledSyncAt: null
+      });
+    }
+  );
+
+  it('invalidates an earlier reconciliation when a later incremental sync succeeds', async () => {
+    const organisationId = await seedOrganisation(
+      '2026-09-18T00:00:00.000Z'
+    );
+    const previousReconciliation = new Date('2026-09-18T00:05:00.000Z');
+    await database.db
+      .update(organisations)
+      .set({
+        operationalState: 'RECONCILED',
+        latestReconciledSyncAt: previousReconciliation,
+        lastSuccessfulSyncAt: new Date('2026-09-18T00:00:00.000Z')
+      })
+      .where(eq(organisations.id, organisationId));
+    const xero = new FakeXeroSyncClient();
+
+    await runIncrementalSync(
+      { database: database.db, xero, clock: fixedClock },
+      { organisationId }
+    );
+
+    const [organisation] = await database.db
+      .select()
+      .from(organisations)
+      .where(eq(organisations.id, organisationId));
+    expect(organisation).toMatchObject({
+      operationalState: 'RECONCILIATION_REQUIRED',
+      operationalStateVersion: 1,
+      latestReconciledSyncAt: null,
+      lastSuccessfulSyncAt: fixedClock.now()
+    });
+  });
+
+  it('blocks initial, incremental, and targeted sync work during maintenance before calling Xero', async () => {
+    const initialOrganisationId = await seedOrganisation();
+    const incrementalOrganisationId = await seedOrganisation();
+    const refreshOrganisationId = await seedOrganisation();
+    await database.db
+      .update(organisations)
+      .set({ maintenanceMode: true })
+      .where(eq(organisations.id, initialOrganisationId));
+    await database.db
+      .update(organisations)
+      .set({ maintenanceMode: true })
+      .where(eq(organisations.id, incrementalOrganisationId));
+    await database.db
+      .update(organisations)
+      .set({ maintenanceMode: true })
+      .where(eq(organisations.id, refreshOrganisationId));
+    const initialXero = new FakeXeroSyncClient();
+    const incrementalXero = new FakeXeroSyncClient();
+    const refreshXero = new FakeXeroSyncClient();
+
+    await expect(
+      runInitialSync(
+        { database: database.db, xero: initialXero, clock: fixedClock },
+        { organisationId: initialOrganisationId }
+      )
+    ).rejects.toThrow('OPERATIONAL_MAINTENANCE');
+    await expect(
+      runIncrementalSync(
+        { database: database.db, xero: incrementalXero, clock: fixedClock },
+        { organisationId: incrementalOrganisationId }
+      )
+    ).rejects.toThrow('OPERATIONAL_MAINTENANCE');
+    await expect(
+      runInvoiceRefresh(
+        { database: database.db, xero: refreshXero, clock: fixedClock },
+        { organisationId: refreshOrganisationId, invoiceId: randomUUID() }
+      )
+    ).rejects.toThrow('OPERATIONAL_MAINTENANCE');
+
+    expect(initialXero.listOptions).toHaveLength(0);
+    expect(incrementalXero.listOptions).toHaveLength(0);
+    expect(refreshXero.getInvoiceCalls).toBe(0);
   });
 });

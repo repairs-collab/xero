@@ -18,9 +18,9 @@ import {
   disputes,
   invoiceChases,
   invoices,
-  organisations,
   pauses,
   paymentPromises,
+  PostgresOrganisationSafetyRepository,
   PostgresReminderWhitelistRepository,
   PostgresApprovalRepository,
   reminderSequences,
@@ -128,22 +128,32 @@ export async function calculateReminderWork(
   const whitelist = new PostgresReminderWhitelistRepository(
     dependencies.database
   );
+  const safety = new PostgresOrganisationSafetyRepository(
+    dependencies.database
+  );
+  const approvalRepository = new PostgresApprovalRepository(
+    dependencies.database
+  );
   const summary: CalculationSummary = {
     createdStages: 0,
     createdApprovals: 0,
     createdTasks: 0,
     skippedOccurrences: 0
   };
-  await new PostgresApprovalRepository(
-    dependencies.database
-  ).expirePastDue(organisationId, now);
-
-  const [organisation] = await dependencies.database
-    .select()
-    .from(organisations)
-    .where(eq(organisations.id, organisationId))
-    .limit(1);
-  if (organisation === undefined) throw new Error('Organisation was not found');
+  const organisation = await dependencies.database.transaction(
+    async (transaction) => {
+      const current = await safety.assertOperationalMutationAllowed(
+        transaction,
+        organisationId
+      );
+      await approvalRepository.expirePastDue(
+        organisationId,
+        now,
+        transaction
+      );
+      return current;
+    }
+  );
 
   const sequenceRows = await dependencies.database
     .select({
@@ -177,6 +187,7 @@ export async function calculateReminderWork(
     sequenceRows.map((sequence) => sequence.sequenceId)
   );
   await dependencies.database.transaction(async (transaction) => {
+    await safety.assertOperationalMutationAllowed(transaction, organisationId);
     const pending = await transaction
       .select({
         approvalId: approvals.id,
@@ -316,14 +327,20 @@ export async function calculateReminderWork(
         if (Number(row.invoice.amountDue) < Number(sequence.minimumBalance)) {
           continue;
         }
-        await dependencies.database.insert(invoiceChases).values({
-          id: chaseId,
-          organisationId,
-          invoiceId: row.invoice.id,
-          sequenceId: sequence.sequenceId,
-          customerId: row.contact.id,
-          status: 'ACTIVE',
-          updatedAt: now
+        await dependencies.database.transaction(async (transaction) => {
+          await safety.assertOperationalMutationAllowed(
+            transaction,
+            organisationId
+          );
+          await transaction.insert(invoiceChases).values({
+            id: chaseId,
+            organisationId,
+            invoiceId: row.invoice.id,
+            sequenceId: sequence.sequenceId,
+            customerId: row.contact.id,
+            status: 'ACTIVE',
+            updatedAt: now
+          });
         });
       }
 
@@ -490,6 +507,10 @@ export async function calculateReminderWork(
         )
       );
       await dependencies.database.transaction(async (transaction) => {
+        await safety.assertOperationalMutationAllowed(
+          transaction,
+          organisationId
+        );
         const pendingForChase = await transaction
           .select({
             approvalId: approvals.id,
@@ -588,10 +609,16 @@ export async function calculateReminderWork(
             row.invoice.xeroInvoiceId
           );
           onlineInvoiceUrl = online.data;
-          await dependencies.database
-            .update(invoices)
-            .set({ onlineInvoiceUrl })
-            .where(eq(invoices.id, row.invoice.id));
+          await dependencies.database.transaction(async (transaction) => {
+            await safety.assertOperationalMutationAllowed(
+              transaction,
+              organisationId
+            );
+            await transaction
+              .update(invoices)
+              .set({ onlineInvoiceUrl })
+              .where(eq(invoices.id, row.invoice.id));
+          });
         } catch {
           const unavailableSmsCount = eligibleOccurrences.filter(
             ({ occurrence }) => occurrence.channel === 'SMS'
@@ -606,6 +633,10 @@ export async function calculateReminderWork(
         for (const { occurrence, configured } of eligibleOccurrences) {
           if (occurrence.channel !== 'SMS') continue;
           await dependencies.database.transaction(async (transaction) => {
+            await safety.assertOperationalMutationAllowed(
+              transaction,
+              organisationId
+            );
             const [lockedApproval] = await transaction
               .select({
                 id: approvals.id,
@@ -691,96 +722,106 @@ export async function calculateReminderWork(
         }
       }
       for (const { occurrence, configured } of eligibleOccurrences) {
-        const stageId = randomUUID();
-        const isTask = occurrence.channel === 'TASK';
-        const status = isTask
-          ? 'DELIVERED'
-          : sequence.mode === 'REVIEW'
-            ? 'AWAITING_APPROVAL'
-            : 'SCHEDULED';
-        const inserted = await dependencies.database
-          .insert(stageInstances)
-          .values({
-            id: stageId,
-            organisationId,
-            invoiceChaseId: chaseId,
-            sequenceVersionId: sequence.versionId,
-            stageKey: occurrence.stageId,
-            channel: occurrence.channel,
-            status,
-            scheduledAt: new Date(occurrence.scheduledAtUtc),
-            sourceVersion: row.invoice.syncVersion,
-            completedAt: isTask ? now : null,
-            updatedAt: now
-          })
-          .onConflictDoNothing({
-            target: [
-              stageInstances.organisationId,
-              stageInstances.invoiceChaseId,
-              stageInstances.stageKey,
-              stageInstances.channel,
-              stageInstances.scheduledAt
-            ]
-          })
-          .returning({ id: stageInstances.id });
-        if (inserted.length === 0) continue;
-        summary.createdStages += 1;
-
-        if (occurrence.channel !== 'TASK' && sequence.mode === 'REVIEW') {
-          const preview = previewFor({
-            channel: occurrence.channel,
-            template: configured.template,
-            customerName: row.contact.name,
-            invoiceNumber: row.invoice.invoiceNumber,
-            amountDue: row.invoice.amountDue,
-            currency: row.invoice.currency,
-            dueDate: row.invoice.dueDate,
-            onlineInvoiceUrl,
-            organisationName: organisation.name,
-            maxSmsSegments: sequence.maxSmsSegments
-          });
-          await dependencies.database.insert(approvals).values({
-            organisationId,
-            stageInstanceId: stageId,
-            renderedPreview: preview,
-            sourceVersion: row.invoice.syncVersion,
-            status: 'PENDING',
-            expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000)
-          });
-          summary.createdApprovals += 1;
-        }
-
-        const isEscalation =
-          occurrence.channel === 'TASK' || configured.offsetDays === 30;
-        if (isEscalation) {
-          const existingTasks = await dependencies.database
-            .select({ id: tasks.id })
-            .from(tasks)
-            .where(
-              and(
-                eq(tasks.organisationId, organisationId),
-                eq(tasks.contactId, row.contact.id),
-                eq(tasks.sequenceId, sequence.sequenceId),
-                eq(tasks.kind, 'DEBT_ESCALATION'),
-                inArray(tasks.status, ['OPEN', 'COMPLETED'])
-              )
-            )
-            .limit(1);
-          if (existingTasks.length === 0) {
-            const createdTask = await dependencies.database.insert(tasks).values({
+        await dependencies.database.transaction(async (transaction) => {
+          await safety.assertOperationalMutationAllowed(
+            transaction,
+            organisationId
+          );
+          const stageId = randomUUID();
+          const isTask = occurrence.channel === 'TASK';
+          const status = isTask
+            ? 'DELIVERED'
+            : sequence.mode === 'REVIEW'
+              ? 'AWAITING_APPROVAL'
+              : 'SCHEDULED';
+          const inserted = await transaction
+            .insert(stageInstances)
+            .values({
+              id: stageId,
               organisationId,
-              contactId: row.contact.id,
-              invoiceId: row.invoice.id,
-              sequenceId: sequence.sequenceId,
-              kind: 'DEBT_ESCALATION',
-              status: 'OPEN',
-              dueAt: new Date(occurrence.scheduledAtUtc),
-              summary: `Escalate overdue invoice ${row.invoice.invoiceNumber}`,
+              invoiceChaseId: chaseId,
+              sequenceVersionId: sequence.versionId,
+              stageKey: occurrence.stageId,
+              channel: occurrence.channel,
+              status,
+              scheduledAt: new Date(occurrence.scheduledAtUtc),
+              sourceVersion: row.invoice.syncVersion,
+              completedAt: isTask ? now : null,
               updatedAt: now
-            }).onConflictDoNothing().returning({ id: tasks.id });
-            summary.createdTasks += createdTask.length;
+            })
+            .onConflictDoNothing({
+              target: [
+                stageInstances.organisationId,
+                stageInstances.invoiceChaseId,
+                stageInstances.stageKey,
+                stageInstances.channel,
+                stageInstances.scheduledAt
+              ]
+            })
+            .returning({ id: stageInstances.id });
+          if (inserted.length === 0) return;
+          summary.createdStages += 1;
+
+          if (occurrence.channel !== 'TASK' && sequence.mode === 'REVIEW') {
+            const preview = previewFor({
+              channel: occurrence.channel,
+              template: configured.template,
+              customerName: row.contact.name,
+              invoiceNumber: row.invoice.invoiceNumber,
+              amountDue: row.invoice.amountDue,
+              currency: row.invoice.currency,
+              dueDate: row.invoice.dueDate,
+              onlineInvoiceUrl,
+              organisationName: organisation.name,
+              maxSmsSegments: sequence.maxSmsSegments
+            });
+            await transaction.insert(approvals).values({
+              organisationId,
+              stageInstanceId: stageId,
+              renderedPreview: preview,
+              sourceVersion: row.invoice.syncVersion,
+              status: 'PENDING',
+              expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000)
+            });
+            summary.createdApprovals += 1;
           }
-        }
+
+          const isEscalation =
+            occurrence.channel === 'TASK' || configured.offsetDays === 30;
+          if (isEscalation) {
+            const existingTasks = await transaction
+              .select({ id: tasks.id })
+              .from(tasks)
+              .where(
+                and(
+                  eq(tasks.organisationId, organisationId),
+                  eq(tasks.contactId, row.contact.id),
+                  eq(tasks.sequenceId, sequence.sequenceId),
+                  eq(tasks.kind, 'DEBT_ESCALATION'),
+                  inArray(tasks.status, ['OPEN', 'COMPLETED'])
+                )
+              )
+              .limit(1);
+            if (existingTasks.length === 0) {
+              const createdTask = await transaction
+                .insert(tasks)
+                .values({
+                  organisationId,
+                  contactId: row.contact.id,
+                  invoiceId: row.invoice.id,
+                  sequenceId: sequence.sequenceId,
+                  kind: 'DEBT_ESCALATION',
+                  status: 'OPEN',
+                  dueAt: new Date(occurrence.scheduledAtUtc),
+                  summary: `Escalate overdue invoice ${row.invoice.invoiceNumber}`,
+                  updatedAt: now
+                })
+                .onConflictDoNothing()
+                .returning({ id: tasks.id });
+              summary.createdTasks += createdTask.length;
+            }
+          }
+        });
       }
     }
   }

@@ -46,4 +46,33 @@ describe('shared inbox', () => {
     const service = createInboxService({ database: client.db, publisher: publisher(), clock: { now: () => now } });
     await expect(service.sendOperatorReply(seeded.session, { organisationId: seeded.organisationId, conversationId: seeded.conversationId, content: 'Hello' })).rejects.toThrow('SMS_SUPPRESSED:SINCH_OPT_OUT');
   });
+
+  it('refuses a new Operator reply during maintenance without storing or queueing it', async () => {
+    const seeded = await seedConversation();
+    await client.db
+      .update(organisations)
+      .set({ maintenanceMode: true })
+      .where(eq(organisations.id, seeded.organisationId));
+    const jobs = publisher();
+    const service = createInboxService({
+      database: client.db,
+      publisher: jobs,
+      clock: { now: () => now }
+    });
+
+    await expect(
+      service.sendOperatorReply(seeded.session, {
+        organisationId: seeded.organisationId,
+        conversationId: seeded.conversationId,
+        content: 'Please call accounts.'
+      })
+    ).rejects.toThrow('OPERATIONAL_MAINTENANCE');
+
+    const replies = await client.db
+      .select()
+      .from(operatorReplies)
+      .where(eq(operatorReplies.organisationId, seeded.organisationId));
+    expect(replies).toHaveLength(0);
+    expect(jobs.publish).not.toHaveBeenCalled();
+  });
 });

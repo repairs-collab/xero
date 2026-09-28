@@ -4,7 +4,12 @@ import { and, eq } from 'drizzle-orm';
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
 
 import { authorise, type AppSession } from '@bc5000/auth';
-import { auditEvents, type Database, outboundMessages } from '@bc5000/db/web';
+import {
+  auditEvents,
+  type Database,
+  outboundMessages,
+  PostgresOrganisationSafetyRepository
+} from '@bc5000/db/web';
 import { renderSms } from '@bc5000/domain';
 import { jobNames, type JobPublisher } from '@bc5000/jobs';
 
@@ -39,6 +44,7 @@ const normaliseAustralianNumber = (rawValue: string): string => {
 export function createTestSmsService(
   dependencies: TestSmsServiceDependencies
 ) {
+  const safety = new PostgresOrganisationSafetyRepository(dependencies.database);
   const queue = async (session: AppSession, input: QueueTestSmsInput) => {
     authorise(session, 'message.test-sms', input.organisationId);
     if (!input.confirmed) throw new Error('TEST_SMS_CONFIRMATION_REQUIRED');
@@ -58,6 +64,10 @@ export function createTestSmsService(
     const now = dependencies.clock.now();
     const idempotencyKey = `test-sms:${input.requestId.trim()}`;
     const stored = await dependencies.database.transaction(async (transaction) => {
+      await safety.assertOperationalMutationAllowed(
+        transaction,
+        input.organisationId
+      );
       const [created] = await transaction
         .insert(outboundMessages)
         .values({

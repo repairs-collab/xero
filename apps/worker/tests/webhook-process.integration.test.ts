@@ -21,7 +21,8 @@ import {
   reminderSequences,
   reminderSequenceVersions,
   stageInstances,
-  suppressions
+  suppressions,
+  webhookEvents
 } from '@bc5000/db';
 import { jobNames, type JobPublisher } from '@bc5000/jobs';
 
@@ -353,5 +354,64 @@ describe('processWebhookEvent', () => {
         webhookEventId: recorded.id
       }
     });
+  });
+
+  it('completes a delivery webhook as a no-op when reset deleted its message target', async () => {
+    const seeded = await seedCustomerChase();
+    const [outbound] = await client.db
+      .insert(outboundMessages)
+      .values({
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId,
+        channel: 'SMS',
+        recipientKey: seeded.phone,
+        sourceVersion: 1,
+        status: 'ACCEPTED',
+        idempotencyKey: randomUUID()
+      })
+      .returning();
+    if (outbound === undefined) throw new Error('Outbound seed failed');
+    await client.db.insert(messageAttempts).values({
+      organisationId: seeded.organisationId,
+      outboundMessageId: outbound.id,
+      attemptNumber: 1,
+      provider: 'SINCH',
+      providerMessageId: 'provider-message-reset-deleted',
+      status: 'ACCEPTED'
+    });
+    const recorded = await recordEvent(
+      seeded.organisationId,
+      'SINCH',
+      randomUUID(),
+      {
+        event_type: 'DELIVERY_REPORT',
+        message_id: 'provider-message-reset-deleted',
+        status: 'DELIVERED',
+        status_code: 0,
+        timestamp: '2026-09-18T01:03:00Z',
+        metadata: {}
+      }
+    );
+    await client.db
+      .delete(outboundMessages)
+      .where(eq(outboundMessages.id, outbound.id));
+
+    await expect(
+      processWebhookEvent(
+        { database: client.db, publisher },
+        {
+          organisationId: seeded.organisationId,
+          webhookEventId: recorded.id,
+          provider: 'SINCH'
+        }
+      )
+    ).resolves.toBeUndefined();
+
+    const [stored] = await client.db
+      .select()
+      .from(webhookEvents)
+      .where(eq(webhookEvents.id, recorded.id));
+    expect(stored?.processedAt).not.toBeNull();
+    expect(stored?.processingError).toBeNull();
   });
 });

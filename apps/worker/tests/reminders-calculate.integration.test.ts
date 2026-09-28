@@ -735,4 +735,43 @@ describe('calculateReminderWork', () => {
     expect(approval?.status).toBe('EXPIRED');
     expect(stage?.status).toBe('CANCELLED');
   });
+
+  it('refuses reminder calculation during maintenance without creating work', async () => {
+    const seeded = await seedInvoiceAndSequence({
+      mode: 'REVIEW',
+      dueDate: '2026-09-18',
+      offsetDays: 0,
+      channel: 'SMS'
+    });
+    await client.db
+      .update(organisations)
+      .set({ maintenanceMode: true })
+      .where(eq(organisations.id, seeded.organisationId));
+
+    await expect(
+      calculateReminderWork(
+        { database: client.db, clock: { now: () => now }, xero: unusedXero },
+        seeded.organisationId
+      )
+    ).rejects.toThrow('OPERATIONAL_MAINTENANCE');
+
+    expect(
+      await client.db
+        .select()
+        .from(stageInstances)
+        .where(eq(stageInstances.organisationId, seeded.organisationId))
+    ).toHaveLength(0);
+    expect(
+      await client.db
+        .select()
+        .from(approvals)
+        .where(eq(approvals.organisationId, seeded.organisationId))
+    ).toHaveLength(0);
+    expect(
+      await client.db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.organisationId, seeded.organisationId))
+    ).toHaveLength(0);
+  });
 });

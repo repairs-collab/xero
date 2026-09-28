@@ -7,6 +7,7 @@ import {
   type Database,
   invoiceChases,
   invoices,
+  PostgresOrganisationSafetyRepository,
   stageInstances
 } from '@bc5000/db/web';
 import { jobNames, type JobPublisher } from '@bc5000/jobs';
@@ -26,6 +27,7 @@ interface ApprovalServiceDependencies {
 }
 
 export function createApprovalService(dependencies: ApprovalServiceDependencies) {
+  const safety = new PostgresOrganisationSafetyRepository(dependencies.database);
   const decide = async (
     session: AppSession,
     input: { organisationId: string; approvalId: string },
@@ -33,6 +35,10 @@ export function createApprovalService(dependencies: ApprovalServiceDependencies)
   ): Promise<{ stageInstanceId: string }> => {
     authorise(session, 'reminder.approve', input.organisationId);
     const outcome = await dependencies.database.transaction(async (transaction) => {
+      await safety.assertOperationalMutationAllowed(
+        transaction,
+        input.organisationId
+      );
       const [row] = await transaction
         .select({ approval: approvals, stage: stageInstances, invoice: invoices })
         .from(approvals)
@@ -70,6 +76,10 @@ export function createApprovalService(dependencies: ApprovalServiceDependencies)
     authorise(session, 'reminder.approve', input.organisationId);
     if (input.until <= dependencies.clock.now()) throw new Error('SNOOZE_MUST_BE_FUTURE');
     await dependencies.database.transaction(async (transaction) => {
+      await safety.assertOperationalMutationAllowed(
+        transaction,
+        input.organisationId
+      );
       const [approval] = await transaction.select().from(approvals).where(and(eq(approvals.organisationId, input.organisationId), eq(approvals.id, input.approvalId), eq(approvals.status, 'PENDING'))).for('update').limit(1);
       if (approval === undefined) throw new Error('APPROVAL_NOT_PENDING');
       await transaction.update(approvals).set({ status: 'EXPIRED', decidedByUserId: session.userId, decidedAt: dependencies.clock.now() }).where(eq(approvals.id, approval.id));

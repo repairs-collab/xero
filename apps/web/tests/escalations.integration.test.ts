@@ -103,4 +103,41 @@ describe('escalation tasks', () => {
       })
     ).rejects.toThrow('ESCALATION_NOT_FOUND');
   });
+
+  it('blocks escalation mutations during maintenance without completing or auditing the task', async () => {
+    const seeded = await seedEscalation();
+    await client.db
+      .update(organisations)
+      .set({ maintenanceMode: true })
+      .where(eq(organisations.id, seeded.organisationId));
+    const service = createEscalationService({
+      database: client.db,
+      clock: { now: () => now }
+    });
+
+    await expect(
+      service.completeTask(seeded.session, {
+        organisationId: seeded.organisationId,
+        taskId: seeded.taskId,
+        resolutionNote: 'Called accounts'
+      })
+    ).rejects.toThrow('OPERATIONAL_MAINTENANCE');
+    await expect(
+      service.recordCallLinkOpened(seeded.session, {
+        organisationId: seeded.organisationId,
+        taskId: seeded.taskId
+      })
+    ).rejects.toThrow('OPERATIONAL_MAINTENANCE');
+
+    const [task] = await client.db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, seeded.taskId));
+    const events = await client.db
+      .select()
+      .from(auditEvents)
+      .where(eq(auditEvents.organisationId, seeded.organisationId));
+    expect(task?.status).toBe('OPEN');
+    expect(events).toHaveLength(0);
+  });
 });
