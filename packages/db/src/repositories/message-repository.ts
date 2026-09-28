@@ -8,6 +8,7 @@ import {
   type OutboundStatus
 } from '../schema/messaging.js';
 import { stageInstances } from '../schema/reminders.js';
+import { PostgresReminderWhitelistRepository } from './reminder-whitelist-repository.js';
 
 export interface StoredOutboundOutcome {
   outboundId: string;
@@ -50,6 +51,7 @@ export interface QueueDirectOutboundInput {
 
 export type BeginOutboundResult =
   | { kind: 'claimed'; outboundId: string; attemptId: string }
+  | { kind: 'blocked'; reason: 'REMINDER_WHITELISTED' }
   | { kind: 'existing'; outcome: StoredOutboundOutcome };
 
 export type QueueDirectOutboundResult =
@@ -100,6 +102,18 @@ export class PostgresMessageRepository {
     input: BeginReminderOutboundInput
   ): Promise<BeginOutboundResult> {
     return this.database.transaction(async (transaction) => {
+      if (input.contactId !== undefined && input.invoiceId !== undefined) {
+        const whitelist = new PostgresReminderWhitelistRepository(this.database);
+        const target = {
+          organisationId: input.organisationId,
+          contactId: input.contactId,
+          invoiceId: input.invoiceId
+        };
+        await whitelist.lockTarget(transaction, target);
+        if ((await whitelist.findActive(target, transaction)).length > 0) {
+          return { kind: 'blocked', reason: 'REMINDER_WHITELISTED' };
+        }
+      }
       await transaction
         .select({ id: stageInstances.id })
         .from(stageInstances)

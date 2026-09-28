@@ -21,6 +21,7 @@ import {
   organisations,
   pauses,
   paymentPromises,
+  PostgresReminderWhitelistRepository,
   PostgresApprovalRepository,
   reminderSequences,
   reminderSequenceVersions,
@@ -124,6 +125,9 @@ export async function calculateReminderWork(
   organisationId: string
 ): Promise<CalculationSummary> {
   const now = dependencies.clock.now();
+  const whitelist = new PostgresReminderWhitelistRepository(
+    dependencies.database
+  );
   const summary: CalculationSummary = {
     createdStages: 0,
     createdApprovals: 0,
@@ -272,6 +276,18 @@ export async function calculateReminderWork(
     }
 
     for (const row of invoiceRows) {
+      if (
+        (
+          await whitelist.findActive({
+            organisationId,
+            contactId: row.contact.id,
+            invoiceId: row.invoice.id
+          })
+        ).length > 0
+      ) {
+        summary.skippedOccurrences += configuredStages.length;
+        continue;
+      }
       const smsChannels = await dependencies.database
         .select()
         .from(contactChannels)

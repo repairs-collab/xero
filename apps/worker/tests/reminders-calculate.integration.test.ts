@@ -14,6 +14,7 @@ import {
   organisations,
   reminderSequences,
   reminderSequenceVersions,
+  reminderWhitelistEntries,
   sequenceStages,
   stageInstances,
   suppressions,
@@ -133,6 +134,47 @@ const seedInvoiceAndSequence = async (options: {
 };
 
 describe('calculateReminderWork', () => {
+  it.each(['CLIENT', 'INVOICE'] as const)(
+    'does not create day-30 SMS or escalation work for a whitelisted %s target',
+    async (scope) => {
+      const seeded = await seedInvoiceAndSequence({
+        mode: 'AUTOMATIC',
+        dueDate: '2026-08-19',
+        offsetDays: 30,
+        channel: 'SMS_DAILY'
+      });
+      await client.db.insert(reminderWhitelistEntries).values({
+        organisationId: seeded.organisationId,
+        scope,
+        contactId: seeded.contactId,
+        ...(scope === 'INVOICE' ? { invoiceId: seeded.invoiceId } : {})
+      });
+
+      const result = await calculateReminderWork(
+        { database: client.db, clock: { now: () => now }, xero: unusedXero },
+        seeded.organisationId
+      );
+
+      expect(result).toMatchObject({
+        createdStages: 0,
+        createdApprovals: 0,
+        createdTasks: 0
+      });
+      expect(
+        await client.db
+          .select()
+          .from(stageInstances)
+          .where(eq(stageInstances.organisationId, seeded.organisationId))
+      ).toHaveLength(0);
+      expect(
+        await client.db
+          .select()
+          .from(tasks)
+          .where(eq(tasks.organisationId, seeded.organisationId))
+      ).toHaveLength(0);
+    }
+  );
+
   it('fetches and caches a missing URL before creating a review SMS preview', async () => {
     const seeded = await seedInvoiceAndSequence({
       mode: 'REVIEW',
