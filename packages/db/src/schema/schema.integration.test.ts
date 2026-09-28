@@ -212,7 +212,9 @@ describe('database invariants', () => {
     await database.db
       .delete(stageInstances)
       .where(eq(stageInstances.id, stageInstanceId));
-    const history = await database.pool.query(
+    const history = await database.pool.query<{
+      stage_instance_id: string | null;
+    }>(
       'select stage_instance_id from outbound_messages where id = $1',
       [outboundId]
     );
