@@ -1,9 +1,8 @@
-import { and, desc, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { headers } from 'next/headers';
 
 import { authorise } from '@bc5000/auth';
 import {
-  auditEvents,
   organisations,
   providerConnections
 } from '@bc5000/db/web';
@@ -13,9 +12,20 @@ import {
   requireWebSession
 } from '../../../../server/runtime.js';
 import { activateLive, disableLive, updateAllowlist } from './actions.js';
-import { LIVE_ACKNOWLEDGEMENT } from './sending-settings.js';
+import {
+  liveActivationFeedback,
+  LIVE_ACKNOWLEDGEMENT
+} from './sending-settings.js';
 
-export default async function SendingSettingsPage() {
+type SearchParameters = Promise<
+  Record<string, string | string[] | undefined>
+>;
+
+export default async function SendingSettingsPage({
+  searchParams
+}: {
+  searchParams: SearchParameters;
+}) {
   const session = await requireWebSession(
     new Request('http://localhost/', { headers: await headers() })
   );
@@ -35,17 +45,8 @@ export default async function SendingSettingsPage() {
     .select()
     .from(providerConnections)
     .where(eq(providerConnections.organisationId, organisationId));
-  const [controlledTest] = await database
-    .select({ id: auditEvents.id })
-    .from(auditEvents)
-    .where(
-      and(
-        eq(auditEvents.organisationId, organisationId),
-        eq(auditEvents.eventType, 'CONTROLLED_TEST_PASSED')
-      )
-    )
-    .orderBy(desc(auditEvents.occurredAt))
-    .limit(1);
+  const parameters = await searchParams;
+  const activationFeedback = liveActivationFeedback(parameters.activation);
 
   const now = Date.now();
   const healthySince = now - 24 * 60 * 60 * 1000;
@@ -73,6 +74,15 @@ export default async function SendingSettingsPage() {
           to enable.
         </p>
       </header>
+      {activationFeedback !== null && (
+        <div
+          className={`sending-feedback sending-feedback--${activationFeedback.tone}`}
+          role={activationFeedback.tone === 'error' ? 'alert' : 'status'}
+        >
+          <strong>{activationFeedback.title}</strong>
+          <p>{activationFeedback.detail}</p>
+        </div>
+      )}
       <section
         className={`sending-banner sending-banner--${organisation.sendMode}`}
       >
@@ -119,7 +129,7 @@ export default async function SendingSettingsPage() {
         </section>
         <section className="panel">
           <span className="eyebrow">Live-mode gates</span>
-          <h2>Launch readiness</h2>
+          <h2>Controlled launch readiness</h2>
           <ul className="gate-list">
             <li className={providerHealthy('XERO') ? 'passed' : ''}>
               Xero connection healthy in the last 24 hours
@@ -136,9 +146,6 @@ export default async function SendingSettingsPage() {
               }
             >
               Controlled allowlist configured
-            </li>
-            <li className={controlledTest ? 'passed' : ''}>
-              Controlled end-to-end test passed
             </li>
           </ul>
           {organisation.sendMode === 'dry-run' ? (
@@ -157,8 +164,13 @@ export default async function SendingSettingsPage() {
                 />
               </label>
               <button className="button button--danger">
-                Enable live sending
+                Enable controlled live testing
               </button>
+              <p className="settings-copy">
+                Only destinations on the technical recipient allowlist can
+                receive messages. Complete controlled SMS and Xero email tests
+                before the final customer rollout.
+              </p>
             </form>
           ) : (
             <form className="settings-form" action={disableLive}>
