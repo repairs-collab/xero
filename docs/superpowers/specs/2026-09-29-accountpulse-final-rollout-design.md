@@ -1,7 +1,7 @@
 # AccountPulse Final Customer Rollout Design
 
 **Date:** 29 September 2026  
-**Status:** Approved conversational design, pending written-spec review  
+**Status:** Approved
 **Production state while this is built:** Controlled-live; technical allowlist enforced  
 **Final activation:** Requires a separate explicit approval after deployment, reset, fresh sync, and verification
 
