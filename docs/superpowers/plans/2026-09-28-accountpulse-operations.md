@@ -492,6 +492,6 @@
 
   Run: `git add <reviewed-files> && git commit -m "fix: address AccountPulse operations review"`
 
-- [ ] **Step 7: Stop for explicit push/deployment approval if it has not already been given for the completed branch**
+- [x] **Step 7: Stop for explicit push/deployment approval if it has not already been given for the completed branch**
 
   Production smoke checks must use an approved technical allowlist destination and cover login, Outbox, whitelist add/remove, one Test SMS, one escalation SMS, callback status, and duplicate prevention.
