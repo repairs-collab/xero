@@ -6,6 +6,7 @@ export const jobNames = {
   remindersCalculate: 'reminders.calculate',
   reminderExecute: 'reminder.execute',
   operatorReplyExecute: 'operator-reply.execute',
+  testSmsExecute: 'test-sms.execute',
   providerConnectionTest: 'provider.connection-test',
   webhookProcess: 'webhook.process',
   retentionApply: 'retention.apply'

@@ -24,6 +24,7 @@ import { reconcileNightly } from './handlers/reconcile-nightly.js';
 import { executeReminder } from './handlers/reminder-execute.js';
 import { calculateReminderWork } from './handlers/reminders-calculate.js';
 import { applyRetention } from './handlers/retention-apply.js';
+import { executeTestSms } from './handlers/test-sms-execute.js';
 import { processWebhookEvent } from './handlers/webhook-process.js';
 import { runIncrementalSync } from './handlers/xero-incremental-sync.js';
 import { runInitialSync } from './handlers/xero-initial-sync.js';
@@ -123,6 +124,11 @@ async function main() {
         ).then(() => undefined),
       [jobNames.operatorReplyExecute]: (payload) =>
         executeOperatorReply(
+          { database: databaseClient.db, clock, sinch, callbackUrl },
+          payload
+        ).then(() => undefined),
+      [jobNames.testSmsExecute]: (payload) =>
+        executeTestSms(
           { database: databaseClient.db, clock, sinch, callbackUrl },
           payload
         ).then(() => undefined),

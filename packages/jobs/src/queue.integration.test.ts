@@ -190,6 +190,26 @@ describe('durable job queue', () => {
     expect(job?.retryLimit).toBe(0);
   });
 
+  it('validates test-SMS jobs and never retries their external send', async () => {
+    const organisationId = randomUUID();
+    const outboundMessageId = randomUUID();
+    const id = await queue.enqueueUnique(
+      jobNames.testSmsExecute,
+      { organisationId, outboundMessageId },
+      `test-sms:${outboundMessageId}`
+    );
+
+    const [job] = await queue.findJobs(jobNames.testSmsExecute, { id });
+    expect(job?.retryLimit).toBe(0);
+    await expect(
+      queue.enqueueUnique(
+        jobNames.testSmsExecute,
+        { organisationId, outboundMessageId: '' },
+        `bad-test-sms:${randomUUID()}`
+      )
+    ).rejects.toThrow(/outboundMessageId/i);
+  });
+
   it('upserts one UTC schedule per organisation across restarts', async () => {
     const organisationId = randomUUID();
 
