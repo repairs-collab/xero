@@ -25,6 +25,31 @@ const databaseUrl =
   'postgres://bc5000:bc5000@localhost:5432/bc5000';
 const database = createDatabase(databaseUrl);
 
+const tableColumns = async (tableName: string): Promise<string[]> => {
+  const result = await database.pool.query<{ column_name: string }>(
+    `select column_name
+       from information_schema.columns
+      where table_schema = 'public'
+        and table_name = $1
+      order by ordinal_position`,
+    [tableName]
+  );
+  return result.rows.map((row) => row.column_name);
+};
+
+const tableExists = async (tableName: string): Promise<boolean> => {
+  const result = await database.pool.query<{ exists: boolean }>(
+    `select exists (
+       select 1
+         from information_schema.tables
+        where table_schema = 'public'
+          and table_name = $1
+     ) as exists`,
+    [tableName]
+  );
+  return result.rows[0]?.exists === true;
+};
+
 beforeAll(async () => {
   await migrateDatabase(database.db);
 });
@@ -138,6 +163,198 @@ describe('database invariants', () => {
 
   it('exports the reminder whitelist schema', () => {
     expect(schema).toHaveProperty('reminderWhitelistEntries');
+  });
+
+  it('exports reset manifests and rollout reconciliations', () => {
+    expect(schema).toHaveProperty('operationalResetRuns');
+    expect(schema).toHaveProperty('rolloutReconciliations');
+  });
+
+  it('keeps an existing live organisation controlled after rollout migration', async () => {
+    const requiredColumns = [
+      'rollout_scope',
+      'maintenance_mode',
+      'operational_state',
+      'operational_state_version',
+      'latest_reconciled_sync_at'
+    ];
+    const columns = await tableColumns('organisations');
+    expect(columns).toEqual(expect.arrayContaining(requiredColumns));
+    if (!requiredColumns.every((column) => columns.includes(column))) return;
+
+    const organisationId = randomUUID();
+    await database.db.insert(organisations).values({
+      id: organisationId,
+      name: 'Controlled live migration test',
+      xeroOrganisationId: randomUUID(),
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD',
+      sendMode: 'live',
+      liveSendAcknowledged: true
+    });
+    const result = await database.pool.query<{
+      send_mode: string;
+      rollout_scope: string;
+      maintenance_mode: boolean;
+      operational_state: string;
+      operational_state_version: number;
+      latest_reconciled_sync_at: Date | null;
+    }>(
+      `select send_mode, rollout_scope, maintenance_mode, operational_state,
+              operational_state_version, latest_reconciled_sync_at
+         from organisations
+        where id = $1`,
+      [organisationId]
+    );
+
+    expect(result.rows[0]).toEqual({
+      send_mode: 'live',
+      rollout_scope: 'CONTROLLED',
+      maintenance_mode: false,
+      operational_state: 'READY',
+      operational_state_version: 0,
+      latest_reconciled_sync_at: null
+    });
+  });
+
+  it('rejects unsupported rollout and operational states', async () => {
+    const columns = await tableColumns('organisations');
+    expect(columns).toContain('rollout_scope');
+    expect(columns).toContain('operational_state');
+    if (
+      !columns.includes('rollout_scope') ||
+      !columns.includes('operational_state')
+    ) {
+      return;
+    }
+
+    const organisationId = randomUUID();
+    await database.db.insert(organisations).values({
+      id: organisationId,
+      name: 'Invalid rollout state test',
+      xeroOrganisationId: randomUUID(),
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await expect(
+      database.pool.query(
+        'update organisations set rollout_scope = $1 where id = $2',
+        ['UNSAFE', organisationId]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+    await expect(
+      database.pool.query(
+        'update organisations set operational_state = $1 where id = $2',
+        ['UNKNOWN', organisationId]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+  });
+
+  it('allows only one active operational reset per organisation', async () => {
+    const exists = await tableExists('operational_reset_runs');
+    expect(exists).toBe(true);
+    if (!exists) return;
+
+    const organisationId = randomUUID();
+    const userId = randomUUID();
+    await database.db.insert(organisations).values({
+      id: organisationId,
+      name: 'Reset uniqueness test',
+      xeroOrganisationId: randomUUID(),
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await database.db.insert(users).values({
+      id: userId,
+      cognitoSubject: randomUUID(),
+      email: `${userId}@example.invalid`,
+      displayName: 'Reset administrator'
+    });
+    const insertReset = (id: string, status: string) =>
+      database.pool.query(
+        `insert into operational_reset_runs
+          (id, organisation_id, status, requested_by_user_id, deployed_commit)
+         values ($1, $2, $3, $4, $5)`,
+        [id, organisationId, status, userId, '0123456789abcdef']
+      );
+    const firstId = randomUUID();
+    await insertReset(firstId, 'PREPARING');
+    await expect(
+      insertReset(randomUUID(), 'RESETTING')
+    ).rejects.toMatchObject({ code: '23505' });
+    await database.pool.query(
+      `update operational_reset_runs
+          set status = 'COMPLETED', completed_at = now()
+        where id = $1`,
+      [firstId]
+    );
+    await expect(insertReset(randomUUID(), 'PREPARING')).resolves.toMatchObject(
+      { rowCount: 1 }
+    );
+  });
+
+  it('ties one reconciliation record to one organisation sync', async () => {
+    const exists = await tableExists('rollout_reconciliations');
+    expect(exists).toBe(true);
+    if (!exists) return;
+
+    const organisationId = randomUUID();
+    const userId = randomUUID();
+    const syncCompletedAt = new Date('2026-09-29T01:00:00.000Z');
+    await database.db.insert(organisations).values({
+      id: organisationId,
+      name: 'Reconciliation uniqueness test',
+      xeroOrganisationId: randomUUID(),
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await database.db.insert(users).values({
+      id: userId,
+      cognitoSubject: randomUUID(),
+      email: `${userId}@example.invalid`,
+      displayName: 'Reconciliation administrator'
+    });
+    const insertReconciliation = () =>
+      database.pool.query(
+        `insert into rollout_reconciliations
+          (id, organisation_id, sync_completed_at, active_contact_count,
+           outstanding_invoice_count, outstanding_totals,
+           generated_approval_count, enabled_sequence_count,
+           all_enabled_sequences_review, acknowledged_by_user_id,
+           acknowledged_at)
+         values ($1, $2, $3, 4, 5, $4, 6, 1, true, $5, $6)`,
+        [
+          randomUUID(),
+          organisationId,
+          syncCompletedAt,
+          { AUD: '1234.5000' },
+          userId,
+          new Date('2026-09-29T01:05:00.000Z')
+        ]
+      );
+
+    await insertReconciliation();
+    await expect(insertReconciliation()).rejects.toMatchObject({
+      code: '23505'
+    });
+    await expect(
+      database.pool.query(
+        `insert into rollout_reconciliations
+          (id, organisation_id, sync_completed_at, active_contact_count,
+           outstanding_invoice_count, outstanding_totals,
+           generated_approval_count, enabled_sequence_count,
+           all_enabled_sequences_review, acknowledged_by_user_id,
+           acknowledged_at)
+         values ($1, $2, $3, 0, 0, '{}'::jsonb, 0, 0, true, $4, $5)`,
+        [
+          randomUUID(),
+          randomUUID(),
+          syncCompletedAt,
+          userId,
+          new Date('2026-09-29T01:05:00.000Z')
+        ]
+      )
+    ).rejects.toMatchObject({ code: '23503' });
   });
 
   it('keeps one active whitelist entry per target while retaining removed history', async () => {

@@ -43,6 +43,13 @@
       "when": 1790569659781,
       "tag": "0005_accountpulse_operations",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790631609544,
+      "tag": "0006_accountpulse_final_rollout",
+      "breakpoints": true
     }
   ]
 }
