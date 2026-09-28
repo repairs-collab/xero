@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
 import { eq } from 'drizzle-orm';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { AuthorizationFailure, type AppSession } from '@bc5000/auth';
@@ -14,7 +16,12 @@ import {
 } from '@bc5000/db';
 import type { JobPublisher } from '@bc5000/jobs';
 
+import { settingsCardsForRole } from '../src/app/(protected)/settings/settings-cards.js';
 import { createTestSmsService } from '../src/app/(protected)/settings/test-sms/test-sms-service.js';
+import {
+  createTestSmsPreview,
+  TestSmsForm
+} from '../src/components/test-sms-form.js';
 
 const client = createDatabase(
   process.env.DATABASE_URL ??
@@ -55,6 +62,45 @@ const createPublisher = () =>
   ({ publish: vi.fn(() => Promise.resolve(randomUUID())) }) satisfies JobPublisher;
 
 describe('test SMS queue service', () => {
+  it('shows the Test SMS settings card only to Administrators', () => {
+    expect(settingsCardsForRole('ADMIN').map((card) => card.href)).toContain(
+      '/settings/test-sms'
+    );
+    expect(settingsCardsForRole('OPERATOR').map((card) => card.href)).not.toContain(
+      '/settings/test-sms'
+    );
+  });
+
+  it('renders a stable request ID, dry-run guidance, and no provider secrets', () => {
+    const requestId = randomUUID();
+    const html = renderToStaticMarkup(
+      createElement(TestSmsForm, {
+        organisationId: randomUUID(),
+        requestId,
+        sendMode: 'dry-run'
+      })
+    );
+
+    expect(html).toContain(`value="${requestId}"`);
+    expect(html.match(new RegExp(requestId, 'g'))).toHaveLength(1);
+    expect(html).toContain('No SMS will be sent to a phone while dry-run mode is active');
+    expect(html).toContain('I confirm this test SMS is ready');
+    expect(html).not.toMatch(/api[-_ ]?key|client secret|authorization:/i);
+  });
+
+  it('provides encoding, segment, and validation feedback before submission', () => {
+    expect(createTestSmsPreview('AccountPulse test message')).toMatchObject({
+      segmentCount: 1,
+      error: null
+    });
+    expect(createTestSmsPreview('')).toMatchObject({
+      error: 'Enter a message to preview its SMS length.'
+    });
+    expect(createTestSmsPreview('A'.repeat(500))).toMatchObject({
+      error: 'This message exceeds the 3-segment test limit.'
+    });
+  });
+
   it('is Administrator-only and requires explicit confirmation', async () => {
     const seeded = await seed();
     const service = createTestSmsService({
