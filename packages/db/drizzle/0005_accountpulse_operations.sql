@@ -25,6 +25,64 @@ ALTER TABLE "outbound_messages" ADD COLUMN "content" text;--> statement-breakpoi
 ALTER TABLE "outbound_messages" ADD COLUMN "failure_reason" text;--> statement-breakpoint
 ALTER TABLE "stage_instances" ADD COLUMN "origin" varchar(24) DEFAULT 'AUTOMATION' NOT NULL;--> statement-breakpoint
 ALTER TABLE "stage_instances" ADD COLUMN "created_by_user_id" uuid;--> statement-breakpoint
+-- accountpulse-history-backfill:start
+UPDATE "stage_instances"
+SET "origin" = 'MANUAL_REMINDER'
+WHERE "stage_key" = 'manual';--> statement-breakpoint
+UPDATE "stage_instances" AS "stage"
+SET "created_by_user_id" = (
+	SELECT "approval"."decided_by_user_id"
+	FROM "approvals" AS "approval"
+	WHERE "approval"."stage_instance_id" = "stage"."id"
+		AND "approval"."status" = 'APPROVED'
+		AND "approval"."decided_by_user_id" IS NOT NULL
+	ORDER BY "approval"."decided_at" DESC NULLS LAST, "approval"."created_at" DESC
+	LIMIT 1
+)
+WHERE "stage"."origin" = 'MANUAL_REMINDER'
+	AND EXISTS (
+		SELECT 1
+		FROM "approvals" AS "approval"
+		WHERE "approval"."stage_instance_id" = "stage"."id"
+			AND "approval"."status" = 'APPROVED'
+			AND "approval"."decided_by_user_id" IS NOT NULL
+	);--> statement-breakpoint
+UPDATE "outbound_messages" AS "outbound"
+SET "contact_id" = COALESCE("chase"."customer_id", "invoice"."contact_id"),
+	"invoice_id" = "invoice"."id",
+	"actor_user_id" = "stage"."created_by_user_id",
+	"source" = CASE
+		WHEN "outbound"."channel" = 'XERO_EMAIL' THEN 'XERO_EMAIL'
+		WHEN "stage"."origin" = 'MANUAL_REMINDER' THEN 'MANUAL_REMINDER'
+		ELSE 'AUTOMATED_REMINDER'
+	END
+FROM "stage_instances" AS "stage"
+INNER JOIN "invoice_chases" AS "chase"
+	ON "chase"."id" = "stage"."invoice_chase_id"
+INNER JOIN "invoices" AS "invoice"
+	ON "invoice"."id" = "chase"."invoice_id"
+WHERE "outbound"."stage_instance_id" = "stage"."id"
+	AND "outbound"."organisation_id" = "stage"."organisation_id"
+	AND "chase"."organisation_id" = "outbound"."organisation_id"
+	AND "invoice"."organisation_id" = "outbound"."organisation_id";--> statement-breakpoint
+UPDATE "outbound_messages" AS "outbound"
+SET "content" = (
+	SELECT "approval"."rendered_preview"
+	FROM "approvals" AS "approval"
+	WHERE "approval"."stage_instance_id" = "outbound"."stage_instance_id"
+		AND "approval"."status" = 'APPROVED'
+	ORDER BY "approval"."decided_at" DESC NULLS LAST, "approval"."created_at" DESC
+	LIMIT 1
+)
+WHERE "outbound"."channel" = 'SMS'
+	AND "outbound"."content" IS NULL
+	AND EXISTS (
+		SELECT 1
+		FROM "approvals" AS "approval"
+		WHERE "approval"."stage_instance_id" = "outbound"."stage_instance_id"
+			AND "approval"."status" = 'APPROVED'
+	);--> statement-breakpoint
+-- accountpulse-history-backfill:end
 ALTER TABLE "reminder_whitelist_entries" ADD CONSTRAINT "reminder_whitelist_entries_organisation_id_organisations_id_fk" FOREIGN KEY ("organisation_id") REFERENCES "public"."organisations"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "reminder_whitelist_entries" ADD CONSTRAINT "reminder_whitelist_entries_contact_id_contacts_id_fk" FOREIGN KEY ("contact_id") REFERENCES "public"."contacts"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "reminder_whitelist_entries" ADD CONSTRAINT "reminder_whitelist_entries_invoice_id_invoices_id_fk" FOREIGN KEY ("invoice_id") REFERENCES "public"."invoices"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint

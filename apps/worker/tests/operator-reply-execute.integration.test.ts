@@ -59,4 +59,45 @@ describe('operator reply execution', () => {
     expect(deliveredReply?.status).toBe('DELIVERED');
     expect(deliveredOutbound?.status).toBe('DELIVERED');
   });
+
+  it('retains the provider delivery failure in both Inbox and Outbox', async () => {
+    const seeded = await seedReply('live');
+    const sendSms = vi.fn(() =>
+      Promise.resolve({
+        kind: 'accepted' as const,
+        messageId: 'sinch-failed-delivery',
+        status: 'ACCEPTED'
+      })
+    );
+    await executeOperatorReply(
+      {
+        database: client.db,
+        clock: { now: () => now },
+        sinch: { sendSms },
+        callbackUrl: 'https://example.invalid/sinch'
+      },
+      seeded
+    );
+
+    await processDeliveryEvent(client.db, seeded.organisationId, {
+      kind: 'delivery',
+      messageId: 'sinch-failed-delivery',
+      status: 'EXPIRED',
+      statusCode: 400,
+      category: 'permanently-failed',
+      occurredAt: '2026-09-18T02:01:00.000Z',
+      metadata: {}
+    });
+
+    const [reply] = await client.db
+      .select()
+      .from(operatorReplies)
+      .where(eq(operatorReplies.id, seeded.replyId));
+    const [outbound] = await client.db
+      .select()
+      .from(outboundMessages)
+      .where(eq(outboundMessages.organisationId, seeded.organisationId));
+    expect(reply).toMatchObject({ status: 'FAILED', failureReason: 'EXPIRED' });
+    expect(outbound).toMatchObject({ status: 'FAILED', failureReason: 'EXPIRED' });
+  });
 });

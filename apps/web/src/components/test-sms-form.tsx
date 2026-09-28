@@ -44,7 +44,11 @@ export const createTestSmsPreview = (content: string): TestSmsPreview => {
 
 const validAustralianNumber = (value: string): boolean => {
   const parsed = parsePhoneNumberFromString(value.trim(), 'AU');
-  return parsed?.country === 'AU' && parsed.isValid();
+  return (
+    parsed?.country === 'AU' &&
+    parsed.isValid() &&
+    parsed.getType() === 'MOBILE'
+  );
 };
 
 export function TestSmsForm({

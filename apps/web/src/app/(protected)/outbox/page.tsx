@@ -1,5 +1,10 @@
 import { authorise } from '@bc5000/auth';
-import type { OutboundSource, OutboundStatus } from '@bc5000/db/web';
+import {
+  organisations,
+  type OutboundSource,
+  type OutboundStatus
+} from '@bc5000/db/web';
+import { eq } from 'drizzle-orm';
 import { PaperAirplaneIcon } from '@heroicons/react/24/outline';
 import { headers } from 'next/headers';
 import Link from 'next/link';
@@ -10,6 +15,7 @@ import {
   queryOutbox,
   type OutboxChannel
 } from './outbox-query.js';
+import { parseOutboxDateRange } from './outbox-date-range.js';
 
 type SearchParameters = Record<string, string | string[] | undefined>;
 
@@ -45,12 +51,6 @@ const accepted = <Value extends string>(
     ? (value as Value)
     : undefined;
 
-const dateAt = (value: string | undefined, endOfDay = false): Date | undefined => {
-  if (value === undefined || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined;
-  const parsed = new Date(`${value}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}Z`);
-  return Number.isNaN(parsed.getTime()) ? undefined : parsed;
-};
-
 const paginationHref = (
   parameters: SearchParameters,
   cursor: string
@@ -77,6 +77,12 @@ export default async function OutboxPage({
     throw new Error('No active organisation membership');
   }
   authorise(session, 'outbox.read', organisationId);
+  const [organisation] = await getDatabaseClient()
+    .db.select({ timeZone: organisations.timeZone })
+    .from(organisations)
+    .where(eq(organisations.id, organisationId))
+    .limit(1);
+  if (organisation === undefined) throw new Error('Organisation not found');
   const parameters = await searchParams;
   const search = first(parameters.search);
   const channel = accepted(first(parameters.channel), channels);
@@ -85,6 +91,11 @@ export default async function OutboxPage({
   const from = first(parameters.from);
   const to = first(parameters.to);
   const cursor = first(parameters.cursor);
+  const dateRange = parseOutboxDateRange({
+    ...(from === undefined ? {} : { from }),
+    ...(to === undefined ? {} : { to }),
+    timeZone: organisation.timeZone
+  });
   const result = await queryOutbox(getDatabaseClient().db, {
     organisationId,
     limit: 25,
@@ -92,8 +103,7 @@ export default async function OutboxPage({
     ...(channel === undefined ? {} : { channel }),
     ...(source === undefined ? {} : { source }),
     ...(status === undefined ? {} : { status }),
-    ...(dateAt(from) === undefined ? {} : { from: dateAt(from)! }),
-    ...(dateAt(to, true) === undefined ? {} : { to: dateAt(to, true)! }),
+    ...dateRange,
     ...(cursor === undefined ? {} : { cursor })
   });
 

@@ -8,11 +8,13 @@ import {
   approvals,
   auditEvents,
   contacts,
+  conversations,
   createDatabase,
   invoiceChases,
   invoices,
   migrateDatabase,
   organisations,
+  operatorReplies,
   outboundMessages,
   reminderSequences,
   reminderSequenceVersions,
@@ -148,6 +150,16 @@ async function seedScenario() {
 
   const queuedOutboundId = randomUUID();
   const acceptedOutboundId = randomUUID();
+  const inboxOutboundId = randomUUID();
+  const conversationId = randomUUID();
+  const replyId = randomUUID();
+  await client.db.insert(conversations).values({
+    id: conversationId,
+    organisationId,
+    contactId,
+    normalisedNumber: '+61400000000',
+    lastMessageAt: now
+  });
   await client.db.insert(outboundMessages).values([
     {
       id: queuedOutboundId,
@@ -174,8 +186,33 @@ async function seedScenario() {
       content: 'Already accepted',
       status: 'ACCEPTED',
       idempotencyKey: randomUUID()
+    },
+    {
+      id: inboxOutboundId,
+      organisationId,
+      contactId,
+      actorUserId: operatorUserId,
+      channel: 'SMS',
+      source: 'INBOX_REPLY',
+      recipientKey: '+61400000000',
+      content: 'Thanks for the update',
+      status: 'QUEUED',
+      idempotencyKey: `operator-reply:${replyId}`
     }
   ]);
+  await client.db.insert(operatorReplies).values({
+    id: replyId,
+    organisationId,
+    conversationId,
+    actorUserId: operatorUserId,
+    outboundMessageId: inboxOutboundId,
+    content: 'Thanks for the update',
+    contentHash: 'reply-hash',
+    status: 'PENDING',
+    idempotencyKey: `operator-reply:${replyId}`,
+    createdAt: now,
+    updatedAt: now
+  });
   const taskId = randomUUID();
   await client.db.insert(tasks).values({
     id: taskId,
@@ -204,6 +241,8 @@ async function seedScenario() {
     approvalIds,
     queuedOutboundId,
     acceptedOutboundId,
+    inboxOutboundId,
+    replyId,
     taskId,
     session
   };
@@ -213,6 +252,24 @@ const publisher = () =>
   ({ publish: vi.fn(() => Promise.resolve(randomUUID())) }) satisfies JobPublisher;
 
 describe('Reminder Whitelist lifecycle', () => {
+  it('enforces the whitelist reason limit on the server', async () => {
+    const seeded = await seedScenario();
+    const service = createReminderWhitelistService({
+      database: client.db,
+      publisher: publisher(),
+      clock: { now: () => now }
+    });
+
+    await expect(
+      service.add(seeded.session('OPERATOR'), {
+        organisationId: seeded.organisationId,
+        scope: 'CLIENT',
+        contactId: seeded.contactId,
+        reason: 'A'.repeat(501)
+      })
+    ).rejects.toThrow('REMINDER_WHITELIST_REASON_TOO_LONG');
+  });
+
   it('cancels all unsent client work while preserving accepted history', async () => {
     const seeded = await seedScenario();
     const jobs = publisher();
@@ -266,6 +323,14 @@ describe('Reminder Whitelist lifecycle', () => {
     expect(messages.find((row) => row.id === seeded.acceptedOutboundId)?.status).toBe(
       'ACCEPTED'
     );
+    expect(messages.find((row) => row.id === seeded.inboxOutboundId)?.status).toBe(
+      'QUEUED'
+    );
+    const [reply] = await client.db
+      .select()
+      .from(operatorReplies)
+      .where(eq(operatorReplies.id, seeded.replyId));
+    expect(reply?.status).toBe('PENDING');
     expect(task?.status).toBe('CANCELLED');
     const events = await client.db
       .select()

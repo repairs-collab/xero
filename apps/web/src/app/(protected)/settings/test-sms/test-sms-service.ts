@@ -26,7 +26,11 @@ export interface QueueTestSmsInput {
 
 const normaliseAustralianNumber = (rawValue: string): string => {
   const parsed = parsePhoneNumberFromString(rawValue.trim(), 'AU');
-  if (parsed?.country !== 'AU' || !parsed.isValid()) {
+  if (
+    parsed?.country !== 'AU' ||
+    !parsed.isValid() ||
+    parsed.getType() !== 'MOBILE'
+  ) {
     throw new Error('INVALID_AU_MOBILE_NUMBER');
   }
   return parsed.number;

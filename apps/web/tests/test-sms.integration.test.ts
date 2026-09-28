@@ -147,6 +147,13 @@ describe('test SMS queue service', () => {
     await expect(
       service.queue(seeded.session('ADMIN'), {
         ...base,
+        destination: '(02) 9374 4000',
+        content: 'Test'
+      })
+    ).rejects.toThrow('INVALID_AU_MOBILE_NUMBER');
+    await expect(
+      service.queue(seeded.session('ADMIN'), {
+        ...base,
         destination: '0400 000 001',
         content: 'A'.repeat(500)
       })

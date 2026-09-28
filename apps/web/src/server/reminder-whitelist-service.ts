@@ -50,6 +50,13 @@ const unsentStageStatuses = [
   'SNOOZED'
 ] as const;
 
+const reminderOutboundSources = [
+  'AUTOMATED_REMINDER',
+  'MANUAL_REMINDER',
+  'ESCALATION_SMS',
+  'XERO_EMAIL'
+] as const;
+
 export function createReminderWhitelistService(
   dependencies: ReminderWhitelistServiceDependencies
 ) {
@@ -65,11 +72,19 @@ export function createReminderWhitelistService(
     if (input.scope === 'INVOICE' && input.invoiceId === undefined) {
       throw new Error('REMINDER_WHITELIST_INVOICE_REQUIRED');
     }
+    const reason = input.reason?.trim();
+    if (reason !== undefined && reason.length > 500) {
+      throw new Error('REMINDER_WHITELIST_REASON_TOO_LONG');
+    }
     const now = dependencies.clock.now();
     return dependencies.database.transaction(async (transaction) => {
       await repository.lockTarget(transaction, input);
       const added = await repository.add(transaction, {
-        ...input,
+        organisationId: input.organisationId,
+        scope: input.scope,
+        contactId: input.contactId,
+        ...(input.invoiceId === undefined ? {} : { invoiceId: input.invoiceId }),
+        ...(reason === undefined || reason === '' ? {} : { reason }),
         actorUserId: session.userId,
         now
       });
@@ -141,6 +156,7 @@ export function createReminderWhitelistService(
           and(
             eq(outboundMessages.organisationId, input.organisationId),
             inArray(outboundMessages.status, ['PENDING', 'QUEUED']),
+            inArray(outboundMessages.source, [...reminderOutboundSources]),
             or(
               stageIds.length === 0
                 ? undefined
@@ -188,7 +204,7 @@ export function createReminderWhitelistService(
             scope: input.scope,
             contactId: input.contactId,
             invoiceId: input.invoiceId ?? null,
-            reason: input.reason ?? null
+            reason: reason === undefined || reason === '' ? null : reason
           },
           occurredAt: now
         },

@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createDatabase, migrateDatabase } from '../client.js';
 import {
+  approvals,
   auditEvents,
   contacts,
   invoiceChases,
@@ -13,7 +15,8 @@ import {
   outboundMessages,
   reminderSequenceVersions,
   reminderSequences,
-  stageInstances
+  stageInstances,
+  users
 } from './index.js';
 import * as schema from './index.js';
 
@@ -219,6 +222,77 @@ describe('database invariants', () => {
       [outboundId]
     );
     expect(history.rows[0]?.stage_instance_id).toBeNull();
+  });
+
+  it('backfills reliable historical Outbox associations and source classification', async () => {
+    const { organisationId, contactId, invoiceId, stageInstanceId } =
+      await seedStageInstance();
+    const userId = randomUUID();
+    const outboundId = randomUUID();
+    await database.db.insert(users).values({
+      id: userId,
+      cognitoSubject: randomUUID(),
+      email: `${userId}@example.invalid`,
+      displayName: 'Historical operator'
+    });
+    await database.db
+      .update(stageInstances)
+      .set({ stageKey: 'manual', origin: 'AUTOMATION', createdByUserId: null })
+      .where(eq(stageInstances.id, stageInstanceId));
+    await database.db.insert(approvals).values({
+      organisationId,
+      stageInstanceId,
+      renderedPreview: 'Historical approved reminder',
+      sourceVersion: 1,
+      status: 'APPROVED',
+      decidedByUserId: userId,
+      decidedAt: new Date('2026-09-18T00:01:00Z'),
+      expiresAt: new Date('2026-09-19T00:00:00Z')
+    });
+    await database.db.insert(outboundMessages).values({
+      id: outboundId,
+      organisationId,
+      stageInstanceId,
+      channel: 'SMS',
+      recipientKey: '+61400000000',
+      sourceVersion: 1,
+      status: 'DELIVERED',
+      idempotencyKey: `historical:${outboundId}`
+    });
+    const migration = await readFile(
+      new URL('../../drizzle/0005_accountpulse_operations.sql', import.meta.url),
+      'utf8'
+    );
+    const backfill = migration
+      .split('-- accountpulse-history-backfill:start')[1]
+      ?.split('-- accountpulse-history-backfill:end')[0];
+    expect(backfill).toBeDefined();
+    for (const statement of (backfill ?? '')
+      .split('--> statement-breakpoint')
+      .map((value) => value.trim())
+      .filter(Boolean)) {
+      await database.pool.query(statement);
+    }
+
+    const [stage] = await database.db
+      .select()
+      .from(stageInstances)
+      .where(eq(stageInstances.id, stageInstanceId));
+    const [outbound] = await database.db
+      .select()
+      .from(outboundMessages)
+      .where(eq(outboundMessages.id, outboundId));
+    expect(stage).toMatchObject({
+      origin: 'MANUAL_REMINDER',
+      createdByUserId: userId
+    });
+    expect(outbound).toMatchObject({
+      contactId,
+      invoiceId,
+      actorUserId: userId,
+      source: 'MANUAL_REMINDER',
+      content: 'Historical approved reminder'
+    });
   });
 
   it.each(['update', 'delete'] as const)(

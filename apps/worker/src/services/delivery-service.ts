@@ -68,6 +68,7 @@ export async function processDeliveryEvent(
       .update(outboundMessages)
       .set({
         status: delivered ? 'DELIVERED' : 'FAILED',
+        failureReason: delivered ? null : event.status,
         completedAt: occurredAt,
         updatedAt: occurredAt
       })

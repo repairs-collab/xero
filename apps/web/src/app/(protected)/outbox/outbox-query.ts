@@ -5,7 +5,6 @@ import {
   gte,
   ilike,
   lt,
-  lte,
   or,
   type SQL
 } from 'drizzle-orm';
@@ -30,7 +29,7 @@ export interface OutboxQueryInput {
   source?: OutboundSource;
   status?: OutboundStatus;
   from?: Date;
-  to?: Date;
+  before?: Date;
   cursor?: string;
   limit: number;
 }
@@ -109,8 +108,8 @@ export async function queryOutbox(
   if (input.from !== undefined) {
     conditions.push(gte(outboundMessages.createdAt, input.from));
   }
-  if (input.to !== undefined) {
-    conditions.push(lte(outboundMessages.createdAt, input.to));
+  if (input.before !== undefined) {
+    conditions.push(lt(outboundMessages.createdAt, input.before));
   }
   if (input.search?.trim()) {
     const pattern = searchPattern(input.search.trim());

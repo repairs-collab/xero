@@ -21,6 +21,7 @@ vi.mock('next/link', () => ({
 }));
 
 import { queryOutbox } from '../src/app/(protected)/outbox/outbox-query.js';
+import { parseOutboxDateRange } from '../src/app/(protected)/outbox/outbox-date-range.js';
 import { OutboxTable } from '../src/components/outbox-table.js';
 
 const client = createDatabase(
@@ -188,6 +189,44 @@ async function seedOutbox() {
 }
 
 describe('Outbox query and presentation', () => {
+  it('uses whole local Sydney days for date filters across standard and daylight time', () => {
+    expect(
+      parseOutboxDateRange({
+        from: '2026-09-28',
+        to: '2026-09-28',
+        timeZone: 'Australia/Sydney'
+      })
+    ).toEqual({
+      from: new Date('2026-09-27T14:00:00.000Z'),
+      before: new Date('2026-09-28T14:00:00.000Z')
+    });
+    expect(
+      parseOutboxDateRange({
+        from: '2026-01-15',
+        to: '2026-01-15',
+        timeZone: 'Australia/Sydney'
+      })
+    ).toEqual({
+      from: new Date('2026-01-14T13:00:00.000Z'),
+      before: new Date('2026-01-15T13:00:00.000Z')
+    });
+    expect(
+      parseOutboxDateRange({
+        from: 'not-a-date',
+        timeZone: 'Australia/Sydney'
+      })
+    ).toEqual({});
+    expect(
+      parseOutboxDateRange({
+        from: '2026-09-28',
+        to: '2026-02-31',
+        timeZone: 'Australia/Sydney'
+      })
+    ).toEqual({
+      from: new Date('2026-09-27T14:00:00.000Z')
+    });
+  });
+
   it('isolates organisations and uses a stable created-time plus ID cursor', async () => {
     const seeded = await seedOutbox();
     const first = await queryOutbox(client.db, {
@@ -227,7 +266,7 @@ describe('Outbox query and presentation', () => {
       channel: 'XERO_EMAIL',
       status: 'ACCEPTED',
       from: new Date('2026-09-28T03:02:00.000Z'),
-      to: new Date('2026-09-28T03:02:00.000Z'),
+      before: new Date('2026-09-28T03:02:00.001Z'),
       search: 'INV-100',
       limit: 20
     });
