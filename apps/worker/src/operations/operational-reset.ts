@@ -685,14 +685,46 @@ export function createOperationalResetService(
         input.organisationId
       );
       assertControlledLive(organisation);
-      if (organisation.maintenanceMode) {
-        throw new Error('RESET_ALREADY_ACTIVE');
-      }
       const adminUserId = await requireAdmin(
         transaction,
         input.organisationId,
         input.adminEmail
       );
+      const [sameRun] = await transaction
+        .select()
+        .from(operationalResetRuns)
+        .where(
+          and(
+            eq(operationalResetRuns.id, input.resetRunId),
+            eq(operationalResetRuns.organisationId, input.organisationId)
+          )
+        )
+        .for('update')
+        .limit(1);
+      if (sameRun !== undefined) {
+        if (
+          sameRun.deployedCommit !== input.deployedCommit ||
+          sameRun.requestedByUserId !== adminUserId
+        ) {
+          throw new Error('RESET_RUN_IDENTITY_MISMATCH');
+        }
+        if (sameRun.status === 'COMPLETED') return;
+        if (
+          !['PREPARING', 'SNAPSHOT_CREATED', 'FAILED'].includes(
+            sameRun.status
+          ) ||
+          !organisation.maintenanceMode ||
+          !['RESET_PREPARING', 'RESET_FAILED'].includes(
+            organisation.operationalState
+          )
+        ) {
+          throw new Error('RESET_RUN_NOT_REUSABLE');
+        }
+        return;
+      }
+      if (organisation.maintenanceMode) {
+        throw new Error('RESET_ALREADY_ACTIVE');
+      }
       const [activeReset] = await transaction
         .select({ id: operationalResetRuns.id })
         .from(operationalResetRuns)
@@ -762,11 +794,13 @@ export function createOperationalResetService(
         input.resetRunId
       );
       if (run.status === 'COMPLETED' || run.status === 'ABORTED') return;
+      const persistedSnapshotIdentifier =
+        run.snapshotIdentifier ?? input.snapshotIdentifier;
       await transaction
         .update(operationalResetRuns)
         .set({
           status: 'FAILED',
-          snapshotIdentifier: input.snapshotIdentifier,
+          snapshotIdentifier: persistedSnapshotIdentifier,
           snapshotCreatedAt: run.snapshotCreatedAt ?? failedAt,
           failureCode: 'RESET_EXECUTION_FAILED',
           updatedAt: failedAt
@@ -793,7 +827,7 @@ export function createOperationalResetService(
         afterValue: {
           operationalState: 'RESET_FAILED',
           failureCode: 'RESET_EXECUTION_FAILED',
-          snapshotIdentifier: input.snapshotIdentifier
+          snapshotIdentifier: persistedSnapshotIdentifier
         },
         occurredAt: failedAt
       });

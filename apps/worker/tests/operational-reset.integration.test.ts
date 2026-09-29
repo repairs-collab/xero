@@ -447,6 +447,7 @@ describe('operational reset', { timeout: 15_000 }, () => {
     ).rejects.toThrow('OPERATIONAL_STATE_CONFLICT');
 
     await service.prepare(baseInput);
+    await expect(service.prepare(baseInput)).resolves.toBeUndefined();
     const [organisation] = await database.db
       .select()
       .from(organisations)
@@ -777,6 +778,40 @@ describe('operational reset', { timeout: 15_000 }, () => {
     expect(run?.rowCountManifest.contacts).toBe(1);
   });
 
+  it('never overwrites a snapshot already bound to the reset run on failure', async () => {
+    const seeded = await seedGraph();
+    const { resetRunId } = await prepare(seeded);
+    const lockedSnapshot = 'accountpulse-locked-snapshot';
+    const service = createOperationalResetService({
+      database: database.db,
+      clock,
+      afterEvidenceRecorded: async () => {
+        await database.db
+          .update(operationalResetRuns)
+          .set({ snapshotIdentifier: lockedSnapshot })
+          .where(eq(operationalResetRuns.id, resetRunId));
+      }
+    });
+
+    await expect(
+      service.execute({
+        organisationId: seeded.organisationId,
+        resetRunId,
+        snapshotIdentifier: 'accountpulse-unbound-snapshot'
+      })
+    ).rejects.toThrow('SNAPSHOT_IDENTIFIER_MISMATCH');
+
+    const [failedRun] = await database.db
+      .select()
+      .from(operationalResetRuns)
+      .where(eq(operationalResetRuns.id, resetRunId));
+    expect(failedRun).toMatchObject({
+      status: 'FAILED',
+      snapshotIdentifier: lockedSnapshot,
+      failureCode: 'RESET_EXECUTION_FAILED'
+    });
+  });
+
   it('rolls back deterministically, permits same-run retry, and makes completed re-execution a no-op', async () => {
     const seeded = await seedGraph();
     const resetRunId = randomUUID();
@@ -835,6 +870,16 @@ describe('operational reset', { timeout: 15_000 }, () => {
       snapshotIdentifier: 'accountpulse-rollback-test'
     });
     expect(completed.rowCountManifest.contacts).toBe(1);
+    await expect(
+      service.prepare({
+        organisationId: seeded.organisationId,
+        resetRunId,
+        deployedCommit: '0123456789abcdef0123456789abcdef01234567',
+        adminEmail: seeded.adminEmail,
+        acknowledgement: OPERATIONAL_RESET_ACKNOWLEDGEMENT,
+        expectedVersion: 0
+      })
+    ).resolves.toBeUndefined();
 
     const newContactId = randomUUID();
     await database.db.insert(contacts).values({

@@ -1,0 +1,320 @@
+name: Protected AccountPulse operational reset
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: Environment protected by its GitHub approval rules
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      operation:
+        description: Start/resume a reset, or explicitly abort an incomplete reset
+        required: true
+        type: choice
+        options:
+          - reset
+          - abort
+      organisation_id:
+        description: Exact AccountPulse organisation UUID
+        required: true
+        type: string
+      reset_run_id:
+        description: New UUID for reset, or the existing UUID for retry/abort
+        required: true
+        type: string
+      admin_email:
+        description: Active AccountPulse Administrator who approved the operation
+        required: true
+        type: string
+      deployed_commit:
+        description: Exact 40-character Git commit already deployed to the target
+        required: true
+        type: string
+      expected_version:
+        description: Current operational-state version (required for reset)
+        required: false
+        type: string
+      acknowledgement:
+        description: Exact operational-reset acknowledgement (required for reset)
+        required: false
+        type: string
+      abort_reason:
+        description: Credential-free audit reason (required for abort)
+        required: false
+        type: string
+      snapshot_id:
+        description: Optional confirmation of the snapshot already recorded in the same-run deployment lock
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: bill-chaser-production
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-southeast-2
+  TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
+  OPERATION: ${{ inputs.operation }}
+  ORGANISATION_ID: ${{ inputs.organisation_id }}
+  RESET_RUN_ID: ${{ inputs.reset_run_id }}
+  ADMIN_EMAIL: ${{ inputs.admin_email }}
+  DEPLOYED_COMMIT: ${{ inputs.deployed_commit }}
+  EXPECTED_VERSION: ${{ inputs.expected_version }}
+  ACKNOWLEDGEMENT: ${{ inputs.acknowledgement }}
+  ABORT_REASON: ${{ inputs.abort_reason }}
+  REQUESTED_SNAPSHOT_ID: ${{ inputs.snapshot_id }}
+  RESET_PHASE: preflight
+
+jobs:
+  operational-reset:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: ${{ inputs.target_environment }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.deployed_commit }}
+      - uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ap-southeast-2
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+
+      - name: Verify target and run protected operation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          [[ "$TARGET_ENVIRONMENT" =~ ^(staging|production)$ ]] || { echo "::error::Invalid environment"; exit 1; }
+          [[ "$OPERATION" =~ ^(reset|abort)$ ]] || { echo "::error::Invalid operation"; exit 1; }
+          [[ "$ORGANISATION_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || { echo "::error::Invalid organisation ID"; exit 1; }
+          [[ "$RESET_RUN_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || { echo "::error::Invalid reset run ID"; exit 1; }
+          [[ "$DEPLOYED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::A full deployed Git commit is required"; exit 1; }
+          [[ "$ADMIN_EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || { echo "::error::Invalid Admin email"; exit 1; }
+          if [[ "$OPERATION" == "reset" ]]; then
+            [[ "$EXPECTED_VERSION" =~ ^[0-9]+$ ]] || { echo "::error::Expected operational-state version is required"; exit 1; }
+            [[ "$ACKNOWLEDGEMENT" == "I understand this will permanently reset AccountPulse operational data for this organisation" ]] || { echo "::error::Acknowledgement did not match"; exit 1; }
+            if [[ -n "$REQUESTED_SNAPSHOT_ID" ]]; then
+              [[ "$REQUESTED_SNAPSHOT_ID" =~ ^[A-Za-z][A-Za-z0-9-]{0,253}[A-Za-z0-9]$ && "$REQUESTED_SNAPSHOT_ID" != *--* ]] || { echo "::error::Invalid retry snapshot identifier"; exit 1; }
+            fi
+          else
+            [[ -n "$ABORT_REASON" ]] || { echo "::error::Abort reason is required"; exit 1; }
+          fi
+
+          CHECKED_OUT_COMMIT=$(git rev-parse HEAD)
+          [[ "$CHECKED_OUT_COMMIT" == "$DEPLOYED_COMMIT" ]] || { echo "::error::Checked-out commit mismatch"; exit 1; }
+
+          SERVICE_STACK="${TARGET_ENVIRONMENT}-bill-chaser-services"
+          DATA_STACK="${TARGET_ENVIRONMENT}-bill-chaser-data"
+          stack_output() {
+            aws cloudformation describe-stacks --stack-name "$1" --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue | [0]" --output text
+          }
+
+          CLUSTER=$(stack_output "$SERVICE_STACK" WorkerClusterName)
+          SERVICE=$(stack_output "$SERVICE_STACK" WorkerServiceName)
+          TASK_DEFINITION=$(stack_output "$SERVICE_STACK" WorkerTaskDefinitionArn)
+          BASELINE_DESIRED=$(stack_output "$SERVICE_STACK" WorkerBaselineDesiredCount)
+          DATABASE_INSTANCE=$(stack_output "$DATA_STACK" DatabaseInstanceIdentifier)
+          for value in "$CLUSTER" "$SERVICE" "$TASK_DEFINITION" "$DATABASE_INSTANCE"; do
+            [[ -n "$value" && "$value" != "None" ]] || { echo "::error::Required stack output is missing"; exit 1; }
+          done
+
+          SERVICE_DESCRIPTION=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --output json)
+          ACTIVE_TASK_DEFINITION=$(jq -r '.services[0].taskDefinition // empty' <<< "$SERVICE_DESCRIPTION")
+          ORIGINAL_DESIRED=$(jq -r '.services[0].desiredCount // empty' <<< "$SERVICE_DESCRIPTION")
+          NETWORK=$(jq -c '.services[0].networkConfiguration' <<< "$SERVICE_DESCRIPTION")
+          [[ "$ACTIVE_TASK_DEFINITION" == "$TASK_DEFINITION" ]] || { echo "::error::Service task definition does not match the deployed stack"; exit 1; }
+          [[ "$ORIGINAL_DESIRED" =~ ^[0-9]+$ && "$BASELINE_DESIRED" =~ ^[0-9]+$ ]] || { echo "::error::Worker desired-count evidence is invalid"; exit 1; }
+          DEPLOYED_WORKER_IMAGE=$(aws ecs describe-task-definition --task-definition "$TASK_DEFINITION" --query 'taskDefinition.containerDefinitions[?name==`Worker`].image | [0]' --output text)
+          [[ "${DEPLOYED_WORKER_IMAGE##*:}" == "$DEPLOYED_COMMIT" ]] || { echo "::error::Worker image does not match the approved deployed commit"; exit 1; }
+
+          LOCK_NAME="/accountpulse/${TARGET_ENVIRONMENT}/operational-reset-lock"
+          RECOVERY_RUN=false
+          RECOVERY_COMPLETED=false
+          LOCK_SNAPSHOT=""
+          if LOCK_RESULT=$(aws ssm get-parameter --name "$LOCK_NAME" --query 'Parameter.Value' --output text 2>&1); then
+            EXISTING_LOCK="$LOCK_RESULT"
+          elif [[ "$LOCK_RESULT" == *"ParameterNotFound"* ]]; then
+            EXISTING_LOCK=""
+          else
+            echo "::error::Unable to verify the protected-reset deployment lock"
+            exit 1
+          fi
+          if [[ -n "$EXISTING_LOCK" && "$EXISTING_LOCK" != "None" ]]; then
+            RECOVERY_RUN=true
+            EXISTING_RUN=$(jq -r '.resetRunId // empty' <<< "$EXISTING_LOCK")
+            EXISTING_COMMIT=$(jq -r '.deployedCommit // empty' <<< "$EXISTING_LOCK")
+            EXISTING_PHASE=$(jq -r '.phase // empty' <<< "$EXISTING_LOCK")
+            LOCK_SNAPSHOT=$(jq -r '.snapshotIdentifier // empty' <<< "$EXISTING_LOCK")
+            [[ "$EXISTING_RUN" == "$RESET_RUN_ID" ]] || { echo "::error::Another protected reset or recovery holds the deployment lock"; exit 1; }
+            [[ "$EXISTING_COMMIT" == "$DEPLOYED_COMMIT" ]] || { echo "::error::Reset retry commit does not match the deployment lock"; exit 1; }
+            if [[ "$EXISTING_PHASE" == "reset-completed" || "$EXISTING_PHASE" == "workers-restored" ]]; then
+              RECOVERY_COMPLETED=true
+            fi
+          fi
+          if [[ -n "$REQUESTED_SNAPSHOT_ID" ]]; then
+            [[ -n "$EXISTING_LOCK" && "$EXISTING_LOCK" != "None" ]] || { echo "::error::A retry snapshot requires the existing same-run deployment lock"; exit 1; }
+            [[ -n "$LOCK_SNAPSHOT" && "$REQUESTED_SNAPSHOT_ID" == "$LOCK_SNAPSHOT" ]] || { echo "::error::Retry snapshot does not match the deployment lock"; exit 1; }
+          elif [[ -n "$LOCK_SNAPSHOT" ]]; then
+            REQUESTED_SNAPSHOT_ID="$LOCK_SNAPSHOT"
+          fi
+          if [[ -n "$REQUESTED_SNAPSHOT_ID" ]]; then
+            [[ "$REQUESTED_SNAPSHOT_ID" =~ ^[A-Za-z][A-Za-z0-9-]{0,253}[A-Za-z0-9]$ && "$REQUESTED_SNAPSHOT_ID" != *--* ]] || { echo "::error::Invalid retry snapshot identifier"; exit 1; }
+          fi
+          write_lock() {
+            local phase="$1"
+            local value current_snapshot
+            if [[ "$RECOVERY_COMPLETED" == "true" && "$phase" != "workers-restored" ]]; then
+              phase=reset-completed
+            fi
+            current_snapshot="${SNAPSHOT_ID:-${REQUESTED_SNAPSHOT_ID:-}}"
+            value=$(jq -cn --arg run "$RESET_RUN_ID" --arg commit "$DEPLOYED_COMMIT" --arg phase "$phase" --arg snapshot "$current_snapshot" '{resetRunId:$run,deployedCommit:$commit,phase:$phase,snapshotIdentifier:$snapshot}')
+            echo "RESET_PHASE=$phase" >> "$GITHUB_ENV"
+            aws ssm put-parameter --name "$LOCK_NAME" --type String --overwrite --value "$value" >/dev/null
+          }
+          write_lock preflight
+          echo "RESET_CLUSTER=$CLUSTER" >> "$GITHUB_ENV"
+          echo "RESET_SERVICE=$SERVICE" >> "$GITHUB_ENV"
+
+          run_worker_task() {
+            local command_json="$1"
+            local overrides task exit_code stop_reason
+            overrides=$(jq -cn --argjson command "$command_json" '{containerOverrides:[{name:"Worker",command:$command}]}')
+            task=$(aws ecs run-task --cluster "$CLUSTER" --task-definition "$TASK_DEFINITION" --launch-type FARGATE --network-configuration "$NETWORK" --overrides "$overrides" --query 'tasks[0].taskArn' --output text)
+            [[ -n "$task" && "$task" != "None" ]] || { echo "::error::ECS did not start the one-off task" >&2; return 1; }
+            aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$task"
+            exit_code=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$task" --query 'tasks[0].containers[?name==`Worker`].exitCode | [0]' --output text)
+            if [[ "$exit_code" != "0" ]]; then
+              stop_reason=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$task" --query 'tasks[0].stoppedReason' --output text)
+              echo "::error::One-off worker task failed: ${stop_reason}" >&2
+              return 1
+            fi
+            echo "$task"
+          }
+
+          SCALABLE_TARGET=$(aws application-autoscaling describe-scalable-targets --service-namespace ecs --resource-ids "service/${CLUSTER}/${SERVICE}" --scalable-dimension ecs:service:DesiredCount --output json)
+          ORIGINAL_MIN=$(jq -r '.ScalableTargets[0].MinCapacity // empty' <<< "$SCALABLE_TARGET")
+          ORIGINAL_MAX=$(jq -r '.ScalableTargets[0].MaxCapacity // empty' <<< "$SCALABLE_TARGET")
+          ORIGINAL_SUSPENDED=$(jq -c '.ScalableTargets[0].SuspendedState // {DynamicScalingInSuspended:false,DynamicScalingOutSuspended:false,ScheduledScalingSuspended:false}' <<< "$SCALABLE_TARGET")
+          DEFAULT_ACTIVE_SCALING='{"DynamicScalingInSuspended":false,"DynamicScalingOutSuspended":false,"ScheduledScalingSuspended":false}'
+
+          restore_workers() {
+            local desired="$1"
+            local recovery="${2:-false}"
+            aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --desired-count "$desired" >/dev/null
+            if [[ -n "$ORIGINAL_MAX" ]]; then
+              local minimum="$ORIGINAL_MIN"
+              local suspended="$ORIGINAL_SUSPENDED"
+              if [[ "$recovery" == "true" ]]; then
+                minimum="$BASELINE_DESIRED"
+                suspended="$DEFAULT_ACTIVE_SCALING"
+              fi
+              aws application-autoscaling register-scalable-target --service-namespace ecs --resource-id "service/${CLUSTER}/${SERVICE}" --scalable-dimension ecs:service:DesiredCount --min-capacity "$minimum" --max-capacity "$ORIGINAL_MAX" --suspended-state "$suspended" >/dev/null
+            fi
+            aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+          }
+
+          if [[ "$OPERATION" == "abort" ]]; then
+            write_lock aborting
+            # operational-reset abort
+            ABORT_COMMAND=$(jq -cn --arg org "$ORGANISATION_ID" --arg run "$RESET_RUN_ID" --arg admin "$ADMIN_EMAIL" --arg reason "$ABORT_REASON" '["node","/app/worker.mjs","operational-reset","abort","--organisation-id",$org,"--run-id",$run,"--admin-email",$admin,"--reason",$reason]')
+            ABORT_TASK=$(run_worker_task "$ABORT_COMMAND")
+            # Restore only after the audited abort succeeds.
+            restore_workers "$BASELINE_DESIRED" true
+            curl --fail --show-error --silent --retry 12 --retry-delay 10 "https://${{ vars.HOSTNAME }}/health/ready" >/dev/null
+            aws ssm delete-parameter --name "$LOCK_NAME" >/dev/null
+            echo "Abort completed by task ${ABORT_TASK}; worker service restored."
+            exit 0
+          fi # end abort
+
+          # operational-reset prepare
+          PREPARE_COMMAND=$(jq -cn --arg org "$ORGANISATION_ID" --arg run "$RESET_RUN_ID" --arg commit "$DEPLOYED_COMMIT" --arg admin "$ADMIN_EMAIL" --arg acknowledgement "$ACKNOWLEDGEMENT" --arg version "$EXPECTED_VERSION" '["node","/app/worker.mjs","operational-reset","prepare","--organisation-id",$org,"--run-id",$run,"--deployed-commit",$commit,"--admin-email",$admin,"--acknowledgement",$acknowledgement,"--expected-version",$version]')
+          PREPARE_TASK=$(run_worker_task "$PREPARE_COMMAND")
+          write_lock prepared
+
+          if [[ -n "$ORIGINAL_MAX" ]]; then
+            DRAIN_SUSPENDED='{"DynamicScalingInSuspended":true,"DynamicScalingOutSuspended":true,"ScheduledScalingSuspended":true}'
+            aws application-autoscaling register-scalable-target --service-namespace ecs --resource-id "service/${CLUSTER}/${SERVICE}" --scalable-dimension ecs:service:DesiredCount --min-capacity "$ORIGINAL_MIN" --max-capacity "$ORIGINAL_MAX" --suspended-state "$DRAIN_SUSPENDED" >/dev/null
+          fi
+          # Establish a stable pre-drain task set after every autoscaling source is suspended.
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+          PRE_DRAIN_SERVICE=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query 'services[0].{running:runningCount,pending:pendingCount}' --output json)
+          PRE_DRAIN_RUNNING=$(jq -r '.running' <<< "$PRE_DRAIN_SERVICE")
+          PRE_DRAIN_PENDING=$(jq -r '.pending' <<< "$PRE_DRAIN_SERVICE")
+          [[ "$PRE_DRAIN_PENDING" == "0" ]] || { echo "::error::Worker replacements are still pending before drain"; exit 1; }
+          PRE_DRAIN_TASK_SET=$(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SERVICE" --desired-status RUNNING --output json)
+          PRE_DRAIN_TASK_COUNT=$(jq '.taskArns | length' <<< "$PRE_DRAIN_TASK_SET")
+          [[ "$PRE_DRAIN_TASK_COUNT" == "$PRE_DRAIN_RUNNING" ]] || { echo "::error::Stable worker task evidence is incomplete"; exit 1; }
+          PRE_DRAIN_TASKS=$(jq -r '.taskArns[]?' <<< "$PRE_DRAIN_TASK_SET" | tr '\n' ' ')
+          if [[ -n "$ORIGINAL_MAX" ]]; then
+            aws application-autoscaling register-scalable-target --service-namespace ecs --resource-id "service/${CLUSTER}/${SERVICE}" --scalable-dimension ecs:service:DesiredCount --min-capacity 0 --max-capacity "$ORIGINAL_MAX" --suspended-state "$DRAIN_SUSPENDED" >/dev/null
+          fi
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --desired-count 0 >/dev/null
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+          DRAINED_SERVICE=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query 'services[0].{desired:desiredCount,running:runningCount,pending:pendingCount}' --output json)
+          [[ "$(jq -r '.desired' <<< "$DRAINED_SERVICE")" == "0" && "$(jq -r '.running' <<< "$DRAINED_SERVICE")" == "0" && "$(jq -r '.pending' <<< "$DRAINED_SERVICE")" == "0" ]] || { echo "::error::Worker tasks did not drain to zero"; exit 1; }
+          if [[ -n "$PRE_DRAIN_TASKS" && "$PRE_DRAIN_TASKS" != "None" ]]; then
+            aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks $PRE_DRAIN_TASKS
+            DRAIN_DESCRIPTIONS=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks $PRE_DRAIN_TASKS --output json)
+            DRAIN_FAILURES=$(jq '([.failures[]?] | length) + ([.tasks[].containers[]? | select(.name == "Worker" and .exitCode != 0)] | length)' <<< "$DRAIN_DESCRIPTIONS")
+            [[ "$DRAIN_FAILURES" == "0" ]] || { echo "::error::One or more worker tasks did not drain cleanly; reset remains locked"; exit 1; }
+          fi
+          write_lock workers-drained
+
+          SAFE_ORG=${ORGANISATION_ID:0:8}
+          SNAPSHOT_ID="${REQUESTED_SNAPSHOT_ID:-${TARGET_ENVIRONMENT}-accountpulse-${SAFE_ORG}-${GITHUB_RUN_ID}}"
+          SNAPSHOT_STATUS=$(aws rds describe-db-snapshots --db-snapshot-identifier "$SNAPSHOT_ID" --query 'DBSnapshots[0].Status' --output text 2>/dev/null || true)
+          if [[ -n "$REQUESTED_SNAPSHOT_ID" && ( -z "$SNAPSHOT_STATUS" || "$SNAPSHOT_STATUS" == "None" ) ]]; then
+            echo "::error::The requested retry snapshot does not exist"
+            exit 1
+          elif [[ -z "$SNAPSHOT_STATUS" || "$SNAPSHOT_STATUS" == "None" ]]; then
+            aws rds create-db-snapshot --db-instance-identifier "$DATABASE_INSTANCE" --db-snapshot-identifier "$SNAPSHOT_ID" >/dev/null
+          fi
+          aws rds wait db-snapshot-available --db-snapshot-identifier "$SNAPSHOT_ID"
+          SNAPSHOT_DESCRIPTION=$(aws rds describe-db-snapshots --db-snapshot-identifier "$SNAPSHOT_ID" --output json)
+          SNAPSHOT_DATABASE=$(jq -r '.DBSnapshots[0].DBInstanceIdentifier // empty' <<< "$SNAPSHOT_DESCRIPTION")
+          [[ "$SNAPSHOT_DATABASE" == "$DATABASE_INSTANCE" ]] || { echo "::error::Snapshot does not belong to the target database"; exit 1; }
+          ENCRYPTED=$(jq -r '.DBSnapshots[0].Encrypted' <<< "$SNAPSHOT_DESCRIPTION")
+          [[ "$ENCRYPTED" == "true" ]] || { echo "::error::Snapshot is not encrypted"; exit 1; }
+          write_lock snapshot-ready
+
+          # operational-reset execute
+          EXECUTE_COMMAND=$(jq -cn --arg org "$ORGANISATION_ID" --arg run "$RESET_RUN_ID" --arg snapshot "$SNAPSHOT_ID" '["node","/app/worker.mjs","operational-reset","execute","--organisation-id",$org,"--run-id",$run,"--snapshot-id",$snapshot]')
+          EXECUTE_TASK=$(run_worker_task "$EXECUTE_COMMAND")
+          write_lock reset-completed
+
+          # Restore the worker service only after execute succeeded.
+          RESTORE_DESIRED="$ORIGINAL_DESIRED"
+          RECOVERY_RESTORE="$RECOVERY_RUN"
+          if [[ "$RESTORE_DESIRED" == "0" && "$RECOVERY_RESTORE" == "true" ]]; then
+            RESTORE_DESIRED="$BASELINE_DESIRED"
+          fi
+          restore_workers "$RESTORE_DESIRED" "$RECOVERY_RESTORE"
+          write_lock workers-restored
+          curl --fail --show-error --silent --retry 12 --retry-delay 10 "https://${{ vars.HOSTNAME }}/health/ready" >/dev/null
+          aws ssm delete-parameter --name "$LOCK_NAME" >/dev/null
+          echo "Reset ${RESET_RUN_ID} completed with snapshot ${SNAPSHOT_ID}."
+          echo "Prepare task: ${PREPARE_TASK}; execute task: ${EXECUTE_TASK}."
+
+      - name: Explain protected failure state
+        if: failure()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ -n "${RESET_CLUSTER:-}" && -n "${RESET_SERVICE:-}" ]]; then
+            aws ecs describe-services --cluster "$RESET_CLUSTER" --services "$RESET_SERVICE" --query 'services[0].{desired:desiredCount,running:runningCount,pending:pendingCount,taskDefinition:taskDefinition}' --output json || true
+          fi
+          if [[ "$RESET_PHASE" == "reset-completed" || "$RESET_PHASE" == "workers-restored" ]]; then
+            echo "::error::Operational deletion completed, but worker restoration or readiness did not. Do not abort the completed run. The deployment lock remains active."
+            echo "Rerun this approved workflow with the same reset-run and snapshot identifiers to perform the idempotent restore/readiness recovery. See docs/runbooks/operational-reset.md."
+          else
+            echo "::error::The protected operational reset did not complete. Workers remain paused if the drain had begun, and the deployment lock remains active."
+            echo "Do not resume workers or retry sends blindly. Follow docs/runbooks/operational-reset.md, then choose an idempotent retry with the recorded snapshot or an explicit audited abort."
+          fi

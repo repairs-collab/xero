@@ -33,6 +33,8 @@ export interface ShutdownResult {
 const wait = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+export const DEFAULT_WORKER_DRAIN_TIMEOUT_MS = 110_000;
+
 export async function shutdownWorker(options: {
   queue: WorkerQueue;
   database: CloseableDatabase;
@@ -40,7 +42,7 @@ export async function shutdownWorker(options: {
   timeoutMs?: number;
   logger?: ShutdownLogger;
 }): Promise<ShutdownResult> {
-  const timeoutMs = options.timeoutMs ?? 25_000;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_WORKER_DRAIN_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;
   let failed = false;
 
@@ -57,6 +59,7 @@ export async function shutdownWorker(options: {
 
   const unfinishedJobIds = options.inFlight.ids();
   if (unfinishedJobIds.length > 0) {
+    failed = true;
     options.logger?.warn('Worker shutdown deadline reached', {
       unfinishedJobIds
     });

@@ -1,4 +1,10 @@
-import { ArnFormat, Duration, Stack, type StackProps } from 'aws-cdk-lib';
+import {
+  ArnFormat,
+  CfnOutput,
+  Duration,
+  Stack,
+  type StackProps
+} from 'aws-cdk-lib';
 import { Certificate } from 'aws-cdk-lib/aws-certificatemanager';
 import { SubnetType } from 'aws-cdk-lib/aws-ec2';
 import {
@@ -198,6 +204,7 @@ export class ServiceStack extends Stack {
           props.data.sinchApiSecret
         )
       },
+      stopTimeout: Duration.seconds(120),
       healthCheck: {
         command: ['CMD-SHELL', 'node -e "process.kill(1,0)"'],
         interval: Duration.seconds(30),
@@ -279,5 +286,22 @@ export class ServiceStack extends Stack {
       .scaleOnCpuUtilization('WorkerCpuScaling', {
         targetUtilizationPercent: 70
       });
+
+    new CfnOutput(this, 'WorkerClusterName', {
+      value: this.cluster.clusterName,
+      description: 'Exact ECS cluster for protected worker operations'
+    });
+    new CfnOutput(this, 'WorkerServiceName', {
+      value: this.workerService.serviceName,
+      description: 'Exact ECS worker service for drain and restore operations'
+    });
+    new CfnOutput(this, 'WorkerTaskDefinitionArn', {
+      value: workerTask.taskDefinitionArn,
+      description: 'Immutable worker task definition used by one-off operations'
+    });
+    new CfnOutput(this, 'WorkerBaselineDesiredCount', {
+      value: String(props.stage === 'production' ? 2 : 1),
+      description: 'Safe worker count restored after an explicitly aborted reset'
+    });
   }
 }
