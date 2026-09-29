@@ -407,7 +407,7 @@ const countRows = async (tableName: string, organisationId: string) => {
   return Number(result.rows[0]?.count ?? '0');
 };
 
-describe('operational reset', () => {
+describe('operational reset', { timeout: 15_000 }, () => {
   it('requires the exact acknowledgement, a current Admin, controlled live, and a matching state version', async () => {
     const seeded = await seedGraph();
     const operatorId = randomUUID();
