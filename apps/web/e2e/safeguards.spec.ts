@@ -36,6 +36,66 @@ test('shows the final rollout safeguards without an in-app reset control', async
   await expect(page.getByRole('button', { name: /reset/i })).toHaveCount(0);
 });
 
+test('shows failed gates in controlled live before final approval is available', async ({
+  page
+}) => {
+  await resetLaunchScenario('controlledLive');
+  await page.goto('/settings/sending');
+
+  await expect(page.getByRole('heading', { name: 'Controlled live' })).toBeVisible();
+  await expect(page.getByText('Action required')).toBeVisible();
+  await expect(page.getByText('Controlled Test SMS')).toBeVisible();
+  await expect(
+    page.getByText(/Send a Test SMS to a number on the technical allowlist/)
+  ).toBeVisible();
+  await expect(
+    page.getByLabel('Type the exact customer-rollout acknowledgement')
+  ).toHaveCount(0);
+});
+
+test('keeps the technical allowlist after reset and requires fresh sync and Test SMS evidence', async ({
+  page
+}) => {
+  await resetLaunchScenario('resetSyncRequired');
+  await page.goto('/settings/sending');
+
+  await expect(page.getByRole('heading', { name: 'Controlled live' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Reset complete' })).toBeVisible();
+  await expect(page.getByText('Fresh Xero sync required', { exact: true })).toBeVisible();
+  await expect(page.getByText('No successful sync recorded')).toBeVisible();
+  await expect(page.getByText('Complete the fresh Xero sync before reconciling the figures.')).toBeVisible();
+  await expect(page.getByRole('definition').filter({ hasText: '0' })).toHaveCount(3);
+  await expect(page.getByLabel('Mobile numbers or email addresses')).toHaveValue(
+    launchScenario.mobile
+  );
+  await expect(page.getByText('Controlled Test SMS')).toBeVisible();
+  await expect(
+    page.getByText(/Send a Test SMS to a number on the technical allowlist/)
+  ).toBeVisible();
+});
+
+test('rejects an inexact final customer acknowledgement', async ({ page }) => {
+  await resetLaunchScenario('reconciledReady');
+  await page.goto('/settings/sending');
+
+  await page
+    .getByLabel('Type the exact customer-rollout acknowledgement')
+    .fill('I approve customer reminders');
+  await page.getByRole('button', { name: 'Enable Customer live' }).click();
+
+  await expect(page).toHaveURL(
+    /rollout=CUSTOMER_ROLLOUT_ACKNOWLEDGEMENT_MISMATCH/
+  );
+  await expect(
+    page.getByText('Customer-rollout acknowledgement did not match')
+  ).toBeVisible();
+  await expect(readRolloutState()).resolves.toMatchObject({
+    sendMode: 'live',
+    rolloutScope: 'CONTROLLED',
+    operationalState: 'RECONCILED'
+  });
+});
+
 test('reconciles, activates customers, rolls back, and performs an emergency stop', async ({
   page
 }) => {
@@ -72,6 +132,9 @@ test('reconciles, activates customers, rolls back, and performs an emergency sto
     rolloutScope: 'CUSTOMER',
     operationalState: 'RECONCILED'
   });
+  await expect(page.getByLabel('Mobile numbers or email addresses')).toHaveValue(
+    launchScenario.mobile
+  );
 
   await page
     .getByLabel('Reason for returning to Controlled live')

@@ -56,33 +56,33 @@
 - Produces `rolloutReconciliations` keyed to one exact successful-sync timestamp with active-contact count, outstanding-invoice count, totals by currency, generated-approval count, enabled-sequence count, review-only result, actor, and acknowledgement timestamp.
 - Enforces one active reset run per organisation with a partial unique index and unique reconciliation per organisation/sync timestamp.
 
-- [ ] **Step 1: Write failing migration and schema tests**
+- [x] **Step 1: Write failing migration and schema tests**
 
   Cover defaults, accepted enum-like values, active-reset uniqueness, reconciliation uniqueness, foreign keys, and preservation of existing `sendMode`. Seed a live organisation before migration and assert it becomes live/controlled rather than dry-run or customer-live.
 
-- [ ] **Step 2: Run the schema tests and verify they fail**
+- [x] **Step 2: Run the schema tests and verify they fail**
 
   Run: `pnpm vitest run packages/db/src/schema/schema.integration.test.ts`
 
   Expected: FAIL because the rollout fields and tables do not exist.
 
-- [ ] **Step 3: Implement the additive schema**
+- [x] **Step 3: Implement the additive schema**
 
   Add typed columns with safe defaults. Keep reset manifests and reconciliations separate from operational receivables so reset deletion cannot remove its own evidence. Export every new type/table from both worker and web database entry points.
 
-- [ ] **Step 4: Generate and inspect the named migration**
+- [x] **Step 4: Generate and inspect the named migration**
 
   Run: `pnpm --filter @bc5000/db db:generate -- --name accountpulse_final_rollout`
 
   Expected: migration `0006` is additive, backfills `CONTROLLED`, leaves `send_mode` untouched, and contains no destructive table-wide statement.
 
-- [ ] **Step 5: Run the schema tests and verify they pass**
+- [x] **Step 5: Run the schema tests and verify they pass**
 
   Run: `pnpm vitest run packages/db/src/schema/schema.integration.test.ts`
 
   Expected: PASS.
 
-- [ ] **Step 6: Commit the persistence foundation**
+- [x] **Step 6: Commit the persistence foundation**
 
   Run: `git add packages/db && git commit -m "feat: add rollout safety persistence"`
 
@@ -99,27 +99,27 @@
 - Sources use the existing canonical values `AUTOMATED_REMINDER | MANUAL_REMINDER | ESCALATION_SMS | INBOX_REPLY | TEST_SMS | XERO_EMAIL`.
 - Reason codes distinguish global dry-run, missing acknowledgement, maintenance, controlled-recipient refusal, and Test-SMS allowlist refusal.
 
-- [ ] **Step 1: Write the complete policy matrix as failing unit tests**
+- [x] **Step 1: Write the complete policy matrix as failing unit tests**
 
   Assert all supported send-mode/scope/source combinations, case-insensitive email matching, exact E.164 matching, maintenance refusal, invalid dry-run/customer input safety, and the invariant that `TEST_SMS` never escapes the allowlist.
 
-- [ ] **Step 2: Run the policy test and verify it fails**
+- [x] **Step 2: Run the policy test and verify it fails**
 
   Run: `pnpm vitest run packages/domain/src/send-policy.test.ts`
 
   Expected: FAIL because the policy module does not exist.
 
-- [ ] **Step 3: Implement the smallest pure policy**
+- [x] **Step 3: Implement the smallest pure policy**
 
   Keep business eligibility out of this function; it answers only whether an already-eligible outbound item may call a provider. Treat unknown or unsupported state as blocked.
 
-- [ ] **Step 4: Run the policy test and verify it passes**
+- [x] **Step 4: Run the policy test and verify it passes**
 
   Run: `pnpm vitest run packages/domain/src/send-policy.test.ts`
 
   Expected: PASS.
 
-- [ ] **Step 5: Commit the shared policy**
+- [x] **Step 5: Commit the shared policy**
 
   Run: `git add packages/domain && git commit -m "feat: define shared rollout send policy"`
 
@@ -140,31 +140,31 @@
 - Modify: `apps/web/tests/manual-reminder-view.test.ts`
 
 **Interfaces:**
-- Produces `loadProviderSendDecision(database, input)`, which fetches the current organisation row immediately before submission and delegates to Task 2.
+- Produces `dispatchWithProviderSendLock(database, input, dispatch)`, which locks and fetches the current organisation row, delegates to Task 2, rechecks suppression, and holds the lock through provider submission.
 - Adds `rolloutScope` and maintenance data to reminder revalidation without trusting an earlier page/service read as the final send authority.
 - Preserves current dry-run records and error copy while allowing otherwise-eligible customer destinations only in customer scope.
 
-- [ ] **Step 1: Add failing worker race and source-coverage tests**
+- [x] **Step 1: Add failing worker race and source-coverage tests**
 
   Cover automated SMS, Xero invoice email, manual customer SMS/email, escalation SMS, Inbox reply, and Test SMS. In each provider handler, mutate scope or maintenance state after the initial claim but before the mocked provider call and assert the second read prevents submission. Assert suppressions and reminder whitelist still win in customer scope.
 
-- [ ] **Step 2: Run the focused tests and verify they fail**
+- [x] **Step 2: Run the focused tests and verify they fail**
 
   Run: `pnpm vitest run apps/worker/tests/reminder-execute.integration.test.ts apps/worker/tests/test-sms-execute.integration.test.ts apps/worker/tests/operator-reply-execute.integration.test.ts apps/web/tests/customer-actions.integration.test.ts apps/web/tests/manual-reminder-view.test.ts`
 
   Expected: FAIL because handlers still embed controlled-allowlist logic and do not understand customer scope.
 
-- [ ] **Step 3: Replace duplicated send checks with the shared policy**
+- [x] **Step 3: Replace duplicated send checks with the shared policy**
 
   Re-read the organisation directly before `sinch.sendSms` and the Xero email call. Map policy refusals to existing dry-run/cancelled terminal states without creating another attempt. Keep Test SMS allowlist-only in both controlled and customer scope. Use the same policy in manual-reminder validation so the page and worker agree.
 
-- [ ] **Step 4: Run the focused tests and verify they pass**
+- [x] **Step 4: Run the focused tests and verify they pass**
 
   Run: `pnpm vitest run apps/worker/tests/reminder-execute.integration.test.ts apps/worker/tests/test-sms-execute.integration.test.ts apps/worker/tests/operator-reply-execute.integration.test.ts apps/web/tests/customer-actions.integration.test.ts apps/web/tests/manual-reminder-view.test.ts`
 
   Expected: PASS with zero provider calls for every refused case.
 
-- [ ] **Step 5: Commit outbound enforcement**
+- [x] **Step 5: Commit outbound enforcement**
 
   Run: `git add packages/domain apps/worker apps/web/src/server/manual-reminder-service.ts apps/web/src/app/'(protected)'/customers apps/web/tests && git commit -m "feat: enforce rollout scope on every send"`
 
@@ -201,31 +201,31 @@
 - Successful full/incremental sync transitions `SYNC_REQUIRED` to `RECONCILIATION_REQUIRED`, clears `latestReconciledSyncAt`, and records the exact new `lastSuccessfulSyncAt`.
 - Webhook receipt remains available; processing a delivery for a reset-deleted record is a safe no-op, while an inbound opt-out can still create/preserve suppression after workers resume.
 
-- [ ] **Step 1: Write failing repository and entry-point tests**
+- [x] **Step 1: Write failing repository and entry-point tests**
 
   Set maintenance between initial lookup and transactional mutation. Assert every named entry point refuses without partial writes or jobs. Assert a fresh no-cursor sync is full, updates operational state only after success, and invalidates an old reconciliation. Assert reset-deleted webhook targets do not throw or retry.
 
-- [ ] **Step 2: Run the focused tests and verify they fail**
+- [x] **Step 2: Run the focused tests and verify they fail**
 
   Run: `pnpm vitest run packages/db/src/repositories/organisation-safety-repository.integration.test.ts apps/web/tests/approvals.integration.test.ts apps/web/tests/integration-settings.integration.test.ts apps/web/tests/inbox.integration.test.ts apps/web/tests/escalations.integration.test.ts apps/web/tests/test-sms.integration.test.ts apps/worker/tests/reminders-calculate.integration.test.ts apps/worker/tests/xero-sync.integration.test.ts apps/worker/tests/webhook-process.integration.test.ts`
 
   Expected: FAIL because maintenance and lifecycle guards are absent.
 
-- [ ] **Step 3: Implement transactional maintenance checks**
+- [x] **Step 3: Implement transactional maintenance checks**
 
   Put the final check in the same transaction as each mutation. Do not block sign-in, settings reads, audit reads, provider health tests, or webhook recording. Make missing reset-deleted work return a terminal no-op rather than throw.
 
-- [ ] **Step 4: Implement sync-state transitions**
+- [x] **Step 4: Implement sync-state transitions**
 
   A null Xero cursor continues to request the full outstanding-invoice set. Set `RECONCILIATION_REQUIRED` only after the invoice/contact write set and sync timestamp succeed. A later sync always invalidates earlier reconciliation evidence.
 
-- [ ] **Step 5: Run the focused tests and verify they pass**
+- [x] **Step 5: Run the focused tests and verify they pass**
 
   Run: `pnpm vitest run packages/db/src/repositories/organisation-safety-repository.integration.test.ts apps/web/tests/approvals.integration.test.ts apps/web/tests/integration-settings.integration.test.ts apps/web/tests/inbox.integration.test.ts apps/web/tests/escalations.integration.test.ts apps/web/tests/test-sms.integration.test.ts apps/worker/tests/reminders-calculate.integration.test.ts apps/worker/tests/xero-sync.integration.test.ts apps/worker/tests/webhook-process.integration.test.ts`
 
   Expected: PASS.
 
-- [ ] **Step 6: Commit maintenance and sync lifecycle safeguards**
+- [x] **Step 6: Commit maintenance and sync lifecycle safeguards**
 
   Run: `git add packages/db apps/web apps/worker && git commit -m "feat: gate operations during reset"`
 
@@ -243,27 +243,27 @@
 - Purges only `created`/`retry` jobs whose validated payload belongs to the target organisation and whose names are sync, invoice-refresh, reminder-calculate, reminder-execute, operator-reply, or Test-SMS operational jobs.
 - Does not purge active jobs, schedules, provider-test jobs, retention jobs, or persisted webhook evidence.
 
-- [ ] **Step 1: Write failing queue-administration tests**
+- [x] **Step 1: Write failing queue-administration tests**
 
   Seed two organisations and every job state/name. Assert only the target organisation's eligible queued/retry jobs are removed and the returned manifest is exact. Assert SQL uses bound parameters and invalid identifiers are refused.
 
-- [ ] **Step 2: Run the queue test and verify it fails**
+- [x] **Step 2: Run the queue test and verify it fails**
 
   Run: `pnpm vitest run packages/jobs/src/administration.integration.test.ts packages/jobs/src/queue.integration.test.ts`
 
   Expected: FAIL because no organisation purge API exists.
 
-- [ ] **Step 3: Implement scoped pg-boss cleanup**
+- [x] **Step 3: Implement scoped pg-boss cleanup**
 
   Use the caller's transaction and the JSON payload's `organisationId`; never delete by queue name alone. Recheck eligible states under lock and return per-name counts for the reset manifest.
 
-- [ ] **Step 4: Run the queue tests and verify they pass**
+- [x] **Step 4: Run the queue tests and verify they pass**
 
   Run: `pnpm vitest run packages/jobs/src/administration.integration.test.ts packages/jobs/src/queue.integration.test.ts`
 
   Expected: PASS.
 
-- [ ] **Step 5: Commit the queue administration API**
+- [x] **Step 5: Commit the queue administration API**
 
   Run: `git add packages/jobs && git commit -m "feat: purge organisation reset jobs safely"`
 
@@ -283,35 +283,35 @@
 - `execute` requires the same run ID plus a completed snapshot identifier, records final pre-delete counts, purges queued organisation jobs through Task 5 in the same transaction, deletes the approved operational tables in that organisation-scoped transaction, resets sequences to `REVIEW`, clears Xero cursor/sync/reconciliation, preserves suppressions and listed configuration/security data, and ends live/controlled in `SYNC_REQUIRED`.
 - `abort` requires an Admin email and non-empty reason, records failure/abort evidence, clears maintenance only when no deletion transaction is active, and never activates customer scope.
 
-- [ ] **Step 1: Write failing reset precondition and deletion tests**
+- [x] **Step 1: Write failing reset precondition and deletion tests**
 
   Cover exact acknowledgement, Admin verification, live/controlled requirement, active-run exclusion, compare-and-set version, target-organisation isolation, every deleted table, every preserved table, test-SMS history deletion, suppression preservation, sequence review reset, sync-state clearing, row-count manifest, snapshot reference, and audit events.
 
-- [ ] **Step 2: Add deterministic rollback and retry tests**
+- [x] **Step 2: Add deterministic rollback and retry tests**
 
   Inject a failure after several delete statements and assert all deletions roll back, maintenance remains true, operational state becomes `RESET_FAILED`, controlled-live remains unchanged, and a retry with the same run ID is idempotent. Assert duplicate successful execute does not delete new post-reset data.
 
-- [ ] **Step 3: Run the reset tests and verify they fail**
+- [x] **Step 3: Run the reset tests and verify they fail**
 
   Run: `pnpm vitest run apps/worker/tests/operational-reset.integration.test.ts apps/worker/src/runtime-config.test.ts`
 
   Expected: FAIL because the reset operation and commands do not exist.
 
-- [ ] **Step 4: Implement prepare, execute, and abort**
+- [x] **Step 4: Implement prepare, execute, and abort**
 
   Take a PostgreSQL advisory lock for the target organisation and lock its organisation/reset rows. Delete in explicit foreign-key order with `organisation_id = $target` on every statement; do not use dynamic table names or `TRUNCATE`. Store counts and references only, not message bodies, credentials, phone numbers, or email addresses.
 
-- [ ] **Step 5: Wire the commands into the bundled worker entrypoint**
+- [x] **Step 5: Wire the commands into the bundled worker entrypoint**
 
   Parse fixed subcommands and validated environment/arguments before starting pg-boss or provider clients. Exit non-zero on failed preconditions so the protected workflow stops.
 
-- [ ] **Step 6: Run the reset tests and verify they pass**
+- [x] **Step 6: Run the reset tests and verify they pass**
 
   Run: `pnpm vitest run apps/worker/tests/operational-reset.integration.test.ts apps/worker/src/runtime-config.test.ts`
 
   Expected: PASS.
 
-- [ ] **Step 7: Commit the reset operation**
+- [x] **Step 7: Commit the reset operation**
 
   Run: `git add apps/worker && git commit -m "feat: add protected operational reset"`
 
@@ -328,35 +328,35 @@
 - Produces `getCustomerRolloutReadiness(database, { organisationId, now })` with a result for every approved gate and evidence identifiers/timestamps safe to render.
 - Reconciliation metrics are active contacts, outstanding authorised ACCREC invoices with positive balance, totals by currency, pending approvals, enabled sequences, and all-enabled-sequences-review.
 
-- [ ] **Step 1: Write failing reconciliation and activation tests**
+- [x] **Step 1: Write failing reconciliation and activation tests**
 
   Assert Admin-only access, exact current-sync acknowledgement, non-empty post-reset data, both provider checks under 24 hours, sync under 15 minutes, accepted/delivered allowlisted Test SMS under seven days, no maintenance/reset, every enabled sequence in `REVIEW`, exact final acknowledgement, and CAS refusal on stale state/version.
 
-- [ ] **Step 2: Write failing rollback-control tests**
+- [x] **Step 2: Write failing rollback-control tests**
 
   Assert return-to-controlled requires a reason and preserves live plus allowlist. Assert emergency disable requires a reason and atomically sets dry-run/controlled. Assert neither transition changes sequences or deletes data. Verify complete audit payloads omit PII/content.
 
-- [ ] **Step 3: Run the safeguard tests and verify they fail**
+- [x] **Step 3: Run the safeguard tests and verify they fail**
 
   Run: `pnpm vitest run apps/web/tests/sending-safeguards.integration.test.ts apps/web/tests/integration-settings.integration.test.ts`
 
   Expected: FAIL because reconciliation/customer transitions do not exist.
 
-- [ ] **Step 4: Implement reconciliation and readiness queries**
+- [x] **Step 4: Implement reconciliation and readiness queries**
 
   Record one immutable reconciliation row tied to `lastSuccessfulSyncAt`; compare displayed metrics again in the transaction before acknowledgement. Query Test-SMS evidence from canonical Outbox and require its destination to still be on the technical allowlist.
 
-- [ ] **Step 5: Implement compare-and-set state transitions and audits**
+- [x] **Step 5: Implement compare-and-set state transitions and audits**
 
   Re-evaluate all gates inside the activation transaction, update only from live/controlled plus the expected operational-state version, and write `CUSTOMER_ROLLOUT_ACTIVATED`. Add audited `CUSTOMER_ROLLOUT_RETURNED_TO_CONTROLLED` and `ALL_PROVIDER_SENDING_DISABLED` paths.
 
-- [ ] **Step 6: Run the safeguard tests and verify they pass**
+- [x] **Step 6: Run the safeguard tests and verify they pass**
 
   Run: `pnpm vitest run apps/web/tests/sending-safeguards.integration.test.ts apps/web/tests/integration-settings.integration.test.ts`
 
   Expected: PASS.
 
-- [ ] **Step 7: Commit rollout transitions**
+- [x] **Step 7: Commit rollout transitions**
 
   Run: `git add apps/web/src/app/'(protected)'/settings/sending apps/web/tests && git commit -m "feat: add customer rollout approval gates"`
 
@@ -377,33 +377,33 @@
 - Displays exactly `Dry run`, `Controlled live`, or `Customer live`, plus reset phase, snapshot/deletion completion, fresh-sync need, reconciliation status, SMS evidence, and each gate's corrective action.
 - Contains no destructive reset button and no live Xero-email test requirement.
 
-- [ ] **Step 1: Read the installed Next.js 16 guidance before changing web code**
+- [x] **Step 1: Read the installed Next.js 16 guidance before changing web code**
 
   Read completely: `apps/web/node_modules/next/dist/docs/01-app/02-guides/forms.md`, `apps/web/node_modules/next/dist/docs/01-app/02-guides/server-actions.md`, `apps/web/node_modules/next/dist/docs/01-app/02-guides/redirecting.md`, and `apps/web/node_modules/next/dist/docs/01-app/03-api-reference/04-functions/revalidatePath.md`.
 
   Expected: implementation follows the installed-version server-action, redirect, and revalidation behaviour.
 
-- [ ] **Step 2: Write failing page-model, action, and browser tests**
+- [x] **Step 2: Write failing page-model, action, and browser tests**
 
   Assert the three labels, controlled allowlist explanation, no Xero-email test gate/copy, safe evidence display, reset lifecycle display, reconciliation metrics, exact acknowledgement fields, Admin-only actions, actionable failure copy, and visible rollback controls.
 
-- [ ] **Step 3: Run the UI tests and verify they fail**
+- [x] **Step 3: Run the UI tests and verify they fail**
 
   Run: `pnpm vitest run apps/web/tests/sending-controls-ui.test.tsx apps/web/tests/sending-safeguards.integration.test.ts && pnpm --filter @bc5000/web test:e2e -- safeguards.spec.ts`
 
   Expected: FAIL because the final-rollout interface is absent.
 
-- [ ] **Step 4: Implement the AccountPulse controls and status panels**
+- [x] **Step 4: Implement the AccountPulse controls and status panels**
 
   Keep the technical allowlist editable only as a controlled-testing safeguard. Render counts/totals without customer PII. Require exact text for customer activation and a non-empty reason for both rollback actions. After each action, revalidate `/settings/sending` and redirect with a stable success/error code.
 
-- [ ] **Step 5: Run the UI tests and verify they pass**
+- [x] **Step 5: Run the UI tests and verify they pass**
 
   Run: `pnpm vitest run apps/web/tests/sending-controls-ui.test.tsx apps/web/tests/sending-safeguards.integration.test.ts && pnpm --filter @bc5000/web test:e2e -- safeguards.spec.ts`
 
   Expected: PASS.
 
-- [ ] **Step 6: Commit the Admin experience**
+- [x] **Step 6: Commit the Admin experience**
 
   Run: `git add apps/web && git commit -m "feat: add final rollout controls"`
 
@@ -430,31 +430,31 @@
 - On any execute failure, the workflow leaves workers paused and prints the approved retry/abort runbook; it does not auto-abort or auto-restore sending.
 - Standard `deploy.yml` continues to deploy/migrate/smoke-test only and contains no reset or customer-activation command.
 
-- [ ] **Step 1: Write failing infrastructure and workflow contract tests**
+- [x] **Step 1: Write failing infrastructure and workflow contract tests**
 
   Assert outputs exist, worker shutdown drains before closing, reset workflow is dispatch-only, production environment approval is required, deployed SHA is checked, RDS snapshot completes before reset, worker desired count reaches zero before deletion, failure does not restart workers, and no command can set `rolloutScope=CUSTOMER`.
 
-- [ ] **Step 2: Run the infrastructure tests and verify they fail**
+- [x] **Step 2: Run the infrastructure tests and verify they fail**
 
   Run: `pnpm vitest run infra/test/stacks.test.ts infra/test/deployment-workflow.test.ts infra/test/operational-reset-workflow.test.ts apps/worker/tests/runtime.integration.test.ts`
 
   Expected: FAIL because the outputs and protected reset workflow do not exist.
 
-- [ ] **Step 3: Implement outputs, drain timing, and the manual workflow**
+- [x] **Step 3: Implement outputs, drain timing, and the manual workflow**
 
   Preserve the service's original desired count and include a bounded wait. Snapshot identifiers use the environment, organisation-safe suffix, and GitHub run ID. Pass only identifiers/acknowledgement to the task; never echo database credentials or provider secrets. Document the extra deployment-role permissions required for `rds:CreateDBSnapshot`, `rds:DescribeDBSnapshots`, ECS service scaling/run-task, and CloudFormation output reads.
 
-- [ ] **Step 4: Update launch/reset documentation**
+- [x] **Step 4: Update launch/reset documentation**
 
   Remove the live Xero-email test requirement. Document controlled-live as the state before/during reset, the deleted/preserved table classes, staging drill, failure recovery, fresh-sync reconciliation, separate final customer approval, first-cohort observation, return-to-controlled, and emergency dry-run.
 
-- [ ] **Step 5: Run the infrastructure tests and verify they pass**
+- [x] **Step 5: Run the infrastructure tests and verify they pass**
 
   Run: `pnpm vitest run infra/test/stacks.test.ts infra/test/deployment-workflow.test.ts infra/test/operational-reset-workflow.test.ts apps/worker/tests/runtime.integration.test.ts`
 
   Expected: PASS.
 
-- [ ] **Step 6: Commit release automation and runbooks**
+- [x] **Step 6: Commit release automation and runbooks**
 
   Run: `git add .github infra apps/worker/src/shutdown.ts apps/worker/tests/runtime.integration.test.ts docs/runbooks && git commit -m "feat: protect production operational reset"`
 
@@ -474,51 +474,51 @@
 - Produces browser coverage for failed gates, successful reconciliation, exact final acknowledgement, customer activation, controlled rollback, emergency dry-run, Test-SMS allowlist retention, and review-mode first cohort.
 - Produces a verified branch that can be deployed without running the reset or activating customer scope.
 
-- [ ] **Step 1: Write the missing end-to-end journeys and verify they fail before final wiring**
+- [x] **Step 1: Write the missing end-to-end journeys and verify they fail before final wiring**
 
   Run: `pnpm --filter @bc5000/web test:e2e -- safeguards.spec.ts automatic-sequence.spec.ts`
 
   Expected: FAIL on at least the new reset/reconciliation/customer-rollout journeys before fixtures and final wiring are complete.
 
-- [ ] **Step 2: Complete fixtures and minimal wiring, then rerun browser tests**
+- [x] **Step 2: Complete fixtures and minimal wiring, then rerun browser tests**
 
   Run: `pnpm --filter @bc5000/web test:e2e -- safeguards.spec.ts automatic-sequence.spec.ts`
 
   Expected: PASS.
 
-- [ ] **Step 3: Run static verification**
+- [x] **Step 3: Run static verification**
 
   Run: `pnpm lint && pnpm typecheck`
 
   Expected: PASS.
 
-- [ ] **Step 4: Run the full unit/integration suite**
+- [x] **Step 4: Run the full unit/integration suite**
 
   Run: `pnpm test && pnpm test:integration`
 
   Expected: PASS with a test count greater than the 320-test baseline recorded before this plan.
 
-- [ ] **Step 5: Build all packages and production applications**
+- [x] **Step 5: Build all packages and production applications**
 
   Run: `pnpm build`
 
   Expected: PASS, including the Next.js production build and bundled reset-capable worker image.
 
-- [ ] **Step 6: Inspect migration, workflow, and branch diff**
+- [x] **Step 6: Inspect migration, workflow, and branch diff**
 
   Run: `git diff origin/main...HEAD --check && git status --short && git log --oneline origin/main..HEAD`
 
   Expected: no whitespace errors, secrets, customer data, unexpected generated files, reset invocation in the deployment workflow, or customer-live default.
 
-- [ ] **Step 7: Run the required whole-branch review**
+- [x] **Step 7: Run the required whole-branch review**
 
   Use `superpowers:requesting-code-review`. Give special attention to send races, organisation scoping, deletion order, preserved suppressions, reset failure state, workflow failure paths, audit PII, and deployment/reset/activation separation. Resolve findings test-first and rerun affected checks.
 
-- [ ] **Step 8: Commit verification fixes**
+- [x] **Step 8: Commit verification fixes**
 
   Run: `git add <reviewed-files> && git commit -m "fix: address final rollout review"`
 
-- [ ] **Step 9: Stop for deployment approval**
+- [x] **Step 9: Stop for deployment approval**
 
   Do not push, merge, deploy, reset, sync, reconcile, or activate customer scope unless separately authorised. After an approved deployment, verify production remains live/controlled and the technical allowlist is unchanged, then request the user's explicit production-reset approval.
 

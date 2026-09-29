@@ -17,6 +17,7 @@ import {
 } from '@bc5000/integrations/sinch';
 
 import { executeTestSms } from '../src/handlers/test-sms-execute.js';
+import { processOptOut } from '../src/services/inbound-reply-service.js';
 
 const client = createDatabase(
   process.env.DATABASE_URL ??
@@ -177,6 +178,60 @@ describe('test SMS execution', () => {
       .from(messageAttempts)
       .where(eq(messageAttempts.outboundMessageId, seeded.outboundMessageId));
     expect(attempts).toHaveLength(1);
+  });
+
+  it('keeps rollout changes and opt-outs pending until an in-flight provider submission finishes', async () => {
+    const seeded = await seedTestSms();
+    const providerStarted = deferred();
+    const releaseProvider = deferred();
+    const sendSms = vi.fn(async () => {
+      providerStarted.resolve();
+      await releaseProvider.promise;
+      return {
+        kind: 'accepted' as const,
+        messageId: 'sinch-atomic-send',
+        status: 'ACCEPTED'
+      };
+    });
+
+    const execution = executeTestSms(dependencies(sendSms), seeded);
+    await providerStarted.promise;
+
+    let rolloutChangeFinished = false;
+    const rolloutChange = client.db
+      .transaction(async (transaction) => {
+        await transaction
+          .update(organisations)
+          .set({ maintenanceMode: true })
+          .where(eq(organisations.id, seeded.organisationId));
+      })
+      .then(() => {
+        rolloutChangeFinished = true;
+      });
+    let optOutFinished = false;
+    const optOut = processOptOut(client.db, seeded.organisationId, {
+      kind: 'opt-out',
+      notificationId: randomUUID(),
+      from: number,
+      to: '+61400000002',
+      receivedAt: '2026-09-28T03:16:00.000Z',
+      content: 'STOP'
+    }).then(() => {
+      optOutFinished = true;
+    });
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    expect(rolloutChangeFinished).toBe(false);
+    expect(optOutFinished).toBe(false);
+
+    releaseProvider.resolve();
+    await expect(execution).resolves.toEqual({
+      kind: 'sent',
+      providerMessageId: 'sinch-atomic-send'
+    });
+    await Promise.all([rolloutChange, optOut]);
+    expect(rolloutChangeFinished).toBe(true);
+    expect(optOutFinished).toBe(true);
   });
 
   it('re-reads maintenance after claiming and prevents the Test SMS provider call', async () => {

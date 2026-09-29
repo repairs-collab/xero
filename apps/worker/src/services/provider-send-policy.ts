@@ -5,7 +5,8 @@ import {
   messageAttempts,
   organisations,
   outboundMessages,
-  stageInstances
+  stageInstances,
+  suppressions
 } from '@bc5000/db';
 import {
   evaluateProviderSendPolicy,
@@ -21,29 +22,56 @@ export interface ProviderSendDecisionInput {
   destination: string;
 }
 
-export async function loadProviderSendDecision(
-  database: Database,
-  input: ProviderSendDecisionInput
-): Promise<ProviderSendPolicyDecision> {
-  const [organisation] = await database
-    .select()
-    .from(organisations)
-    .where(eq(organisations.id, input.organisationId))
-    .for('update')
-    .limit(1);
-  if (organisation === undefined) {
-    return { kind: 'blocked', reason: 'UNSUPPORTED_SENDING_STATE' };
-  }
+export type ProviderDispatchResult<Value> =
+  | Exclude<ProviderSendPolicyDecision, { kind: 'provider-call' }>
+  | { kind: 'suppressed'; source: string }
+  | { kind: 'dispatched'; value: Value };
 
-  return evaluateProviderSendPolicy({
-    sendMode: organisation.sendMode,
-    liveSendAcknowledged: organisation.liveSendAcknowledged,
-    rolloutScope: organisation.rolloutScope,
-    maintenanceMode: organisation.maintenanceMode,
-    source: input.source,
-    channel: input.channel,
-    destination: input.destination,
-    recipientAllowlist: organisation.recipientAllowlist
+export async function dispatchWithProviderSendLock<Value>(
+  database: Database,
+  input: ProviderSendDecisionInput,
+  dispatch: () => Promise<Value>
+): Promise<ProviderDispatchResult<Value>> {
+  return database.transaction(async (transaction) => {
+    const [organisation] = await transaction
+      .select()
+      .from(organisations)
+      .where(eq(organisations.id, input.organisationId))
+      .for('update')
+      .limit(1);
+    if (organisation === undefined) {
+      return { kind: 'blocked', reason: 'UNSUPPORTED_SENDING_STATE' };
+    }
+
+    const decision = evaluateProviderSendPolicy({
+      sendMode: organisation.sendMode,
+      liveSendAcknowledged: organisation.liveSendAcknowledged,
+      rolloutScope: organisation.rolloutScope,
+      maintenanceMode: organisation.maintenanceMode,
+      source: input.source,
+      channel: input.channel,
+      destination: input.destination,
+      recipientAllowlist: organisation.recipientAllowlist
+    });
+    if (decision.kind !== 'provider-call') return decision;
+
+    const [suppression] = await transaction
+      .select({ source: suppressions.source })
+      .from(suppressions)
+      .where(
+        and(
+          eq(suppressions.organisationId, input.organisationId),
+          eq(suppressions.channel, input.channel),
+          eq(suppressions.normalisedDestination, input.destination),
+          eq(suppressions.consentState, 'SUPPRESSED')
+        )
+      )
+      .limit(1);
+    if (suppression !== undefined) {
+      return { kind: 'suppressed', source: suppression.source };
+    }
+
+    return { kind: 'dispatched', value: await dispatch() };
   });
 }
 
@@ -54,7 +82,10 @@ export async function markProviderSendBlocked(
     outboundId: string;
     attemptId: string;
     stageInstanceId: string | null;
-    reason: Extract<ProviderSendPolicyDecision, { kind: 'blocked' }>['reason'];
+    reason:
+      | Extract<ProviderSendPolicyDecision, { kind: 'blocked' }>['reason']
+      | 'CHANNEL_SUPPRESSED'
+      | `SUPPRESSED:${string}`;
     now: Date;
   }
 ): Promise<void> {

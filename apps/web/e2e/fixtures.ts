@@ -2,13 +2,9 @@ import type { Page } from '@playwright/test';
 import { eq, sql } from 'drizzle-orm';
 
 import { createSessionCookie } from '@bc5000/auth';
+import { createDatabase, organisations } from '@bc5000/db';
 import {
-  createDatabase,
-  organisations,
-  outboundMessages,
-  providerConnections
-} from '@bc5000/db';
-import {
+  type FinalRolloutScenarioName,
   launchScenario,
   seedLaunchScenario,
   seedSmsOptOut as applySmsOptOut
@@ -19,51 +15,14 @@ const databaseUrl =
   'postgres://bc5000:bc5000@127.0.0.1:5432/bc5000';
 const sessionSecret = Buffer.alloc(32);
 
-export const resetLaunchScenario = (): Promise<void> =>
-  seedLaunchScenario(databaseUrl);
+export const resetLaunchScenario = (
+  scenario: FinalRolloutScenarioName = 'dryRun'
+): Promise<void> => seedLaunchScenario(databaseUrl, scenario);
 
 export const seedSmsOptOut = (): Promise<void> => applySmsOptOut(databaseUrl);
 
 export async function prepareCustomerRolloutScenario(): Promise<void> {
-  const client = createDatabase(databaseUrl);
-  const now = new Date();
-  try {
-    await client.db
-      .update(organisations)
-      .set({
-        sendMode: 'live',
-        rolloutScope: 'CONTROLLED',
-        liveSendAcknowledged: true,
-        operationalState: 'RECONCILIATION_REQUIRED',
-        operationalStateVersion: 3,
-        lastSuccessfulSyncAt: now,
-        latestReconciledSyncAt: null,
-        updatedAt: now
-      })
-      .where(eq(organisations.id, launchScenario.organisationId));
-    await client.db
-      .update(providerConnections)
-      .set({
-        connectedAt: now,
-        lastSuccessfulAuthenticationAt: now,
-        updatedAt: now
-      })
-      .where(eq(providerConnections.organisationId, launchScenario.organisationId));
-    await client.db.insert(outboundMessages).values({
-      organisationId: launchScenario.organisationId,
-      actorUserId: launchScenario.adminUserId,
-      channel: 'SMS',
-      source: 'TEST_SMS',
-      recipientKey: launchScenario.mobile,
-      status: 'DELIVERED',
-      idempotencyKey: `rollout-e2e-${now.getTime()}`,
-      completedAt: now,
-      createdAt: now,
-      updatedAt: now
-    });
-  } finally {
-    await client.pool.end();
-  }
+  await seedLaunchScenario(databaseUrl, 'readyForReconciliation');
 }
 
 export async function bumpOperationalStateVersion(): Promise<void> {

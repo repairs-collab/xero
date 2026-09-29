@@ -21,7 +21,7 @@ import {
 import type { JobPayloads } from '@bc5000/jobs';
 
 import {
-  loadProviderSendDecision,
+  dispatchWithProviderSendLock,
   markProviderSendBlocked
 } from '../services/provider-send-policy.js';
 
@@ -99,6 +99,7 @@ export async function executeTestSms(
   if (candidate === undefined || candidate.outbound.content === null) {
     throw new Error('TEST_SMS_NOT_FOUND');
   }
+  const content = candidate.outbound.content;
 
   const now = dependencies.clock.now();
   const repository = new PostgresMessageRepository(dependencies.database);
@@ -151,43 +152,56 @@ export async function executeTestSms(
     return { kind: 'cancelled', reason: 'SUPPRESSED' };
   }
 
-  const sendDecision = await loadProviderSendDecision(dependencies.database, {
-    organisationId: payload.organisationId,
-    source: 'TEST_SMS',
-    channel: 'SMS',
-    destination: candidate.outbound.recipientKey
-  });
-  if (sendDecision.kind === 'dry-run') {
-    await repository.markDryRun({
-      outboundId: claim.outboundId,
-      attemptId: claim.attemptId,
-      stageInstanceId: null,
-      now
-    });
-    return { kind: 'dry-run' };
-  }
-  if (sendDecision.kind === 'blocked') {
-    await markProviderSendBlocked(dependencies.database, {
-      organisationId: payload.organisationId,
-      outboundId: claim.outboundId,
-      attemptId: claim.attemptId,
-      stageInstanceId: null,
-      reason: sendDecision.reason,
-      now
-    });
-    return { kind: 'cancelled', reason: sendDecision.reason };
-  }
-
   try {
-    const accepted = await dependencies.sinch.sendSms({
-      destinationNumber: candidate.outbound.recipientKey,
-      content: candidate.outbound.content,
-      callbackUrl: dependencies.callbackUrl,
-      metadata: {
+    const sendResult = await dispatchWithProviderSendLock(
+      dependencies.database,
+      {
         organisationId: payload.organisationId,
-        outboundMessageId: payload.outboundMessageId
-      }
-    });
+        source: 'TEST_SMS',
+        channel: 'SMS',
+        destination: candidate.outbound.recipientKey
+      },
+      () =>
+        dependencies.sinch.sendSms({
+          destinationNumber: candidate.outbound.recipientKey,
+          content,
+          callbackUrl: dependencies.callbackUrl,
+          metadata: {
+            organisationId: payload.organisationId,
+            outboundMessageId: payload.outboundMessageId
+          }
+        })
+    );
+    if (sendResult.kind === 'dry-run') {
+      await repository.markDryRun({
+        outboundId: claim.outboundId,
+        attemptId: claim.attemptId,
+        stageInstanceId: null,
+        now
+      });
+      return { kind: 'dry-run' };
+    }
+    if (sendResult.kind === 'blocked' || sendResult.kind === 'suppressed') {
+      const reason =
+        sendResult.kind === 'suppressed'
+          ? (`SUPPRESSED:${sendResult.source}` as const)
+          : sendResult.reason;
+      await markProviderSendBlocked(dependencies.database, {
+        organisationId: payload.organisationId,
+        outboundId: claim.outboundId,
+        attemptId: claim.attemptId,
+        stageInstanceId: null,
+        reason,
+        now
+      });
+      return {
+        kind: 'cancelled',
+        reason:
+          sendResult.kind === 'suppressed' ? 'SUPPRESSED' : sendResult.reason
+      };
+    }
+
+    const accepted = sendResult.value;
     await repository.markAccepted({
       organisationId: payload.organisationId,
       stageInstanceId: null,

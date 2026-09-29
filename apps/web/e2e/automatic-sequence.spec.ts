@@ -6,6 +6,9 @@ import {
   resetLaunchScenario
 } from './fixtures.js';
 
+const customerAcknowledgement =
+  'I understand approved reminders may be sent to customers';
+
 test.beforeEach(async ({ page }) => {
   await resetLaunchScenario();
   await loginAs(page, 'ADMIN');
@@ -34,4 +37,21 @@ test('dry-run and controlled-launch gates are visible before live testing', asyn
   await expect(page.getByRole('heading', { name: 'Final sending readiness' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Enable Controlled live' })).toBeVisible();
   await expect(page.getByText(/Provider calls are disabled/)).toBeVisible();
+});
+
+test('customer rollout keeps the first reminder cohort in Review mode', async ({
+  page
+}) => {
+  await resetLaunchScenario('reconciledReady');
+  await page.goto('/settings/sending');
+  await page
+    .getByLabel('Type the exact customer-rollout acknowledgement')
+    .fill(customerAcknowledgement);
+  await page.getByRole('button', { name: 'Enable Customer live' }).click();
+  await expect(page).toHaveURL(/rollout=customer-enabled/);
+
+  await page.goto(`/sequences/${launchScenario.sequenceId}`);
+  await expect(page.getByRole('heading', { name: 'Review and approve' })).toBeVisible();
+  await page.goto('/approvals');
+  await expect(page.locator('.approval-title').getByText(/INV-5000/)).toBeVisible();
 });

@@ -15,7 +15,7 @@ import type {
 import type { JobPayloads } from '@bc5000/jobs';
 
 import {
-  loadProviderSendDecision,
+  dispatchWithProviderSendLock,
   markProviderSendBlocked
 } from '../services/provider-send-policy.js';
 
@@ -145,71 +145,80 @@ export async function executeOperatorReply(
     .update(operatorReplies)
     .set({ status: 'SENDING', updatedAt: now })
     .where(eq(operatorReplies.id, row.reply.id));
-  const sendDecision = await loadProviderSendDecision(dependencies.database, {
-    organisationId: payload.organisationId,
-    source: 'INBOX_REPLY',
-    channel: 'SMS',
-    destination: row.conversation.normalisedNumber
-  });
-  if (sendDecision.kind === 'dry-run') {
-    await messages.markDryRun({
-      outboundId: claim.outboundId,
-      attemptId: claim.attemptId,
-      stageInstanceId: null,
-      now
-    });
-    await dependencies.database.transaction(async (transaction) => {
-      await transaction
-        .update(operatorReplies)
-        .set({ status: 'DRY_RUN', sentAt: now, updatedAt: now })
-        .where(eq(operatorReplies.id, row.reply.id));
-      await transaction.insert(auditEvents).values({
-        organisationId: payload.organisationId,
-        actorUserId: row.reply.actorUserId,
-        eventType: 'OPERATOR_REPLY_DRY_RUN',
-        entityType: 'CONVERSATION',
-        entityId: row.conversation.id,
-        afterValue: {
-          replyId: row.reply.id,
-          outboundMessageId: claim.outboundId
-        },
-        occurredAt: now
-      });
-    });
-    return { kind: 'dry-run' };
-  }
-  if (sendDecision.kind === 'blocked') {
-    await markProviderSendBlocked(dependencies.database, {
-      organisationId: payload.organisationId,
-      outboundId: claim.outboundId,
-      attemptId: claim.attemptId,
-      stageInstanceId: null,
-      reason: sendDecision.reason,
-      now
-    });
-    await dependencies.database
-      .update(operatorReplies)
-      .set({
-        status: 'CANCELLED',
-        failureReason: sendDecision.reason,
-        updatedAt: now
-      })
-      .where(eq(operatorReplies.id, row.reply.id));
-    return { kind: 'cancelled', reason: sendDecision.reason };
-  }
-
   try {
-    const accepted = await dependencies.sinch.sendSms({
-      destinationNumber: row.conversation.normalisedNumber,
-      content: row.reply.content,
-      callbackUrl: dependencies.callbackUrl,
-      metadata: {
+    const sendResult = await dispatchWithProviderSendLock(
+      dependencies.database,
+      {
         organisationId: payload.organisationId,
-        operatorReplyId: row.reply.id,
-        conversationId: row.conversation.id,
-        outboundMessageId: claim.outboundId
-      }
-    });
+        source: 'INBOX_REPLY',
+        channel: 'SMS',
+        destination: row.conversation.normalisedNumber
+      },
+      () =>
+        dependencies.sinch.sendSms({
+          destinationNumber: row.conversation.normalisedNumber,
+          content: row.reply.content,
+          callbackUrl: dependencies.callbackUrl,
+          metadata: {
+            organisationId: payload.organisationId,
+            operatorReplyId: row.reply.id,
+            conversationId: row.conversation.id,
+            outboundMessageId: claim.outboundId
+          }
+        })
+    );
+    if (sendResult.kind === 'dry-run') {
+      await messages.markDryRun({
+        outboundId: claim.outboundId,
+        attemptId: claim.attemptId,
+        stageInstanceId: null,
+        now
+      });
+      await dependencies.database.transaction(async (transaction) => {
+        await transaction
+          .update(operatorReplies)
+          .set({ status: 'DRY_RUN', sentAt: now, updatedAt: now })
+          .where(eq(operatorReplies.id, row.reply.id));
+        await transaction.insert(auditEvents).values({
+          organisationId: payload.organisationId,
+          actorUserId: row.reply.actorUserId,
+          eventType: 'OPERATOR_REPLY_DRY_RUN',
+          entityType: 'CONVERSATION',
+          entityId: row.conversation.id,
+          afterValue: {
+            replyId: row.reply.id,
+            outboundMessageId: claim.outboundId
+          },
+          occurredAt: now
+        });
+      });
+      return { kind: 'dry-run' };
+    }
+    if (sendResult.kind === 'blocked' || sendResult.kind === 'suppressed') {
+      const failureReason =
+        sendResult.kind === 'suppressed'
+          ? `SUPPRESSED:${sendResult.source}` as const
+          : sendResult.reason;
+      await markProviderSendBlocked(dependencies.database, {
+        organisationId: payload.organisationId,
+        outboundId: claim.outboundId,
+        attemptId: claim.attemptId,
+        stageInstanceId: null,
+        reason: failureReason,
+        now
+      });
+      await dependencies.database
+        .update(operatorReplies)
+        .set({ status: 'CANCELLED', failureReason, updatedAt: now })
+        .where(eq(operatorReplies.id, row.reply.id));
+      return {
+        kind: 'cancelled',
+        reason:
+          sendResult.kind === 'suppressed' ? 'SUPPRESSED' : sendResult.reason
+      };
+    }
+
+    const accepted = sendResult.value;
     await messages.markAccepted({
       organisationId: payload.organisationId,
       stageInstanceId: null,

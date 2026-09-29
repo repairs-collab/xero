@@ -33,7 +33,7 @@ import {
   type StopReason
 } from '../services/pre-send-revalidation.js';
 import {
-  loadProviderSendDecision,
+  dispatchWithProviderSendLock,
   markProviderSendBlocked
 } from '../services/provider-send-policy.js';
 
@@ -296,70 +296,90 @@ export async function executeReminder(
     });
   }
 
-  const sendDecision = await loadProviderSendDecision(dependencies.database, {
-    organisationId: payload.organisationId,
-    source,
-    channel: reminder.channel,
-    destination: reminder.destination
-  });
-  if (sendDecision.kind === 'dry-run') {
-    await repository.markDryRun({
-      outboundId: claim.outboundId,
-      attemptId: claim.attemptId,
-      stageInstanceId: payload.stageInstanceId,
-      now
-    });
-    return { kind: 'dry-run' };
-  }
-  if (sendDecision.kind === 'blocked') {
-    await markProviderSendBlocked(dependencies.database, {
-      organisationId: payload.organisationId,
-      outboundId: claim.outboundId,
-      attemptId: claim.attemptId,
-      stageInstanceId: payload.stageInstanceId,
-      reason: sendDecision.reason,
-      now
-    });
-    return { kind: 'cancelled', reason: sendDecision.reason };
-  }
-
   try {
-    if (reminder.channel === 'SMS') {
-      const accepted = await dependencies.sinch.sendSms({
-        destinationNumber: reminder.destination,
-        content: reminder.content,
-        callbackUrl: dependencies.callbackUrl,
-        metadata: {
-          organisationId: payload.organisationId,
-          stageInstanceId: payload.stageInstanceId
-        }
-      });
-      await repository.markAccepted({
+    const sendResult = await dispatchWithProviderSendLock(
+      dependencies.database,
+      {
         organisationId: payload.organisationId,
-        stageInstanceId: payload.stageInstanceId,
+        source,
+        channel: reminder.channel,
+        destination: reminder.destination
+      },
+      async () => {
+        if (reminder.channel === 'SMS') {
+          const accepted = await dependencies.sinch.sendSms({
+            destinationNumber: reminder.destination,
+            content: reminder.content,
+            callbackUrl: dependencies.callbackUrl,
+            metadata: {
+              organisationId: payload.organisationId,
+              stageInstanceId: payload.stageInstanceId
+            }
+          });
+          return {
+            provider: 'SINCH' as const,
+            providerMessageId: accepted.messageId,
+            providerPayload: { status: accepted.status }
+          };
+        }
+
+        await dependencies.xero.emailInvoice(reminder.xeroInvoiceId);
+        return {
+          provider: 'XERO' as const,
+          providerMessageId: null,
+          providerPayload: { status: 'ACCEPTED' }
+        };
+      }
+    );
+    if (sendResult.kind === 'dry-run') {
+      await repository.markDryRun({
         outboundId: claim.outboundId,
         attemptId: claim.attemptId,
-        providerMessageId: accepted.messageId,
-        providerPayload: { status: accepted.status },
+        stageInstanceId: payload.stageInstanceId,
         now
       });
-      return {
-        kind: 'sent',
-        provider: 'SINCH',
-        providerMessageId: accepted.messageId
-      };
+      return { kind: 'dry-run' };
+    }
+    if (sendResult.kind === 'blocked') {
+      await markProviderSendBlocked(dependencies.database, {
+        organisationId: payload.organisationId,
+        outboundId: claim.outboundId,
+        attemptId: claim.attemptId,
+        stageInstanceId: payload.stageInstanceId,
+        reason: sendResult.reason,
+        now
+      });
+      return { kind: 'cancelled', reason: sendResult.reason };
+    }
+    if (sendResult.kind === 'suppressed') {
+      await markProviderSendBlocked(dependencies.database, {
+        organisationId: payload.organisationId,
+        outboundId: claim.outboundId,
+        attemptId: claim.attemptId,
+        stageInstanceId: payload.stageInstanceId,
+        reason: 'CHANNEL_SUPPRESSED',
+        now
+      });
+      return { kind: 'cancelled', reason: 'CHANNEL_SUPPRESSED' };
     }
 
-    await dependencies.xero.emailInvoice(reminder.xeroInvoiceId);
+    const accepted = sendResult.value;
     await repository.markAccepted({
       organisationId: payload.organisationId,
       stageInstanceId: payload.stageInstanceId,
       outboundId: claim.outboundId,
       attemptId: claim.attemptId,
-      providerPayload: { status: 'ACCEPTED' },
+      ...(accepted.providerMessageId === null
+        ? {}
+        : { providerMessageId: accepted.providerMessageId }),
+      providerPayload: accepted.providerPayload,
       now
     });
-    return { kind: 'sent', provider: 'XERO', providerMessageId: null };
+    return {
+      kind: 'sent',
+      provider: accepted.provider,
+      providerMessageId: accepted.providerMessageId
+    };
   } catch (error) {
     const rateLimited =
       error instanceof SinchRateLimited || error instanceof XeroRateLimited;

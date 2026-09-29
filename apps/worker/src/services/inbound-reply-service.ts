@@ -9,6 +9,7 @@ import {
   type Database,
   inboundMessages,
   invoiceChases,
+  organisations,
   outboundMessages,
   pauses,
   stageInstances,
@@ -153,6 +154,14 @@ export async function processOptOut(
     event.from
   );
   await database.transaction(async (transaction) => {
+    const [organisation] = await transaction
+      .select({ id: organisations.id })
+      .from(organisations)
+      .where(eq(organisations.id, organisationId))
+      .for('update')
+      .limit(1);
+    if (organisation === undefined) throw new Error('ORGANISATION_NOT_FOUND');
+
     await transaction
       .insert(suppressions)
       .values({

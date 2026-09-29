@@ -12,11 +12,14 @@ import {
   invoices,
   memberships,
   migrateDatabase,
+  operationalResetRuns,
   organisations,
+  outboundMessages,
   pauses,
   providerConnections,
   reminderSequences,
   reminderSequenceVersions,
+  rolloutReconciliations,
   sequenceStages,
   stageInstances,
   suppressions,
@@ -25,8 +28,16 @@ import {
 } from '@bc5000/db';
 
 import { launchScenario as scenario } from './scenarios.js';
+import {
+  finalRolloutFixtureIds,
+  finalRolloutScenarios,
+  type FinalRolloutScenarioName
+} from './final-rollout-scenarios.js';
 
-export async function seedLaunchScenario(databaseUrl: string): Promise<void> {
+export async function seedLaunchScenario(
+  databaseUrl: string,
+  rolloutScenario: FinalRolloutScenarioName = 'dryRun'
+): Promise<void> {
   const client = createDatabase(databaseUrl);
   try {
     await migrateDatabase(client.db);
@@ -292,6 +303,99 @@ export async function seedLaunchScenario(databaseUrl: string): Promise<void> {
         occurredAt: now
       }
     ]);
+
+    const finalScenario = finalRolloutScenarios[rolloutScenario];
+    if (finalScenario.operationalDataCleared) {
+      await client.db.delete(approvals);
+      await client.db.delete(stageInstances);
+      await client.db.delete(invoiceChases);
+      await client.db.delete(tasks);
+      await client.db.delete(pauses);
+      await client.db.delete(inboundMessages);
+      await client.db.delete(conversations);
+      await client.db.delete(invoices);
+      await client.db.delete(contactChannels);
+      await client.db.delete(contacts);
+    }
+    const evidenceAt = new Date();
+    const successfulSyncAt = finalScenario.freshSync ? evidenceAt : null;
+    await client.db
+      .update(organisations)
+      .set({
+        sendMode: finalScenario.sendMode,
+        rolloutScope: finalScenario.rolloutScope,
+        liveSendAcknowledged: finalScenario.liveSendAcknowledged,
+        maintenanceMode: false,
+        operationalState: finalScenario.operationalState,
+        operationalStateVersion: finalScenario.operationalStateVersion,
+        xeroSyncCursor: finalScenario.freshSync ? 'e2e-current-sync' : null,
+        lastSuccessfulSyncAt: successfulSyncAt,
+        latestReconciledSyncAt: finalScenario.reconciliationCurrent
+          ? successfulSyncAt
+          : null,
+        updatedAt: evidenceAt
+      });
+
+    if (finalScenario.freshProviderEvidence) {
+      await client.db
+        .update(providerConnections)
+        .set({
+          connectedAt: evidenceAt,
+          lastSuccessfulAuthenticationAt: evidenceAt,
+          updatedAt: evidenceAt
+        });
+    }
+
+    if (finalScenario.completedReset) {
+      await client.db.insert(operationalResetRuns).values({
+        id: finalRolloutFixtureIds.resetRunId,
+        organisationId: scenario.organisationId,
+        status: 'COMPLETED',
+        requestedByUserId: scenario.adminUserId,
+        deployedCommit: '0123456789abcdef0123456789abcdef01234567',
+        snapshotIdentifier: 'e2e-accountpulse-protected-reset',
+        rowCountManifest: { contacts: 1, invoices: 1, outbound_messages: 1 },
+        jobPurgeManifest: { 'reminders.calculate': 1 },
+        requestedAt: evidenceAt,
+        preparedAt: evidenceAt,
+        snapshotCreatedAt: evidenceAt,
+        completedAt: evidenceAt,
+        updatedAt: evidenceAt
+      });
+    }
+
+    if (finalScenario.controlledSmsEvidence) {
+      await client.db.insert(outboundMessages).values({
+        id: finalRolloutFixtureIds.testSmsId,
+        organisationId: scenario.organisationId,
+        actorUserId: scenario.adminUserId,
+        channel: 'SMS',
+        source: 'TEST_SMS',
+        recipientKey: scenario.mobile,
+        status: 'DELIVERED',
+        idempotencyKey: `final-rollout-${rolloutScenario}`,
+        completedAt: evidenceAt,
+        createdAt: evidenceAt,
+        updatedAt: evidenceAt
+      });
+    }
+
+    if (finalScenario.reconciliationCurrent && successfulSyncAt !== null) {
+      await client.db.insert(rolloutReconciliations).values({
+        id: finalRolloutFixtureIds.reconciliationId,
+        organisationId: scenario.organisationId,
+        syncCompletedAt: successfulSyncAt,
+        activeContactCount: 1,
+        outstandingInvoiceCount: 1,
+        outstandingTotals: { AUD: '100.0000' },
+        generatedApprovalCount: 1,
+        enabledSequenceCount: 1,
+        allEnabledSequencesReview: true,
+        acknowledgedByUserId: scenario.adminUserId,
+        acknowledgedAt: evidenceAt,
+        createdAt: evidenceAt
+      });
+    }
   } finally {
     await client.pool.end();
   }
