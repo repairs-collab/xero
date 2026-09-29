@@ -8,6 +8,7 @@ import {
   invoiceChases,
   invoices,
   organisations,
+  PostgresOrganisationSafetyRepository,
   stageInstances,
   tasks
 } from '@bc5000/db';
@@ -43,6 +44,15 @@ export interface XeroSyncDependencies {
   xero: XeroSyncClient;
   clock: SyncClock;
 }
+
+export const assertXeroSyncAllowed = async (
+  dependencies: XeroSyncDependencies,
+  organisationId: string
+): Promise<void> => {
+  await new PostgresOrganisationSafetyRepository(
+    dependencies.database
+  ).assertOperationalMutationAllowed(dependencies.database, organisationId);
+};
 
 const money = (value: string): string => new Decimal(value).toFixed(4);
 
@@ -105,6 +115,9 @@ export async function synchroniseInvoiceSnapshot(
   const now = dependencies.clock.now();
 
   await dependencies.database.transaction(async (transaction) => {
+    await new PostgresOrganisationSafetyRepository(
+      dependencies.database
+    ).assertOperationalMutationAllowed(transaction, organisationId);
     const existingContacts = await transaction
       .select()
       .from(contacts)
@@ -352,6 +365,7 @@ export async function runInvoiceRefresh(
   dependencies: XeroSyncDependencies,
   payload: XeroInvoiceRefreshJob
 ): Promise<void> {
+  await assertXeroSyncAllowed(dependencies, payload.organisationId);
   const invoice = await dependencies.xero.getInvoice(payload.invoiceId);
   await synchroniseInvoiceSnapshot(
     dependencies,
@@ -365,12 +379,33 @@ export const recordSuccessfulSync = async (
   organisationId: string
 ): Promise<void> => {
   const now = dependencies.clock.now();
-  await dependencies.database
-    .update(organisations)
-    .set({
-      xeroSyncCursor: now.toISOString(),
-      lastSuccessfulSyncAt: now,
-      updatedAt: now
-    })
-    .where(eq(organisations.id, organisationId));
+  const safety = new PostgresOrganisationSafetyRepository(
+    dependencies.database
+  );
+  await dependencies.database.transaction(async (transaction) => {
+    const organisation = await safety.assertOperationalMutationAllowed(
+      transaction,
+      organisationId
+    );
+    const invalidatesReconciliation = [
+      'SYNC_REQUIRED',
+      'RECONCILIATION_REQUIRED',
+      'RECONCILED'
+    ].includes(organisation.operationalState);
+    await transaction
+      .update(organisations)
+      .set({
+        xeroSyncCursor: now.toISOString(),
+        lastSuccessfulSyncAt: now,
+        latestReconciledSyncAt: null,
+        ...(invalidatesReconciliation
+          ? {
+              operationalState: 'RECONCILIATION_REQUIRED' as const,
+              operationalStateVersion: sql`${organisations.operationalStateVersion} + 1`
+            }
+          : {}),
+        updatedAt: now
+      })
+      .where(eq(organisations.id, organisationId));
+  });
 };

@@ -80,6 +80,16 @@ jobs:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ap-southeast-2
           allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+      - name: Refuse deployment during protected reset
+        run: |
+          LOCK_NAME=/accountpulse/staging/operational-reset-lock
+          if LOCK_RESULT=$(aws ssm get-parameter --name "$LOCK_NAME" 2>&1); then
+            echo "::error::A protected staging reset or recovery is active. Resolve it before deployment."
+            exit 1
+          elif [[ "$LOCK_RESULT" != *"ParameterNotFound"* ]]; then
+            echo "::error::Unable to verify the protected-reset lock. Deployment is refused."
+            exit 1
+          fi
       - uses: aws-actions/amazon-ecr-login@v2.1.6
       - name: Ensure shared infrastructure and repositories exist
         run: >-
@@ -138,9 +148,13 @@ jobs:
           --context hostname=${{ vars.HOSTNAME }}
       - name: Run migrations as a one-off ECS task
         run: |
-          CLUSTER=$(aws ecs list-clusters --query 'clusterArns[?contains(@, `staging-bill-chaser`)] | [0]' --output text)
-          SERVICE=$(aws ecs list-services --cluster "$CLUSTER" --query 'serviceArns[?contains(@, `WorkerService`)] | [0]' --output text)
-          TASK_DEFINITION=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query 'services[0].taskDefinition' --output text)
+          STACK=staging-bill-chaser-services
+          stack_output() {
+            aws cloudformation describe-stacks --stack-name "$STACK" --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue | [0]" --output text
+          }
+          CLUSTER=$(stack_output WorkerClusterName)
+          SERVICE=$(stack_output WorkerServiceName)
+          TASK_DEFINITION=$(stack_output WorkerTaskDefinitionArn)
           NETWORK=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query 'services[0].networkConfiguration' --output json)
           TASK=$(aws ecs run-task --cluster "$CLUSTER" --task-definition "$TASK_DEFINITION" --launch-type FARGATE --network-configuration "$NETWORK" --overrides '{"containerOverrides":[{"name":"Worker","command":["node","/app/worker.mjs","migrate"]}]}' --query 'tasks[0].taskArn' --output text)
           aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK"
@@ -170,6 +184,16 @@ jobs:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ap-southeast-2
           allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+      - name: Refuse deployment during protected reset
+        run: |
+          LOCK_NAME=/accountpulse/production/operational-reset-lock
+          if LOCK_RESULT=$(aws ssm get-parameter --name "$LOCK_NAME" 2>&1); then
+            echo "::error::A protected production reset or recovery is active. Resolve it before deployment."
+            exit 1
+          elif [[ "$LOCK_RESULT" != *"ParameterNotFound"* ]]; then
+            echo "::error::Unable to verify the protected-reset lock. Deployment is refused."
+            exit 1
+          fi
       - uses: aws-actions/amazon-ecr-login@v2.1.6
       - name: Ensure production shared infrastructure exists
         run: >-
@@ -192,9 +216,13 @@ jobs:
       - name: Deploy production and run the migration task
         run: |
           pnpm --filter @bc5000/infra cdk deploy --all --require-approval never --context stage=production --context imageTag=${IMAGE_TAG} --context certificateArn=${{ vars.CERTIFICATE_ARN }} --context hostname=${{ vars.HOSTNAME }}
-          CLUSTER=$(aws ecs list-clusters --query 'clusterArns[?contains(@, `production-bill-chaser`)] | [0]' --output text)
-          SERVICE=$(aws ecs list-services --cluster "$CLUSTER" --query 'serviceArns[?contains(@, `WorkerService`)] | [0]' --output text)
-          TASK_DEFINITION=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query 'services[0].taskDefinition' --output text)
+          STACK=production-bill-chaser-services
+          stack_output() {
+            aws cloudformation describe-stacks --stack-name "$STACK" --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue | [0]" --output text
+          }
+          CLUSTER=$(stack_output WorkerClusterName)
+          SERVICE=$(stack_output WorkerServiceName)
+          TASK_DEFINITION=$(stack_output WorkerTaskDefinitionArn)
           NETWORK=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query 'services[0].networkConfiguration' --output json)
           TASK=$(aws ecs run-task --cluster "$CLUSTER" --task-definition "$TASK_DEFINITION" --launch-type FARGATE --network-configuration "$NETWORK" --overrides '{"containerOverrides":[{"name":"Worker","command":["node","/app/worker.mjs","migrate"]}]}' --query 'tasks[0].taskArn' --output text)
           aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK"

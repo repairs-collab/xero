@@ -224,4 +224,42 @@ describe('test SMS queue service', () => {
     });
     expect(JSON.stringify(events[0]?.afterValue)).not.toContain(input.content);
   });
+
+  it('refuses a Test SMS during maintenance without creating Outbox or audit rows', async () => {
+    const seeded = await seed();
+    await client.db
+      .update(organisations)
+      .set({ maintenanceMode: true })
+      .where(eq(organisations.id, seeded.organisationId));
+    const publisher = createPublisher();
+    const service = createTestSmsService({
+      database: client.db,
+      publisher,
+      clock: { now: () => now }
+    });
+
+    await expect(
+      service.queue(seeded.session('ADMIN'), {
+        organisationId: seeded.organisationId,
+        destination: '0400 000 001',
+        content: 'Maintenance safety test',
+        confirmed: true,
+        requestId: randomUUID()
+      })
+    ).rejects.toThrow('OPERATIONAL_MAINTENANCE');
+
+    expect(publisher.publish).not.toHaveBeenCalled();
+    expect(
+      await client.db
+        .select()
+        .from(outboundMessages)
+        .where(eq(outboundMessages.organisationId, seeded.organisationId))
+    ).toHaveLength(0);
+    expect(
+      await client.db
+        .select()
+        .from(auditEvents)
+        .where(eq(auditEvents.organisationId, seeded.organisationId))
+    ).toHaveLength(0);
+  });
 });

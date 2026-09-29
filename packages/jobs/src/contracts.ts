@@ -22,3 +22,15 @@ export interface JobPublisher {
     options?: PublishOptions
   ): Promise<string>;
 }
+
+export type OperationalJobPurgeCounts = Record<
+  | 'xero.initial-sync'
+  | 'xero.incremental-sync'
+  | 'xero.invoice-refresh'
+  | 'xero.nightly-reconcile'
+  | 'reminders.calculate'
+  | 'reminder.execute'
+  | 'operator-reply.execute'
+  | 'test-sms.execute',
+  number
+>;

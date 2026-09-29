@@ -230,6 +230,9 @@ export default async function EscalationsPage() {
               ),
               emailSuppressed: false,
               sendMode: organisation.sendMode,
+              liveSendAcknowledged: organisation.liveSendAcknowledged,
+              rolloutScope: organisation.rolloutScope,
+              maintenanceMode: organisation.maintenanceMode,
               recipientAllowlist: organisation.recipientAllowlist,
               blockingReason: whitelistReason
             });

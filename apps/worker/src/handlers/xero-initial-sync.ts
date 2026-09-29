@@ -1,6 +1,7 @@
 import type { XeroInitialSyncJob } from '@bc5000/jobs';
 
 import {
+  assertXeroSyncAllowed,
   recordSuccessfulSync,
   synchroniseInvoiceCollection,
   type XeroSyncDependencies
@@ -10,6 +11,7 @@ export async function runInitialSync(
   dependencies: XeroSyncDependencies,
   payload: XeroInitialSyncJob
 ): Promise<void> {
+  await assertXeroSyncAllowed(dependencies, payload.organisationId);
   const response = await dependencies.xero.listOutstandingInvoices();
   await synchroniseInvoiceCollection(
     dependencies,

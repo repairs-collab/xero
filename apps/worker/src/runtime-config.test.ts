@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   databaseUrlFromEnvironment,
+  parseOperationalResetCommand,
   parseProviderCredentials
 } from './runtime-config.js';
 
@@ -39,5 +40,93 @@ describe('worker runtime configuration', () => {
         apiSecret: 'sinch-secret'
       }
     });
+  });
+
+  it('parses fixed operational-reset commands without provider credentials', () => {
+    const organisationId = 'f0a9be0f-a5a2-47ac-a951-5ff419311dfa';
+    const resetRunId = '2e7d7c78-c10b-4d3e-b81a-ce3b7cc6c0f0';
+    expect(
+      parseOperationalResetCommand([
+        'operational-reset',
+        'prepare',
+        '--organisation-id',
+        organisationId,
+        '--run-id',
+        resetRunId,
+        '--deployed-commit',
+        '0123456789abcdef0123456789abcdef01234567',
+        '--admin-email',
+        'repairs@motts.com.au',
+        '--acknowledgement',
+        'acknowledged',
+        '--expected-version',
+        '4'
+      ])
+    ).toEqual({
+      kind: 'prepare',
+      input: {
+        organisationId,
+        resetRunId,
+        deployedCommit: '0123456789abcdef0123456789abcdef01234567',
+        adminEmail: 'repairs@motts.com.au',
+        acknowledgement: 'acknowledged',
+        expectedVersion: 4
+      }
+    });
+    expect(
+      parseOperationalResetCommand([
+        'operational-reset',
+        'execute',
+        '--organisation-id',
+        organisationId,
+        '--run-id',
+        resetRunId,
+        '--snapshot-id',
+        'accountpulse-snapshot-1'
+      ])
+    ).toEqual({
+      kind: 'execute',
+      input: {
+        organisationId,
+        resetRunId,
+        snapshotIdentifier: 'accountpulse-snapshot-1'
+      }
+    });
+    expect(
+      parseOperationalResetCommand([
+        'operational-reset',
+        'abort',
+        '--organisation-id',
+        organisationId,
+        '--run-id',
+        resetRunId,
+        '--admin-email',
+        'repairs@motts.com.au',
+        '--reason',
+        'Snapshot failed'
+      ])
+    ).toEqual({
+      kind: 'abort',
+      input: {
+        organisationId,
+        resetRunId,
+        adminEmail: 'repairs@motts.com.au',
+        reason: 'Snapshot failed'
+      }
+    });
+    expect(parseOperationalResetCommand([])).toBeNull();
+    expect(() => parseOperationalResetCommand(['unknown'])).toThrow(
+      'Unsupported worker command'
+    );
+    expect(() =>
+      parseOperationalResetCommand([
+        'operational-reset',
+        'execute',
+        '--organisation-id',
+        organisationId,
+        '--run-id',
+        resetRunId
+      ])
+    ).toThrow('snapshot-id is required');
   });
 });

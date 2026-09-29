@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
@@ -14,6 +14,7 @@ import {
   invoices,
   messageAttempts,
   migrateDatabase,
+  operationalResetRuns,
   organisations,
   outboundMessages,
   pauses,
@@ -21,7 +22,9 @@ import {
   reminderSequences,
   reminderSequenceVersions,
   stageInstances,
-  suppressions
+  suppressions,
+  users,
+  webhookEvents
 } from '@bc5000/db';
 import { jobNames, type JobPublisher } from '@bc5000/jobs';
 
@@ -150,6 +153,27 @@ const recordEvent = async (
     rawBody: JSON.stringify(body),
     signatureValid: true
   });
+
+const recordCompletedReset = async (
+  organisationId: string,
+  completedAt: Date
+): Promise<void> => {
+  const adminUserId = randomUUID();
+  await client.db.insert(users).values({
+    id: adminUserId,
+    cognitoSubject: randomUUID(),
+    email: `${adminUserId}@example.invalid`,
+    displayName: 'Reset Admin'
+  });
+  await client.db.insert(operationalResetRuns).values({
+    organisationId,
+    status: 'COMPLETED',
+    requestedByUserId: adminUserId,
+    deployedCommit: '0123456789abcdef0123456789abcdef01234567',
+    completedAt,
+    updatedAt: completedAt
+  });
+};
 
 describe('processWebhookEvent', () => {
   it('creates an inbox conversation and pauses every active chase on a reply without message_id', async () => {
@@ -353,5 +377,209 @@ describe('processWebhookEvent', () => {
         webhookEventId: recorded.id
       }
     });
+  });
+
+  it('ignores a pre-reset Sinch reply even if a matching customer exists again', async () => {
+    const seeded = await seedCustomerChase();
+    const receivedAt = new Date('2026-09-17T01:00:00.000Z');
+    const completedAt = new Date('2026-09-18T01:00:00.000Z');
+    const recorded = await recordEvent(
+      seeded.organisationId,
+      'SINCH',
+      randomUUID(),
+      {
+        event_type: 'REPLY',
+        reply_id: randomUUID(),
+        source_number: seeded.phone,
+        destination_number: '+61400000002',
+        received_date: receivedAt.toISOString(),
+        content: 'Old reply from before reset',
+        metadata: {}
+      }
+    );
+    await client.db
+      .update(webhookEvents)
+      .set({ receivedAt })
+      .where(eq(webhookEvents.id, recorded.id));
+    await recordCompletedReset(seeded.organisationId, completedAt);
+
+    await processWebhookEvent(
+      { database: client.db, publisher },
+      {
+        organisationId: seeded.organisationId,
+        webhookEventId: recorded.id,
+        provider: 'SINCH'
+      }
+    );
+
+    const oldReply = await client.db
+      .select()
+      .from(inboundMessages)
+      .where(eq(inboundMessages.organisationId, seeded.organisationId));
+    const [stored] = await client.db
+      .select()
+      .from(webhookEvents)
+      .where(eq(webhookEvents.id, recorded.id));
+    expect(oldReply).toHaveLength(0);
+    expect(stored).toMatchObject({
+      processingError: 'IGNORED_PRE_RESET_EVENT'
+    });
+    expect(stored?.processedAt).not.toBeNull();
+  });
+
+  it('preserves a pre-reset Sinch opt-out as a suppression', async () => {
+    const seeded = await seedCustomerChase();
+    const receivedAt = new Date('2026-09-17T01:00:00.000Z');
+    const completedAt = new Date('2026-09-18T01:00:00.000Z');
+    const recorded = await recordEvent(
+      seeded.organisationId,
+      'SINCH',
+      randomUUID(),
+      {
+        event_type: 'OPT_OUT',
+        notification_id: randomUUID(),
+        source_number: seeded.phone,
+        destination_number: '+61400000002',
+        received_date: receivedAt.toISOString(),
+        content: 'STOP'
+      }
+    );
+    await client.db
+      .update(webhookEvents)
+      .set({ receivedAt })
+      .where(eq(webhookEvents.id, recorded.id));
+    await recordCompletedReset(seeded.organisationId, completedAt);
+
+    await processWebhookEvent(
+      { database: client.db, publisher },
+      {
+        organisationId: seeded.organisationId,
+        webhookEventId: recorded.id,
+        provider: 'SINCH'
+      }
+    );
+
+    const [suppression] = await client.db
+      .select()
+      .from(suppressions)
+      .where(
+        and(
+          eq(suppressions.organisationId, seeded.organisationId),
+          eq(suppressions.normalisedDestination, seeded.phone)
+        )
+      );
+    const [stored] = await client.db
+      .select()
+      .from(webhookEvents)
+      .where(eq(webhookEvents.id, recorded.id));
+    expect(suppression).toMatchObject({
+      source: 'SINCH_OPT_OUT',
+      consentState: 'SUPPRESSED'
+    });
+    expect(stored?.processedAt).not.toBeNull();
+    expect(stored?.processingError).toBeNull();
+  });
+
+  it('does not enqueue a Xero refresh while a fresh sync is required', async () => {
+    const seeded = await seedCustomerChase();
+    const xeroInvoiceId = randomUUID();
+    const recorded = await recordEvent(
+      seeded.organisationId,
+      'XERO',
+      `${xeroInvoiceId}:UPDATE:2026-09-18T01:00:00Z`,
+      {
+        events: [
+          {
+            resourceId: xeroInvoiceId,
+            eventCategory: 'INVOICE',
+            eventType: 'UPDATE',
+            eventDateUtc: '2026-09-18T01:00:00Z'
+          }
+        ]
+      }
+    );
+    await client.db
+      .update(organisations)
+      .set({ operationalState: 'SYNC_REQUIRED' })
+      .where(eq(organisations.id, seeded.organisationId));
+    const publishedBefore = published.length;
+
+    await processWebhookEvent(
+      { database: client.db, publisher },
+      {
+        organisationId: seeded.organisationId,
+        webhookEventId: recorded.id,
+        provider: 'XERO'
+      }
+    );
+
+    const [stored] = await client.db
+      .select()
+      .from(webhookEvents)
+      .where(eq(webhookEvents.id, recorded.id));
+    expect(published).toHaveLength(publishedBefore);
+    expect(stored).toMatchObject({
+      processingError: 'IGNORED_PENDING_FRESH_SYNC'
+    });
+    expect(stored?.processedAt).not.toBeNull();
+  });
+
+  it('completes a delivery webhook as a no-op when reset deleted its message target', async () => {
+    const seeded = await seedCustomerChase();
+    const [outbound] = await client.db
+      .insert(outboundMessages)
+      .values({
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId,
+        channel: 'SMS',
+        recipientKey: seeded.phone,
+        sourceVersion: 1,
+        status: 'ACCEPTED',
+        idempotencyKey: randomUUID()
+      })
+      .returning();
+    if (outbound === undefined) throw new Error('Outbound seed failed');
+    await client.db.insert(messageAttempts).values({
+      organisationId: seeded.organisationId,
+      outboundMessageId: outbound.id,
+      attemptNumber: 1,
+      provider: 'SINCH',
+      providerMessageId: 'provider-message-reset-deleted',
+      status: 'ACCEPTED'
+    });
+    const recorded = await recordEvent(
+      seeded.organisationId,
+      'SINCH',
+      randomUUID(),
+      {
+        event_type: 'DELIVERY_REPORT',
+        message_id: 'provider-message-reset-deleted',
+        status: 'DELIVERED',
+        status_code: 0,
+        timestamp: '2026-09-18T01:03:00Z',
+        metadata: {}
+      }
+    );
+    await client.db
+      .delete(outboundMessages)
+      .where(eq(outboundMessages.id, outbound.id));
+
+    await expect(
+      processWebhookEvent(
+        { database: client.db, publisher },
+        {
+          organisationId: seeded.organisationId,
+          webhookEventId: recorded.id,
+          provider: 'SINCH'
+        }
+      )
+    ).resolves.toBeUndefined();
+
+    const [stored] = await client.db
+      .select()
+      .from(webhookEvents)
+      .where(eq(webhookEvents.id, recorded.id));
+    expect(stored?.processedAt).not.toBeNull();
+    expect(stored?.processingError).toBeNull();
   });
 });

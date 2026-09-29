@@ -187,7 +187,7 @@ describe('worker runtime', () => {
     expect(database.close).toHaveBeenCalledOnce();
   });
 
-  it('records unfinished job IDs but still closes cleanly at the deadline', async () => {
+  it('marks a timed-out drain as failed before closing resources', async () => {
     const queue = new FakeWorkerQueue();
     const inFlight = new InFlightJobs();
     const database = { close: vi.fn(() => Promise.resolve()) };
@@ -196,7 +196,7 @@ describe('worker runtime', () => {
     await expect(
       shutdownWorker({ queue, database, inFlight, timeoutMs: 1 })
     ).resolves.toEqual({
-      failed: false,
+      failed: true,
       unfinishedJobIds: ['unknown-outcome-send']
     });
     expect(queue.closed).toBe(true);

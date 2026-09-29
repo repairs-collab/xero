@@ -33,7 +33,7 @@ export async function processDeliveryEvent(
       .limit(1);
     if (row === undefined) {
       const [reply] = await transaction.select().from(operatorReplies).where(and(eq(operatorReplies.organisationId, organisationId), eq(operatorReplies.providerMessageId, event.messageId))).for('update').limit(1);
-      if (reply === undefined) throw new Error('Sinch delivery message was not found');
+      if (reply === undefined) return;
       if (['DELIVERED', 'FAILED', 'CANCELLED'].includes(reply.status) || event.category === 'nonterminal') return;
       const occurredAt = new Date(event.occurredAt);
       const delivered = event.category === 'delivered';

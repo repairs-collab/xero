@@ -53,6 +53,24 @@ const observabilityTemplate = Template.fromStack(stacks.observability);
 const assembly = stacks.app.synth();
 
 describe('Bill Chaser 5000 AWS stacks', () => {
+  it('exports the exact database and worker resources used by protected operations', () => {
+    dataTemplate.hasOutput('DatabaseInstanceIdentifier', {
+      Value: Match.anyValue()
+    });
+    serviceTemplate.hasOutput('WorkerClusterName', {
+      Value: Match.anyValue()
+    });
+    serviceTemplate.hasOutput('WorkerServiceName', {
+      Value: Match.anyValue()
+    });
+    serviceTemplate.hasOutput('WorkerTaskDefinitionArn', {
+      Value: Match.anyValue()
+    });
+    serviceTemplate.hasOutput('WorkerBaselineDesiredCount', {
+      Value: '2'
+    });
+  });
+
   it('keeps RDS private, encrypted, Multi-AZ, and backed up for 35 days', () => {
     dataTemplate.hasResourceProperties('AWS::RDS::DBInstance', {
       PubliclyAccessible: false,
@@ -105,6 +123,17 @@ describe('Bill Chaser 5000 AWS stacks', () => {
         MinimumHealthyPercent: 50,
         MaximumPercent: 200
       }
+    });
+  });
+
+  it('gives a terminating worker enough time to drain active jobs', () => {
+    serviceTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
+      ContainerDefinitions: Match.arrayWith([
+        Match.objectLike({
+          Name: 'Worker',
+          StopTimeout: 120
+        })
+      ])
     });
   });
 

@@ -20,6 +20,11 @@ import {
 } from '@bc5000/integrations/sinch';
 import type { JobPayloads } from '@bc5000/jobs';
 
+import {
+  dispatchWithProviderSendLock,
+  markProviderSendBlocked
+} from '../services/provider-send-policy.js';
+
 export interface TestSmsExecutionDependencies {
   database: Database;
   clock: { now(): Date };
@@ -29,7 +34,13 @@ export interface TestSmsExecutionDependencies {
 
 export type TestSmsOutcome =
   | { kind: 'dry-run' }
-  | { kind: 'cancelled'; reason: 'SUPPRESSED' }
+  | {
+      kind: 'cancelled';
+      reason:
+        | 'SUPPRESSED'
+        | 'OPERATIONAL_MAINTENANCE'
+        | 'UNSUPPORTED_SENDING_STATE';
+    }
   | { kind: 'sent'; providerMessageId: string }
   | { kind: 'rejected'; reason: 'PROVIDER_REJECTED' | 'RATE_LIMITED' }
   | { kind: 'unknown' }
@@ -88,6 +99,7 @@ export async function executeTestSms(
   if (candidate === undefined || candidate.outbound.content === null) {
     throw new Error('TEST_SMS_NOT_FOUND');
   }
+  const content = candidate.outbound.content;
 
   const now = dependencies.clock.now();
   const repository = new PostgresMessageRepository(dependencies.database);
@@ -102,12 +114,6 @@ export async function executeTestSms(
     throw new Error('TEST_SMS_UNEXPECTED_WHITELIST_BLOCK');
   }
 
-  const [controls] = await dependencies.database
-    .select()
-    .from(organisations)
-    .where(eq(organisations.id, payload.organisationId))
-    .limit(1);
-  if (controls === undefined) throw new Error('TEST_SMS_NOT_FOUND');
   const [suppression] = await dependencies.database
     .select()
     .from(suppressions)
@@ -146,30 +152,56 @@ export async function executeTestSms(
     return { kind: 'cancelled', reason: 'SUPPRESSED' };
   }
 
-  const liveAllowed =
-    controls.sendMode === 'live' &&
-    controls.liveSendAcknowledged &&
-    controls.recipientAllowlist.includes(candidate.outbound.recipientKey);
-  if (!liveAllowed) {
-    await repository.markDryRun({
-      outboundId: claim.outboundId,
-      attemptId: claim.attemptId,
-      stageInstanceId: null,
-      now
-    });
-    return { kind: 'dry-run' };
-  }
-
   try {
-    const accepted = await dependencies.sinch.sendSms({
-      destinationNumber: candidate.outbound.recipientKey,
-      content: candidate.outbound.content,
-      callbackUrl: dependencies.callbackUrl,
-      metadata: {
+    const sendResult = await dispatchWithProviderSendLock(
+      dependencies.database,
+      {
         organisationId: payload.organisationId,
-        outboundMessageId: payload.outboundMessageId
-      }
-    });
+        source: 'TEST_SMS',
+        channel: 'SMS',
+        destination: candidate.outbound.recipientKey
+      },
+      () =>
+        dependencies.sinch.sendSms({
+          destinationNumber: candidate.outbound.recipientKey,
+          content,
+          callbackUrl: dependencies.callbackUrl,
+          metadata: {
+            organisationId: payload.organisationId,
+            outboundMessageId: payload.outboundMessageId
+          }
+        })
+    );
+    if (sendResult.kind === 'dry-run') {
+      await repository.markDryRun({
+        outboundId: claim.outboundId,
+        attemptId: claim.attemptId,
+        stageInstanceId: null,
+        now
+      });
+      return { kind: 'dry-run' };
+    }
+    if (sendResult.kind === 'blocked' || sendResult.kind === 'suppressed') {
+      const reason =
+        sendResult.kind === 'suppressed'
+          ? (`SUPPRESSED:${sendResult.source}` as const)
+          : sendResult.reason;
+      await markProviderSendBlocked(dependencies.database, {
+        organisationId: payload.organisationId,
+        outboundId: claim.outboundId,
+        attemptId: claim.attemptId,
+        stageInstanceId: null,
+        reason,
+        now
+      });
+      return {
+        kind: 'cancelled',
+        reason:
+          sendResult.kind === 'suppressed' ? 'SUPPRESSED' : sendResult.reason
+      };
+    }
+
+    const accepted = sendResult.value;
     await repository.markAccepted({
       organisationId: payload.organisationId,
       stageInstanceId: null,

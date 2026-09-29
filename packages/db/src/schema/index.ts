@@ -4,3 +4,4 @@ export * from './organisation.js';
 export * from './receivables.js';
 export * from './reminder-whitelist.js';
 export * from './reminders.js';
+export * from './rollout.js';

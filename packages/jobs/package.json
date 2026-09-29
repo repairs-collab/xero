@@ -12,6 +12,8 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@bc5000/db": "workspace:*",
+    "drizzle-orm": "0.45.2",
     "pg": "^8.23.0",
     "pg-boss": "12.33.0",
     "zod": "^4.6.5"

@@ -3,6 +3,7 @@ import type { XeroIncrementalSyncJob } from '@bc5000/jobs';
 import { eq } from 'drizzle-orm';
 
 import {
+  assertXeroSyncAllowed,
   recordSuccessfulSync,
   synchroniseInvoiceCollection,
   type XeroSyncDependencies
@@ -12,6 +13,7 @@ export async function runIncrementalSync(
   dependencies: XeroSyncDependencies,
   payload: XeroIncrementalSyncJob
 ): Promise<void> {
+  await assertXeroSyncAllowed(dependencies, payload.organisationId);
   const rows = await dependencies.database
     .select({ cursor: organisations.xeroSyncCursor })
     .from(organisations)

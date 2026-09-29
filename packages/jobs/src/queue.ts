@@ -11,6 +11,9 @@ import {
 } from 'pg-boss';
 import { Client } from 'pg';
 
+import type { DbTransaction } from '@bc5000/db';
+
+import { purgeOrganisationOperationalJobs } from './administration.js';
 import type { JobPublisher, PublishOptions } from './contracts.js';
 import { allJobNames, jobNames, type JobName } from './names.js';
 import {
@@ -126,6 +129,13 @@ export class DurableJobQueue implements JobPublisher {
       workers.map(([name, id]) => this.#boss.offWork(name, { id, wait: false }))
     );
     this.#workers.clear();
+  }
+
+  purgeOrganisationOperationalJobs(
+    transaction: DbTransaction,
+    input: { organisationId: string }
+  ) {
+    return purgeOrganisationOperationalJobs(transaction, input);
   }
 
   async enqueueUnique<Name extends JobName>(

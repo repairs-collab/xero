@@ -30,8 +30,10 @@ import { runIncrementalSync } from './handlers/xero-incremental-sync.js';
 import { runInitialSync } from './handlers/xero-initial-sync.js';
 import { runInvoiceRefresh } from './handlers/xero-invoice-refresh.js';
 import { startWorker } from './main.js';
+import { createOperationalResetService } from './operations/operational-reset.js';
 import {
   databaseUrlFromEnvironment,
+  parseOperationalResetCommand,
   parseProviderCredentials
 } from './runtime-config.js';
 import { waitForDatabaseMigrations } from './startup.js';
@@ -44,6 +46,10 @@ const required = (name: string): string => {
 
 async function main() {
   const databaseUrl = databaseUrlFromEnvironment(process.env);
+  const operationalResetCommand =
+    process.argv[2] === 'migrate'
+      ? null
+      : parseOperationalResetCommand(process.argv.slice(2));
   const databaseClient = createDatabase(databaseUrl);
   if (process.argv[2] === 'migrate') {
     await migrateDatabase(
@@ -51,6 +57,30 @@ async function main() {
       process.env.MIGRATIONS_DIR
     );
     await databaseClient.pool.end();
+    return;
+  }
+
+  if (operationalResetCommand !== null) {
+    try {
+      const reset = createOperationalResetService({
+        database: databaseClient.db,
+        clock: { now: () => new Date() }
+      });
+      if (operationalResetCommand.kind === 'prepare') {
+        await reset.prepare(operationalResetCommand.input);
+      } else if (operationalResetCommand.kind === 'execute') {
+        await reset.execute(operationalResetCommand.input);
+      } else {
+        await reset.abort(operationalResetCommand.input);
+      }
+      console.info('Operational reset command completed', {
+        operation: operationalResetCommand.kind,
+        organisationId: operationalResetCommand.input.organisationId,
+        resetRunId: operationalResetCommand.input.resetRunId
+      });
+    } finally {
+      await databaseClient.pool.end();
+    }
     return;
   }
 

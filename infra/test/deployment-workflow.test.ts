@@ -27,4 +27,30 @@ describe('deployment image scanning', () => {
     expect(workflow).toContain('if (( CRITICAL > 0 || HIGH > 0 )); then');
     expect(workflow).not.toContain('"None\\tNone"');
   });
+
+  it('uses exact stack outputs for one-off migration tasks', () => {
+    expect(workflow).toContain('WorkerClusterName');
+    expect(workflow).toContain('WorkerServiceName');
+    expect(workflow).toContain('WorkerTaskDefinitionArn');
+    expect(workflow).not.toContain('aws ecs list-clusters');
+    expect(workflow).not.toContain('aws ecs list-services');
+  });
+
+  it('cannot invoke reset or customer activation from a normal deployment', () => {
+    expect(workflow).not.toContain('/app/worker.mjs","operational-reset');
+    expect(workflow).not.toContain('CUSTOMER_ROLLOUT');
+    expect(workflow).not.toContain('rolloutScope');
+  });
+
+  it('refuses to deploy while a durable operational-reset lock exists', () => {
+    expect(workflow.match(/Refuse deployment during protected reset/g)).toHaveLength(2);
+    expect(workflow.match(/aws ssm get-parameter/g)).toHaveLength(2);
+    expect(workflow.match(/ParameterNotFound/g)).toHaveLength(2);
+    expect(workflow.match(/Unable to verify the protected-reset lock/g)).toHaveLength(2);
+    expect(workflow).toContain('/accountpulse/staging/operational-reset-lock');
+    expect(workflow).toContain('/accountpulse/production/operational-reset-lock');
+    expect(workflow.indexOf('Refuse deployment during protected reset')).toBeLessThan(
+      workflow.indexOf('Deploy staging services')
+    );
+  });
 });

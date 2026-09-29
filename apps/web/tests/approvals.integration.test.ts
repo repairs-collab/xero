@@ -125,4 +125,37 @@ describe('approval decisions', () => {
     expect(staleResult).toEqual([{ approvalId: stale.approvalId, status: 'STALE' }]);
     expect(jobs.publish).toHaveBeenCalledTimes(1);
   });
+
+  it('refuses an approval during operational maintenance without changing or queueing it', async () => {
+    const seeded = await seedApproval();
+    await client.db
+      .update(organisations)
+      .set({ maintenanceMode: true })
+      .where(eq(organisations.id, seeded.organisationId));
+    const jobs = publisher();
+    const service = createApprovalService({
+      database: client.db,
+      publisher: jobs,
+      clock: { now: () => now }
+    });
+
+    await expect(
+      service.approveReminder(seeded.session, {
+        organisationId: seeded.organisationId,
+        approvalId: seeded.approvalId
+      })
+    ).rejects.toThrow('OPERATIONAL_MAINTENANCE');
+
+    const [approval] = await client.db
+      .select()
+      .from(approvals)
+      .where(eq(approvals.id, seeded.approvalId));
+    const [stage] = await client.db
+      .select()
+      .from(stageInstances)
+      .where(eq(stageInstances.id, seeded.stageId));
+    expect(approval?.status).toBe('PENDING');
+    expect(stage?.status).toBe('PENDING_APPROVAL');
+    expect(jobs.publish).not.toHaveBeenCalled();
+  });
 });

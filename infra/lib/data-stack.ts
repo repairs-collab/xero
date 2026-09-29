@@ -1,4 +1,5 @@
 import {
+  CfnOutput,
   Duration,
   RemovalPolicy,
   Stack,
@@ -161,6 +162,11 @@ export class DataStack extends Stack {
       encryption: RepositoryEncryption.KMS,
       encryptionKey: this.dataKey,
       lifecycleRules: [{ maxImageCount: 50, rulePriority: 1 }]
+    });
+
+    new CfnOutput(this, 'DatabaseInstanceIdentifier', {
+      value: this.database.instanceIdentifier,
+      description: 'RDS instance used by the protected operational reset workflow'
     });
   }
 }

@@ -1,7 +1,9 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 
 import {
   type Database,
+  operationalResetRuns,
+  organisations,
   webhookEvents
 } from '@bc5000/db';
 import { parseSinchEvent } from '@bc5000/integrations/sinch';
@@ -96,6 +98,85 @@ export async function processWebhookEvent(
   if (stored === undefined) throw new Error('Webhook event was not found');
   if (stored.processedAt !== null) return;
   if (!stored.signatureValid) throw new Error('Refusing an unverified webhook');
+
+  const [latestCompletedReset] = await dependencies.database
+    .select({ completedAt: operationalResetRuns.completedAt })
+    .from(operationalResetRuns)
+    .where(
+      and(
+        eq(operationalResetRuns.organisationId, payload.organisationId),
+        eq(operationalResetRuns.status, 'COMPLETED')
+      )
+    )
+    .orderBy(desc(operationalResetRuns.completedAt))
+    .limit(1);
+  if (
+    latestCompletedReset?.completedAt !== null &&
+    latestCompletedReset?.completedAt !== undefined &&
+    stored.receivedAt <= latestCompletedReset.completedAt
+  ) {
+    if (stored.provider === 'SINCH') {
+      const event = (() => {
+        try {
+          const rawBody = rawBodyFrom(stored.providerPayload);
+          return parseSinchEvent(Buffer.from(rawBody));
+        } catch {
+          return undefined;
+        }
+      })();
+      if (event?.kind === 'opt-out') {
+        await processOptOut(
+          dependencies.database,
+          stored.organisationId,
+          event
+        );
+        await dependencies.database
+          .update(webhookEvents)
+          .set({
+            processedAt: new Date(),
+            processingAttempts: sql`${webhookEvents.processingAttempts} + 1`,
+            processingError: null
+          })
+          .where(eq(webhookEvents.id, stored.id));
+        return;
+      }
+    }
+    await dependencies.database
+      .update(webhookEvents)
+      .set({
+        processedAt: new Date(),
+        processingAttempts: sql`${webhookEvents.processingAttempts} + 1`,
+        processingError: 'IGNORED_PRE_RESET_EVENT'
+      })
+      .where(eq(webhookEvents.id, stored.id));
+    return;
+  }
+
+  if (stored.provider === 'XERO') {
+    const [organisation] = await dependencies.database
+      .select({
+        operationalState: organisations.operationalState
+      })
+      .from(organisations)
+      .where(eq(organisations.id, stored.organisationId))
+      .limit(1);
+    if (
+      organisation === undefined ||
+      organisation.operationalState === 'RESET_PREPARING' ||
+      organisation.operationalState === 'RESET_IN_PROGRESS' ||
+      organisation.operationalState === 'SYNC_REQUIRED'
+    ) {
+      await dependencies.database
+        .update(webhookEvents)
+        .set({
+          processedAt: new Date(),
+          processingAttempts: sql`${webhookEvents.processingAttempts} + 1`,
+          processingError: 'IGNORED_PENDING_FRESH_SYNC'
+        })
+        .where(eq(webhookEvents.id, stored.id));
+      return;
+    }
+  }
 
   await dependencies.database
     .update(webhookEvents)

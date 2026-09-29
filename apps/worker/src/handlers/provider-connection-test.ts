@@ -49,16 +49,24 @@ export async function testProviderConnection(
     secretArn: connection.secretArn
   });
   const now = dependencies.clock.now();
+  let staleResult = false;
   await dependencies.database.transaction(async (transaction) => {
     if (result.healthy) {
-      await transaction
+      const updated = await transaction
         .update(providerConnections)
         .set({
           connectedAt: connection.connectedAt ?? now,
           lastSuccessfulAuthenticationAt: now,
           updatedAt: now
         })
-        .where(eq(providerConnections.id, connection.id));
+        .where(
+          and(
+            eq(providerConnections.id, connection.id),
+            eq(providerConnections.secretArn, connection.secretArn)
+          )
+        )
+        .returning({ id: providerConnections.id });
+      staleResult = updated.length === 0;
     }
     await transaction.insert(auditEvents).values({
       organisationId: payload.organisationId,
@@ -67,12 +75,17 @@ export async function testProviderConnection(
       entityId: connection.id,
       afterValue: {
         provider: payload.provider,
-        healthy: result.healthy,
+        healthy: result.healthy && !staleResult,
+        probeHealthy: result.healthy,
+        staleResult,
         requiredScopes: result.requiredScopes ?? [],
         details: result.details ?? null
       },
       occurredAt: now
     });
   });
+  if (staleResult) {
+    throw new Error('PROVIDER_CONNECTION_CHANGED_DURING_TEST');
+  }
   return result;
 }
