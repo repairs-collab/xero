@@ -89,7 +89,11 @@ export interface RevalidatedReminder {
 
 export type RevalidationResult =
   | { kind: 'eligible'; reminder: RevalidatedReminder }
-  | { kind: 'blocked'; reason: StopReason };
+  | {
+      kind: 'blocked';
+      reason: StopReason;
+      approvalId?: string | null;
+    };
 
 export interface RevalidationDependencies {
   database: Database;
@@ -364,7 +368,11 @@ export async function revalidateReminder(
       approval.sourceVersion !== currentSourceVersion ||
       row.stage.sourceVersion !== currentSourceVersion
     ) {
-      return { kind: 'blocked', reason: 'SOURCE_CHANGED' };
+      return {
+        kind: 'blocked',
+        reason: 'SOURCE_CHANGED',
+        approvalId: approval.id
+      };
     }
   }
 
@@ -378,7 +386,11 @@ export async function revalidateReminder(
       row.invoice.onlineInvoiceUrl !== null &&
       online.data !== row.invoice.onlineInvoiceUrl
     ) {
-      return { kind: 'blocked', reason: 'SOURCE_CHANGED' };
+      return {
+        kind: 'blocked',
+        reason: 'SOURCE_CHANGED',
+        approvalId: approval?.id ?? null
+      };
     }
     onlineInvoiceUrl = online.data;
     await dependencies.database
@@ -450,7 +462,11 @@ export async function revalidateReminder(
                 { maxSegments: configured.maxSmsSegments }
               ).content;
     } catch {
-      return { kind: 'blocked', reason: 'SOURCE_CHANGED' };
+      return {
+        kind: 'blocked',
+        reason: 'SOURCE_CHANGED',
+        approvalId: approval?.id ?? null
+      };
     }
     if (content === undefined) {
       throw new Error('Reminder content could not be rendered');
@@ -460,7 +476,11 @@ export async function revalidateReminder(
     row.stage.channel === 'SMS' &&
     (onlineInvoiceUrl === '' || !content.includes(onlineInvoiceUrl))
   ) {
-    return { kind: 'blocked', reason: 'SOURCE_CHANGED' };
+    return {
+      kind: 'blocked',
+      reason: 'SOURCE_CHANGED',
+      approvalId: approval?.id ?? null
+    };
   }
 
   return {

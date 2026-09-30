@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 
 import {
   approvals,
@@ -112,7 +112,8 @@ const cancelStage = async (
   organisationId: string,
   stageInstanceId: string,
   reason: StopReason | 'XERO_EMAIL_ALLOWANCE',
-  now: Date
+  now: Date,
+  expectedApprovalId?: string | null
 ): Promise<void> => {
   await database.transaction(async (transaction) => {
     const [stage] = await transaction
@@ -126,6 +127,20 @@ const cancelStage = async (
       )
       .for('update');
     if (stage === undefined || stage.status !== 'QUEUED') return;
+    if (expectedApprovalId !== undefined) {
+      const [latestApproval] = await transaction
+        .select({ id: approvals.id })
+        .from(approvals)
+        .where(
+          and(
+            eq(approvals.organisationId, organisationId),
+            eq(approvals.stageInstanceId, stageInstanceId)
+          )
+        )
+        .orderBy(desc(approvals.createdAt), desc(approvals.id))
+        .limit(1);
+      if ((latestApproval?.id ?? null) !== expectedApprovalId) return;
+    }
     await transaction
       .update(stageInstances)
       .set({ status: 'CANCELLED', completedAt: now, updatedAt: now })
@@ -237,12 +252,16 @@ export async function executeReminder(
     payload
   );
   if (validation.kind === 'blocked') {
+    if (validation.reason === 'APPROVAL_REQUIRED') {
+      return { kind: 'cancelled', reason: validation.reason };
+    }
     await cancelStage(
       dependencies.database,
       payload.organisationId,
       payload.stageInstanceId,
       validation.reason,
-      now
+      now,
+      validation.approvalId
     );
     return { kind: 'cancelled', reason: validation.reason };
   }

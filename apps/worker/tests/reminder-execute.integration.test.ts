@@ -457,6 +457,61 @@ describe('executeReminder', () => {
     expect(sinch.sendCalls).toHaveLength(0);
   });
 
+  it('does not cancel a replacement approval being approved concurrently', async () => {
+    const seeded = await seedApprovedReminder({
+      rolloutScope: 'CUSTOMER',
+      allowlisted: false,
+      approvalStatus: 'PENDING'
+    });
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    const sinch = new FakeSinch();
+    const decisionLocked = deferred();
+    const releaseDecision = deferred();
+    const approvalDecision = client.db.transaction(async (transaction) => {
+      await transaction
+        .select({ id: stageInstances.id })
+        .from(stageInstances)
+        .where(eq(stageInstances.id, seeded.stageInstanceId))
+        .for('update');
+      await transaction
+        .update(approvals)
+        .set({ status: 'APPROVED', decidedAt: now })
+        .where(eq(approvals.stageInstanceId, seeded.stageInstanceId));
+      await transaction
+        .update(stageInstances)
+        .set({ status: 'QUEUED' })
+        .where(eq(stageInstances.id, seeded.stageInstanceId));
+      decisionLocked.resolve();
+      await releaseDecision.promise;
+    });
+    await decisionLocked.promise;
+
+    await expect(
+      executeReminder(dependencies(xero, sinch), {
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId
+      })
+    ).resolves.toEqual({
+      kind: 'cancelled',
+      reason: 'APPROVAL_REQUIRED'
+    });
+    releaseDecision.resolve();
+    await approvalDecision;
+
+    const [stage] = await client.db
+      .select({ status: stageInstances.status })
+      .from(stageInstances)
+      .where(eq(stageInstances.id, seeded.stageInstanceId));
+    const [approval] = await client.db
+      .select({ status: approvals.status })
+      .from(approvals)
+      .where(eq(approvals.stageInstanceId, seeded.stageInstanceId));
+    expect(stage?.status).toBe('QUEUED');
+    expect(approval?.status).toBe('APPROVED');
+    expect(sinch.sendCalls).toHaveLength(0);
+  });
+
   it.each(['CLIENT', 'INVOICE'] as const)(
     'cancels before sending when the %s target is whitelisted',
     async (scope) => {
