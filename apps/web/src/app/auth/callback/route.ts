@@ -9,8 +9,10 @@ import {
 
 import {
   getCognitoConfiguration,
+  getDatabaseClient,
   getSessionSecret
 } from '../../../server/runtime.js';
+import { acceptPendingInvitations } from '../../(protected)/settings/users/user-administration.js';
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const code = request.nextUrl.searchParams.get('code');
@@ -24,6 +26,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const identity = await exchangeCognitoCode(
     { code, returnedState, transaction },
     configuration
+  );
+  await acceptPendingInvitations(
+    getDatabaseClient().db,
+    identity.subject,
+    new Date()
   );
   const response = NextResponse.redirect(
     new URL(transaction.returnTo ?? '/', configuration.redirectUri),

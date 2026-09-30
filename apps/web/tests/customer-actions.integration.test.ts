@@ -4,7 +4,7 @@ import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { AppSession } from '@bc5000/auth';
-import { approvals, auditEvents, contactChannels, contacts, createDatabase, invoiceChases, invoices, migrateDatabase, organisations, pauses, paymentPromises, reminderSequenceVersions, reminderSequences, reminderWhitelistEntries, stageInstances, suppressions, users } from '@bc5000/db';
+import { approvals, auditEvents, contactChannels, contacts, createDatabase, invoiceChases, invoices, migrateDatabase, organisations, pauses, paymentPromises, reminderSequenceVersions, reminderSequences, reminderWhitelistEntries, stageInstances, suppressions, tasks, users } from '@bc5000/db';
 import type { JobPublisher } from '@bc5000/jobs';
 
 import { createCustomerOperations } from '../src/app/(protected)/customers/[customerId]/customer-operations.js';
@@ -40,6 +40,32 @@ describe('customer chase controls', () => {
     const [approval] = await client.db.select().from(approvals).where(eq(approvals.id, seeded.approvalId));
     expect(result.normalisedPhone).toBe('+61400000001');
     expect(approval?.status).toBe('EXPIRED');
+  });
+
+  it('completes an open phone data-quality task when a valid override is saved', async () => {
+    const seeded = await seedCustomer();
+    await client.db.insert(tasks).values({
+      organisationId: seeded.organisationId,
+      contactId: seeded.customerId,
+      kind: 'DATA_QUALITY_PHONE',
+      status: 'OPEN',
+      summary: 'No unambiguous SMS phone number is available'
+    });
+    const service = createCustomerOperations({ database: client.db, publisher: publisher(), clock: { now: () => now } });
+
+    await service.setApprovedPhoneOverride(seeded.session, {
+      organisationId: seeded.organisationId,
+      customerId: seeded.customerId,
+      phone: '0400 000 001',
+      reason: 'Confirmed by customer'
+    });
+
+    const [task] = await client.db.select().from(tasks).where(eq(tasks.contactId, seeded.customerId));
+    expect(task).toMatchObject({
+      status: 'COMPLETED',
+      resolutionNote: 'Valid SMS phone override saved',
+      completedAt: now
+    });
   });
 
   it('records a promise, keeps the customer paused, and schedules re-evaluation', async () => {

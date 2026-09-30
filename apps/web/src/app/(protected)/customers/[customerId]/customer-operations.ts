@@ -4,7 +4,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
 
 import { authorise, type AppSession } from '@bc5000/auth';
-import { approvals, auditEvents, contactChannels, type Database, disputes, invoiceChases, invoices, pauses, paymentPromises, stageInstances } from '@bc5000/db/web';
+import { approvals, auditEvents, contactChannels, type Database, disputes, invoiceChases, invoices, pauses, paymentPromises, stageInstances, tasks } from '@bc5000/db/web';
 import { jobNames, type JobPublisher } from '@bc5000/jobs';
 
 import { createManualReminderService } from '../../../../server/manual-reminder-service.js';
@@ -30,6 +30,7 @@ export function createCustomerOperations(dependencies: { database: Database; pub
       const [existing] = await transaction.select({ id: contactChannels.id }).from(contactChannels).where(and(eq(contactChannels.organisationId, input.organisationId), eq(contactChannels.contactId, input.customerId), eq(contactChannels.kind, 'SMS'), eq(contactChannels.normalisedValue, normalisedPhone))).limit(1);
       if (existing === undefined) await transaction.insert(contactChannels).values({ organisationId: input.organisationId, contactId: input.customerId, kind: 'SMS', sourceValue: input.phone.trim(), normalisedValue: normalisedPhone, usable: true, approvedOverride: true, overrideReason: input.reason.trim(), approvedByUserId: session.userId, approvedAt: now, updatedAt: now });
       else await transaction.update(contactChannels).set({ sourceValue: input.phone.trim(), usable: true, approvedOverride: true, overrideReason: input.reason.trim(), approvedByUserId: session.userId, approvedAt: now, updatedAt: now }).where(eq(contactChannels.id, existing.id));
+      await transaction.update(tasks).set({ status: 'COMPLETED', resolutionNote: 'Valid SMS phone override saved', completedAt: now, updatedAt: now }).where(and(eq(tasks.organisationId, input.organisationId), eq(tasks.contactId, input.customerId), eq(tasks.kind, 'DATA_QUALITY_PHONE'), eq(tasks.status, 'OPEN')));
       await expireCustomerApprovals(transaction, input.organisationId, input.customerId, now);
       await transaction.insert(auditEvents).values({ organisationId: input.organisationId, actorUserId: session.userId, eventType: 'CUSTOMER_PHONE_OVERRIDE_SET', entityType: 'CONTACT', entityId: input.customerId, afterValue: { destinationHash: createHash('sha256').update(normalisedPhone).digest('hex'), reason: input.reason.trim() }, occurredAt: now });
     });

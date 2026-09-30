@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 
 import { authorise, type AppSession, type Role } from '@bc5000/auth';
 import {
@@ -8,6 +8,7 @@ import {
   type Database,
   invitations,
   memberships,
+  organisations,
   users
 } from '@bc5000/db/web';
 
@@ -15,6 +16,17 @@ export interface CognitoUserAdministration {
   createUser(email: string): Promise<{ subject: string }>;
   resendInvitation(email: string): Promise<void>;
   disableUser(subject: string): Promise<void>;
+}
+
+export type MemberStatus = 'INVITED' | 'ACTIVE' | 'DISABLED';
+
+export interface UserAdministrationMember {
+  userId: string;
+  email: string;
+  displayName: string;
+  role: Role;
+  status: MemberStatus;
+  invitationId: string | null;
 }
 
 export class LastAdminRequired extends Error {
@@ -32,24 +44,36 @@ export interface UserAdministrationDependencies {
   clock: { now(): Date };
 }
 
-const activeAdminCount = async (
+export async function acceptPendingInvitations(
   database: Database,
-  organisationId: string
-): Promise<number> => {
-  const [row] = await database
-    .select({ count: sql<number>`count(*)::integer` })
+  cognitoSubject: string,
+  now: Date
+): Promise<void> {
+  const [user] = await database
+    .select({ id: users.id, email: users.email })
+    .from(users)
+    .where(eq(users.cognitoSubject, cognitoSubject))
+    .limit(1);
+  if (user === undefined) return;
+  const organisationRows = await database
+    .select({ organisationId: memberships.organisationId })
     .from(memberships)
-    .innerJoin(users, eq(users.id, memberships.userId))
+    .where(eq(memberships.userId, user.id));
+  if (organisationRows.length === 0) return;
+  await database
+    .update(invitations)
+    .set({ status: 'ACCEPTED', acceptedAt: now })
     .where(
       and(
-        eq(memberships.organisationId, organisationId),
-        eq(memberships.role, 'ADMIN'),
-        isNull(memberships.disabledAt),
-        isNull(users.disabledAt)
+        inArray(
+          invitations.organisationId,
+          organisationRows.map((row) => row.organisationId)
+        ),
+        eq(invitations.email, user.email),
+        eq(invitations.status, 'PENDING')
       )
     );
-  return row?.count ?? 0;
-};
+}
 
 export function createUserAdministration(
   dependencies: UserAdministrationDependencies
@@ -66,6 +90,12 @@ export function createUserAdministration(
     authorise(session, 'user.manage', input.organisationId);
     const email = input.email.trim().toLowerCase();
     if (email.length === 0) throw new Error('Email is required');
+    const [existingUser] = await dependencies.database
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1);
+    if (existingUser !== undefined) throw new Error('USER_EMAIL_EXISTS');
     const created = await dependencies.cognito.createUser(email);
     const now = dependencies.clock.now();
     const userId = randomUUID();
@@ -109,6 +139,44 @@ export function createUserAdministration(
     return { invitationId, userId };
   };
 
+  const listMembers = async (
+    session: AppSession,
+    input: { organisationId: string }
+  ): Promise<UserAdministrationMember[]> => {
+    authorise(session, 'user.manage', input.organisationId);
+    const memberRows = await dependencies.database
+      .select({ membership: memberships, user: users })
+      .from(memberships)
+      .innerJoin(users, eq(users.id, memberships.userId))
+      .where(eq(memberships.organisationId, input.organisationId))
+      .orderBy(asc(users.displayName), asc(users.email));
+    const invitationRows = await dependencies.database
+      .select()
+      .from(invitations)
+      .where(eq(invitations.organisationId, input.organisationId));
+    const pendingByEmail = new Map(
+      invitationRows
+        .filter((invitation) => invitation.status === 'PENDING')
+        .map((invitation) => [invitation.email, invitation] as const)
+    );
+    return memberRows.map(({ membership, user }) => {
+      const pendingInvitation = pendingByEmail.get(user.email);
+      const disabled = membership.disabledAt !== null || user.disabledAt !== null;
+      return {
+        userId: user.id,
+        email: user.email,
+        displayName: user.displayName,
+        role: membership.role,
+        status: disabled
+          ? 'DISABLED'
+          : pendingInvitation === undefined
+            ? 'ACTIVE'
+            : 'INVITED',
+        invitationId: pendingInvitation?.id ?? null
+      };
+    });
+  };
+
   const resendInvitation = async (
     session: AppSession,
     input: { organisationId: string; invitationId: string }
@@ -149,27 +217,41 @@ export function createUserAdministration(
     input: { organisationId: string; userId: string; role: Role }
   ): Promise<void> => {
     authorise(session, 'user.manage', input.organisationId);
-    const [membership] = await dependencies.database
-      .select()
-      .from(memberships)
-      .where(
-        and(
-          eq(memberships.organisationId, input.organisationId),
-          eq(memberships.userId, input.userId),
-          isNull(memberships.disabledAt)
-        )
-      )
-      .limit(1);
-    if (membership === undefined) throw new Error('Membership was not found');
-    if (
-      membership.role === 'ADMIN' &&
-      input.role !== 'ADMIN' &&
-      (await activeAdminCount(dependencies.database, input.organisationId)) <= 1
-    ) {
-      throw new LastAdminRequired();
-    }
     const now = dependencies.clock.now();
     await dependencies.database.transaction(async (transaction) => {
+      await transaction
+        .select({ id: organisations.id })
+        .from(organisations)
+        .where(eq(organisations.id, input.organisationId))
+        .for('update');
+      const [row] = await transaction
+        .select({ membership: memberships, user: users })
+        .from(memberships)
+        .innerJoin(users, eq(users.id, memberships.userId))
+        .where(
+          and(
+            eq(memberships.organisationId, input.organisationId),
+            eq(memberships.userId, input.userId),
+            isNull(memberships.disabledAt)
+          )
+        )
+        .limit(1);
+      if (row === undefined) throw new Error('Membership was not found');
+      if (row.membership.role === 'ADMIN' && input.role !== 'ADMIN') {
+        const [adminCount] = await transaction
+          .select({ count: sql<number>`count(*)::integer` })
+          .from(memberships)
+          .innerJoin(users, eq(users.id, memberships.userId))
+          .where(
+            and(
+              eq(memberships.organisationId, input.organisationId),
+              eq(memberships.role, 'ADMIN'),
+              isNull(memberships.disabledAt),
+              isNull(users.disabledAt)
+            )
+          );
+        if ((adminCount?.count ?? 0) <= 1) throw new LastAdminRequired();
+      }
       await transaction
         .update(memberships)
         .set({ role: input.role })
@@ -179,13 +261,23 @@ export function createUserAdministration(
             eq(memberships.userId, input.userId)
           )
         );
+      await transaction
+        .update(invitations)
+        .set({ role: input.role })
+        .where(
+          and(
+            eq(invitations.organisationId, input.organisationId),
+            eq(invitations.email, row.user.email),
+            eq(invitations.status, 'PENDING')
+          )
+        );
       await transaction.insert(auditEvents).values({
         organisationId: input.organisationId,
         actorUserId: session.userId,
         eventType: 'USER_ROLE_CHANGED',
         entityType: 'MEMBERSHIP',
         entityId: input.userId,
-        beforeValue: { role: membership.role },
+        beforeValue: { role: row.membership.role },
         afterValue: { role: input.role },
         occurredAt: now
       });
@@ -197,29 +289,47 @@ export function createUserAdministration(
     input: { organisationId: string; userId: string }
   ): Promise<void> => {
     authorise(session, 'user.manage', input.organisationId);
-    const [row] = await dependencies.database
-      .select({ membership: memberships, user: users })
-      .from(memberships)
-      .innerJoin(users, eq(users.id, memberships.userId))
-      .where(
-        and(
-          eq(memberships.organisationId, input.organisationId),
-          eq(memberships.userId, input.userId),
-          isNull(memberships.disabledAt)
-        )
-      )
-      .limit(1);
-    if (row === undefined) throw new Error('Membership was not found');
-    if (
-      row.membership.role === 'ADMIN' &&
-      (await activeAdminCount(dependencies.database, input.organisationId)) <= 1
-    ) {
-      throw new LastAdminRequired();
-    }
-
-    await dependencies.cognito.disableUser(row.user.cognitoSubject);
     const now = dependencies.clock.now();
-    await dependencies.database.transaction(async (transaction) => {
+    const disabledIdentity = await dependencies.database.transaction(async (transaction) => {
+      await transaction
+        .select({ id: organisations.id })
+        .from(organisations)
+        .where(eq(organisations.id, input.organisationId))
+        .for('update');
+      const [targetUser] = await transaction
+        .select()
+        .from(users)
+        .where(eq(users.id, input.userId))
+        .for('update')
+        .limit(1);
+      if (targetUser === undefined) throw new Error('Membership was not found');
+      const [membership] = await transaction
+        .select()
+        .from(memberships)
+        .where(
+          and(
+            eq(memberships.organisationId, input.organisationId),
+            eq(memberships.userId, input.userId),
+            isNull(memberships.disabledAt)
+          )
+        )
+        .limit(1);
+      if (membership === undefined) throw new Error('Membership was not found');
+      if (membership.role === 'ADMIN') {
+        const [adminCount] = await transaction
+          .select({ count: sql<number>`count(*)::integer` })
+          .from(memberships)
+          .innerJoin(users, eq(users.id, memberships.userId))
+          .where(
+            and(
+              eq(memberships.organisationId, input.organisationId),
+              eq(memberships.role, 'ADMIN'),
+              isNull(memberships.disabledAt),
+              isNull(users.disabledAt)
+            )
+          );
+        if ((adminCount?.count ?? 0) <= 1) throw new LastAdminRequired();
+      }
       await transaction
         .update(memberships)
         .set({ disabledAt: now })
@@ -229,20 +339,48 @@ export function createUserAdministration(
             eq(memberships.userId, input.userId)
           )
         );
+      await transaction
+        .update(invitations)
+        .set({ status: 'REVOKED' })
+        .where(
+          and(
+            eq(invitations.organisationId, input.organisationId),
+            eq(invitations.email, targetUser.email),
+            eq(invitations.status, 'PENDING')
+          )
+        );
       await transaction.insert(auditEvents).values({
         organisationId: input.organisationId,
         actorUserId: session.userId,
         eventType: 'USER_DISABLED',
         entityType: 'MEMBERSHIP',
         entityId: input.userId,
-        beforeValue: { role: row.membership.role, active: true },
-        afterValue: { role: row.membership.role, active: false },
+        beforeValue: { role: membership.role, active: true },
+        afterValue: { role: membership.role, active: false },
         occurredAt: now
       });
+      const [remainingMembership] = await transaction
+        .select({ organisationId: memberships.organisationId })
+        .from(memberships)
+        .where(
+          and(
+            eq(memberships.userId, input.userId),
+            isNull(memberships.disabledAt)
+          )
+        )
+        .limit(1);
+      return {
+        cognitoSubject: targetUser.cognitoSubject,
+        disableCognito: remainingMembership === undefined
+      };
     });
+    if (disabledIdentity.disableCognito) {
+      await dependencies.cognito.disableUser(disabledIdentity.cognitoSubject);
+    }
   };
 
   return {
+    listMembers,
     inviteMember,
     resendInvitation,
     changeRole,

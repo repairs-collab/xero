@@ -368,6 +368,50 @@ describe('targeted Xero invoice refresh', () => {
       status: 'OPEN'
     });
   });
+
+  it('completes an open phone data-quality task when Xero later supplies a valid phone', async () => {
+    const seeded = await seedApprovedReminder();
+    const xero = new FakeXeroSyncClient();
+    xero.invoices.set(
+      seeded.xeroInvoiceId,
+      xeroInvoice(seeded.xeroInvoiceId, seeded.xeroContactId)
+    );
+    xero.contacts.set(
+      seeded.xeroContactId,
+      xeroContact(seeded.xeroContactId, [
+        { type: 'MOBILE', number: 'not-a-phone' }
+      ])
+    );
+    const dependencies = {
+      database: database.db,
+      xero,
+      clock: fixedClock
+    };
+    const payload = {
+      organisationId: seeded.organisationId,
+      invoiceId: seeded.xeroInvoiceId
+    };
+
+    await runInvoiceRefresh(dependencies, payload);
+    xero.contacts.set(
+      seeded.xeroContactId,
+      xeroContact(seeded.xeroContactId, [
+        { type: 'MOBILE', number: '0400 000 001' }
+      ])
+    );
+    await runInvoiceRefresh(dependencies, payload);
+
+    const [task] = await database.db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.contactId, seeded.contactId));
+    expect(task).toMatchObject({
+      kind: 'DATA_QUALITY_PHONE',
+      status: 'COMPLETED',
+      resolutionNote: 'Valid SMS phone available after Xero synchronisation',
+      completedAt: fixedClock.now()
+    });
+  });
 });
 
 describe('Xero collection synchronisation', () => {
