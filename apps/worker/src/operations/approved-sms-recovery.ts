@@ -18,6 +18,7 @@ import {
   stageInstances
 } from '@bc5000/db';
 import { localDateInterval } from '@bc5000/domain';
+import { jobNames, type JobPublisher } from '@bc5000/jobs';
 
 import { renderReminderPreview } from '../handlers/reminders-calculate.js';
 
@@ -27,6 +28,7 @@ export const approvedSmsRecoveryAcknowledgement = (localDate: string): string =>
 interface ApprovedSmsRecoveryDependencies {
   database: Database;
   clock: { now(): Date };
+  publisher: JobPublisher;
 }
 
 type DatabaseTransaction = Parameters<
@@ -93,7 +95,8 @@ const digestCandidates = (candidates: RecoveryCandidate[]): string =>
 const findCandidates = async (
   executor: RecoveryQueryExecutor,
   input: { organisationId: string; localDate: string },
-  lockRows: boolean
+  lockRows: boolean,
+  stageInstanceId?: string
 ): Promise<RecoveryCandidate[]> => {
   const organisation = await requireCustomerLive(
     executor,
@@ -104,6 +107,7 @@ const findCandidates = async (
     .select({
       approvalId: approvals.id,
       approvalCreatedAt: approvals.createdAt,
+      approvalRenderedPreview: approvals.renderedPreview,
       approvalStatus: approvals.status,
       amountDue: invoices.amountDue,
       currency: invoices.currency,
@@ -163,29 +167,56 @@ const findCandidates = async (
         eq(stageInstances.organisationId, input.organisationId),
         eq(stageInstances.status, 'CANCELLED'),
         eq(stageInstances.channel, 'SMS'),
-        eq(stageInstances.origin, 'AUTOMATION')
+        eq(stageInstances.origin, 'AUTOMATION'),
+        stageInstanceId === undefined
+          ? undefined
+          : eq(stageInstances.id, stageInstanceId)
       )
     )
     .orderBy(desc(approvals.createdAt), desc(approvals.id));
   const rows = lockRows ? await query.for('update') : await query;
+  if (rows.length === 0) return [];
 
-  const latestByStage = new Map<string, (typeof rows)[number]>();
+  const approvedEvents = await executor
+    .select({ approvalId: auditEvents.entityId })
+    .from(auditEvents)
+    .where(
+      and(
+        eq(auditEvents.organisationId, input.organisationId),
+        eq(auditEvents.eventType, 'REMINDER_APPROVED'),
+        eq(auditEvents.entityType, 'APPROVAL'),
+        inArray(
+          auditEvents.entityId,
+          rows.map((row) => row.approvalId)
+        )
+      )
+    );
+  const provenApproved = new Set(
+    approvedEvents.flatMap((event) =>
+      event.approvalId === null ? [] : [event.approvalId]
+    )
+  );
+
+  const latestDecidedByStage = new Map<string, (typeof rows)[number]>();
   for (const row of rows) {
-    if (!latestByStage.has(row.stageInstanceId)) {
-      latestByStage.set(row.stageInstanceId, row);
-    }
-  }
-  const possible = [...latestByStage.values()].filter(
-    (row): row is typeof row & {
-      decidedAt: Date;
-      decidedByUserId: string;
-    } =>
+    if (
+      !latestDecidedByStage.has(row.stageInstanceId) &&
+      provenApproved.has(row.approvalId) &&
       row.approvalStatus === 'EXPIRED' &&
       row.decidedAt !== null &&
       row.decidedByUserId !== null &&
       row.decidedAt >= interval.from &&
       row.decidedAt < interval.before
-  );
+    ) {
+      latestDecidedByStage.set(row.stageInstanceId, row);
+    }
+  }
+  const possible = [...latestDecidedByStage.values()] as Array<
+    (typeof rows)[number] & {
+      decidedAt: Date;
+      decidedByUserId: string;
+    }
+  >;
   if (possible.length === 0) return [];
 
   const stageIds = possible.map((row) => row.stageInstanceId);
@@ -262,7 +293,7 @@ const findCandidates = async (
             : entry.invoiceId === row.invoiceId
         )
     )
-    .map((row) => {
+    .map((row): RecoveryCandidate | null => {
       const configured = configuredStages.find(
         (stage) =>
           stage.sequenceVersionId === row.sequenceVersionId &&
@@ -275,26 +306,31 @@ const findCandidates = async (
           `RECOVERY_STAGE_CONFIGURATION_NOT_FOUND:${row.stageInstanceId}`
         );
       }
+      const renderedPreview = renderReminderPreview({
+        channel: 'SMS',
+        template: configured.template,
+        customerName: row.customerName,
+        invoiceNumber: row.invoiceNumber,
+        amountDue: row.amountDue,
+        currency: row.currency,
+        dueDate: row.dueDate,
+        onlineInvoiceUrl: row.onlineInvoiceUrl,
+        organisationName: organisation.name,
+        maxSmsSegments: row.maxSmsSegments
+      });
+      if (renderedPreview !== row.approvalRenderedPreview) return null;
       return {
         approvalId: row.approvalId,
         currentSourceVersion: row.currentSourceVersion,
         decidedByUserId: row.decidedByUserId,
-        renderedPreview: renderReminderPreview({
-          channel: 'SMS',
-          template: configured.template,
-          customerName: row.customerName,
-          invoiceNumber: row.invoiceNumber,
-          amountDue: row.amountDue,
-          currency: row.currency,
-          dueDate: row.dueDate,
-          onlineInvoiceUrl: row.onlineInvoiceUrl,
-          organisationName: organisation.name,
-          maxSmsSegments: row.maxSmsSegments
-        }),
+        renderedPreview,
         stageInstanceId: row.stageInstanceId,
         stageSourceVersion: row.stageSourceVersion
       };
     })
+    .filter(
+      (candidate): candidate is RecoveryCandidate => candidate !== null
+    )
     .sort((left, right) =>
       left.stageInstanceId.localeCompare(right.stageInstanceId)
     );
@@ -326,7 +362,12 @@ export function createApprovedSmsRecoveryService(
     expectedCount: number;
     expectedDigest: string;
     acknowledgement: string;
-  }): Promise<{ regeneratedCount: number }> => {
+  }): Promise<{
+    candidateCount: number;
+    publishedCount: number;
+    failedCount: number;
+    uncertainCount: number;
+  }> => {
     if (
       input.acknowledgement !==
       approvedSmsRecoveryAcknowledgement(input.localDate)
@@ -340,82 +381,195 @@ export function createApprovedSmsRecoveryService(
       throw new Error('RECOVERY_EXPECTED_DIGEST_INVALID');
     }
 
-    return dependencies.database.transaction(async (transaction) => {
-      const organisation =
-        await new PostgresOrganisationSafetyRepository(
-          dependencies.database
-        ).assertOperationalMutationAllowed(transaction, input.organisationId);
-      if (
-        organisation.sendMode !== 'live' ||
-        organisation.rolloutScope !== 'CUSTOMER' ||
-        !organisation.liveSendAcknowledged
-      ) {
-        throw new Error('CUSTOMER_LIVE_REQUIRED');
-      }
-
-      const candidates = await findCandidates(transaction, input, true);
-      if (candidates.length !== input.expectedCount) {
-        throw new Error(
-          `RECOVERY_COUNT_CHANGED: expected ${input.expectedCount.toString()}, found ${candidates.length.toString()}`
-        );
-      }
-      if (digestCandidates(candidates) !== input.expectedDigest) {
-        throw new Error('RECOVERY_PREVIEW_CHANGED');
-      }
-      if (candidates.length === 0) return { regeneratedCount: 0 };
-
-      const now = dependencies.clock.now();
-      for (const candidate of candidates) {
-        const updatedStages = await transaction
-          .update(stageInstances)
-          .set({
-            status: 'AWAITING_APPROVAL',
-            sourceVersion: candidate.currentSourceVersion,
-            completedAt: null,
-            updatedAt: now
-          })
-          .where(
-            and(
-              eq(stageInstances.organisationId, input.organisationId),
-              eq(stageInstances.id, candidate.stageInstanceId),
-              eq(stageInstances.status, 'CANCELLED'),
-              eq(stageInstances.sourceVersion, candidate.stageSourceVersion)
-            )
-          )
-          .returning({ id: stageInstances.id });
-        if (updatedStages.length !== 1) {
-          throw new Error('RECOVERY_CANDIDATES_CHANGED');
+    const candidates = await dependencies.database.transaction(
+      async (transaction) => {
+        const organisation =
+          await new PostgresOrganisationSafetyRepository(
+            dependencies.database
+          ).assertOperationalMutationAllowed(
+            transaction,
+            input.organisationId
+          );
+        if (
+          organisation.sendMode !== 'live' ||
+          organisation.rolloutScope !== 'CUSTOMER' ||
+          !organisation.liveSendAcknowledged
+        ) {
+          throw new Error('CUSTOMER_LIVE_REQUIRED');
         }
-        await transaction.insert(approvals).values({
-          organisationId: input.organisationId,
-          stageInstanceId: candidate.stageInstanceId,
-          renderedPreview: candidate.renderedPreview,
-          sourceVersion: candidate.currentSourceVersion,
-          status: 'PENDING',
-          expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000)
-        });
-        await transaction.insert(auditEvents).values({
-          organisationId: input.organisationId,
-          actorUserId: candidate.decidedByUserId,
-          eventType: 'APPROVED_SMS_RECOVERY_REGENERATED',
-          entityType: 'STAGE_INSTANCE',
-          entityId: candidate.stageInstanceId,
-          correlationId: `approved-sms-recovery:${input.localDate}`,
-          beforeValue: {
-            status: 'CANCELLED',
-            approvalStatus: 'EXPIRED',
-            sourceVersion: candidate.stageSourceVersion
-          },
-          afterValue: {
-            status: 'AWAITING_APPROVAL',
-            approvalStatus: 'PENDING',
-            sourceVersion: candidate.currentSourceVersion
-          },
-          occurredAt: now
-        });
+
+        const reviewedCandidates = await findCandidates(
+          transaction,
+          input,
+          true
+        );
+        if (reviewedCandidates.length !== input.expectedCount) {
+          throw new Error(
+            `RECOVERY_COUNT_CHANGED: expected ${input.expectedCount.toString()}, found ${reviewedCandidates.length.toString()}`
+          );
+        }
+        if (digestCandidates(reviewedCandidates) !== input.expectedDigest) {
+          throw new Error('RECOVERY_PREVIEW_CHANGED');
+        }
+        return reviewedCandidates;
       }
-      return { regeneratedCount: candidates.length };
-    });
+    );
+
+    let publishedCount = 0;
+    let failedCount = 0;
+    let uncertainCount = 0;
+    for (const candidate of candidates) {
+      let queuedApprovalId: string;
+      try {
+        queuedApprovalId = await dependencies.database.transaction(
+          async (transaction) => {
+            const organisation =
+              await new PostgresOrganisationSafetyRepository(
+                dependencies.database
+              ).assertOperationalMutationAllowed(
+                transaction,
+                input.organisationId
+              );
+            if (
+              organisation.sendMode !== 'live' ||
+              organisation.rolloutScope !== 'CUSTOMER' ||
+              !organisation.liveSendAcknowledged
+            ) {
+              throw new Error('CUSTOMER_LIVE_REQUIRED');
+            }
+
+            const currentCandidates = await findCandidates(
+              transaction,
+              input,
+              true,
+              candidate.stageInstanceId
+            );
+            const currentCandidate = currentCandidates[0];
+            if (
+              currentCandidate === undefined ||
+              digestCandidates([currentCandidate]) !==
+                digestCandidates([candidate])
+            ) {
+              throw new Error(
+                `RECOVERY_CANDIDATE_CHANGED:${candidate.stageInstanceId}`
+              );
+            }
+
+            const now = dependencies.clock.now();
+            const updatedStages = await transaction
+              .update(stageInstances)
+              .set({
+                status: 'QUEUED',
+                sourceVersion: candidate.currentSourceVersion,
+                completedAt: null,
+                updatedAt: now
+              })
+              .where(
+                and(
+                  eq(stageInstances.organisationId, input.organisationId),
+                  eq(stageInstances.id, candidate.stageInstanceId),
+                  eq(stageInstances.status, 'CANCELLED'),
+                  eq(
+                    stageInstances.sourceVersion,
+                    candidate.stageSourceVersion
+                  )
+                )
+              )
+              .returning({ id: stageInstances.id });
+            if (updatedStages.length !== 1) {
+              throw new Error('RECOVERY_CANDIDATE_CHANGED');
+            }
+            const [queuedApproval] = await transaction
+              .insert(approvals)
+              .values({
+                organisationId: input.organisationId,
+                stageInstanceId: candidate.stageInstanceId,
+                renderedPreview: candidate.renderedPreview,
+                sourceVersion: candidate.currentSourceVersion,
+                status: 'APPROVED',
+                decidedByUserId: candidate.decidedByUserId,
+                decidedAt: now,
+                expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000)
+              })
+              .returning({ id: approvals.id });
+            if (queuedApproval === undefined) {
+              throw new Error('RECOVERY_APPROVAL_NOT_CREATED');
+            }
+            await transaction.insert(auditEvents).values({
+              organisationId: input.organisationId,
+              actorUserId: candidate.decidedByUserId,
+              eventType: 'APPROVED_SMS_RECOVERY_QUEUED',
+              entityType: 'STAGE_INSTANCE',
+              entityId: candidate.stageInstanceId,
+              correlationId: `approved-sms-recovery:${input.localDate}`,
+              beforeValue: {
+                status: 'CANCELLED',
+                approvalStatus: 'EXPIRED',
+                approvalId: candidate.approvalId,
+                sourceVersion: candidate.stageSourceVersion
+              },
+              afterValue: {
+                status: 'QUEUED',
+                approvalStatus: 'APPROVED',
+                approvalId: queuedApproval.id,
+                sourceVersion: candidate.currentSourceVersion
+              },
+              occurredAt: now
+            });
+            return queuedApproval.id;
+          }
+        );
+      } catch {
+        failedCount += 1;
+        continue;
+      }
+
+      try {
+        await dependencies.publisher.publish(
+          jobNames.reminderExecute,
+          {
+            organisationId: input.organisationId,
+            stageInstanceId: candidate.stageInstanceId
+          },
+          {
+            singletonKey: `approved-sms-recovery:${input.localDate}:${candidate.stageInstanceId}:${candidate.currentSourceVersion.toString()}`
+          }
+        );
+        publishedCount += 1;
+      } catch (error) {
+        const uncertainAt = dependencies.clock.now();
+        await dependencies.database.transaction(async (transaction) => {
+            await transaction.insert(auditEvents).values({
+              organisationId: input.organisationId,
+              actorUserId: candidate.decidedByUserId,
+              eventType: 'APPROVED_SMS_RECOVERY_QUEUE_UNCERTAIN',
+              entityType: 'STAGE_INSTANCE',
+              entityId: candidate.stageInstanceId,
+              correlationId: `approved-sms-recovery:${input.localDate}`,
+              beforeValue: {
+                status: 'QUEUED',
+                approvalStatus: 'APPROVED',
+                approvalId: queuedApprovalId
+              },
+              afterValue: {
+                status: 'QUEUED',
+                approvalStatus: 'APPROVED',
+                reason:
+                  error instanceof Error ? error.message : 'QUEUE_UNCERTAIN'
+              },
+              occurredAt: uncertainAt
+            });
+        });
+        uncertainCount += 1;
+      }
+    }
+
+    return {
+      candidateCount: candidates.length,
+      publishedCount,
+      failedCount,
+      uncertainCount
+    };
   };
 
   return { execute, preview };
