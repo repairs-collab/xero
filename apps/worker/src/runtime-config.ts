@@ -30,6 +30,22 @@ export type OperationalResetCommand =
       };
     };
 
+export type ApprovedSmsRecoveryCommand =
+  | {
+      kind: 'preview';
+      input: { organisationId: string; localDate: string };
+    }
+  | {
+      kind: 'execute';
+      input: {
+        organisationId: string;
+        localDate: string;
+        expectedCount: number;
+        expectedDigest: string;
+        acknowledgement: string;
+      };
+    };
+
 const required = (environment: Environment, name: string): string => {
   const value = environment[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
@@ -112,6 +128,60 @@ const flag = (flags: Map<string, string>, name: string): string => {
   if (!value) throw new Error(`${name} is required`);
   return value;
 };
+
+export function parseApprovedSmsRecoveryCommand(
+  arguments_: string[]
+): ApprovedSmsRecoveryCommand | null {
+  if (arguments_.length === 0) return null;
+  if (arguments_[0] !== 'recover-approved-sms') {
+    throw new Error('Unsupported worker command');
+  }
+  const subcommand = arguments_[1];
+  const flags = parseFlags(arguments_.slice(2));
+  const organisationId = flag(flags, 'organisation-id');
+  const localDate = flag(flags, 'local-date');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(localDate)) {
+    throw new Error('local-date is invalid');
+  }
+  if (subcommand === 'preview') {
+    rejectUnknownFlags(flags, ['organisation-id', 'local-date']);
+    return { kind: 'preview', input: { organisationId, localDate } };
+  }
+  if (subcommand === 'execute') {
+    rejectUnknownFlags(flags, [
+      'organisation-id',
+      'local-date',
+      'expected-count',
+      'expected-digest',
+      'acknowledgement'
+    ]);
+    const expectedCountSource = flag(flags, 'expected-count');
+    if (!/^\d+$/.test(expectedCountSource)) {
+      throw new Error('expected-count is invalid');
+    }
+    const expectedCount = Number(expectedCountSource);
+    if (!Number.isSafeInteger(expectedCount)) {
+      throw new Error('expected-count is invalid');
+    }
+    const expectedDigest = flag(flags, 'expected-digest').toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(expectedDigest)) {
+      throw new Error('expected-digest is invalid');
+    }
+    return {
+      kind: 'execute',
+      input: {
+        organisationId,
+        localDate,
+        expectedCount,
+        expectedDigest,
+        acknowledgement: flag(flags, 'acknowledgement')
+      }
+    };
+  }
+  throw new Error(
+    'Approved SMS recovery subcommand must be preview or execute'
+  );
+}
 
 const rejectUnknownFlags = (
   flags: Map<string, string>,

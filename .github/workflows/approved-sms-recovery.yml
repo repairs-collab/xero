@@ -1,0 +1,117 @@
+name: Protected AccountPulse approved SMS recovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Preview eligible reminders, or execute an exact reviewed count
+        required: true
+        type: choice
+        options:
+          - preview
+          - execute
+      organisation_id:
+        description: Exact AccountPulse organisation UUID
+        required: true
+        type: string
+      local_date:
+        description: Approval date in the organisation time zone (YYYY-MM-DD)
+        required: true
+        type: string
+      deployed_commit:
+        description: Exact 40-character Git commit deployed to production
+        required: true
+        type: string
+      expected_count:
+        description: Exact preview count (required for execute)
+        required: false
+        type: string
+      preview_digest:
+        description: Exact SHA-256 digest returned by preview (required for execute)
+        required: false
+        type: string
+      acknowledgement:
+        description: Exact recovery acknowledgement (required for execute)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: bill-chaser-production
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-southeast-2
+  OPERATION: ${{ inputs.operation }}
+  ORGANISATION_ID: ${{ inputs.organisation_id }}
+  LOCAL_DATE: ${{ inputs.local_date }}
+  DEPLOYED_COMMIT: ${{ inputs.deployed_commit }}
+  EXPECTED_COUNT: ${{ inputs.expected_count }}
+  EXPECTED_DIGEST: ${{ inputs.preview_digest }}
+  ACKNOWLEDGEMENT: ${{ inputs.acknowledgement }}
+
+jobs:
+  approved-sms-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.deployed_commit }}
+      - uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ap-southeast-2
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+      - name: Verify production target and run protected recovery
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          [[ "$OPERATION" =~ ^(preview|execute)$ ]] || { echo "::error::Invalid operation"; exit 1; }
+          [[ "$ORGANISATION_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || { echo "::error::Invalid organisation ID"; exit 1; }
+          [[ "$LOCAL_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "::error::Invalid local date"; exit 1; }
+          [[ "$DEPLOYED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::A full deployed Git commit is required"; exit 1; }
+          if [[ "$OPERATION" == "execute" ]]; then
+            [[ "$EXPECTED_COUNT" =~ ^[0-9]+$ ]] || { echo "::error::Expected preview count is required"; exit 1; }
+            [[ "$EXPECTED_DIGEST" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::Exact preview digest is required"; exit 1; }
+            [[ "$ACKNOWLEDGEMENT" == "RECOVER APPROVED UNSENT SMS FOR $LOCAL_DATE" ]] || { echo "::error::Acknowledgement did not match"; exit 1; }
+          fi
+
+          CHECKED_OUT_COMMIT=$(git rev-parse HEAD)
+          [[ "$CHECKED_OUT_COMMIT" == "$DEPLOYED_COMMIT" ]] || { echo "::error::Checked-out commit mismatch"; exit 1; }
+
+          STACK=production-bill-chaser-services
+          stack_output() {
+            aws cloudformation describe-stacks --stack-name "$STACK" --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue | [0]" --output text
+          }
+          CLUSTER=$(stack_output WorkerClusterName)
+          SERVICE=$(stack_output WorkerServiceName)
+          TASK_DEFINITION=$(stack_output WorkerTaskDefinitionArn)
+          SERVICE_DESCRIPTION=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --output json)
+          ACTIVE_TASK_DEFINITION=$(jq -r '.services[0].taskDefinition // empty' <<< "$SERVICE_DESCRIPTION")
+          NETWORK=$(jq -c '.services[0].networkConfiguration' <<< "$SERVICE_DESCRIPTION")
+          [[ "$ACTIVE_TASK_DEFINITION" == "$TASK_DEFINITION" ]] || { echo "::error::Production worker task definition mismatch"; exit 1; }
+          DEPLOYED_WORKER_IMAGE=$(aws ecs describe-task-definition --task-definition "$TASK_DEFINITION" --query 'taskDefinition.containerDefinitions[?name==`Worker`].image | [0]' --output text)
+          [[ "${DEPLOYED_WORKER_IMAGE##*:}" == "$DEPLOYED_COMMIT" ]] || { echo "::error::Production worker image does not match the approved deployed commit"; exit 1; }
+
+          if [[ "$OPERATION" == "preview" ]]; then
+            COMMAND=$(jq -cn --arg org "$ORGANISATION_ID" --arg date "$LOCAL_DATE" '["node","/app/worker.mjs","recover-approved-sms","preview","--organisation-id",$org,"--local-date",$date]')
+          else
+            COMMAND=$(jq -cn --arg org "$ORGANISATION_ID" --arg date "$LOCAL_DATE" --arg count "$EXPECTED_COUNT" --arg digest "$EXPECTED_DIGEST" --arg ack "$ACKNOWLEDGEMENT" '["node","/app/worker.mjs","recover-approved-sms","execute","--organisation-id",$org,"--local-date",$date,"--expected-count",$count,"--expected-digest",$digest,"--acknowledgement",$ack]')
+          fi
+          OVERRIDES=$(jq -cn --argjson command "$COMMAND" '{containerOverrides:[{name:"Worker",command:$command}]}')
+          TASK=$(aws ecs run-task --cluster "$CLUSTER" --task-definition "$TASK_DEFINITION" --launch-type FARGATE --network-configuration "$NETWORK" --overrides "$OVERRIDES" --query 'tasks[0].taskArn' --output text)
+          echo "Recovery task: $TASK"
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK"
+          EXIT_CODE=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK" --query 'tasks[0].containers[?name==`Worker`].exitCode | [0]' --output text)
+          if [[ "$EXIT_CODE" != "0" ]]; then
+            STOP_REASON=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK" --query 'tasks[0].stoppedReason' --output text)
+            echo "::error::Recovery task failed with exit code $EXIT_CODE: $STOP_REASON"
+            exit 1
+          fi
+          echo "Protected approved-SMS recovery $OPERATION completed. Review the production worker log stream for the exact result."
