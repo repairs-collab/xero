@@ -67,10 +67,18 @@ async function main() {
   }
 
   if (approvedSmsRecoveryCommand !== null) {
+    const recoveryQueue = new DurableJobQueue({
+      databaseUrl,
+      logger: console
+    });
     try {
+      if (approvedSmsRecoveryCommand.kind === 'execute') {
+        await recoveryQueue.start();
+      }
       const recovery = createApprovedSmsRecoveryService({
         database: databaseClient.db,
-        clock: { now: () => new Date() }
+        clock: { now: () => new Date() },
+        publisher: recoveryQueue
       });
       const result =
         approvedSmsRecoveryCommand.kind === 'preview'
@@ -83,6 +91,7 @@ async function main() {
         result
       });
     } finally {
+      await recoveryQueue.stop();
       await databaseClient.pool.end();
     }
     return;
