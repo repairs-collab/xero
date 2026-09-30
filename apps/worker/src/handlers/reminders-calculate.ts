@@ -4,6 +4,7 @@ import {
   and,
   desc,
   eq,
+  gte,
   gt,
   inArray,
   isNull,
@@ -12,6 +13,7 @@ import {
 
 import {
   approvals,
+  auditEvents,
   contactChannels,
   contacts,
   type Database,
@@ -562,9 +564,52 @@ export async function calculateReminderWork(
               )
             );
         }
+        const recoveryProtectedStages = new Set<string>();
+        if (pendingForChase.length > 0) {
+          const pendingApprovalByStage = new Map(
+            pendingForChase.map((pending) => [
+              pending.stageId,
+              pending.approvalId
+            ])
+          );
+          const recoveryEvents = await transaction
+            .select({
+              afterValue: auditEvents.afterValue,
+              stageId: auditEvents.entityId
+            })
+            .from(auditEvents)
+            .where(
+              and(
+                eq(auditEvents.organisationId, organisationId),
+                eq(
+                  auditEvents.eventType,
+                  'APPROVED_SMS_RECOVERY_RESET_FOR_REAPPROVAL'
+                ),
+                eq(auditEvents.entityType, 'STAGE_INSTANCE'),
+                gte(
+                  auditEvents.occurredAt,
+                  new Date(now.getTime() - 24 * 60 * 60 * 1000)
+                ),
+                inArray(
+                  auditEvents.entityId,
+                  pendingForChase.map((pending) => pending.stageId)
+                )
+              )
+            );
+          for (const event of recoveryEvents) {
+            if (event.stageId === null) continue;
+            if (
+              event.afterValue?.approvalId ===
+              pendingApprovalByStage.get(event.stageId)
+            ) {
+              recoveryProtectedStages.add(event.stageId);
+            }
+          }
+        }
         const obsoletePending = pendingForChase.filter(
           (pending) =>
             pending.stageKey !== 'manual' &&
+            !recoveryProtectedStages.has(pending.stageId) &&
             !currentOccurrenceKeys.has(
               `${pending.sequenceVersionId}:${pending.stageKey}:${pending.channel}:${pending.scheduledAt.getTime().toString()}`
             )

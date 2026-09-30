@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
   approvals,
+  auditEvents,
   contactChannels,
   contacts,
   createDatabase,
@@ -734,6 +735,80 @@ describe('calculateReminderWork', () => {
       .where(eq(stageInstances.organisationId, seeded.organisationId));
     expect(approval?.status).toBe('EXPIRED');
     expect(stage?.status).toBe('CANCELLED');
+  });
+
+  it('preserves a recovered reminder for reapproval after its original schedule time', async () => {
+    const seeded = await seedInvoiceAndSequence({
+      mode: 'REVIEW',
+      dueDate: '2026-08-01',
+      offsetDays: 30,
+      channel: 'SMS_DAILY'
+    });
+
+    await calculateReminderWork(
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+      seeded.organisationId
+    );
+    const [chase] = await client.db
+      .select()
+      .from(invoiceChases)
+      .where(eq(invoiceChases.invoiceId, seeded.invoiceId));
+    if (chase === undefined) throw new Error('Expected an invoice chase');
+
+    const stageId = randomUUID();
+    await client.db.insert(stageInstances).values({
+      id: stageId,
+      organisationId: seeded.organisationId,
+      invoiceChaseId: chase.id,
+      sequenceVersionId: seeded.sequenceVersionId,
+      stageKey: 'daily-after-30',
+      channel: 'SMS',
+      status: 'AWAITING_APPROVAL',
+      scheduledAt: new Date('2026-09-16T23:00:00.000Z'),
+      sourceVersion: 3
+    });
+    const [approval] = await client.db
+      .insert(approvals)
+      .values({
+        organisationId: seeded.organisationId,
+        stageInstanceId: stageId,
+        renderedPreview: 'Recovered reminder',
+        sourceVersion: 3,
+        status: 'PENDING',
+        expiresAt: new Date('2026-09-19T00:00:00.000Z')
+      })
+      .returning({ id: approvals.id });
+    if (approval === undefined) throw new Error('Expected an approval');
+    await client.db.insert(auditEvents).values({
+      organisationId: seeded.organisationId,
+      eventType: 'APPROVED_SMS_RECOVERY_RESET_FOR_REAPPROVAL',
+      entityType: 'STAGE_INSTANCE',
+      entityId: stageId,
+      correlationId: 'approved-sms-recovery:2026-09-18',
+      afterValue: {
+        status: 'AWAITING_APPROVAL',
+        approvalStatus: 'PENDING',
+        approvalId: approval.id,
+        sourceVersion: 3
+      },
+      occurredAt: now
+    });
+
+    await calculateReminderWork(
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+      seeded.organisationId
+    );
+
+    const [storedApproval] = await client.db
+      .select({ status: approvals.status })
+      .from(approvals)
+      .where(eq(approvals.id, approval.id));
+    const [storedStage] = await client.db
+      .select({ status: stageInstances.status })
+      .from(stageInstances)
+      .where(eq(stageInstances.id, stageId));
+    expect(storedApproval?.status).toBe('PENDING');
+    expect(storedStage?.status).toBe('AWAITING_APPROVAL');
   });
 
   it('refuses reminder calculation during maintenance without creating work', async () => {
