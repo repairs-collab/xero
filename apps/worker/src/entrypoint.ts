@@ -30,9 +30,11 @@ import { runIncrementalSync } from './handlers/xero-incremental-sync.js';
 import { runInitialSync } from './handlers/xero-initial-sync.js';
 import { runInvoiceRefresh } from './handlers/xero-invoice-refresh.js';
 import { startWorker } from './main.js';
+import { createApprovedSmsRecoveryService } from './operations/approved-sms-recovery.js';
 import { createOperationalResetService } from './operations/operational-reset.js';
 import {
   databaseUrlFromEnvironment,
+  parseApprovedSmsRecoveryCommand,
   parseOperationalResetCommand,
   parseProviderCredentials
 } from './runtime-config.js';
@@ -46,8 +48,12 @@ const required = (name: string): string => {
 
 async function main() {
   const databaseUrl = databaseUrlFromEnvironment(process.env);
+  const approvedSmsRecoveryCommand =
+    process.argv[2] === 'recover-approved-sms'
+      ? parseApprovedSmsRecoveryCommand(process.argv.slice(2))
+      : null;
   const operationalResetCommand =
-    process.argv[2] === 'migrate'
+    process.argv[2] === 'migrate' || approvedSmsRecoveryCommand !== null
       ? null
       : parseOperationalResetCommand(process.argv.slice(2));
   const databaseClient = createDatabase(databaseUrl);
@@ -57,6 +63,28 @@ async function main() {
       process.env.MIGRATIONS_DIR
     );
     await databaseClient.pool.end();
+    return;
+  }
+
+  if (approvedSmsRecoveryCommand !== null) {
+    try {
+      const recovery = createApprovedSmsRecoveryService({
+        database: databaseClient.db,
+        clock: { now: () => new Date() }
+      });
+      const result =
+        approvedSmsRecoveryCommand.kind === 'preview'
+          ? await recovery.preview(approvedSmsRecoveryCommand.input)
+          : await recovery.execute(approvedSmsRecoveryCommand.input);
+      console.info('Approved SMS recovery command completed', {
+        operation: approvedSmsRecoveryCommand.kind,
+        organisationId: approvedSmsRecoveryCommand.input.organisationId,
+        localDate: approvedSmsRecoveryCommand.input.localDate,
+        result
+      });
+    } finally {
+      await databaseClient.pool.end();
+    }
     return;
   }
 

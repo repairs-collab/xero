@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   databaseUrlFromEnvironment,
+  parseApprovedSmsRecoveryCommand,
   parseOperationalResetCommand,
   parseProviderCredentials
 } from './runtime-config.js';
@@ -128,5 +129,63 @@ describe('worker runtime configuration', () => {
         resetRunId
       ])
     ).toThrow('snapshot-id is required');
+  });
+
+  it('parses protected approved-SMS recovery commands', () => {
+    const organisationId = 'f0a9be0f-a5a2-47ac-a951-5ff419311dfa';
+    expect(
+      parseApprovedSmsRecoveryCommand([
+        'recover-approved-sms',
+        'preview',
+        '--organisation-id',
+        organisationId,
+        '--local-date',
+        '2026-09-30'
+      ])
+    ).toEqual({
+      kind: 'preview',
+      input: { organisationId, localDate: '2026-09-30' }
+    });
+    expect(
+      parseApprovedSmsRecoveryCommand([
+        'recover-approved-sms',
+        'execute',
+        '--organisation-id',
+        organisationId,
+        '--local-date',
+        '2026-09-30',
+        '--expected-count',
+        '12',
+        '--expected-digest',
+        '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+        '--acknowledgement',
+        'RECOVER APPROVED UNSENT SMS FOR 2026-09-30'
+      ])
+    ).toEqual({
+      kind: 'execute',
+      input: {
+        organisationId,
+        localDate: '2026-09-30',
+        expectedCount: 12,
+        expectedDigest:
+          '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+        acknowledgement: 'RECOVER APPROVED UNSENT SMS FOR 2026-09-30'
+      }
+    });
+    expect(parseApprovedSmsRecoveryCommand([])).toBeNull();
+    expect(() =>
+      parseApprovedSmsRecoveryCommand([
+        'recover-approved-sms',
+        'execute',
+        '--organisation-id',
+        organisationId,
+        '--local-date',
+        '2026-09-30',
+        '--expected-count',
+        '-1',
+        '--acknowledgement',
+        'wrong'
+      ])
+    ).toThrow('expected-count is invalid');
   });
 });

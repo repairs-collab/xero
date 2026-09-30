@@ -81,7 +81,7 @@ const promiseStillActive = (
   return end >= now;
 };
 
-const previewFor = (input: {
+export const renderReminderPreview = (input: {
   channel: 'SMS' | 'XERO_EMAIL';
   template: string | null;
   customerName: string;
@@ -671,7 +671,7 @@ export async function calculateReminderWork(
               .limit(1)
               .for('update');
             if (lockedApproval === undefined) return;
-            const expectedPreview = previewFor({
+            const expectedPreview = renderReminderPreview({
               channel: 'SMS',
               template: configured.template,
               customerName: row.contact.name,
@@ -763,7 +763,7 @@ export async function calculateReminderWork(
           summary.createdStages += 1;
 
           if (occurrence.channel !== 'TASK' && sequence.mode === 'REVIEW') {
-            const preview = previewFor({
+            const preview = renderReminderPreview({
               channel: occurrence.channel,
               template: configured.template,
               customerName: row.contact.name,
