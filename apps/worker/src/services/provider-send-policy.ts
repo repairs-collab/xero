@@ -2,6 +2,7 @@ import { and, eq } from 'drizzle-orm';
 
 import {
   type Database,
+  type DbTransaction,
   messageAttempts,
   organisations,
   outboundMessages,
@@ -30,7 +31,7 @@ export type ProviderDispatchResult<Value> =
 export async function dispatchWithProviderSendLock<Value>(
   database: Database,
   input: ProviderSendDecisionInput,
-  dispatch: () => Promise<Value>
+  dispatch: (transaction: DbTransaction) => Promise<Value>
 ): Promise<ProviderDispatchResult<Value>> {
   return database.transaction(async (transaction) => {
     const [organisation] = await transaction
@@ -71,7 +72,7 @@ export async function dispatchWithProviderSendLock<Value>(
       return { kind: 'suppressed', source: suppression.source };
     }
 
-    return { kind: 'dispatched', value: await dispatch() };
+    return { kind: 'dispatched', value: await dispatch(transaction) };
   });
 }
 
@@ -85,6 +86,8 @@ export async function markProviderSendBlocked(
     reason:
       | Extract<ProviderSendPolicyDecision, { kind: 'blocked' }>['reason']
       | 'CHANNEL_SUPPRESSED'
+      | 'OUTSIDE_SCHEDULE_WINDOW'
+      | 'SOURCE_CHANGED'
       | `SUPPRESSED:${string}`;
     now: Date;
   }
