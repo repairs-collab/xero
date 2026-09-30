@@ -319,6 +319,199 @@ const waitUntilAsync = async (
 };
 
 describe('executeReminder', () => {
+  it('ignores a delayed job after its stage returns to awaiting approval', async () => {
+    const seeded = await seedApprovedReminder({
+      rolloutScope: 'CUSTOMER',
+      allowlisted: false
+    });
+    await client.db
+      .update(stageInstances)
+      .set({ status: 'AWAITING_APPROVAL' })
+      .where(eq(stageInstances.id, seeded.stageInstanceId));
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    const sinch = new FakeSinch();
+
+    await expect(
+      executeReminder(dependencies(xero, sinch), {
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId
+      })
+    ).resolves.toEqual({
+      kind: 'cancelled',
+      reason: 'UNSUPPORTED_SENDING_STATE'
+    });
+    expect(xero.getInvoiceCalls).toBe(0);
+    expect(xero.getOnlineInvoiceUrlCalls).toBe(0);
+    expect(sinch.sendCalls).toHaveLength(0);
+  });
+
+  it('does not claim a reminder reset while pre-send validation is running', async () => {
+    const seeded = await seedApprovedReminder({
+      rolloutScope: 'CUSTOMER',
+      allowlisted: false
+    });
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    const validationReachedProvider = deferred();
+    const releaseValidation = deferred();
+    xero.getOnlineInvoiceUrl = async () => {
+      xero.getOnlineInvoiceUrlCalls += 1;
+      validationReachedProvider.resolve();
+      await releaseValidation.promise;
+      return result(xero.onlineInvoiceUrl);
+    };
+    const sinch = new FakeSinch();
+    const execution = executeReminder(dependencies(xero, sinch), {
+      organisationId: seeded.organisationId,
+      stageInstanceId: seeded.stageInstanceId
+    });
+    await validationReachedProvider.promise;
+    await client.db.transaction(async (transaction) => {
+      await transaction
+        .update(stageInstances)
+        .set({ status: 'AWAITING_APPROVAL' })
+        .where(eq(stageInstances.id, seeded.stageInstanceId));
+      await transaction.insert(approvals).values({
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId,
+        renderedPreview:
+          'Hi Alex, invoice INV-5000 is overdue. https://in.xero.test/INV-5000',
+        sourceVersion: 3,
+        status: 'PENDING',
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
+        createdAt: new Date(Date.now() + 1_000)
+      });
+    });
+    releaseValidation.resolve();
+
+    await expect(execution).resolves.toEqual({
+      kind: 'cancelled',
+      reason: 'UNSUPPORTED_SENDING_STATE'
+    });
+    expect(sinch.sendCalls).toHaveLength(0);
+    expect(
+      await client.db
+        .select()
+        .from(outboundMessages)
+        .where(eq(outboundMessages.stageInstanceId, seeded.stageInstanceId))
+    ).toHaveLength(0);
+  });
+
+  it('does not cancel a fresh approval when reset happens before approval validation', async () => {
+    const seeded = await seedApprovedReminder({
+      rolloutScope: 'CUSTOMER',
+      allowlisted: false,
+      invoiceUpdatedAt: new Date(now.getTime() - 6 * 60 * 1000)
+    });
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    const validationReachedXero = deferred();
+    const releaseValidation = deferred();
+    xero.getInvoice = async () => {
+      xero.getInvoiceCalls += 1;
+      validationReachedXero.resolve();
+      await releaseValidation.promise;
+      return result(xero.invoice);
+    };
+    const sinch = new FakeSinch();
+    const execution = executeReminder(dependencies(xero, sinch), {
+      organisationId: seeded.organisationId,
+      stageInstanceId: seeded.stageInstanceId
+    });
+    await validationReachedXero.promise;
+    await client.db.transaction(async (transaction) => {
+      await transaction
+        .update(stageInstances)
+        .set({ status: 'AWAITING_APPROVAL' })
+        .where(eq(stageInstances.id, seeded.stageInstanceId));
+      await transaction.insert(approvals).values({
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId,
+        renderedPreview:
+          'Hi Alex, invoice INV-5000 is overdue. https://in.xero.test/INV-5000',
+        sourceVersion: 3,
+        status: 'PENDING',
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
+        createdAt: new Date(Date.now() + 1_000)
+      });
+    });
+    releaseValidation.resolve();
+
+    await expect(execution).resolves.toEqual({
+      kind: 'cancelled',
+      reason: 'APPROVAL_REQUIRED'
+    });
+    const [stage] = await client.db
+      .select({ status: stageInstances.status })
+      .from(stageInstances)
+      .where(eq(stageInstances.id, seeded.stageInstanceId));
+    expect(stage?.status).toBe('AWAITING_APPROVAL');
+    const pending = await client.db
+      .select()
+      .from(approvals)
+      .where(eq(approvals.stageInstanceId, seeded.stageInstanceId));
+    expect(pending.filter((approval) => approval.status === 'PENDING')).toHaveLength(
+      1
+    );
+    expect(sinch.sendCalls).toHaveLength(0);
+  });
+
+  it('does not cancel a replacement approval being approved concurrently', async () => {
+    const seeded = await seedApprovedReminder({
+      rolloutScope: 'CUSTOMER',
+      allowlisted: false,
+      approvalStatus: 'PENDING'
+    });
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    const sinch = new FakeSinch();
+    const decisionLocked = deferred();
+    const releaseDecision = deferred();
+    const approvalDecision = client.db.transaction(async (transaction) => {
+      await transaction
+        .select({ id: stageInstances.id })
+        .from(stageInstances)
+        .where(eq(stageInstances.id, seeded.stageInstanceId))
+        .for('update');
+      await transaction
+        .update(approvals)
+        .set({ status: 'APPROVED', decidedAt: now })
+        .where(eq(approvals.stageInstanceId, seeded.stageInstanceId));
+      await transaction
+        .update(stageInstances)
+        .set({ status: 'QUEUED' })
+        .where(eq(stageInstances.id, seeded.stageInstanceId));
+      decisionLocked.resolve();
+      await releaseDecision.promise;
+    });
+    await decisionLocked.promise;
+
+    await expect(
+      executeReminder(dependencies(xero, sinch), {
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId
+      })
+    ).resolves.toEqual({
+      kind: 'cancelled',
+      reason: 'APPROVAL_REQUIRED'
+    });
+    releaseDecision.resolve();
+    await approvalDecision;
+
+    const [stage] = await client.db
+      .select({ status: stageInstances.status })
+      .from(stageInstances)
+      .where(eq(stageInstances.id, seeded.stageInstanceId));
+    const [approval] = await client.db
+      .select({ status: approvals.status })
+      .from(approvals)
+      .where(eq(approvals.stageInstanceId, seeded.stageInstanceId));
+    expect(stage?.status).toBe('QUEUED');
+    expect(approval?.status).toBe('APPROVED');
+    expect(sinch.sendCalls).toHaveLength(0);
+  });
+
   it.each(['CLIENT', 'INVOICE'] as const)(
     'cancels before sending when the %s target is whitelisted',
     async (scope) => {

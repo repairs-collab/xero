@@ -40,10 +40,13 @@ interface RecoveryCandidate {
   approvalId: string;
   currentSourceVersion: number;
   decidedByUserId: string;
+  recoveryKind: 'initial' | 'retry';
   renderedPreview: string;
   stageInstanceId: string;
   stageSourceVersion: number;
 }
+
+const recoveryPublishSpacingMs = 2_000;
 
 export interface ApprovedSmsRecoveryPreview {
   localDate: string;
@@ -85,6 +88,7 @@ const digestCandidates = (candidates: RecoveryCandidate[]): string =>
           previewDigest: createHash('sha256')
             .update(candidate.renderedPreview)
             .digest('hex'),
+          recoveryKind: candidate.recoveryKind,
           stageInstanceId: candidate.stageInstanceId,
           stageSourceVersion: candidate.stageSourceVersion
         }))
@@ -96,6 +100,7 @@ const findCandidates = async (
   executor: RecoveryQueryExecutor,
   input: { organisationId: string; localDate: string },
   lockRows: boolean,
+  asOf: Date,
   stageInstanceId?: string
 ): Promise<RecoveryCandidate[]> => {
   const organisation = await requireCustomerLive(
@@ -108,6 +113,7 @@ const findCandidates = async (
       approvalId: approvals.id,
       approvalCreatedAt: approvals.createdAt,
       approvalRenderedPreview: approvals.renderedPreview,
+      approvalSourceVersion: approvals.sourceVersion,
       approvalStatus: approvals.status,
       amountDue: invoices.amountDue,
       currency: invoices.currency,
@@ -124,6 +130,7 @@ const findCandidates = async (
       sequenceVersionId: stageInstances.sequenceVersionId,
       stageInstanceId: stageInstances.id,
       stageKey: stageInstances.stageKey,
+      stageStatus: stageInstances.status,
       stageSourceVersion: stageInstances.sourceVersion
     })
     .from(stageInstances)
@@ -165,7 +172,7 @@ const findCandidates = async (
     .where(
       and(
         eq(stageInstances.organisationId, input.organisationId),
-        eq(stageInstances.status, 'CANCELLED'),
+        inArray(stageInstances.status, ['CANCELLED', 'QUEUED']),
         eq(stageInstances.channel, 'SMS'),
         eq(stageInstances.origin, 'AUTOMATION'),
         stageInstanceId === undefined
@@ -197,24 +204,84 @@ const findCandidates = async (
     )
   );
 
-  const latestDecidedByStage = new Map<string, (typeof rows)[number]>();
+  const recoveryEvents = await executor
+    .select({
+      afterValue: auditEvents.afterValue,
+      entityId: auditEvents.entityId,
+      occurredAt: auditEvents.occurredAt
+    })
+    .from(auditEvents)
+    .where(
+      and(
+        eq(auditEvents.organisationId, input.organisationId),
+        eq(auditEvents.entityType, 'STAGE_INSTANCE'),
+        eq(
+          auditEvents.correlationId,
+          `approved-sms-recovery:${input.localDate}`
+        ),
+        eq(auditEvents.eventType, 'APPROVED_SMS_RECOVERY_QUEUED'),
+        inArray(
+          auditEvents.entityId,
+          rows.map((row) => row.stageInstanceId)
+        )
+      )
+    );
+  const recoveryApprovalIds = new Map<string, Set<string>>();
+  for (const event of recoveryEvents) {
+    if (event.entityId === null || event.occurredAt > asOf) continue;
+    const approvalId = event.afterValue?.approvalId;
+    if (typeof approvalId !== 'string') continue;
+    const approvalIds = recoveryApprovalIds.get(event.entityId) ?? new Set();
+    approvalIds.add(approvalId);
+    recoveryApprovalIds.set(event.entityId, approvalIds);
+  }
+
+  const latestDecidedByStage = new Map<
+    string,
+    (typeof rows)[number] & {
+      recoveryKind: 'initial' | 'retry';
+    }
+  >();
   for (const row of rows) {
+    if (latestDecidedByStage.has(row.stageInstanceId)) continue;
     if (
-      !latestDecidedByStage.has(row.stageInstanceId) &&
-      provenApproved.has(row.approvalId) &&
       row.approvalStatus === 'EXPIRED' &&
+      row.stageStatus === 'CANCELLED' &&
       row.decidedAt !== null &&
       row.decidedByUserId !== null &&
+      provenApproved.has(row.approvalId) &&
       row.decidedAt >= interval.from &&
       row.decidedAt < interval.before
     ) {
-      latestDecidedByStage.set(row.stageInstanceId, row);
+      latestDecidedByStage.set(row.stageInstanceId, {
+        ...row,
+        recoveryKind: 'initial'
+      });
+      continue;
+    }
+    const isProvenRecoveryApproval =
+      recoveryApprovalIds.get(row.stageInstanceId)?.has(row.approvalId) ===
+      true;
+    if (
+      row.approvalStatus === 'APPROVED' &&
+      row.stageStatus === 'QUEUED' &&
+      row.decidedAt !== null &&
+      row.decidedByUserId !== null &&
+      isProvenRecoveryApproval &&
+      row.approvalSourceVersion === row.currentSourceVersion &&
+      row.stageSourceVersion === row.currentSourceVersion
+    ) {
+      latestDecidedByStage.set(row.stageInstanceId, {
+        ...row,
+        recoveryKind: 'retry'
+      });
     }
   }
   const possible = [...latestDecidedByStage.values()] as Array<
     (typeof rows)[number] & {
       decidedAt: Date;
       decidedByUserId: string;
+      recoveryKind: 'initial' | 'retry';
     }
   >;
   if (possible.length === 0) return [];
@@ -323,6 +390,7 @@ const findCandidates = async (
         approvalId: row.approvalId,
         currentSourceVersion: row.currentSourceVersion,
         decidedByUserId: row.decidedByUserId,
+        recoveryKind: row.recoveryKind,
         renderedPreview,
         stageInstanceId: row.stageInstanceId,
         stageSourceVersion: row.stageSourceVersion
@@ -346,7 +414,8 @@ export function createApprovedSmsRecoveryService(
     const candidates = await findCandidates(
       dependencies.database,
       input,
-      false
+      false,
+      dependencies.clock.now()
     );
     return {
       localDate: input.localDate,
@@ -365,6 +434,7 @@ export function createApprovedSmsRecoveryService(
   }): Promise<{
     candidateCount: number;
     publishedCount: number;
+    resetForApprovalCount: number;
     failedCount: number;
     uncertainCount: number;
   }> => {
@@ -398,10 +468,12 @@ export function createApprovedSmsRecoveryService(
           throw new Error('CUSTOMER_LIVE_REQUIRED');
         }
 
+        const reviewedAt = dependencies.clock.now();
         const reviewedCandidates = await findCandidates(
           transaction,
           input,
-          true
+          true,
+          reviewedAt
         );
         if (reviewedCandidates.length !== input.expectedCount) {
           throw new Error(
@@ -416,12 +488,15 @@ export function createApprovedSmsRecoveryService(
     );
 
     let publishedCount = 0;
+    let resetForApprovalCount = 0;
     let failedCount = 0;
     let uncertainCount = 0;
-    for (const candidate of candidates) {
-      let queuedApprovalId: string;
+    const publishBase = dependencies.clock.now();
+    for (const [candidateIndex, candidate] of candidates.entries()) {
+      let queuedApprovalId = candidate.approvalId;
+      let shouldPublish = true;
       try {
-        queuedApprovalId = await dependencies.database.transaction(
+        const prepared = await dependencies.database.transaction(
           async (transaction) => {
             const organisation =
               await new PostgresOrganisationSafetyRepository(
@@ -442,6 +517,7 @@ export function createApprovedSmsRecoveryService(
               transaction,
               input,
               true,
+              dependencies.clock.now(),
               candidate.stageInstanceId
             );
             const currentCandidate = currentCandidates[0];
@@ -456,6 +532,68 @@ export function createApprovedSmsRecoveryService(
             }
 
             const now = dependencies.clock.now();
+            if (candidate.recoveryKind === 'retry') {
+              const updatedStages = await transaction
+                .update(stageInstances)
+                .set({
+                  status: 'AWAITING_APPROVAL',
+                  completedAt: null,
+                  updatedAt: now
+                })
+                .where(
+                  and(
+                    eq(stageInstances.organisationId, input.organisationId),
+                    eq(stageInstances.id, candidate.stageInstanceId),
+                    eq(stageInstances.status, 'QUEUED'),
+                    eq(
+                      stageInstances.sourceVersion,
+                      candidate.stageSourceVersion
+                    )
+                  )
+                )
+                .returning({ id: stageInstances.id });
+              if (updatedStages.length !== 1) {
+                throw new Error('RECOVERY_CANDIDATE_CHANGED');
+              }
+              const [pendingApproval] = await transaction
+                .insert(approvals)
+                .values({
+                  organisationId: input.organisationId,
+                  stageInstanceId: candidate.stageInstanceId,
+                  renderedPreview: candidate.renderedPreview,
+                  sourceVersion: candidate.currentSourceVersion,
+                  status: 'PENDING',
+                  expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000)
+                })
+                .returning({ id: approvals.id });
+              if (pendingApproval === undefined) {
+                throw new Error('RECOVERY_APPROVAL_NOT_CREATED');
+              }
+              await transaction.insert(auditEvents).values({
+                organisationId: input.organisationId,
+                actorUserId: candidate.decidedByUserId,
+                eventType: 'APPROVED_SMS_RECOVERY_RESET_FOR_REAPPROVAL',
+                entityType: 'STAGE_INSTANCE',
+                entityId: candidate.stageInstanceId,
+                correlationId: `approved-sms-recovery:${input.localDate}`,
+                beforeValue: {
+                  status: 'QUEUED',
+                  approvalStatus: 'APPROVED',
+                  approvalId: candidate.approvalId
+                },
+                afterValue: {
+                  status: 'AWAITING_APPROVAL',
+                  approvalStatus: 'PENDING',
+                  approvalId: pendingApproval.id,
+                  sourceVersion: candidate.currentSourceVersion
+                },
+                occurredAt: now
+              });
+              return {
+                approvalId: pendingApproval.id,
+                shouldPublish: false
+              };
+            }
             const updatedStages = await transaction
               .update(stageInstances)
               .set({
@@ -516,11 +654,18 @@ export function createApprovedSmsRecoveryService(
               },
               occurredAt: now
             });
-            return queuedApproval.id;
+            return { approvalId: queuedApproval.id, shouldPublish: true };
           }
         );
+        queuedApprovalId = prepared.approvalId;
+        shouldPublish = prepared.shouldPublish;
       } catch {
         failedCount += 1;
+        continue;
+      }
+
+      if (!shouldPublish) {
+        resetForApprovalCount += 1;
         continue;
       }
 
@@ -532,7 +677,11 @@ export function createApprovedSmsRecoveryService(
             stageInstanceId: candidate.stageInstanceId
           },
           {
-            singletonKey: `approved-sms-recovery:${input.localDate}:${candidate.stageInstanceId}:${candidate.currentSourceVersion.toString()}`
+            singletonKey: `approved-sms-recovery:${input.localDate}:initial:${candidate.stageInstanceId}:${candidate.currentSourceVersion.toString()}:attempt-1`,
+            startAfter: new Date(
+              publishBase.getTime() +
+                candidateIndex * recoveryPublishSpacingMs
+            )
           }
         );
         publishedCount += 1;
@@ -567,6 +716,7 @@ export function createApprovedSmsRecoveryService(
     return {
       candidateCount: candidates.length,
       publishedCount,
+      resetForApprovalCount,
       failedCount,
       uncertainCount
     };
