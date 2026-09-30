@@ -21,7 +21,12 @@ import {
   suppressions,
   tasks
 } from '@bc5000/db';
+import { jobNames, type JobPublisher } from '@bc5000/jobs';
 
+import {
+  dispatchAutomaticReminderWork,
+  runReminderCycle
+} from '../src/handlers/automatic-reminder-dispatch.js';
 import { calculateReminderWork } from '../src/handlers/reminders-calculate.js';
 
 const databaseUrl =
@@ -49,6 +54,9 @@ const seedInvoiceAndSequence = async (options: {
   channel: 'SMS' | 'XERO_EMAIL' | 'TASK' | 'SMS_DAILY';
   onlineInvoiceUrl?: string | null;
   template?: string;
+  sendTime?: string;
+  socialWindowStart?: string;
+  socialWindowEnd?: string;
 }) => {
   const organisationId = randomUUID();
   const contactId = randomUUID();
@@ -110,6 +118,9 @@ const seedInvoiceAndSequence = async (options: {
     sequenceId,
     versionNumber: 1,
     status: 'ACTIVE',
+    sendTime: options.sendTime ?? '09:00:00',
+    socialWindowStart: options.socialWindowStart ?? '08:00:00',
+    socialWindowEnd: options.socialWindowEnd ?? '18:00:00',
     configuration: {}
   });
   await client.db.insert(sequenceStages).values({
@@ -422,20 +433,34 @@ describe('calculateReminderWork', () => {
     });
   });
 
-  it('creates one automatic daily SMS occurrence and one escalation task at day 30', async () => {
+  it('queues and publishes one automatic daily SMS occurrence at its configured send time', async () => {
     const seeded = await seedInvoiceAndSequence({
       mode: 'AUTOMATIC',
       dueDate: '2026-08-19',
       offsetDays: 30,
-      channel: 'SMS_DAILY'
+      channel: 'SMS_DAILY',
+      sendTime: '11:00:00'
     });
+    const publish = vi.fn<JobPublisher['publish']>(() =>
+      Promise.resolve('automatic-reminder-job')
+    );
 
-    await calculateReminderWork(
-      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+    await runReminderCycle(
+      {
+        database: client.db,
+        clock: { now: () => now },
+        xero: unusedXero,
+        publisher: { publish }
+      },
       seeded.organisationId
     );
-    const second = await calculateReminderWork(
-      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+    const second = await runReminderCycle(
+      {
+        database: client.db,
+        clock: { now: () => now },
+        xero: unusedXero,
+        publisher: { publish }
+      },
       seeded.organisationId
     );
 
@@ -444,7 +469,21 @@ describe('calculateReminderWork', () => {
       .from(stageInstances)
       .where(eq(stageInstances.organisationId, seeded.organisationId));
     expect(stages).toHaveLength(1);
-    expect(stages[0]?.status).toBe('SCHEDULED');
+    expect(stages[0]?.status).toBe('QUEUED');
+    expect(publish).toHaveBeenCalledOnce();
+    expect(publish).toHaveBeenNthCalledWith(
+      1,
+      jobNames.reminderExecute,
+      {
+        organisationId: seeded.organisationId,
+        stageInstanceId: stages[0]?.id
+      },
+      {
+        deduplicateWhileActive: true,
+        singletonKey: `automatic-reminder:${stages[0]?.id}:3`,
+        startAfter: new Date('2026-09-18T01:00:00.000Z')
+      }
+    );
     const escalationTasks = await client.db
       .select()
       .from(tasks)
@@ -456,15 +495,199 @@ describe('calculateReminderWork', () => {
       );
     expect(escalationTasks).toHaveLength(1);
     expect(second).toMatchObject({
-      createdStages: 0,
-      createdApprovals: 0,
-      createdTasks: 0
+      calculation: {
+        createdStages: 0,
+        createdApprovals: 0,
+        createdTasks: 0
+      },
+      dispatch: {
+        candidateCount: 0,
+        queuedCount: 0,
+        publishedCount: 0
+      }
     });
     const [chase] = await client.db
       .select()
       .from(invoiceChases)
       .where(eq(invoiceChases.invoiceId, seeded.invoiceId));
     expect(chase?.sequenceId).toBe(seeded.sequenceId);
+  });
+
+  it('retries a current automatic reminder after an uncertain queue result', async () => {
+    const seeded = await seedInvoiceAndSequence({
+      mode: 'AUTOMATIC',
+      dueDate: '2026-09-18',
+      offsetDays: 0,
+      channel: 'SMS'
+    });
+    await calculateReminderWork(
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+      seeded.organisationId
+    );
+    const failedPublish = vi.fn<JobPublisher['publish']>(() =>
+      Promise.reject(new Error('queue response lost'))
+    );
+
+    await expect(
+      dispatchAutomaticReminderWork(
+        {
+          database: client.db,
+          clock: { now: () => now },
+          publisher: { publish: failedPublish }
+        },
+        seeded.organisationId
+      )
+    ).rejects.toThrow('queue response lost');
+    const [queuedStage] = await client.db
+      .select()
+      .from(stageInstances)
+      .where(eq(stageInstances.organisationId, seeded.organisationId));
+    const successfulPublish = vi.fn<JobPublisher['publish']>(() =>
+      Promise.resolve('retry-job')
+    );
+    const retry = await dispatchAutomaticReminderWork(
+      {
+        database: client.db,
+        clock: { now: () => now },
+        publisher: { publish: successfulPublish }
+      },
+      seeded.organisationId
+    );
+
+    expect(queuedStage?.status).toBe('QUEUED');
+    expect(retry).toMatchObject({
+      candidateCount: 1,
+      queuedCount: 0,
+      publishedCount: 1
+    });
+    expect(successfulPublish).toHaveBeenCalledWith(
+      jobNames.reminderExecute,
+      {
+        organisationId: seeded.organisationId,
+        stageInstanceId: queuedStage?.id
+      },
+      expect.objectContaining({
+        deduplicateWhileActive: true,
+        singletonKey: `automatic-reminder:${queuedStage?.id}:3`
+      })
+    );
+  });
+
+  it('does not release an automatic reminder scheduled on a previous local day', async () => {
+    const seeded = await seedInvoiceAndSequence({
+      mode: 'AUTOMATIC',
+      dueDate: '2026-09-18',
+      offsetDays: 0,
+      channel: 'SMS'
+    });
+    const [chase] = await client.db
+      .insert(invoiceChases)
+      .values({
+        organisationId: seeded.organisationId,
+        invoiceId: seeded.invoiceId,
+        sequenceId: seeded.sequenceId,
+        customerId: seeded.contactId,
+        status: 'ACTIVE',
+        updatedAt: now
+      })
+      .returning({ id: invoiceChases.id });
+    if (chase === undefined) throw new Error('Expected an invoice chase');
+    const [historicalStage] = await client.db
+      .insert(stageInstances)
+      .values({
+        organisationId: seeded.organisationId,
+        invoiceChaseId: chase.id,
+        sequenceVersionId: seeded.sequenceVersionId,
+        stageKey: 'historical-due-date',
+        channel: 'SMS',
+        status: 'SCHEDULED',
+        scheduledAt: new Date('2026-09-16T23:00:00.000Z'),
+        sourceVersion: 3
+      })
+      .returning({ id: stageInstances.id });
+    const publish = vi.fn<JobPublisher['publish']>(() =>
+      Promise.resolve('unexpected-job')
+    );
+
+    const result = await dispatchAutomaticReminderWork(
+      {
+        database: client.db,
+        clock: { now: () => now },
+        publisher: { publish }
+      },
+      seeded.organisationId
+    );
+
+    expect(result).toMatchObject({ candidateCount: 0, publishedCount: 0 });
+    expect(publish).not.toHaveBeenCalled();
+    const [stored] = await client.db
+      .select({ status: stageInstances.status })
+      .from(stageInstances)
+      .where(eq(stageInstances.id, historicalStage?.id ?? randomUUID()));
+    expect(stored?.status).toBe('SCHEDULED');
+  });
+
+  it('leaves a missed same-day reminder scheduled after its social window closes', async () => {
+    const seeded = await seedInvoiceAndSequence({
+      mode: 'AUTOMATIC',
+      dueDate: '2026-09-18',
+      offsetDays: 0,
+      channel: 'SMS'
+    });
+    await calculateReminderWork(
+      { database: client.db, clock: { now: () => now }, xero: unusedXero },
+      seeded.organisationId
+    );
+    const afterWindow = new Date('2026-09-18T10:00:00.000Z');
+    const publish = vi.fn<JobPublisher['publish']>(() =>
+      Promise.resolve('unexpected-job')
+    );
+
+    const result = await dispatchAutomaticReminderWork(
+      {
+        database: client.db,
+        clock: { now: () => afterWindow },
+        publisher: { publish }
+      },
+      seeded.organisationId
+    );
+
+    expect(result).toMatchObject({ candidateCount: 0, publishedCount: 0 });
+    expect(publish).not.toHaveBeenCalled();
+    const [stage] = await client.db
+      .select({ status: stageInstances.status })
+      .from(stageInstances)
+      .where(eq(stageInstances.organisationId, seeded.organisationId));
+    expect(stage?.status).toBe('SCHEDULED');
+  });
+
+  it('keeps review-mode reminders awaiting approval and out of the automatic queue', async () => {
+    const seeded = await seedInvoiceAndSequence({
+      mode: 'REVIEW',
+      dueDate: '2026-09-18',
+      offsetDays: 0,
+      channel: 'SMS'
+    });
+    const publish = vi.fn<JobPublisher['publish']>(() =>
+      Promise.resolve('unexpected-job')
+    );
+
+    await runReminderCycle(
+      {
+        database: client.db,
+        clock: { now: () => now },
+        xero: unusedXero,
+        publisher: { publish }
+      },
+      seeded.organisationId
+    );
+
+    expect(publish).not.toHaveBeenCalled();
+    const [stage] = await client.db
+      .select({ status: stageInstances.status })
+      .from(stageInstances)
+      .where(eq(stageInstances.organisationId, seeded.organisationId));
+    expect(stage?.status).toBe('AWAITING_APPROVAL');
   });
 
   it('expires historical pending daily reminders while preserving the current review item', async () => {

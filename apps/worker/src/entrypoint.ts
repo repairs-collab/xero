@@ -22,7 +22,7 @@ import { executeOperatorReply } from './handlers/operator-reply-execute.js';
 import { testProviderConnection } from './handlers/provider-connection-test.js';
 import { reconcileNightly } from './handlers/reconcile-nightly.js';
 import { executeReminder } from './handlers/reminder-execute.js';
-import { calculateReminderWork } from './handlers/reminders-calculate.js';
+import { runReminderCycle } from './handlers/automatic-reminder-dispatch.js';
 import { applyRetention } from './handlers/retention-apply.js';
 import { executeTestSms } from './handlers/test-sms-execute.js';
 import { processWebhookEvent } from './handlers/webhook-process.js';
@@ -171,8 +171,8 @@ async function main() {
       [jobNames.xeroNightlyReconcile]: (payload) =>
         reconcileNightly(syncDependencies, payload).then(() => undefined),
       [jobNames.remindersCalculate]: (payload) =>
-        calculateReminderWork(
-          { database: databaseClient.db, clock, xero },
+        runReminderCycle(
+          { database: databaseClient.db, clock, xero, publisher: queue },
           payload.organisationId
         ).then(() => undefined),
       [jobNames.reminderExecute]: (payload) =>

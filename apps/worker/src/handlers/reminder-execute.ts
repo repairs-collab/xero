@@ -28,6 +28,7 @@ import {
 import type { JobPayloads } from '@bc5000/jobs';
 
 import {
+  revalidateAutomaticReminderSchedule,
   revalidateReminder,
   type RevalidationXeroClient,
   type StopReason
@@ -343,7 +344,26 @@ export async function executeReminder(
         channel: reminder.channel,
         destination: reminder.destination
       },
-      async () => {
+      async (transaction) => {
+        const scheduleValidation = await revalidateAutomaticReminderSchedule(
+          {
+            transaction,
+            clock: dependencies.clock
+          },
+          {
+            ...payload,
+            expectedAutomatic:
+              reminder.sequenceMode === 'AUTOMATIC' &&
+              reminder.stageOrigin === 'AUTOMATION'
+          }
+        );
+        if (scheduleValidation.kind === 'blocked') {
+          return {
+            kind: 'schedule-blocked' as const,
+            reason: scheduleValidation.reason,
+            blockedAt: dependencies.clock.now()
+          };
+        }
         if (reminder.channel === 'SMS') {
           const accepted = await dependencies.sinch.sendSms({
             destinationNumber: reminder.destination,
@@ -355,6 +375,7 @@ export async function executeReminder(
             }
           });
           return {
+            kind: 'accepted' as const,
             provider: 'SINCH' as const,
             providerMessageId: accepted.messageId,
             providerPayload: { status: accepted.status }
@@ -363,6 +384,7 @@ export async function executeReminder(
 
         await dependencies.xero.emailInvoice(reminder.xeroInvoiceId);
         return {
+          kind: 'accepted' as const,
           provider: 'XERO' as const,
           providerMessageId: null,
           providerPayload: { status: 'ACCEPTED' }
@@ -399,6 +421,18 @@ export async function executeReminder(
         now
       });
       return { kind: 'cancelled', reason: 'CHANNEL_SUPPRESSED' };
+    }
+
+    if (sendResult.value.kind === 'schedule-blocked') {
+      await markProviderSendBlocked(dependencies.database, {
+        organisationId: payload.organisationId,
+        outboundId: claim.outboundId,
+        attemptId: claim.attemptId,
+        stageInstanceId: payload.stageInstanceId,
+        reason: sendResult.value.reason,
+        now: sendResult.value.blockedAt
+      });
+      return { kind: 'cancelled', reason: sendResult.value.reason };
     }
 
     const accepted = sendResult.value;

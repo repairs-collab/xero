@@ -14,6 +14,7 @@ import {
   contacts,
   disputes,
   type Database,
+  type DbTransaction,
   invoiceChases,
   invoices,
   organisations,
@@ -56,7 +57,8 @@ export type StopReason =
   | 'PROMISE_TO_PAY'
   | 'REMINDER_WHITELISTED'
   | 'SOURCE_CHANGED'
-  | 'APPROVAL_REQUIRED';
+  | 'APPROVAL_REQUIRED'
+  | 'OUTSIDE_SCHEDULE_WINDOW';
 
 export interface RevalidatedReminder {
   organisationId: string;
@@ -118,6 +120,159 @@ const promiseStillActive = (
   return end.getTime() >= now.getTime();
 };
 
+const localDate = (instant: Date, timeZone: string): string => {
+  const parts = new Intl.DateTimeFormat('en-AU', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(instant);
+  const part = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((value) => value.type === type)?.value ?? '';
+  return `${part('year')}-${part('month')}-${part('day')}`;
+};
+
+const localTime = (instant: Date, timeZone: string): string => {
+  const parts = new Intl.DateTimeFormat('en-AU', {
+    timeZone,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(instant);
+  const part = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((value) => value.type === type)?.value ?? '';
+  return `${part('hour')}:${part('minute')}:${part('second')}`;
+};
+
+type AutomaticScheduleState = {
+  organisation: Pick<typeof organisations.$inferSelect, 'timeZone'>;
+  stage: Pick<
+    typeof stageInstances.$inferSelect,
+    'origin' | 'scheduledAt'
+  >;
+  sequence: Pick<
+    typeof reminderSequences.$inferSelect,
+    'enabled' | 'mode'
+  >;
+  sequenceVersion: Pick<
+    typeof reminderSequenceVersions.$inferSelect,
+    'socialWindowEnd' | 'socialWindowStart' | 'status'
+  >;
+};
+
+type AutomaticScheduleStopReason =
+  | 'OUTSIDE_SCHEDULE_WINDOW'
+  | 'SOURCE_CHANGED';
+
+const automaticScheduleStopReason = (
+  row: AutomaticScheduleState,
+  now: Date,
+  expectedAutomatic =
+    row.sequence.mode === 'AUTOMATIC' && row.stage.origin === 'AUTOMATION'
+): AutomaticScheduleStopReason | null => {
+  if (!expectedAutomatic) {
+    return null;
+  }
+  if (
+    row.sequence.mode !== 'AUTOMATIC' ||
+    row.stage.origin !== 'AUTOMATION' ||
+    !row.sequence.enabled ||
+    row.sequenceVersion.status !== 'ACTIVE'
+  ) {
+    return 'SOURCE_CHANGED';
+  }
+  const currentLocalDate = localDate(now, row.organisation.timeZone);
+  const scheduledLocalDate = localDate(
+    row.stage.scheduledAt,
+    row.organisation.timeZone
+  );
+  const currentLocalTime = localTime(now, row.organisation.timeZone);
+  if (
+    now < row.stage.scheduledAt ||
+    currentLocalDate !== scheduledLocalDate ||
+    currentLocalTime < row.sequenceVersion.socialWindowStart ||
+    currentLocalTime >= row.sequenceVersion.socialWindowEnd
+  ) {
+    return 'OUTSIDE_SCHEDULE_WINDOW';
+  }
+  return null;
+};
+
+export async function revalidateAutomaticReminderSchedule(
+  dependencies: { transaction: DbTransaction; clock: { now(): Date } },
+  input: {
+    organisationId: string;
+    stageInstanceId: string;
+    expectedAutomatic: boolean;
+  }
+): Promise<
+  | { kind: 'eligible' }
+  | { kind: 'blocked'; reason: AutomaticScheduleStopReason }
+> {
+  if (!input.expectedAutomatic) return { kind: 'eligible' };
+  const [row] = await dependencies.transaction
+    .select({
+      organisation: { timeZone: organisations.timeZone },
+      stage: {
+        origin: stageInstances.origin,
+        scheduledAt: stageInstances.scheduledAt
+      },
+      sequence: {
+        enabled: reminderSequences.enabled,
+        mode: reminderSequences.mode
+      },
+      sequenceVersion: {
+        socialWindowEnd: reminderSequenceVersions.socialWindowEnd,
+        socialWindowStart: reminderSequenceVersions.socialWindowStart,
+        status: reminderSequenceVersions.status
+      }
+    })
+    .from(stageInstances)
+    .innerJoin(
+      invoiceChases,
+      and(
+        eq(invoiceChases.id, stageInstances.invoiceChaseId),
+        eq(invoiceChases.organisationId, input.organisationId)
+      )
+    )
+    .innerJoin(
+      reminderSequences,
+      and(
+        eq(reminderSequences.id, invoiceChases.sequenceId),
+        eq(reminderSequences.organisationId, input.organisationId)
+      )
+    )
+    .innerJoin(
+      reminderSequenceVersions,
+      and(
+        eq(reminderSequenceVersions.id, stageInstances.sequenceVersionId),
+        eq(reminderSequenceVersions.sequenceId, reminderSequences.id),
+        eq(reminderSequenceVersions.organisationId, input.organisationId)
+      )
+    )
+    .innerJoin(organisations, eq(organisations.id, input.organisationId))
+    .where(
+      and(
+        eq(stageInstances.organisationId, input.organisationId),
+        eq(stageInstances.id, input.stageInstanceId)
+      )
+    )
+    .for('update')
+    .limit(1);
+  if (row === undefined) {
+    return { kind: 'blocked', reason: 'SOURCE_CHANGED' };
+  }
+  const reason = automaticScheduleStopReason(
+    row,
+    dependencies.clock.now(),
+    input.expectedAutomatic
+  );
+  return reason === null
+    ? { kind: 'eligible' }
+    : { kind: 'blocked', reason };
+}
+
 export async function revalidateReminder(
   dependencies: RevalidationDependencies,
   input: { organisationId: string; stageInstanceId: string }
@@ -129,7 +284,8 @@ export async function revalidateReminder(
       chase: invoiceChases,
       invoice: invoices,
       contact: contacts,
-      sequence: reminderSequences
+      sequence: reminderSequences,
+      sequenceVersion: reminderSequenceVersions
     })
     .from(stageInstances)
     .innerJoin(
@@ -161,6 +317,14 @@ export async function revalidateReminder(
       )
     )
     .innerJoin(
+      reminderSequenceVersions,
+      and(
+        eq(reminderSequenceVersions.organisationId, input.organisationId),
+        eq(reminderSequenceVersions.id, stageInstances.sequenceVersionId),
+        eq(reminderSequenceVersions.sequenceId, reminderSequences.id)
+      )
+    )
+    .innerJoin(
       organisations,
       eq(organisations.id, input.organisationId)
     )
@@ -175,6 +339,13 @@ export async function revalidateReminder(
   if (row === undefined) throw new Error('Reminder stage was not found');
   if (row.stage.channel === 'TASK') {
     return { kind: 'blocked', reason: 'CHANNEL_UNUSABLE' };
+  }
+  const automaticScheduleReason = automaticScheduleStopReason(
+    row,
+    dependencies.now
+  );
+  if (automaticScheduleReason !== null) {
+    return { kind: 'blocked', reason: automaticScheduleReason };
   }
 
   const activeWhitelist = await new PostgresReminderWhitelistRepository(
