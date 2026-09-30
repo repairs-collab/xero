@@ -476,6 +476,33 @@ describe('executeReminder', () => {
     });
   });
 
+  it('sends when a refreshed Xero amount is numerically unchanged', async () => {
+    const seeded = await seedApprovedReminder({
+      amountDue: '125.5000',
+      invoiceUpdatedAt: new Date(now.getTime() - 6 * 60 * 1000),
+      rolloutScope: 'CUSTOMER',
+      allowlisted: false
+    });
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded, { amountDue: '125.5' });
+    const sinch = new FakeSinch();
+
+    await expect(
+      executeReminder(dependencies(xero, sinch), {
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId
+      })
+    ).resolves.toMatchObject({ kind: 'sent', provider: 'SINCH' });
+
+    expect(xero.getInvoiceCalls).toBe(1);
+    expect(sinch.sendCalls).toHaveLength(1);
+    const [invoice] = await client.db
+      .select()
+      .from(invoices)
+      .where(eq(invoices.id, seeded.invoiceId));
+    expect(invoice?.syncVersion).toBe(3);
+  });
+
   it.each([
     {
       label: 'manual customer SMS',

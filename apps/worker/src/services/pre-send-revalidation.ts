@@ -6,6 +6,7 @@ import {
   isNull,
   or
 } from 'drizzle-orm';
+import { Decimal } from 'decimal.js';
 
 import {
   approvals,
@@ -193,7 +194,7 @@ export async function revalidateReminder(
     );
     const changed =
       refreshed.data.status !== row.invoice.status ||
-      refreshed.data.amountDue !== row.invoice.amountDue ||
+      !new Decimal(refreshed.data.amountDue).eq(row.invoice.amountDue) ||
       refreshed.data.dueDate !== row.invoice.dueDate;
     currentStatus = refreshed.data.status;
     currentAmountDue = refreshed.data.amountDue;
