@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -50,6 +50,7 @@ async function seedCancelledStage(options: {
   decidedAt?: Date | null;
   origin?: 'AUTOMATION' | 'MANUAL_REMINDER' | 'ESCALATION_SMS';
   previewMatches?: boolean;
+  recoveredQueued?: boolean;
   withApprovalAudit?: boolean;
   withWhitelist?: boolean;
   withOutbound?: boolean;
@@ -161,10 +162,13 @@ async function seedCancelledStage(options: {
     stageKey: 'seven-days',
     origin: options.origin ?? 'AUTOMATION',
     channel: 'SMS',
-    status: 'CANCELLED',
+    status: options.recoveredQueued === true ? 'QUEUED' : 'CANCELLED',
     scheduledAt: new Date('2026-09-30T00:00:00.000Z'),
     sourceVersion: 4,
-    completedAt: new Date('2026-09-30T00:05:00.000Z')
+    completedAt:
+      options.recoveredQueued === true
+        ? null
+        : new Date('2026-09-30T00:05:00.000Z')
   });
   await database.db.insert(approvals).values({
     id: approvalId,
@@ -185,9 +189,14 @@ async function seedCancelledStage(options: {
     id: regeneratedApprovalId,
     organisationId,
     stageInstanceId,
-    renderedPreview: 'Regenerated approval retired by the scheduler',
+    renderedPreview:
+      options.recoveredQueued === true
+        ? approvedPreview
+        : 'Regenerated approval retired by the scheduler',
     sourceVersion: 4,
-    status: 'EXPIRED',
+    status: options.recoveredQueued === true ? 'APPROVED' : 'EXPIRED',
+    decidedByUserId: options.recoveredQueued === true ? adminId : null,
+    decidedAt: options.recoveredQueued === true ? now : null,
     expiresAt: new Date('2026-10-01T03:00:00.000Z'),
     createdAt: new Date('2026-09-30T03:00:00.000Z')
   });
@@ -201,6 +210,24 @@ async function seedCancelledStage(options: {
       beforeValue: { status: 'PENDING' },
       afterValue: { status: 'APPROVED' },
       occurredAt: decidedAt
+    });
+  }
+  if (options.recoveredQueued === true) {
+    await database.db.insert(auditEvents).values({
+      organisationId,
+      actorUserId: adminId,
+      eventType: 'APPROVED_SMS_RECOVERY_QUEUED',
+      entityType: 'STAGE_INSTANCE',
+      entityId: stageInstanceId,
+      correlationId: 'approved-sms-recovery:2026-09-30',
+      beforeValue: { status: 'CANCELLED' },
+      afterValue: {
+        status: 'QUEUED',
+        approvalStatus: 'APPROVED',
+        approvalId: regeneratedApprovalId,
+        sourceVersion: 4
+      },
+      occurredAt: now
     });
   }
   if (options.withWhitelist === true) {
@@ -312,6 +339,7 @@ describe('approved SMS recovery', () => {
     expect(result).toEqual({
       candidateCount: 1,
       publishedCount: 1,
+      resetForApprovalCount: 0,
       failedCount: 0,
       uncertainCount: 0
     });
@@ -322,7 +350,8 @@ describe('approved SMS recovery', () => {
         stageInstanceId: eligible.stageInstanceId
       },
       {
-        singletonKey: `approved-sms-recovery:2026-09-30:${eligible.stageInstanceId}:4`
+        singletonKey: `approved-sms-recovery:2026-09-30:initial:${eligible.stageInstanceId}:4:attempt-1`,
+        startAfter: now
       }
     );
 
@@ -451,6 +480,7 @@ describe('approved SMS recovery', () => {
     expect(result).toEqual({
       candidateCount: 2,
       publishedCount: 1,
+      resetForApprovalCount: 0,
       failedCount: 0,
       uncertainCount: 1
     });
@@ -483,5 +513,86 @@ describe('approved SMS recovery', () => {
       );
     expect(failureEvents).toHaveLength(1);
     expect(failureEvents[0]?.entityId).toBe(fails.stageInstanceId);
+  });
+
+  it('resets recovered stages without outbound for reapproval', async () => {
+    const first = await seedCancelledStage({ recoveredQueued: true });
+    const second = await seedCancelledStage({
+      organisationId: first.organisationId,
+      recoveredQueued: true
+    });
+    const publish: JobPublisher['publish'] = vi.fn(() =>
+      Promise.resolve(randomUUID())
+    );
+    const recovery = createApprovedSmsRecoveryService({
+      database: database.db,
+      clock: { now: () => now },
+      publisher: { publish }
+    });
+    const preview = await recovery.preview({
+      organisationId: first.organisationId,
+      localDate: '2026-09-30'
+    });
+
+    expect(preview.count).toBe(2);
+    const result = await recovery.execute({
+      organisationId: first.organisationId,
+      localDate: '2026-09-30',
+      expectedCount: preview.count,
+      expectedDigest: preview.digest,
+      acknowledgement: approvedSmsRecoveryAcknowledgement('2026-09-30')
+    });
+
+    expect(result).toEqual({
+      candidateCount: 2,
+      publishedCount: 0,
+      resetForApprovalCount: 2,
+      failedCount: 0,
+      uncertainCount: 0
+    });
+    expect(publish).not.toHaveBeenCalled();
+    const resetStages = await database.db
+      .select({ status: stageInstances.status })
+      .from(stageInstances)
+      .where(
+        inArray(stageInstances.id, [first.stageInstanceId, second.stageInstanceId])
+      );
+    expect(resetStages).toHaveLength(2);
+    expect(resetStages.every((stage) => stage.status === 'AWAITING_APPROVAL')).toBe(
+      true
+    );
+    const pendingApprovals = await database.db
+      .select({ id: approvals.id })
+      .from(approvals)
+      .where(
+        and(
+          eq(approvals.organisationId, first.organisationId),
+          eq(approvals.status, 'PENDING'),
+          inArray(approvals.stageInstanceId, [
+            first.stageInstanceId,
+            second.stageInstanceId
+          ])
+        )
+      );
+    expect(pendingApprovals).toHaveLength(2);
+    const events = await database.db
+      .select()
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.organisationId, first.organisationId),
+          eq(
+            auditEvents.eventType,
+            'APPROVED_SMS_RECOVERY_RESET_FOR_REAPPROVAL'
+          )
+        )
+      );
+    expect(events).toHaveLength(2);
+    expect(
+      await recovery.preview({
+        organisationId: first.organisationId,
+        localDate: '2026-09-30'
+      })
+    ).toMatchObject({ count: 0, stageInstanceIds: [] });
   });
 });
