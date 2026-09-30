@@ -8,6 +8,7 @@ import {
   CheckCircleIcon,
   ClockIcon,
   Cog6ToothIcon,
+  DevicePhoneMobileIcon,
   ExclamationTriangleIcon,
   HomeIcon,
   PaperAirplaneIcon,
@@ -23,6 +24,7 @@ const navigation = [
   ['Inbox', '/inbox', ChatBubbleLeftRightIcon],
   ['Outbox', '/outbox', PaperAirplaneIcon],
   ['Escalations', '/escalations', ExclamationTriangleIcon],
+  ['SMS Issues', '/sms-issues', DevicePhoneMobileIcon],
   ['Customers', '/customers', UserGroupIcon],
   ['Sequences', '/sequences', BoltIcon],
   ['Activity', '/activity', ClockIcon]

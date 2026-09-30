@@ -1,6 +1,10 @@
 import { NextRequest } from 'next/server';
 import { describe, expect, it, vi } from 'vitest';
 
+const acceptPendingInvitations = vi.hoisted(() =>
+  vi.fn(() => Promise.resolve())
+);
+
 vi.mock('@bc5000/auth', () => ({
   clearCognitoTransactionCookie: () =>
     'bc5000_login=; Path=/auth; Max-Age=0',
@@ -25,7 +29,12 @@ vi.mock('../../../server/runtime.js', () => ({
     authorizationEndpoint: 'https://auth.example.test/oauth2/authorize',
     tokenEndpoint: 'https://auth.example.test/oauth2/token'
   }),
+  getDatabaseClient: () => ({ db: { kind: 'test-database' } }),
   getSessionSecret: () => new Uint8Array(32).fill(1)
+}));
+
+vi.mock('../../(protected)/settings/users/user-administration.js', () => ({
+  acceptPendingInvitations
 }));
 
 import { GET } from './route.js';
@@ -41,6 +50,11 @@ describe('Cognito callback', () => {
     expect(response.status).toBe(303);
     expect(response.headers.get('location')).toBe(
       'https://billchaser.motts.com.au/approvals'
+    );
+    expect(acceptPendingInvitations).toHaveBeenCalledWith(
+      { kind: 'test-database' },
+      'cognito-subject-1',
+      expect.any(Date)
     );
   });
 });

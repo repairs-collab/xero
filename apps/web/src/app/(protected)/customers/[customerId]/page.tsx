@@ -46,11 +46,15 @@ const hidden = (organisationId: string, customerId: string) => (
 );
 
 export default async function CustomerPage({
-  params
+  params,
+  searchParams
 }: {
   params: Promise<{ customerId: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { customerId } = await params;
+  const phoneEditor = (await searchParams).editPhone;
+  const showPhoneEditor = (Array.isArray(phoneEditor) ? phoneEditor[0] : phoneEditor) === '1';
   const session = await requireWebSession(
     new Request('http://localhost/', { headers: await headers() })
   );
@@ -441,7 +445,7 @@ export default async function CustomerPage({
                 <button className="button button--primary">Record and pause</button>
               </form>
             </details>
-            <details>
+            <details id="sms-phone" open={showPhoneEditor}>
               <summary>SMS phone override</summary>
               <form action={setApprovedPhoneOverride}>
                 {hidden(organisationId, customerId)}

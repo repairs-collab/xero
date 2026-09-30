@@ -225,6 +225,23 @@ export async function synchroniseInvoiceSnapshot(
           updatedAt: now
         });
       }
+    } else {
+      await transaction
+        .update(tasks)
+        .set({
+          status: 'COMPLETED',
+          resolutionNote: 'Valid SMS phone available after Xero synchronisation',
+          completedAt: now,
+          updatedAt: now
+        })
+        .where(
+          and(
+            eq(tasks.organisationId, organisationId),
+            eq(tasks.contactId, contactId),
+            eq(tasks.kind, 'DATA_QUALITY_PHONE'),
+            eq(tasks.status, 'OPEN')
+          )
+        );
     }
 
     const existingInvoices = await transaction
