@@ -184,7 +184,8 @@ export async function executeReminder(
   const [stage] = await dependencies.database
     .select({
       channel: stageInstances.channel,
-      sourceVersion: stageInstances.sourceVersion
+      sourceVersion: stageInstances.sourceVersion,
+      status: stageInstances.status
     })
     .from(stageInstances)
     .where(
@@ -210,6 +211,9 @@ export async function executeReminder(
       providerMessageId: existing.providerMessageId,
       channel: stage.channel
     });
+  }
+  if (stage.status !== 'QUEUED') {
+    return { kind: 'cancelled', reason: 'UNSUPPORTED_SENDING_STATE' };
   }
 
   const validation = await revalidateReminder(
@@ -278,6 +282,9 @@ export async function executeReminder(
     provider: reminder.channel === 'SMS' ? 'SINCH' : 'XERO',
     now
   });
+  if (claim.kind === 'not-queued') {
+    return { kind: 'cancelled', reason: 'UNSUPPORTED_SENDING_STATE' };
+  }
   if (claim.kind === 'blocked') {
     await cancelStage(
       dependencies.database,

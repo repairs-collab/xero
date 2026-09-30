@@ -319,6 +319,85 @@ const waitUntilAsync = async (
 };
 
 describe('executeReminder', () => {
+  it('ignores a delayed job after its stage returns to awaiting approval', async () => {
+    const seeded = await seedApprovedReminder({
+      rolloutScope: 'CUSTOMER',
+      allowlisted: false
+    });
+    await client.db
+      .update(stageInstances)
+      .set({ status: 'AWAITING_APPROVAL' })
+      .where(eq(stageInstances.id, seeded.stageInstanceId));
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    const sinch = new FakeSinch();
+
+    await expect(
+      executeReminder(dependencies(xero, sinch), {
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId
+      })
+    ).resolves.toEqual({
+      kind: 'cancelled',
+      reason: 'UNSUPPORTED_SENDING_STATE'
+    });
+    expect(xero.getInvoiceCalls).toBe(0);
+    expect(xero.getOnlineInvoiceUrlCalls).toBe(0);
+    expect(sinch.sendCalls).toHaveLength(0);
+  });
+
+  it('does not claim a reminder reset while pre-send validation is running', async () => {
+    const seeded = await seedApprovedReminder({
+      rolloutScope: 'CUSTOMER',
+      allowlisted: false
+    });
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    const validationReachedProvider = deferred();
+    const releaseValidation = deferred();
+    xero.getOnlineInvoiceUrl = async () => {
+      xero.getOnlineInvoiceUrlCalls += 1;
+      validationReachedProvider.resolve();
+      await releaseValidation.promise;
+      return result(xero.onlineInvoiceUrl);
+    };
+    const sinch = new FakeSinch();
+    const execution = executeReminder(dependencies(xero, sinch), {
+      organisationId: seeded.organisationId,
+      stageInstanceId: seeded.stageInstanceId
+    });
+    await validationReachedProvider.promise;
+    await client.db.transaction(async (transaction) => {
+      await transaction
+        .update(stageInstances)
+        .set({ status: 'AWAITING_APPROVAL' })
+        .where(eq(stageInstances.id, seeded.stageInstanceId));
+      await transaction.insert(approvals).values({
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId,
+        renderedPreview:
+          'Hi Alex, invoice INV-5000 is overdue. https://in.xero.test/INV-5000',
+        sourceVersion: 3,
+        status: 'PENDING',
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
+        createdAt: new Date(now.getTime() + 1)
+      });
+    });
+    releaseValidation.resolve();
+
+    await expect(execution).resolves.toEqual({
+      kind: 'cancelled',
+      reason: 'UNSUPPORTED_SENDING_STATE'
+    });
+    expect(sinch.sendCalls).toHaveLength(0);
+    expect(
+      await client.db
+        .select()
+        .from(outboundMessages)
+        .where(eq(outboundMessages.stageInstanceId, seeded.stageInstanceId))
+    ).toHaveLength(0);
+  });
+
   it.each(['CLIENT', 'INVOICE'] as const)(
     'cancels before sending when the %s target is whitelisted',
     async (scope) => {

@@ -54,6 +54,10 @@ export type BeginOutboundResult =
   | { kind: 'blocked'; reason: 'REMINDER_WHITELISTED' }
   | { kind: 'existing'; outcome: StoredOutboundOutcome };
 
+export type BeginReminderResult =
+  | BeginOutboundResult
+  | { kind: 'not-queued' };
+
 export type QueueDirectOutboundResult =
   | { kind: 'queued'; outboundId: string }
   | { kind: 'existing'; outboundId: string; status: OutboundStatus };
@@ -94,13 +98,13 @@ export class PostgresMessageRepository {
     };
   }
 
-  async begin(input: BeginOutboundInput): Promise<BeginOutboundResult> {
+  async begin(input: BeginOutboundInput): Promise<BeginReminderResult> {
     return this.beginReminder(input);
   }
 
   async beginReminder(
     input: BeginReminderOutboundInput
-  ): Promise<BeginOutboundResult> {
+  ): Promise<BeginReminderResult> {
     return this.database.transaction(async (transaction) => {
       if (input.contactId !== undefined && input.invoiceId !== undefined) {
         const whitelist = new PostgresReminderWhitelistRepository(this.database);
@@ -114,8 +118,8 @@ export class PostgresMessageRepository {
           return { kind: 'blocked', reason: 'REMINDER_WHITELISTED' };
         }
       }
-      await transaction
-        .select({ id: stageInstances.id })
+      const [lockedStage] = await transaction
+        .select({ id: stageInstances.id, status: stageInstances.status })
         .from(stageInstances)
         .where(
           and(
@@ -124,6 +128,9 @@ export class PostgresMessageRepository {
           )
         )
         .for('update');
+      if (lockedStage === undefined || lockedStage.status !== 'QUEUED') {
+        return { kind: 'not-queued' };
+      }
 
       const [created] = await transaction
         .insert(outboundMessages)
