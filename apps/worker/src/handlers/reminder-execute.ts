@@ -115,13 +115,25 @@ const cancelStage = async (
   now: Date
 ): Promise<void> => {
   await database.transaction(async (transaction) => {
+    const [stage] = await transaction
+      .select({ status: stageInstances.status })
+      .from(stageInstances)
+      .where(
+        and(
+          eq(stageInstances.organisationId, organisationId),
+          eq(stageInstances.id, stageInstanceId)
+        )
+      )
+      .for('update');
+    if (stage === undefined || stage.status !== 'QUEUED') return;
     await transaction
       .update(stageInstances)
       .set({ status: 'CANCELLED', completedAt: now, updatedAt: now })
       .where(
         and(
           eq(stageInstances.organisationId, organisationId),
-          eq(stageInstances.id, stageInstanceId)
+          eq(stageInstances.id, stageInstanceId),
+          eq(stageInstances.status, 'QUEUED')
         )
       );
     if (

@@ -380,7 +380,7 @@ describe('executeReminder', () => {
         sourceVersion: 3,
         status: 'PENDING',
         expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
-        createdAt: new Date(now.getTime() + 1)
+        createdAt: new Date(Date.now() + 1_000)
       });
     });
     releaseValidation.resolve();
@@ -396,6 +396,65 @@ describe('executeReminder', () => {
         .from(outboundMessages)
         .where(eq(outboundMessages.stageInstanceId, seeded.stageInstanceId))
     ).toHaveLength(0);
+  });
+
+  it('does not cancel a fresh approval when reset happens before approval validation', async () => {
+    const seeded = await seedApprovedReminder({
+      rolloutScope: 'CUSTOMER',
+      allowlisted: false,
+      invoiceUpdatedAt: new Date(now.getTime() - 6 * 60 * 1000)
+    });
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    const validationReachedXero = deferred();
+    const releaseValidation = deferred();
+    xero.getInvoice = async () => {
+      xero.getInvoiceCalls += 1;
+      validationReachedXero.resolve();
+      await releaseValidation.promise;
+      return result(xero.invoice);
+    };
+    const sinch = new FakeSinch();
+    const execution = executeReminder(dependencies(xero, sinch), {
+      organisationId: seeded.organisationId,
+      stageInstanceId: seeded.stageInstanceId
+    });
+    await validationReachedXero.promise;
+    await client.db.transaction(async (transaction) => {
+      await transaction
+        .update(stageInstances)
+        .set({ status: 'AWAITING_APPROVAL' })
+        .where(eq(stageInstances.id, seeded.stageInstanceId));
+      await transaction.insert(approvals).values({
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId,
+        renderedPreview:
+          'Hi Alex, invoice INV-5000 is overdue. https://in.xero.test/INV-5000',
+        sourceVersion: 3,
+        status: 'PENDING',
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000),
+        createdAt: new Date(Date.now() + 1_000)
+      });
+    });
+    releaseValidation.resolve();
+
+    await expect(execution).resolves.toEqual({
+      kind: 'cancelled',
+      reason: 'APPROVAL_REQUIRED'
+    });
+    const [stage] = await client.db
+      .select({ status: stageInstances.status })
+      .from(stageInstances)
+      .where(eq(stageInstances.id, seeded.stageInstanceId));
+    expect(stage?.status).toBe('AWAITING_APPROVAL');
+    const pending = await client.db
+      .select()
+      .from(approvals)
+      .where(eq(approvals.stageInstanceId, seeded.stageInstanceId));
+    expect(pending.filter((approval) => approval.status === 'PENDING')).toHaveLength(
+      1
+    );
+    expect(sinch.sendCalls).toHaveLength(0);
   });
 
   it.each(['CLIENT', 'INVOICE'] as const)(
