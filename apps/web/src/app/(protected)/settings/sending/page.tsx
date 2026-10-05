@@ -22,11 +22,13 @@ import {
   activateCustomerRollout,
   activateLive,
   disableAllProviderSending,
+  overrideCustomerRollout,
   returnToControlledLive,
   updateAllowlist
 } from './actions.js';
 import {
   CUSTOMER_ROLLOUT_ACKNOWLEDGEMENT,
+  CUSTOMER_ROLLOUT_OVERRIDE_ACKNOWLEDGEMENT,
   getCustomerRolloutReadiness,
   liveActivationFeedback,
   LIVE_ACKNOWLEDGEMENT,
@@ -115,6 +117,12 @@ export default async function SendingSettingsPage({
     organisation.sendMode === 'live' &&
     organisation.rolloutScope === 'CONTROLLED' &&
     organisation.operationalState === 'RECONCILED';
+  const canOverrideCustomerRollout =
+    organisation.rolloutScope === 'CONTROLLED' &&
+    organisation.maintenanceMode === false &&
+    !['RESET_PREPARING', 'RESET_IN_PROGRESS', 'RESET_FAILED'].includes(
+      organisation.operationalState
+    );
 
   return (
     <div className="page-stack sending-controls-page">
@@ -273,6 +281,43 @@ export default async function SendingSettingsPage({
               disabled={!readiness.readyForCustomerAcknowledgement}
             >
               Enable Customer live
+            </button>
+          </form>
+        </section>
+      )}
+
+      {canOverrideCustomerRollout && (
+        <section className="panel rollout-action-panel rollout-override-panel">
+          <span className="eyebrow">Administrator override</span>
+          <h2>Override setup checks and enable Customer Live</h2>
+          <p className="settings-copy">
+            This bypasses rollout setup gates only. It cannot bypass maintenance
+            or reset locks, paid-invoice checks, opt-outs, suppressions,
+            whitelists, pauses, invalid contact details, duplicate prevention,
+            source changes, or sending windows. The audit log records the
+            Administrator, that a reason was supplied, and the bypassed setup
+            gates; the private reason text is not retained.
+          </p>
+          <form className="settings-form" action={overrideCustomerRollout}>
+            <HiddenOrganisationState
+              organisationId={organisationId}
+              version={organisation.operationalStateVersion}
+            />
+            <label>
+              Operational reason
+              <textarea name="reason" rows={3} maxLength={500} required />
+            </label>
+            <label>
+              Type the exact override confirmation
+              <input
+                name="acknowledgement"
+                autoComplete="off"
+                placeholder={CUSTOMER_ROLLOUT_OVERRIDE_ACKNOWLEDGEMENT}
+                required
+              />
+            </label>
+            <button className="button button--danger">
+              Override setup checks and enable Customer Live
             </button>
           </form>
         </section>

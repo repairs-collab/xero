@@ -26,6 +26,7 @@ import {
 import {
   createSendingSettings,
   CUSTOMER_ROLLOUT_ACKNOWLEDGEMENT,
+  CUSTOMER_ROLLOUT_OVERRIDE_ACKNOWLEDGEMENT,
   getCustomerRolloutReadiness,
   liveActivationFeedback,
   LIVE_ACKNOWLEDGEMENT,
@@ -664,6 +665,114 @@ describe('global sending safeguards', () => {
     expect(JSON.stringify(activated)).not.toContain(
       CUSTOMER_ROLLOUT_ACKNOWLEDGEMENT
     );
+  });
+
+  it('allows only an administrator to override setup gates while retaining reset locks and audit privacy', async () => {
+    const seeded = await seedCustomerRolloutReady();
+    const service = createSendingSettings({
+      database: client.db,
+      clock: { now: () => now }
+    });
+    await client.db
+      .update(providerConnections)
+      .set({ enabled: false })
+      .where(eq(providerConnections.organisationId, seeded.organisationId));
+    await client.db
+      .update(reminderSequences)
+      .set({ mode: 'AUTOMATIC' })
+      .where(eq(reminderSequences.id, seeded.sequenceId));
+    const privateReason = 'Approved by Jane on 0400 111 222 for invoice 999';
+
+    await expect(
+      service.overrideCustomerRollout(seeded.session('OPERATOR'), {
+        organisationId: seeded.organisationId,
+        acknowledgement: CUSTOMER_ROLLOUT_OVERRIDE_ACKNOWLEDGEMENT,
+        reason: privateReason,
+        expectedVersion: 3
+      })
+    ).rejects.toThrow('FORBIDDEN');
+    await expect(
+      service.overrideCustomerRollout(seeded.session('ADMIN'), {
+        organisationId: seeded.organisationId,
+        acknowledgement: 'enable it',
+        reason: privateReason,
+        expectedVersion: 3
+      })
+    ).rejects.toThrow('CUSTOMER_ROLLOUT_OVERRIDE_ACKNOWLEDGEMENT_MISMATCH');
+    await expect(
+      service.overrideCustomerRollout(seeded.session('ADMIN'), {
+        organisationId: seeded.organisationId,
+        acknowledgement: CUSTOMER_ROLLOUT_OVERRIDE_ACKNOWLEDGEMENT,
+        reason: ' ',
+        expectedVersion: 3
+      })
+    ).rejects.toThrow('REASON_REQUIRED');
+    await expect(
+      service.overrideCustomerRollout(seeded.session('ADMIN'), {
+        organisationId: seeded.organisationId,
+        acknowledgement: CUSTOMER_ROLLOUT_OVERRIDE_ACKNOWLEDGEMENT,
+        reason: privateReason,
+        expectedVersion: 2
+      })
+    ).rejects.toThrow('OPERATIONAL_STATE_CONFLICT');
+
+    await service.overrideCustomerRollout(seeded.session('ADMIN'), {
+      organisationId: seeded.organisationId,
+      acknowledgement: CUSTOMER_ROLLOUT_OVERRIDE_ACKNOWLEDGEMENT,
+      reason: privateReason,
+      expectedVersion: 3
+    });
+    const [organisation] = await client.db
+      .select()
+      .from(organisations)
+      .where(eq(organisations.id, seeded.organisationId));
+    expect(organisation).toMatchObject({
+      sendMode: 'live',
+      rolloutScope: 'CUSTOMER',
+      liveSendAcknowledged: true,
+      operationalState: 'RECONCILIATION_REQUIRED',
+      operationalStateVersion: 4
+    });
+    const events = await client.db
+      .select()
+      .from(auditEvents)
+      .where(eq(auditEvents.organisationId, seeded.organisationId));
+    const overridden = events.find(
+      (event) => event.eventType === 'CUSTOMER_ROLLOUT_SETUP_OVERRIDE_ACTIVATED'
+    );
+    expect(overridden?.afterValue).toMatchObject({
+      beforeScope: 'CONTROLLED',
+      afterScope: 'CUSTOMER',
+      reasonRecorded: true
+    });
+    const bypassedGates = (
+      overridden?.afterValue as { bypassedGates?: unknown } | null
+    )?.bypassedGates;
+    expect(bypassedGates).toEqual([
+      'providersHealthy',
+      'enabledSequencesReview',
+      'reconciliationCurrent'
+    ]);
+    expect(JSON.stringify(overridden)).not.toContain(privateReason);
+    expect(JSON.stringify(overridden)).not.toContain(
+      CUSTOMER_ROLLOUT_OVERRIDE_ACKNOWLEDGEMENT
+    );
+
+    const resetSeeded = await seedCustomerRolloutReady();
+    await client.db.insert(operationalResetRuns).values({
+      organisationId: resetSeeded.organisationId,
+      status: 'PREPARING',
+      requestedByUserId: resetSeeded.userId,
+      deployedCommit: 'abcdef1'
+    });
+    await expect(
+      service.overrideCustomerRollout(resetSeeded.session('ADMIN'), {
+        organisationId: resetSeeded.organisationId,
+        acknowledgement: CUSTOMER_ROLLOUT_OVERRIDE_ACKNOWLEDGEMENT,
+        reason: 'Urgent approved rollout',
+        expectedVersion: 3
+      })
+    ).rejects.toThrow('OPERATIONAL_MAINTENANCE');
   });
 
   it('waits for sequence changes and refuses activation if one becomes automatic', async () => {

@@ -34,6 +34,8 @@ export const RECONCILIATION_ACKNOWLEDGEMENT =
   'I confirm these figures match the current Xero receivables for this sync';
 export const CUSTOMER_ROLLOUT_ACKNOWLEDGEMENT =
   'I understand approved reminders may be sent to customers';
+export const CUSTOMER_ROLLOUT_OVERRIDE_ACKNOWLEDGEMENT =
+  'OVERRIDE SETUP CHECKS AND ENABLE CUSTOMER LIVE';
 
 export interface LiveActivationFeedback {
   tone: 'error' | 'success';
@@ -889,6 +891,83 @@ export function createSendingSettings(dependencies: {
     });
   };
 
+  const overrideCustomerRollout = async (
+    session: AppSession,
+    input: {
+      organisationId: string;
+      acknowledgement: string;
+      reason: string;
+      expectedVersion: number;
+    }
+  ) => {
+    authorise(session, 'provider.configure', input.organisationId);
+    if (input.acknowledgement !== CUSTOMER_ROLLOUT_OVERRIDE_ACKNOWLEDGEMENT) {
+      throw new Error('CUSTOMER_ROLLOUT_OVERRIDE_ACKNOWLEDGEMENT_MISMATCH');
+    }
+    requiredReason(input.reason);
+    return dependencies.database.transaction(async (transaction) => {
+      const organisation = await safety.assertOperationalMutationAllowed(
+        transaction,
+        input.organisationId
+      );
+      if (organisation.operationalStateVersion !== input.expectedVersion) {
+        throw new Error('OPERATIONAL_STATE_CONFLICT');
+      }
+      if (organisation.rolloutScope === 'CUSTOMER') {
+        throw new Error('ROLLOUT_STATE_CONFLICT');
+      }
+      await lockCustomerRolloutEvidence(transaction, input.organisationId);
+      const now = dependencies.clock.now();
+      const readiness = await calculateCustomerRolloutReadiness(transaction, {
+        organisationId: input.organisationId,
+        now
+      });
+      if (
+        !readiness.gates.resetIdle.passed ||
+        organisation.operationalState === 'RESET_PREPARING' ||
+        organisation.operationalState === 'RESET_IN_PROGRESS' ||
+        organisation.operationalState === 'RESET_FAILED'
+      ) {
+        throw new Error('OPERATIONAL_MAINTENANCE');
+      }
+      const bypassedGates = failedReadinessGatesAt(readiness, now).filter(
+        (gate) => gate !== 'resetIdle'
+      );
+      const updated = await safety.compareAndSetOperationalState(transaction, {
+        organisationId: input.organisationId,
+        expectedState: organisation.operationalState,
+        expectedVersion: input.expectedVersion,
+        nextState: organisation.operationalState,
+        rolloutScope: 'CUSTOMER',
+        sendMode: 'live',
+        liveSendAcknowledged: true,
+        now
+      });
+      await transaction.insert(auditEvents).values({
+        organisationId: input.organisationId,
+        actorUserId: session.userId,
+        eventType: 'CUSTOMER_ROLLOUT_SETUP_OVERRIDE_ACTIVATED',
+        entityType: 'ORGANISATION',
+        entityId: input.organisationId,
+        beforeValue: {
+          rolloutScope: organisation.rolloutScope,
+          sendMode: organisation.sendMode,
+          operationalState: organisation.operationalState
+        },
+        afterValue: {
+          beforeScope: organisation.rolloutScope,
+          afterScope: updated.rolloutScope,
+          sendMode: updated.sendMode,
+          operationalState: updated.operationalState,
+          reasonRecorded: true,
+          bypassedGates
+        },
+        occurredAt: now
+      });
+      return { readiness, bypassedGates };
+    });
+  };
+
   const returnToControlledLive = async (
     session: AppSession,
     input: {
@@ -1024,6 +1103,7 @@ export function createSendingSettings(dependencies: {
     activateLive,
     acknowledgeReconciliation,
     activateCustomerRollout,
+    overrideCustomerRollout,
     returnToControlledLive,
     disableAllProviderSending,
     disableLive
