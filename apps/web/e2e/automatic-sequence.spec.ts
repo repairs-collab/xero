@@ -47,7 +47,9 @@ test('customer rollout keeps the first reminder cohort in Review mode', async ({
   await page
     .getByLabel('Type the exact customer-rollout acknowledgement')
     .fill(customerAcknowledgement);
-  await page.getByRole('button', { name: 'Enable Customer live' }).click();
+  await page
+    .getByRole('button', { name: 'Enable Customer live', exact: true })
+    .click();
   await expect(page).toHaveURL(/rollout=customer-enabled/);
 
   await page.goto(`/sequences/${launchScenario.sequenceId}`);

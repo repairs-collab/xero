@@ -81,7 +81,9 @@ test('rejects an inexact final customer acknowledgement', async ({ page }) => {
   await page
     .getByLabel('Type the exact customer-rollout acknowledgement')
     .fill('I approve customer reminders');
-  await page.getByRole('button', { name: 'Enable Customer live' }).click();
+  await page
+    .getByRole('button', { name: 'Enable Customer live', exact: true })
+    .click();
 
   await expect(page).toHaveURL(
     /rollout=CUSTOMER_ROLLOUT_ACKNOWLEDGEMENT_MISMATCH/
@@ -123,7 +125,9 @@ test('reconciles, activates customers, rolls back, and performs an emergency sto
     customerAcknowledgement
   );
   await finalApproval.fill(customerAcknowledgement);
-  await page.getByRole('button', { name: 'Enable Customer live' }).click();
+  await page
+    .getByRole('button', { name: 'Enable Customer live', exact: true })
+    .click();
 
   await expect(page).toHaveURL(/rollout=customer-enabled/);
   await expect(page.getByRole('heading', { name: 'Customer live' })).toBeVisible();
@@ -146,7 +150,9 @@ test('reconciles, activates customers, rolls back, and performs an emergency sto
   await page
     .getByLabel('Type the exact customer-rollout acknowledgement')
     .fill(customerAcknowledgement);
-  await page.getByRole('button', { name: 'Enable Customer live' }).click();
+  await page
+    .getByRole('button', { name: 'Enable Customer live', exact: true })
+    .click();
   await expect(page).toHaveURL(/rollout=customer-enabled/);
 
   await page
