@@ -173,3 +173,85 @@ describe('SinchClient.checkConnection', () => {
     expect(http.requests[0]).not.toHaveProperty('body');
   });
 });
+
+describe('SinchClient reply recovery', () => {
+  it('maps unconfirmed APAC replies and confirms only processed ids', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push(
+      {
+        status: 200,
+        headers: {},
+        body: JSON.stringify({
+          replies: [
+            {
+              message_id: 'message-1',
+              reply_id: 'reply-1',
+              date_received: '2026-10-05T01:02:03Z',
+              destination_number: '+61400000002',
+              source_number: '+61400000001',
+              content: 'Paid today',
+              metadata: { invoice: 'INV-1', ignored: 42 }
+            },
+            {
+              reply_id: 'reply-2',
+              date_received: '2026-10-05T02:02:03Z',
+              source_number: '+61400000003',
+              content: 'Call me',
+              metadata: {}
+            }
+          ]
+        })
+      },
+      { status: 202, headers: {}, body: '' }
+    );
+    const client = createClient(http);
+
+    await expect(client.checkReplies()).resolves.toEqual([
+      {
+        kind: 'reply',
+        replyId: 'reply-1',
+        messageId: 'message-1',
+        from: '+61400000001',
+        to: '+61400000002',
+        receivedAt: '2026-10-05T01:02:03Z',
+        content: 'Paid today',
+        metadata: { invoice: 'INV-1' }
+      },
+      {
+        kind: 'reply',
+        replyId: 'reply-2',
+        from: '+61400000003',
+        receivedAt: '2026-10-05T02:02:03Z',
+        content: 'Call me',
+        metadata: {}
+      }
+    ]);
+    await expect(client.confirmReplies(['reply-1'])).resolves.toBeUndefined();
+
+    expect(http.requests[0]).toMatchObject({
+      method: 'GET',
+      url: 'https://au.app.api.sinch.com/v1/replies'
+    });
+    expect(http.requests[1]).toMatchObject({
+      method: 'POST',
+      url: 'https://au.app.api.sinch.com/v1/replies/confirmed'
+    });
+    expect(JSON.parse(http.requests[1]?.body ?? '')).toEqual({
+      reply_ids: ['reply-1']
+    });
+  });
+
+  it('rejects a malformed reply list without confirming anything', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push({
+      status: 200,
+      headers: {},
+      body: JSON.stringify({ replies: [{ reply_id: 'reply-1' }] })
+    });
+
+    await expect(createClient(http).checkReplies()).rejects.toBeInstanceOf(
+      SinchTransientFailure
+    );
+    expect(http.requests).toHaveLength(1);
+  });
+});

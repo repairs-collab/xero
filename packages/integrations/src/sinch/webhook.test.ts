@@ -196,6 +196,27 @@ describe('parseSinchEvent', () => {
     }
   );
 
+  it('accepts a numeric delivery status code from a Sinch webhook template', () => {
+    expect(
+      parseSinchEvent(
+        Buffer.from(
+          JSON.stringify({
+            event_type: 'DELIVERY_REPORT',
+            message_id: 'message-2',
+            status: 'DELIVERED',
+            status_code: '0',
+            timestamp: '2026-09-18T01:02:03Z'
+          })
+        )
+      )
+    ).toMatchObject({
+      kind: 'delivery',
+      messageId: 'message-2',
+      statusCode: 0,
+      category: 'delivered'
+    });
+  });
+
   it('maps duplicate payload bytes deterministically', () => {
     const raw = Buffer.from(replyPayload);
     expect(parseSinchEvent(raw)).toEqual(parseSinchEvent(raw));

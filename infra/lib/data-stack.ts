@@ -72,6 +72,7 @@ export class DataStack extends Stack {
   readonly xeroWebhookSecret: Secret;
   readonly sinchApiSecret: Secret;
   readonly sinchWebhookKey: Secret;
+  readonly sinchWebhookToken: Secret;
   readonly webRepository: Repository;
   readonly workerRepository: Repository;
 
@@ -148,6 +149,12 @@ export class DataStack extends Stack {
       'sinch-webhook-public-key',
       {},
       'not-configured'
+    );
+    this.sinchWebhookToken = retainedSecret(
+      this,
+      'SinchWebhookToken',
+      props.stage,
+      'sinch-webhook-token'
     );
     this.webRepository = new Repository(this, 'WebRepository', {
       repositoryName: `${props.stage}-bill-chaser-web`,

@@ -178,19 +178,21 @@ const recordCompletedReset = async (
 describe('processWebhookEvent', () => {
   it('creates an inbox conversation and pauses every active chase on a reply without message_id', async () => {
     const seeded = await seedCustomerChase();
+    const replyId = randomUUID();
+    const replyBody = {
+      event_type: 'REPLY',
+      reply_id: replyId,
+      source_number: seeded.phone,
+      destination_number: '+61400000002',
+      received_date: '2026-09-18T01:02:03Z',
+      content: 'Can we pay Friday?',
+      metadata: {}
+    };
     const recorded = await recordEvent(
       seeded.organisationId,
       'SINCH',
       randomUUID(),
-      {
-        event_type: 'REPLY',
-        reply_id: randomUUID(),
-        source_number: seeded.phone,
-        destination_number: '+61400000002',
-        received_date: '2026-09-18T01:02:03Z',
-        content: 'Can we pay Friday?',
-        metadata: {}
-      }
+      replyBody
     );
     const payload = {
       organisationId: seeded.organisationId,
@@ -200,6 +202,20 @@ describe('processWebhookEvent', () => {
 
     await processWebhookEvent({ database: client.db, publisher }, payload);
     await processWebhookEvent({ database: client.db, publisher }, payload);
+    const duplicateDelivery = await recordEvent(
+      seeded.organisationId,
+      'SINCH',
+      randomUUID(),
+      replyBody
+    );
+    await processWebhookEvent(
+      { database: client.db, publisher },
+      {
+        organisationId: seeded.organisationId,
+        webhookEventId: duplicateDelivery.id,
+        provider: 'SINCH'
+      }
+    );
 
     const threads = await client.db
       .select()

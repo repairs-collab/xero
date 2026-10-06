@@ -46,6 +46,10 @@ export type ApprovedSmsRecoveryCommand =
       };
     };
 
+export interface InboundReplyRecoveryCommand {
+  organisationId?: string;
+}
+
 const required = (environment: Environment, name: string): string => {
   const value = environment[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
@@ -191,6 +195,19 @@ const rejectUnknownFlags = (
     if (!allowed.includes(name)) throw new Error(`${name} is not supported`);
   }
 };
+
+export function parseInboundReplyRecoveryCommand(
+  arguments_: string[]
+): InboundReplyRecoveryCommand | null {
+  if (arguments_.length === 0) return null;
+  if (arguments_[0] !== 'recover-inbound-replies') {
+    throw new Error('Unsupported worker command');
+  }
+  const flags = parseFlags(arguments_.slice(1));
+  rejectUnknownFlags(flags, ['organisation-id']);
+  const organisationId = flags.get('organisation-id')?.trim();
+  return organisationId ? { organisationId } : {};
+}
 
 export function parseOperationalResetCommand(
   arguments_: string[]

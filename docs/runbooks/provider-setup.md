@@ -36,22 +36,25 @@ For Sinch, use JSON keys `apiKey` and `apiSecret` and secret ID `production/bill
 ## Sinch Engage APAC
 
 1. In Sinch Engage, go to Settings → API and create API credentials. Store `apiKey` and `apiSecret` in `production/bill-chaser-5000/sinch-api`.
-2. Bill Chaser uses `https://au.app.api.sinch.com`. **Test connection** performs the read-only `GET /v1/webhooks/messages?page=0&page_size=1` check. A successful test must not send a message.
+2. Bill Chaser uses `https://au.app.api.sinch.com`. **Test connection** performs the read-only `GET /v1/replies` check. A successful test must not send a message.
 3. Ask Sinch Support to confirm `API_SECURE_CALLBACKS` is enabled. Sinch requires HTTPS and supports TLS 1.2/1.3; use TLS 1.3 where available.
 4. Create an RSA/SHA-512 callback signing key with `POST /v1/iam/signature_keys` and body `{"digest":"SHA512","cipher":"RSA"}`. Store the returned `key_id` and public key. Enable it with `PATCH /v1/iam/signature_keys/enabled` and body `{"key_id":"KEY_ID"}`. Only one key can be enabled at a time.
 5. Store the public key as JSON keyed by ID in `production/bill-chaser-5000/sinch-webhook-public-key`, for example `{"KEY_ID":"-----BEGIN PUBLIC KEY-----\\n…\\n-----END PUBLIC KEY-----"}`. Never store the Sinch private key; it remains with Sinch.
-6. Create three POST/JSON webhooks to `https://HOST/api/webhooks/sinch`, with five retries and a retry delay of 30 seconds:
+6. The deployment generates `production/bill-chaser-5000/sinch-webhook-token`. Retrieve it only through an approved secret-reading session; do not print it, paste it into tickets, or store it in source control.
+7. In Sinch Engage **API settings â†’ Webhooks**, create three POST/JSON webhooks to `https://HOST/api/webhooks/sinch`, with five retries and a retry delay of 30 seconds. Add the custom header `X-AccountPulse-Webhook-Token` to each webhook with the exact secret value from step 6. Use these event selections and parser-compatible body fields:
 
-   - `RECEIVED_SMS`, with a template producing `event_type=REPLY`, `reply_id`, `source_number`, `destination_number`, `received_date`, `content`, optional `message_id`, and `metadata`.
-   - `OPT_OUT_SMS`, with a template producing `event_type=OPT_OUT`, `notification_id`, `source_number`, `destination_number`, `received_date`, `content`, and optional `message_id`.
-   - `ENROUTE_DR`, `SUBMITTED_DR`, `DELIVERED_DR`, `EXPIRED_DR`, `REJECTED_DR`, and `FAILED_DR`, with a template producing `event_type=DELIVERY_REPORT`, `message_id`, `status`, numeric `status_code`, `timestamp`, and `metadata`.
+   - **Receive an SMS**: `event_type=REPLY`, `reply_id=$moId`, `message_id=$mtId`, `source_number=$sourceAddress`, `destination_number=$destinationAddress`, `received_date=$receivedTimestamp`, and `content=$moContent`.
+   - **Opt-out occurred**: `event_type=OPT_OUT`, `notification_id=$notificationId`, `message_id=$messageId`, `source_number=$sourceAddress`, `destination_number=$destinationAddress`, `received_date=$receivedTimestamp`, and `content=$moContent`. Do not use `$moId` for this event; Sinch opt-outs have their own notification ID.
+   - **Delivery reports** (all available submitted, en route, delivered, expired, rejected, and failed events): `event_type=DELIVERY_REPORT`, `message_id=$mtId`, `status=$status`, `status_code=$statusCode`, and `timestamp=$receivedTimestamp`.
 
-7. Verify callbacks contain `X-MessageMedia-Signature`, `X-MessageMedia-Digest-Type`, `X-MessageMedia-Cipher-Type`, and `X-MessageMedia-Key-Id`. Bill Chaser verifies the signature over the request line, Date header, and exact raw body before storing the event.
-8. Send one allowlisted SMS, verify its delivery callback, reply to it, and send `STOP`. The reply must pause the whole customer; the opt-out must also suppress future SMS.
+8. Save each webhook and confirm the Sinch list contains exactly these three AccountPulse webhooks. A test callback must return `202`; a wrong or missing shared-token header must return `401`. Legacy per-message callbacks may instead contain the `X-MessageMedia-*` signature headers and remain supported.
+9. Send one approved SMS, verify its delivery callback, reply to it, and send `STOP`. The reply must appear in Inbox and pause the whole customer; the opt-out must also suppress future SMS. Do not mark provider setup complete until all three checks pass.
+10. If replies existed before the webhooks were installed, run the one-off `recover-inbound-replies` worker command. It confirms only replies stored successfully (or deliberately excluded by the latest completed reset), reports safe reply IDs for failures, and exits non-zero unless the provider queue is fully drained.
 
 ## Rotation
 
 - Xero/Sinch API credentials: add a new secret version, test, force worker deployment, then revoke the old credential.
 - Xero webhook key: coordinate the app change and web deployment as one maintenance action; watch signature-failure alarms.
 - Sinch callback key: create the new key, store both public keys, deploy web, enable the new Sinch key, verify a signed callback, then remove the old public key.
+- Sinch webhook token: schedule a short maintenance window, create a new secret version, deploy the web task, immediately replace the custom header on all three Sinch webhooks, then verify a `202` test callback. Roll back both the secret version and webhook headers together if verification fails.
 - Session secret: first disable live sending, rotate, force web deployment, and expect all user sessions to be invalidated.

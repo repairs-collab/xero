@@ -141,6 +141,7 @@ describe('public webhook endpoints', () => {
     const handler = createSinchWebhookHandler({
       organisationId,
       publicKeys: new Map([['key-1', publicKeyPem]]),
+      sharedToken: 'sinch-webhook-token',
       repository: new PostgresWebhookRepository(client.db),
       queue
     });
@@ -165,5 +166,87 @@ describe('public webhook endpoints', () => {
       .where(eq(webhookEvents.organisationId, organisationId));
     expect(stored.some((event) => event.provider === 'SINCH')).toBe(true);
     expect(queued.at(-1)?.name).toBe(jobNames.webhookProcess);
+  });
+
+  it('accepts a Sinch Engage webhook authenticated by the shared token', async () => {
+    const before = queued.length;
+    const replyId = randomUUID();
+    const body = JSON.stringify({
+      event_type: 'REPLY',
+      reply_id: replyId,
+      source_number: '+61400000003',
+      destination_number: '+61400000004',
+      received_date: '2026-09-18T01:02:03Z',
+      content: 'Thanks, I will pay today.'
+    });
+    const handler = createSinchWebhookHandler({
+      organisationId,
+      publicKeys: new Map(),
+      sharedToken: 'sinch-webhook-token',
+      repository: new PostgresWebhookRepository(client.db),
+      queue
+    });
+
+    const response = await handler(
+      new Request('https://bill-chaser.test/api/webhooks/sinch', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-accountpulse-webhook-token': 'sinch-webhook-token'
+        },
+        body
+      })
+    );
+
+    expect(response.status).toBe(202);
+    expect(queued).toHaveLength(before + 1);
+    expect(queued.at(-1)?.singletonKey).toContain(replyId);
+  });
+
+  it('rejects an unsigned Sinch Engage webhook with the wrong shared token', async () => {
+    const before = queued.length;
+    const handler = createSinchWebhookHandler({
+      organisationId,
+      publicKeys: new Map(),
+      sharedToken: 'sinch-webhook-token',
+      repository: new PostgresWebhookRepository(client.db),
+      queue
+    });
+
+    const response = await handler(
+      new Request('https://bill-chaser.test/api/webhooks/sinch', {
+        method: 'POST',
+        headers: { 'x-accountpulse-webhook-token': 'wrong-token' },
+        body: JSON.stringify({
+          event_type: 'REPLY',
+          reply_id: randomUUID(),
+          source_number: '+61400000003',
+          destination_number: '+61400000004',
+          received_date: '2026-09-18T01:02:03Z',
+          content: 'This must not be accepted.'
+        })
+      })
+    );
+
+    expect(response.status).toBe(401);
+    expect(queued).toHaveLength(before);
+  });
+
+  it('rejects a multibyte token without throwing', async () => {
+    const handler = createSinchWebhookHandler({
+      organisationId,
+      publicKeys: new Map(),
+      sharedToken: 'a'.repeat(32),
+      repository: new PostgresWebhookRepository(client.db),
+      queue
+    });
+    const response = await handler(
+      new Request('https://bill-chaser.test/api/webhooks/sinch', {
+        method: 'POST',
+        headers: { 'x-accountpulse-webhook-token': 'é'.repeat(32) },
+        body: '{}'
+      })
+    );
+    expect(response.status).toBe(401);
   });
 });

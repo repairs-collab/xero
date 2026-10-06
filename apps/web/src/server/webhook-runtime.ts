@@ -41,3 +41,11 @@ export const getSinchPublicKeys = (): ReadonlyMap<string, string> => {
   }
   return new Map(entries);
 };
+
+export const getSinchWebhookToken = (): string => {
+  const token = process.env.SINCH_WEBHOOK_TOKEN;
+  if (token === undefined || token.length < 32) {
+    throw new Error('SINCH_WEBHOOK_TOKEN must contain at least 32 characters');
+  }
+  return token;
+};

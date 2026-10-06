@@ -1,3 +1,5 @@
+import { timingSafeEqual } from 'node:crypto';
+
 import type { WebhookRepository } from '@bc5000/db/web';
 import {
   parseSinchEvent,
@@ -85,12 +87,22 @@ export function createXeroWebhookHandler(
 export function createSinchWebhookHandler(
   dependencies: CommonDependencies & {
     publicKeys: ReadonlyMap<string, string | Buffer>;
+    sharedToken: string;
   }
 ): (request: Request) => Promise<Response> {
   return async (request) => {
     const rawBody = await byteBody(request);
     const url = new URL(request.url);
-    const verified = await verifySinchCallback({
+    const suppliedToken =
+      request.headers.get('x-accountpulse-webhook-token') ?? '';
+    const expectedToken = dependencies.sharedToken;
+    const suppliedTokenBytes = Buffer.from(suppliedToken, 'utf8');
+    const expectedTokenBytes = Buffer.from(expectedToken, 'utf8');
+    const tokenVerified =
+      suppliedTokenBytes.length === expectedTokenBytes.length &&
+      suppliedTokenBytes.length > 0 &&
+      timingSafeEqual(suppliedTokenBytes, expectedTokenBytes);
+    const signatureVerified = await verifySinchCallback({
       requestLine: `${request.method} ${url.pathname}${url.search} HTTP/1.1`,
       date: request.headers.get('date') ?? '',
       rawBody,
@@ -104,7 +116,9 @@ export function createSinchWebhookHandler(
         request.headers.get('x-messagemedia-key-id') ?? '',
       publicKeys: dependencies.publicKeys
     });
-    if (!verified) return new Response('', { status: 401 });
+    if (!tokenVerified && !signatureVerified) {
+      return new Response('', { status: 401 });
+    }
 
     let event;
     try {

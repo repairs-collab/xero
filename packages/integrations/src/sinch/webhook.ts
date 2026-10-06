@@ -150,8 +150,14 @@ const parseOptOut = (payload: JsonRecord): SinchOptOutEvent => {
 
 const parseDelivery = (payload: JsonRecord): SinchDeliveryEvent => {
   const status = requiredString(payload, 'status');
-  const statusCode = payload.status_code;
-  if (typeof statusCode !== 'number') {
+  const rawStatusCode = payload.status_code;
+  const statusCode =
+    typeof rawStatusCode === 'number'
+      ? rawStatusCode
+      : typeof rawStatusCode === 'string' && /^-?\d+$/.test(rawStatusCode)
+        ? Number(rawStatusCode)
+        : Number.NaN;
+  if (!Number.isSafeInteger(statusCode)) {
     throw new Error('Missing Sinch webhook field: status_code');
   }
   return {

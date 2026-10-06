@@ -9,6 +9,7 @@ import {
   type SinchClock,
   type SinchCredentials,
   type SinchMessageStatus,
+  type SinchReplyEvent,
   type SinchSendSmsInput,
   type SinchSubmitResult
 } from './types.js';
@@ -38,6 +39,27 @@ const errorMessage = (response: HttpResponse): string =>
   response.body === ''
     ? `Sinch returned status ${response.status}`
     : response.body;
+
+const replyString = (
+  reply: Record<string, unknown>,
+  name: string
+): string => {
+  const value = reply[name];
+  if (typeof value !== 'string' || value === '') {
+    throw new Error(`Missing Sinch reply field: ${name}`);
+  }
+  return value;
+};
+
+const replyMetadata = (value: unknown): Record<string, string> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? Object.fromEntries(
+        Object.entries(value).filter(
+          (entry): entry is [string, string] =>
+            typeof entry[1] === 'string'
+        )
+      )
+    : {};
 
 export class SinchClient {
   private readonly baseUrl: string;
@@ -134,6 +156,67 @@ export class SinchClient {
     const response = await this.request('GET', '/v1/replies', '');
     if (response.status !== 200) this.throwForResponse(response);
     return { kind: 'healthy' };
+  }
+
+  async checkReplies(): Promise<SinchReplyEvent[]> {
+    const response = await this.request('GET', '/v1/replies', '');
+    if (response.status !== 200) this.throwForResponse(response);
+    try {
+      const payload = JSON.parse(response.body) as unknown;
+      if (
+        typeof payload !== 'object' ||
+        payload === null ||
+        Array.isArray(payload) ||
+        !Array.isArray((payload as { replies?: unknown }).replies)
+      ) {
+        throw new Error('Malformed replies response');
+      }
+      return (payload as { replies: unknown[] }).replies.map((value) => {
+        if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+          throw new Error('Malformed reply');
+        }
+        const reply = value as Record<string, unknown>;
+        const event: SinchReplyEvent = {
+          kind: 'reply',
+          replyId: replyString(reply, 'reply_id'),
+          from: replyString(reply, 'source_number'),
+          receivedAt: replyString(reply, 'date_received'),
+          content: replyString(reply, 'content'),
+          metadata: replyMetadata(reply.metadata)
+        };
+        const destinationNumber = reply.destination_number;
+        if (
+          typeof destinationNumber === 'string' &&
+          destinationNumber !== ''
+        ) {
+          event.to = destinationNumber;
+        }
+        const messageId = reply.message_id;
+        if (typeof messageId === 'string' && messageId !== '') {
+          event.messageId = messageId;
+        }
+        return event;
+      });
+    } catch (error) {
+      throw new SinchTransientFailure(
+        response.status,
+        error instanceof Error
+          ? `Sinch returned malformed replies: ${error.message}`
+          : 'Sinch returned malformed replies'
+      );
+    }
+  }
+
+  async confirmReplies(replyIds: string[]): Promise<void> {
+    if (replyIds.length === 0) return;
+    const response = await this.request(
+      'POST',
+      '/v1/replies/confirmed',
+      JSON.stringify({ reply_ids: replyIds })
+    );
+    if (![200, 202, 204].includes(response.status)) {
+      this.throwForResponse(response);
+    }
   }
 
   private async request(

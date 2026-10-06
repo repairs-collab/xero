@@ -41,7 +41,7 @@ export interface SinchReplyEvent {
   replyId: string;
   messageId?: string;
   from: string;
-  to: string;
+  to?: string;
   receivedAt: string;
   content: string;
   metadata: Record<string, string>;

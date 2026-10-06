@@ -195,6 +195,19 @@ describe('Bill Chaser 5000 AWS stacks', () => {
         SecretStringTemplate: '{}'
       }
     });
+    dataTemplate.hasResourceProperties('AWS::SecretsManager::Secret', {
+      Name: 'production/bill-chaser-5000/sinch-webhook-token',
+      GenerateSecretString: {
+        PasswordLength: 48
+      }
+    });
+
+    const taskDefinitions = serviceTemplate.findResources(
+      'AWS::ECS::TaskDefinition'
+    );
+    const serialisedTaskDefinitions = JSON.stringify(taskDefinitions);
+    expect(serialisedTaskDefinitions).toContain('SINCH_WEBHOOK_TOKEN');
+    expect(serialisedTaskDefinitions).toContain('SinchWebhookToken');
   });
 
   it('allows regional CloudWatch Logs to use the log encryption key', () => {
