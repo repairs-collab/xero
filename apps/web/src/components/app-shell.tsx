@@ -11,6 +11,7 @@ import {
   DevicePhoneMobileIcon,
   ExclamationTriangleIcon,
   HomeIcon,
+  MagnifyingGlassIcon,
   PaperAirplaneIcon,
   UserGroupIcon
 } from '@heroicons/react/24/outline';
@@ -58,6 +59,17 @@ export function AppShell({
           <BuildingOffice2Icon aria-hidden="true" />
           <span><small>Workspace</small><strong>{organisationName}</strong></span>
         </div>
+
+        <form className="global-search" action="/search" method="get" role="search">
+          <MagnifyingGlassIcon aria-hidden="true" />
+          <input
+            name="q"
+            type="search"
+            aria-label="Search invoices, customers or amounts"
+            placeholder="Search invoices, customers or amounts"
+            maxLength={100}
+          />
+        </form>
 
         <div className="account-menu">
           <span className="avatar">{initials || 'MA'}</span>

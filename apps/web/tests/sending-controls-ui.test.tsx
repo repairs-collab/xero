@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   CUSTOMER_ROLLOUT_ACKNOWLEDGEMENT,
+  CUSTOMER_ROLLOUT_OVERRIDE_ACKNOWLEDGEMENT,
   type CustomerRolloutReadiness,
   RECONCILIATION_ACKNOWLEDGEMENT
 } from '../src/app/(protected)/settings/sending/sending-settings.js';
@@ -207,6 +208,12 @@ describe('final rollout controls', () => {
       'approved reminders may be sent to customers'
     );
     expect(RECONCILIATION_ACKNOWLEDGEMENT).not.toBe(
+      CUSTOMER_ROLLOUT_ACKNOWLEDGEMENT
+    );
+    expect(CUSTOMER_ROLLOUT_OVERRIDE_ACKNOWLEDGEMENT).toBe(
+      'OVERRIDE SETUP CHECKS AND ENABLE CUSTOMER LIVE'
+    );
+    expect(CUSTOMER_ROLLOUT_OVERRIDE_ACKNOWLEDGEMENT).not.toBe(
       CUSTOMER_ROLLOUT_ACKNOWLEDGEMENT
     );
   });

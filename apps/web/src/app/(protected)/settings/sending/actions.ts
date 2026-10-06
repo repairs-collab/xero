@@ -86,6 +86,7 @@ const rolloutErrorCodes = new Set([
   'RECONCILIATION_METRICS_CHANGED',
   'SYNC_SUPERSEDED',
   'CUSTOMER_ROLLOUT_ACKNOWLEDGEMENT_MISMATCH',
+  'CUSTOMER_ROLLOUT_OVERRIDE_ACKNOWLEDGEMENT_MISMATCH',
   'CUSTOMER_ROLLOUT_NOT_READY',
   'ROLLOUT_STATE_CONFLICT',
   'INVALID_ALLOWLIST_RECIPIENT',
@@ -180,6 +181,24 @@ export async function activateCustomerRollout(
     await settings.activateCustomerRollout(session, {
       organisationId: text(formData, 'organisationId'),
       acknowledgement: text(formData, 'acknowledgement'),
+      expectedVersion: nonnegativeInteger(formData, 'expectedVersion')
+    });
+  } catch (error) {
+    status = rolloutActionStatusForError(error);
+  }
+  finish(status);
+}
+
+export async function overrideCustomerRollout(
+  formData: FormData
+): Promise<void> {
+  let status = 'customer-override-enabled';
+  try {
+    const { session, settings } = await context();
+    await settings.overrideCustomerRollout(session, {
+      organisationId: text(formData, 'organisationId'),
+      acknowledgement: text(formData, 'acknowledgement'),
+      reason: text(formData, 'reason'),
       expectedVersion: nonnegativeInteger(formData, 'expectedVersion')
     });
   } catch (error) {

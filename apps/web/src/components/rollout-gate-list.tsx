@@ -35,6 +35,7 @@ const transitionMatchesCurrentState = (
         state.reconciliationCurrent
       );
     case 'customer-enabled':
+    case 'customer-override-enabled':
       return state.sendMode === 'live' && state.rolloutScope === 'CUSTOMER';
     case 'provider-sending-disabled':
       return state.sendMode === 'dry-run' && state.rolloutScope === 'CONTROLLED';
@@ -78,6 +79,13 @@ export const rolloutFeedback = (
         detail:
           'Approved reminders may now reach eligible customers. Per-message safeguards remain active.'
       };
+    case 'customer-override-enabled':
+      return {
+        tone: 'success',
+        title: 'Customer live is active by Administrator override',
+        detail:
+          'Setup gates were bypassed and recorded in the audit log. Maintenance locks and every per-message safeguard remain active.'
+      };
     case 'controlled-restored':
       return {
         tone: 'success',
@@ -111,6 +119,12 @@ export const rolloutFeedback = (
         tone: 'error',
         title: 'Customer-rollout acknowledgement did not match',
         detail: 'Type the final acknowledgement exactly as shown.'
+      };
+    case 'CUSTOMER_ROLLOUT_OVERRIDE_ACKNOWLEDGEMENT_MISMATCH':
+      return {
+        tone: 'error',
+        title: 'Override confirmation did not match',
+        detail: 'Type the Administrator override confirmation exactly as shown.'
       };
     case 'CUSTOMER_ROLLOUT_NOT_READY':
       return {

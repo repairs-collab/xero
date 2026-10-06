@@ -72,4 +72,19 @@ describe('AppShell', () => {
     expect(outbox).toBeGreaterThan(inbox);
     expect(escalations).toBeGreaterThan(outbox);
   });
+
+  it('provides a top-bar search for invoices, customers, and amounts', () => {
+    const html = renderToStaticMarkup(
+      createElement(AppShell, {
+        displayName: 'Mott Appliance Repairs Admin',
+        role: 'ADMIN',
+        children: createElement('p', null, 'Dashboard')
+      })
+    );
+
+    expect(html).toContain('action="/search"');
+    expect(html).toContain('name="q"');
+    expect(html).toContain('type="search"');
+    expect(html).toContain('Search invoices, customers or amounts');
+  });
 });
