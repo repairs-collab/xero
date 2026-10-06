@@ -4,6 +4,13 @@ import { jobNames, type JobName } from './names.js';
 
 const identifier = z.string().trim().min(1);
 const organisationPayload = z.object({ organisationId: identifier });
+const voiceCallPayload = z
+  .object({
+    organisationId: identifier,
+    voiceCallId: identifier,
+    correlationId: identifier.optional()
+  })
+  .strict();
 
 export const jobPayloadSchemas = {
   [jobNames.xeroInitialSync]: organisationPayload,
@@ -27,6 +34,8 @@ export const jobPayloadSchemas = {
     organisationId: identifier,
     outboundMessageId: identifier
   }),
+  [jobNames.voiceCallExecute]: voiceCallPayload,
+  [jobNames.voiceCallReconcile]: voiceCallPayload,
   [jobNames.providerConnectionTest]: z.object({
     organisationId: identifier,
     provider: z.enum(['XERO', 'SINCH'])
@@ -46,6 +55,8 @@ export type JobPayloads = {
 export type XeroInitialSyncJob = JobPayloads['xero.initial-sync'];
 export type XeroIncrementalSyncJob = JobPayloads['xero.incremental-sync'];
 export type XeroInvoiceRefreshJob = JobPayloads['xero.invoice-refresh'];
+export type VoiceCallExecutePayload = JobPayloads['voice-call.execute'];
+export type VoiceCallReconcilePayload = JobPayloads['voice-call.reconcile'];
 
 export function parseJobPayload<Name extends JobName>(
   name: Name,

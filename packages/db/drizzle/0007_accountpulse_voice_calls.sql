@@ -110,3 +110,30 @@ CREATE UNIQUE INDEX "voice_call_requests_org_idempotency_uq" ON "voice_call_requ
 CREATE UNIQUE INDEX "voice_call_requests_org_provider_call_uq" ON "voice_call_requests" USING btree ("organisation_id","provider","provider_call_id") WHERE "voice_call_requests"."provider_call_id" is not null;--> statement-breakpoint
 CREATE INDEX "voice_call_requests_org_state_idx" ON "voice_call_requests" USING btree ("organisation_id","state","created_at");--> statement-breakpoint
 CREATE INDEX "voice_call_requests_org_contact_idx" ON "voice_call_requests" USING btree ("organisation_id","contact_id","created_at");
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION protect_approved_voice_call_invoice_snapshot()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  parent_state varchar(24);
+BEGIN
+  SELECT state
+    INTO parent_state
+    FROM voice_call_requests
+   WHERE id = CASE WHEN TG_OP = 'DELETE' THEN OLD.voice_call_id ELSE NEW.voice_call_id END;
+
+  IF parent_state NOT IN ('DRAFT', 'PREVIEWED') THEN
+    RAISE EXCEPTION 'approved voice call invoice snapshots are immutable';
+  END IF;
+
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+--> statement-breakpoint
+CREATE TRIGGER voice_call_invoices_immutable_after_approval
+BEFORE INSERT OR UPDATE OR DELETE ON voice_call_invoices
+FOR EACH ROW EXECUTE FUNCTION protect_approved_voice_call_invoice_snapshot();

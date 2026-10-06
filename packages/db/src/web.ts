@@ -6,4 +6,5 @@ export * from './repositories/activity-repository.js';
 export * from './repositories/task-repository.js';
 export * from './repositories/reminder-whitelist-repository.js';
 export * from './repositories/organisation-safety-repository.js';
+export * from './repositories/voice-call-repository.js';
 export * from './schema/index.js';

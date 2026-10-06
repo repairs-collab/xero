@@ -10,14 +10,24 @@ export const permissions = {
     'outbox.read',
     'reminder-whitelist.add',
     'reminder-whitelist.remove',
-    'message.test-sms'
+    'message.test-sms',
+    'voice-call.read',
+    'voice-call.prepare',
+    'voice-call.place',
+    'voice-contact.override',
+    'voice-suppression.clear',
+    'voice-settings.manage'
   ],
   OPERATOR: [
     'reminder.approve',
     'chase.operate',
     'audit.read',
     'outbox.read',
-    'reminder-whitelist.add'
+    'reminder-whitelist.add',
+    'voice-call.read',
+    'voice-call.prepare',
+    'voice-call.place',
+    'voice-contact.override'
   ]
 } as const;
 

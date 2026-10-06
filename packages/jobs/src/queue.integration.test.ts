@@ -190,6 +190,19 @@ describe('durable job queue', () => {
     expect(job?.retryLimit).toBe(0);
   });
 
+  it('never automatically retries a voice call submission', async () => {
+    const organisationId = randomUUID();
+    const voiceCallId = randomUUID();
+    const id = await queue.enqueueUnique(
+      jobNames.voiceCallExecute,
+      { organisationId, voiceCallId },
+      `voice-call:${voiceCallId}`
+    );
+
+    const [job] = await queue.findJobs(jobNames.voiceCallExecute, { id });
+    expect(job?.retryLimit).toBe(0);
+  });
+
   it('validates test-SMS jobs and never retries their external send', async () => {
     const organisationId = randomUUID();
     const outboundMessageId = randomUUID();
