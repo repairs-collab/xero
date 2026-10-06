@@ -161,6 +161,9 @@ export class ServiceStack extends Stack {
         ),
         SINCH_CALLBACK_PUBLIC_KEYS_JSON: EcsSecret.fromSecretsManager(
           props.data.sinchWebhookKey
+        ),
+        SINCH_WEBHOOK_TOKEN: EcsSecret.fromSecretsManager(
+          props.data.sinchWebhookToken
         )
       },
       healthCheck: {

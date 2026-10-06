@@ -66,7 +66,7 @@ export async function processInboundReply(
         organisationId,
         contactId,
         normalisedNumber: event.from,
-        unreadCount: 1,
+        unreadCount: 0,
         lastMessageAt: receivedAt,
         updatedAt: receivedAt
       })
@@ -77,15 +77,13 @@ export async function processInboundReply(
           conversations.normalisedNumber
         ],
         set: {
-          unreadCount: sql`${conversations.unreadCount} + 1`,
-          lastMessageAt: receivedAt,
-          updatedAt: receivedAt
+          updatedAt: conversations.updatedAt
         }
       })
       .returning({ id: conversations.id });
     if (conversation === undefined) throw new Error('Conversation was not created');
 
-    await transaction
+    const [insertedMessage] = await transaction
       .insert(inboundMessages)
       .values({
         organisationId,
@@ -103,7 +101,18 @@ export async function processInboundReply(
           inboundMessages.provider,
           inboundMessages.providerMessageId
         ]
-      });
+      })
+      .returning({ id: inboundMessages.id });
+    if (insertedMessage === undefined) return;
+
+    await transaction
+      .update(conversations)
+      .set({
+        unreadCount: sql`${conversations.unreadCount} + 1`,
+        lastMessageAt: sql`greatest(${conversations.lastMessageAt}, ${receivedAt})`,
+        updatedAt: sql`greatest(${conversations.updatedAt}, ${receivedAt})`
+      })
+      .where(eq(conversations.id, conversation.id));
 
     const existingPause = await transaction
       .select({ id: pauses.id })

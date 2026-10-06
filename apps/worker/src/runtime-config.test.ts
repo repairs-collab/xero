@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   databaseUrlFromEnvironment,
   parseApprovedSmsRecoveryCommand,
+  parseInboundReplyRecoveryCommand,
   parseOperationalResetCommand,
   parseProviderCredentials
 } from './runtime-config.js';
@@ -187,5 +188,30 @@ describe('worker runtime configuration', () => {
         'wrong'
       ])
     ).toThrow('expected-count is invalid');
+  });
+
+  it('parses the bounded inbound reply recovery command', () => {
+    expect(
+      parseInboundReplyRecoveryCommand([
+        'recover-inbound-replies',
+        '--organisation-id',
+        'f0a9be0f-a5a2-47ac-a951-5ff419311dfa'
+      ])
+    ).toEqual({
+      organisationId: 'f0a9be0f-a5a2-47ac-a951-5ff419311dfa'
+    });
+    expect(
+      parseInboundReplyRecoveryCommand(['recover-inbound-replies'])
+    ).toEqual({});
+    expect(parseInboundReplyRecoveryCommand([])).toBeNull();
+    expect(() =>
+      parseInboundReplyRecoveryCommand([
+        'recover-inbound-replies',
+        '--organisation-id',
+        'f0a9be0f-a5a2-47ac-a951-5ff419311dfa',
+        '--unexpected',
+        'value'
+      ])
+    ).toThrow('unexpected is not supported');
   });
 });

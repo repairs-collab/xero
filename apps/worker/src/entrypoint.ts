@@ -1,8 +1,9 @@
-import { eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 
 import {
   createDatabase,
   migrateDatabase,
+  operationalResetRuns,
   organisations
 } from '@bc5000/db';
 import { FetchHttpClient } from '@bc5000/integrations/http';
@@ -31,10 +32,16 @@ import { runInitialSync } from './handlers/xero-initial-sync.js';
 import { runInvoiceRefresh } from './handlers/xero-invoice-refresh.js';
 import { startWorker } from './main.js';
 import { createApprovedSmsRecoveryService } from './operations/approved-sms-recovery.js';
+import {
+  assertInboundReplyRecoveryComplete,
+  createInboundReplyRecoveryService
+} from './operations/inbound-reply-recovery.js';
 import { createOperationalResetService } from './operations/operational-reset.js';
+import { processInboundReply } from './services/inbound-reply-service.js';
 import {
   databaseUrlFromEnvironment,
   parseApprovedSmsRecoveryCommand,
+  parseInboundReplyRecoveryCommand,
   parseOperationalResetCommand,
   parseProviderCredentials
 } from './runtime-config.js';
@@ -52,8 +59,14 @@ async function main() {
     process.argv[2] === 'recover-approved-sms'
       ? parseApprovedSmsRecoveryCommand(process.argv.slice(2))
       : null;
+  const inboundReplyRecoveryCommand =
+    process.argv[2] === 'recover-inbound-replies'
+      ? parseInboundReplyRecoveryCommand(process.argv.slice(2))
+      : null;
   const operationalResetCommand =
-    process.argv[2] === 'migrate' || approvedSmsRecoveryCommand !== null
+    process.argv[2] === 'migrate' ||
+    approvedSmsRecoveryCommand !== null ||
+    inboundReplyRecoveryCommand !== null
       ? null
       : parseOperationalResetCommand(process.argv.slice(2));
   const databaseClient = createDatabase(databaseUrl);
@@ -63,6 +76,86 @@ async function main() {
       process.env.MIGRATIONS_DIR
     );
     await databaseClient.pool.end();
+    return;
+  }
+
+  if (inboundReplyRecoveryCommand !== null) {
+    try {
+      let recoveryOrganisationId = inboundReplyRecoveryCommand.organisationId;
+      if (recoveryOrganisationId === undefined) {
+        const organisationRows = await databaseClient.db
+          .select({ id: organisations.id })
+          .from(organisations)
+          .limit(2);
+        if (organisationRows.length !== 1 || organisationRows[0] === undefined) {
+          throw new Error(
+            'organisation-id is required unless exactly one organisation exists'
+          );
+        }
+        recoveryOrganisationId = organisationRows[0].id;
+      }
+      const credentials = parseProviderCredentials(process.env);
+      const sinch = new SinchClient({
+        http: new FetchHttpClient(),
+        credentials: credentials.sinch satisfies SinchCredentials,
+        clock: { now: () => new Date() }
+      });
+      const [latestCompletedReset] = await databaseClient.db
+        .select({ completedAt: operationalResetRuns.completedAt })
+        .from(operationalResetRuns)
+        .where(
+          and(
+            eq(
+              operationalResetRuns.organisationId,
+              recoveryOrganisationId
+            ),
+            eq(operationalResetRuns.status, 'COMPLETED')
+          )
+        )
+        .orderBy(desc(operationalResetRuns.completedAt))
+        .limit(1);
+      const recovery = createInboundReplyRecoveryService({
+        sinch,
+        processReply: async (event) => {
+          const receivedAt = new Date(event.receivedAt);
+          if (!Number.isFinite(receivedAt.getTime())) {
+            throw new Error('Sinch reply has an invalid received timestamp');
+          }
+          if (
+            latestCompletedReset?.completedAt !== null &&
+            latestCompletedReset?.completedAt !== undefined &&
+            receivedAt <= latestCompletedReset.completedAt
+          ) {
+            return 'skipped';
+          }
+          await processInboundReply(
+            databaseClient.db,
+            recoveryOrganisationId,
+            event,
+            {
+              recoverySource: 'SINCH_UNCONFIRMED_REPLIES',
+              replyId: event.replyId,
+              messageId: event.messageId
+            }
+          );
+          return 'processed';
+        }
+      });
+      const result = await recovery.run();
+      console.info('Inbound reply recovery result', {
+        organisationId: recoveryOrganisationId,
+        result
+      });
+      assertInboundReplyRecoveryComplete(result);
+      console.info('Inbound reply recovery command completed', {
+        organisationId: recoveryOrganisationId,
+        confirmed: result.confirmed,
+        processed: result.processed,
+        skipped: result.skipped
+      });
+    } finally {
+      await databaseClient.pool.end();
+    }
     return;
   }
 
