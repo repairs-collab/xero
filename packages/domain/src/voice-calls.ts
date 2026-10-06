@@ -47,7 +47,7 @@ export interface VoiceDraftInput {
   invoices: readonly VoiceDraftInvoiceInput[];
 }
 
-export interface VoiceDraftIncludedInvoice extends VoiceDraftInvoiceInput {}
+export type VoiceDraftIncludedInvoice = VoiceDraftInvoiceInput;
 
 export interface VoiceDraftExcludedInvoice {
   id: string;
