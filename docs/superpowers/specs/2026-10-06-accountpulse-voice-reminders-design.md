@@ -2,7 +2,7 @@
 
 **Date:** 6 October 2026
 
-**Status:** Approved in conversation; awaiting written-spec review
+**Status:** Approved after written-spec review on 7 October 2026
 
 **Scope:** Manually initiated, combined-account voice reminders using Retell AI over a VoIPline SIP trunk
 
@@ -264,6 +264,7 @@ Add `organisation_voice_settings`:
 - `enabled`;
 - `provider` (`RETELL` initially);
 - `secret_arn` for the Retell credential reference;
+- `preview_public_key` for the domain-restricted Retell browser preview (this is not a private API credential);
 - `agent_id` and pinned `agent_version`;
 - `voice_id` and operator-facing voice label;
 - `outbound_number`;
@@ -382,7 +383,7 @@ All reads and mutations include the active organisation identifier in database p
 
 - Credentials remain in AWS Secrets Manager and are fetched only by the server/worker task roles that require them.
 - Retell API calls originate from the worker; no private API key is exposed to the browser.
-- Preview access uses a short-lived, call-specific browser token or session and cannot initiate an external telephone call.
+- Preview access uses Retell's public browser-preview key, restricted to the production AccountPulse hostname (and staging hostname when required), plus a call-specific preview session that cannot initiate an external telephone call. Retell reCAPTCHA protection is enabled where supported.
 - Provider webhook signatures are verified against the unmodified body before processing.
 - Only the minimum data needed for the approved call is sent to Retell: destination, private prompt, account facts, call identifier, and transfer configuration.
 - No card, bank-account, Xero credential, payment-link token, internal note, dispute narrative, or other unrelated customer data is sent.
@@ -555,7 +556,7 @@ Rollback disables only the voice feature and stops new voice jobs. It preserves 
 - [Retell user DTMF](https://docs.retellai.com/build/user-dtmf)
 - [Retell dynamic variables](https://docs.retellai.com/build/dynamic-variables)
 - [Retell custom telephony](https://docs.retellai.com/deploy/custom-telephony)
-- [Retell browser voice integration](https://docs.retellai.com/deploy/chat-widget)
+- [Retell browser voice integration](https://docs.retellai.com/deploy/web-call)
 - [ACCC guidance for collectors and creditors](https://www.accc.gov.au/about-us/publications/guideline-on-debt-collection-for-collectors-and-creditors)
 - [ACCC contact and frequency guidance](https://www.accc.gov.au/consumers/debt/what-debt-collectors-can-and-cant-do)
 - [ACMA telemarketing and debt-collection distinction](https://www.acma.gov.au/say-no-to-telemarketers)
