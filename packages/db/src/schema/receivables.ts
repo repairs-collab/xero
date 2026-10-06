@@ -54,7 +54,7 @@ export const contactChannels = pgTable(
       .notNull()
       .references(() => contacts.id, { onDelete: 'cascade' }),
     kind: varchar('kind', { length: 16 })
-      .$type<'SMS' | 'EMAIL'>()
+      .$type<'SMS' | 'EMAIL' | 'VOICE'>()
       .notNull(),
     sourceValue: text('source_value').notNull(),
     normalisedValue: text('normalised_value').notNull(),

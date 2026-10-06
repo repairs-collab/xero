@@ -224,7 +224,7 @@ export const suppressions = pgTable(
       .notNull()
       .references(() => organisations.id, { onDelete: 'cascade' }),
     channel: varchar('channel', { length: 16 })
-      .$type<'SMS' | 'XERO_EMAIL'>()
+      .$type<'SMS' | 'XERO_EMAIL' | 'VOICE'>()
       .notNull(),
     normalisedDestination: text('normalised_destination').notNull(),
     source: varchar('source', { length: 32 }).notNull(),

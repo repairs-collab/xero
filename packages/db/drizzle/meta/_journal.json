@@ -50,6 +50,13 @@
       "when": 1790631609544,
       "tag": "0006_accountpulse_final_rollout",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1791321776080,
+      "tag": "0007_accountpulse_voice_calls",
+      "breakpoints": true
     }
   ]
 }

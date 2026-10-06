@@ -8,14 +8,23 @@ import { createDatabase, migrateDatabase } from '../client.js';
 import {
   approvals,
   auditEvents,
+  contactChannels,
   contacts,
   invoiceChases,
   invoices,
+  organisationVoiceSettings,
   organisations,
   outboundMessages,
+  providerConnections,
   reminderSequenceVersions,
   reminderSequences,
   stageInstances,
+  suppressions,
+  tasks,
+  voiceCallEvents,
+  voiceCallInvoices,
+  voiceCallRequests,
+  webhookEvents,
   users
 } from './index.js';
 import * as schema from './index.js';
@@ -131,6 +140,58 @@ const seedStageInstance = async () => {
   return { organisationId, contactId, invoiceId, stageInstanceId };
 };
 
+const seedUser = async (label: string): Promise<string> => {
+  const id = randomUUID();
+  await database.db.insert(users).values({
+    id,
+    cognitoSubject: randomUUID(),
+    email: id + '@example.invalid',
+    displayName: label
+  });
+  return id;
+};
+
+const seedVoiceCall = async (
+  input: {
+    organisationId: string;
+    contactId: string;
+    actorUserId: string;
+    idempotencyKey?: string;
+    providerCallId?: string;
+    state?: 'DRAFT' | 'APPROVED';
+    approvedScript?: string | null;
+    scriptHash?: string | null;
+    previewedAt?: Date | null;
+    approvedAt?: Date | null;
+  }
+): Promise<string> => {
+  const id = randomUUID();
+  await database.db.insert(voiceCallRequests).values({
+    id,
+    organisationId: input.organisationId,
+    contactId: input.contactId,
+    actorUserId: input.actorUserId,
+    destinationNumber: '+61400000000',
+    outboundNumber: '+61255501234',
+    combinedAmount: '100.0000',
+    currency: 'AUD',
+    approvedScript: input.approvedScript,
+    scriptHash: input.scriptHash,
+    scriptVersion: 1,
+    agentId: 'agent_accountpulse',
+    agentVersion: 1,
+    voiceId: 'voice_au',
+    voiceSettingsUpdatedAt: new Date('2026-10-07T00:00:00.000Z'),
+    transferTargetLabel: 'Main office',
+    idempotencyKey: input.idempotencyKey ?? randomUUID(),
+    state: input.state ?? 'DRAFT',
+    providerCallId: input.providerCallId,
+    previewedAt: input.previewedAt,
+    approvedAt: input.approvedAt
+  });
+  return id;
+};
+
 describe('database invariants', () => {
   it('prevents two outbound rows with the same organisation idempotency key', async () => {
     const { organisationId, stageInstanceId } = await seedStageInstance();
@@ -168,6 +229,203 @@ describe('database invariants', () => {
   it('exports reset manifests and rollout reconciliations', () => {
     expect(schema).toHaveProperty('operationalResetRuns');
     expect(schema).toHaveProperty('rolloutReconciliations');
+  });
+
+  it('keeps one voice settings row per organisation without secret material columns', async () => {
+    const { organisationId } = await seedStageInstance();
+    const userId = await seedUser('Voice settings administrator');
+    const values = {
+      organisationId,
+      enabled: false,
+      provider: 'RETELL' as const,
+      secretArn: 'arn:aws:secretsmanager:ap-southeast-2:123:secret:retell',
+      previewPublicKey: 'public_key_accountpulse',
+      agentId: 'agent_accountpulse',
+      agentVersion: 1,
+      voiceId: 'voice_au',
+      voiceLabel: 'Australian English',
+      outboundNumber: '+61255501234',
+      fallbackOfficeNumber: '+61255504321',
+      officeDestinationLabel: 'Main office',
+      timezone: 'Australia/Sydney',
+      weekdayStartLocal: '09:00',
+      weekdayEndLocal: '17:00',
+      voicemailTemplate:
+        'This is Mott Appliance Repairs calling about your account.',
+      updatedByUserId: userId
+    };
+
+    await database.db.insert(organisationVoiceSettings).values(values);
+    await expect(
+      database.db.insert(organisationVoiceSettings).values(values)
+    ).rejects.toMatchObject({ cause: { code: '23505' } });
+
+    const columns = await tableColumns('organisation_voice_settings');
+    expect(columns).toContain('preview_public_key');
+    expect(columns).not.toContain('api_key');
+    expect(columns).not.toContain('sip_password');
+  });
+
+  it('enforces organisation idempotency and provider call uniqueness for voice requests', async () => {
+    const { organisationId, contactId } = await seedStageInstance();
+    const actorUserId = await seedUser('Voice operator');
+    const idempotencyKey = 'voice-call-idempotency';
+    await seedVoiceCall({
+      organisationId,
+      contactId,
+      actorUserId,
+      idempotencyKey,
+      providerCallId: 'retell-call-1'
+    });
+
+    await expect(
+      seedVoiceCall({
+        organisationId,
+        contactId,
+        actorUserId,
+        idempotencyKey
+      })
+    ).rejects.toMatchObject({ cause: { code: '23505' } });
+    await expect(
+      seedVoiceCall({
+        organisationId,
+        contactId,
+        actorUserId,
+        providerCallId: 'retell-call-1'
+      })
+    ).rejects.toMatchObject({ cause: { code: '23505' } });
+  });
+
+  it('keeps one immutable invoice snapshot per voice call and invoice', async () => {
+    const { organisationId, contactId, invoiceId } =
+      await seedStageInstance();
+    const actorUserId = await seedUser('Voice snapshot operator');
+    const voiceCallId = await seedVoiceCall({
+      organisationId,
+      contactId,
+      actorUserId
+    });
+    const snapshot = {
+      voiceCallId,
+      organisationId,
+      invoiceId,
+      xeroInvoiceId: 'xero-invoice-snapshot',
+      invoiceNumber: 'INV-SNAPSHOT',
+      amountDue: '100.0000',
+      currency: 'AUD',
+      dueDate: '2026-08-31',
+      syncVersion: 1,
+      snapshotAt: new Date('2026-10-07T00:00:00.000Z')
+    };
+
+    await database.db.insert(voiceCallInvoices).values(snapshot);
+    await expect(
+      database.db.insert(voiceCallInvoices).values(snapshot)
+    ).rejects.toMatchObject({ cause: { code: '23505' } });
+  });
+
+  it('deduplicates normalised Retell events by organisation and provider key', async () => {
+    const { organisationId, contactId } = await seedStageInstance();
+    const actorUserId = await seedUser('Voice event operator');
+    const voiceCallId = await seedVoiceCall({
+      organisationId,
+      contactId,
+      actorUserId
+    });
+    const event = {
+      organisationId,
+      voiceCallId,
+      provider: 'RETELL' as const,
+      providerEventKey: 'call-1:call_started:1',
+      eventType: 'CALL_STARTED',
+      safeState: 'IN_PROGRESS' as const,
+      occurredAt: new Date('2026-10-07T00:01:00.000Z')
+    };
+
+    await database.db.insert(voiceCallEvents).values(event);
+    await expect(
+      database.db.insert(voiceCallEvents).values(event)
+    ).rejects.toMatchObject({ cause: { code: '23505' } });
+  });
+
+  it('requires previewed approved facts before a voice request can be approved', async () => {
+    const { organisationId, contactId } = await seedStageInstance();
+    const actorUserId = await seedUser('Voice approval operator');
+
+    await expect(
+      seedVoiceCall({
+        organisationId,
+        contactId,
+        actorUserId,
+        state: 'APPROVED',
+        approvedScript: null,
+        scriptHash: null,
+        previewedAt: null,
+        approvedAt: null
+      })
+    ).rejects.toMatchObject({ cause: { code: '23514' } });
+  });
+
+  it('round-trips VOICE channels, RETELL providers, and voice review task kinds', async () => {
+    const { organisationId, contactId } = await seedStageInstance();
+    const userId = await seedUser('Voice review administrator');
+    await database.db.insert(contactChannels).values({
+      organisationId,
+      contactId,
+      kind: 'VOICE',
+      sourceValue: '0400 000 000',
+      normalisedValue: '+61400000000'
+    });
+    await database.db.insert(suppressions).values({
+      organisationId,
+      channel: 'VOICE',
+      normalisedDestination: '+61400000000',
+      source: 'WRONG_PERSON',
+      reason: 'Wrong person reported',
+      consentState: 'SUPPRESSED',
+      recordedByUserId: userId
+    });
+    await database.db.insert(providerConnections).values({
+      organisationId,
+      provider: 'RETELL',
+      secretArn: 'arn:aws:secretsmanager:ap-southeast-2:123:secret:retell'
+    });
+    await database.db.insert(webhookEvents).values({
+      organisationId,
+      provider: 'RETELL',
+      providerEventKey: randomUUID(),
+      bodyHash: 'sha256:retell',
+      signatureValid: true,
+      providerPayload: {}
+    });
+    await database.db.insert(tasks).values([
+      {
+        organisationId,
+        contactId,
+        kind: 'VOICE_CONTACT_REVIEW',
+        summary: 'Verify the customer telephone number'
+      },
+      {
+        organisationId,
+        contactId,
+        kind: 'VOICE_OUTCOME_REVIEW',
+        summary: 'Reconcile the voice call outcome'
+      }
+    ]);
+
+    const channel = await database.pool.query<{ kind: string }>(
+      'select kind from contact_channels where organisation_id = $1 and contact_id = $2',
+      [organisationId, contactId]
+    );
+    const taskKinds = await database.pool.query<{ kind: string }>(
+      'select kind from tasks where organisation_id = $1 order by kind',
+      [organisationId]
+    );
+    expect(channel.rows.map((row) => row.kind)).toContain('VOICE');
+    expect(taskKinds.rows.map((row) => row.kind)).toEqual([
+      'VOICE_CONTACT_REVIEW',
+      'VOICE_OUTCOME_REVIEW'
+    ]);
   });
 
   it('keeps an existing live organisation controlled after rollout migration', async () => {
