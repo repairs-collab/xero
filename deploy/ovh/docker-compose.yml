@@ -1,0 +1,108 @@
+name: bc5000
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: bc5000-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DATABASE_NAME:?DATABASE_NAME is required}
+      POSTGRES_USER: ${DATABASE_USER:?DATABASE_USER is required}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - /srv/data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [private]
+
+  web:
+    image: ${ACCOUNT_PULSE_WEB_IMAGE:?ACCOUNT_PULSE_WEB_IMAGE is required}
+    container_name: bc5000-web
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AWS_REGION: ${AWS_REGION:?AWS_REGION is required}
+      DATABASE_NAME: ${DATABASE_NAME:?DATABASE_NAME is required}
+      SEND_MODE: ${SEND_MODE:?SEND_MODE is required}
+      COGNITO_DOMAIN: ${COGNITO_DOMAIN:?COGNITO_DOMAIN is required}
+      DATABASE_HOST: postgres
+      DATABASE_PORT: "5432"
+      COGNITO_REDIRECT_URI: ${COGNITO_REDIRECT_URI:?COGNITO_REDIRECT_URI is required}
+      NODE_ENV: ${NODE_ENV:?NODE_ENV is required}
+      COGNITO_ISSUER: ${COGNITO_ISSUER:?COGNITO_ISSUER is required}
+      COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID:?COGNITO_CLIENT_ID is required}
+      COGNITO_USER_POOL_ID: ${COGNITO_USER_POOL_ID:?COGNITO_USER_POOL_ID is required}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      DATABASE_USER: ${DATABASE_USER:?DATABASE_USER is required}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+      SESSION_SECRET_BASE64: ${SESSION_SECRET_BASE64:?SESSION_SECRET_BASE64 is required}
+      XERO_WEBHOOK_KEY: ${XERO_WEBHOOK_KEY:?XERO_WEBHOOK_KEY is required}
+      SINCH_CALLBACK_PUBLIC_KEYS_JSON: ${SINCH_CALLBACK_PUBLIC_KEYS_JSON:?SINCH_CALLBACK_PUBLIC_KEYS_JSON is required}
+      SINCH_WEBHOOK_TOKEN: ${SINCH_WEBHOOK_TOKEN:?SINCH_WEBHOOK_TOKEN is required}
+      RETELL_API_KEY: ${RETELL_API_KEY:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+    networks: [private]
+
+  worker:
+    image: ${ACCOUNT_PULSE_WORKER_IMAGE:?ACCOUNT_PULSE_WORKER_IMAGE is required}
+    container_name: bc5000-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: &worker-environment
+      AWS_REGION: ${AWS_REGION:?AWS_REGION is required}
+      DATABASE_NAME: ${DATABASE_NAME:?DATABASE_NAME is required}
+      SEND_MODE: ${SEND_MODE:?SEND_MODE is required}
+      DATABASE_HOST: postgres
+      DATABASE_PORT: "5432"
+      NODE_ENV: ${NODE_ENV:?NODE_ENV is required}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?PUBLIC_BASE_URL is required}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      DATABASE_USER: ${DATABASE_USER:?DATABASE_USER is required}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+      XERO_API_CREDENTIALS: ${XERO_API_CREDENTIALS:?XERO_API_CREDENTIALS is required}
+      SINCH_API_CREDENTIALS: ${SINCH_API_CREDENTIALS:?SINCH_API_CREDENTIALS is required}
+      RETELL_API_KEY: ${RETELL_API_KEY:-}
+    networks: [private]
+
+  voice-monitor:
+    profiles: [monitor]
+    image: ${ACCOUNT_PULSE_WORKER_IMAGE:?ACCOUNT_PULSE_WORKER_IMAGE is required}
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["node", "/app/worker.mjs", "voice-monitor"]
+    environment:
+      <<: *worker-environment
+      RETELL_API_KEY: ${RETELL_API_KEY:-}
+      VOICE_QUEUE_AGE_ALARM_SECONDS: ${VOICE_QUEUE_AGE_ALARM_SECONDS:-300}
+      RETELL_WEBHOOK_LAG_ALARM_SECONDS: ${RETELL_WEBHOOK_LAG_ALARM_SECONDS:-300}
+    networks: [private]
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: bc5000-caddy
+    restart: unless-stopped
+    depends_on: [web]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - /opt/bc5000/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /srv/data/caddy/data:/data
+      - /srv/data/caddy/config:/config
+    networks: [private]
+
+networks:
+  private:
+    driver: bridge

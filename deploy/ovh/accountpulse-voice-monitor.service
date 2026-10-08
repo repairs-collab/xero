@@ -1,0 +1,16 @@
+[Unit]
+Description=AccountPulse voice operational monitor
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+Environment=VOICE_QUEUE_AGE_ALARM_SECONDS=300
+Environment=RETELL_WEBHOOK_LAG_ALARM_SECONDS=300
+Environment=RETELL_SIGNATURE_FAILURE_ALARM_COUNT=3
+ExecStart=/usr/local/sbin/bc5000-compose --profile monitor run --rm voice-monitor
+ExecStartPost=/opt/bc5000/accountpulse-voice-log-monitor.sh
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

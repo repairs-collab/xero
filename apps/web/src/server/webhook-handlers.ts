@@ -144,6 +144,11 @@ export function createRetellWebhookHandler(
   dependencies: CommonDependencies & {
     apiKey: string;
     clock: { now(): Date };
+    recordMetric?: (metric: {
+      metric: 'retell_webhook_signature_failures_total';
+      value: 1;
+      organisationId: string;
+    }) => void;
   }
 ): (request: Request) => Promise<Response> {
   return async (request) => {
@@ -157,6 +162,13 @@ export function createRetellWebhookHandler(
         now: dependencies.clock.now()
       })
     ) {
+      const metric = {
+        metric: 'retell_webhook_signature_failures_total' as const,
+        value: 1 as const,
+        organisationId: dependencies.organisationId
+      };
+      if (dependencies.recordMetric) dependencies.recordMetric(metric);
+      else console.warn('AccountPulse operational metric', metric);
       return new Response('', { status: 401 });
     }
 

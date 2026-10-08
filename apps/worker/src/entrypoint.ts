@@ -41,6 +41,7 @@ import {
   createInboundReplyRecoveryService
 } from './operations/inbound-reply-recovery.js';
 import { createOperationalResetService } from './operations/operational-reset.js';
+import { evaluateVoiceMonitor } from './operations/voice-monitor.js';
 import { processInboundReply } from './services/inbound-reply-service.js';
 import {
   createEnvironmentSecretReader,
@@ -60,6 +61,7 @@ const required = (name: string): string => {
 
 async function main() {
   const databaseUrl = databaseUrlFromEnvironment(process.env);
+  const voiceMonitorCommand = process.argv[2] === 'voice-monitor';
   const approvedSmsRecoveryCommand =
     process.argv[2] === 'recover-approved-sms'
       ? parseApprovedSmsRecoveryCommand(process.argv.slice(2))
@@ -70,6 +72,7 @@ async function main() {
       : null;
   const operationalResetCommand =
     process.argv[2] === 'migrate' ||
+    voiceMonitorCommand ||
     approvedSmsRecoveryCommand !== null ||
     inboundReplyRecoveryCommand !== null
       ? null
@@ -81,6 +84,54 @@ async function main() {
       process.env.MIGRATIONS_DIR
     );
     await databaseClient.pool.end();
+    return;
+  }
+
+  if (voiceMonitorCommand) {
+    try {
+      const result = await databaseClient.pool.query<{
+        unknown_outcomes: string;
+        provider_failures: string;
+        queue_age_seconds: string;
+        webhook_lag_seconds: string;
+      }>(`select
+        (select count(*)::text from voice_call_requests where state = 'UNKNOWN') as unknown_outcomes,
+        (select count(*)::text from voice_call_requests where state = 'FAILED' and updated_at >= now() - interval '15 minutes') as provider_failures,
+        (select coalesce(extract(epoch from (now() - min(created_on))), 0)::text from pgboss.job where name in ('voice-call.execute', 'voice-call.reconcile') and state in ('created', 'retry')) as queue_age_seconds,
+        (select coalesce(extract(epoch from (now() - min(received_at))), 0)::text from webhook_events where provider = 'RETELL' and processed_at is null) as webhook_lag_seconds`);
+      const row = result.rows[0];
+      if (!row) throw new Error('Voice monitor query returned no result');
+      const threshold = (name: string, fallback: number): number => {
+        const value = Number(process.env[name] ?? fallback);
+        if (!Number.isFinite(value) || value < 0) {
+          throw new Error(`${name} must be a non-negative number`);
+        }
+        return value;
+      };
+      const report = evaluateVoiceMonitor(
+        {
+          voiceUnknownOutcomesTotal: Number(row.unknown_outcomes),
+          voiceProviderFailuresTotal: Number(row.provider_failures),
+          voiceQueueAgeSeconds: Math.floor(Number(row.queue_age_seconds)),
+          retellWebhookLagSeconds: Math.floor(Number(row.webhook_lag_seconds))
+        },
+        {
+          queueAgeSeconds: threshold('VOICE_QUEUE_AGE_ALARM_SECONDS', 300),
+          webhookLagSeconds: threshold('RETELL_WEBHOOK_LAG_ALARM_SECONDS', 300)
+        }
+      );
+      for (const metric of report.metrics) {
+        console.info('AccountPulse operational metric', metric);
+      }
+      if (!report.healthy) {
+        console.error('AccountPulse voice monitor alarm', {
+          alarms: report.alarms
+        });
+        process.exitCode = 2;
+      }
+    } finally {
+      await databaseClient.pool.end();
+    }
     return;
   }
 

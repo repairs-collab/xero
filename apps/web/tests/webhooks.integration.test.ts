@@ -384,12 +384,14 @@ describe('public webhook endpoints', () => {
     const suppliedSignature =
       signature === 'signed' ? retellSignature(body) : signature;
     const beforeQueued = queued.length;
+    const recordMetric = vi.fn();
     const handler = createRetellWebhookHandler({
       organisationId,
       apiKey: retellApiKey,
       clock: { now: () => clockTime },
       repository: new PostgresWebhookRepository(client.db),
-      queue
+      queue,
+      recordMetric
     });
 
     const response = await handler(
@@ -401,6 +403,11 @@ describe('public webhook endpoints', () => {
     );
 
     expect(response.status).toBe(401);
+    expect(recordMetric).toHaveBeenCalledWith({
+      metric: 'retell_webhook_signature_failures_total',
+      value: 1,
+      organisationId
+    });
     expect(queued).toHaveLength(beforeQueued);
     const stored = await client.db
       .select()
