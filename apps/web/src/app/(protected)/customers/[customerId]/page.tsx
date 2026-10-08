@@ -15,6 +15,7 @@ import {
   pauses,
   paymentPromises,
   PostgresActivityRepository,
+  PostgresVoiceCallRepository,
   reminderSequences,
   reminderSequenceVersions,
   suppressions
@@ -22,6 +23,7 @@ import {
 import { selectPreferredSmsChannel } from '@bc5000/domain';
 
 import { CustomerTimeline } from '../../../../components/customer-timeline.js';
+import { getJobQueue } from '../../../../server/job-runtime.js';
 import {
   getDatabaseClient,
   requireWebSession
@@ -37,6 +39,15 @@ import {
   setApprovedPhoneOverride
 } from './actions.js';
 import { createManualReminderView } from './manual-reminder-view.js';
+import {
+  approveVoiceReminder,
+  prepareVoiceReminder
+} from './voice/actions.js';
+import { createVoiceCallService } from './voice/voice-call-service.js';
+import {
+  VoiceReminderPanel,
+  VoiceReminderStart
+} from './voice/voice-reminder-panel.js';
 
 const hidden = (organisationId: string, customerId: string) => (
   <>
@@ -53,8 +64,13 @@ export default async function CustomerPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { customerId } = await params;
-  const phoneEditor = (await searchParams).editPhone;
+  const query = await searchParams;
+  const phoneEditor = query.editPhone;
   const showPhoneEditor = (Array.isArray(phoneEditor) ? phoneEditor[0] : phoneEditor) === '1';
+  const voiceParameter = query.voice;
+  const voiceIdempotencyKey = Array.isArray(voiceParameter)
+    ? voiceParameter[0]
+    : voiceParameter;
   const session = await requireWebSession(
     new Request('http://localhost/', { headers: await headers() })
   );
@@ -72,6 +88,22 @@ export default async function CustomerPage({
     )
     .limit(1);
   if (!customer) notFound();
+
+  const voiceDraft =
+    voiceIdempotencyKey === undefined || voiceIdempotencyKey.trim() === ''
+      ? null
+      : await createVoiceCallService({
+          database: db,
+          repository: new PostgresVoiceCallRepository(db),
+          publisher: await getJobQueue(),
+          session,
+          clock: { now: () => new Date() },
+          holidays: { list: () => [] }
+        }).prepare({
+          organisationId,
+          customerId,
+          idempotencyKey: voiceIdempotencyKey
+        });
 
   const [
     channels,
@@ -228,10 +260,25 @@ export default async function CustomerPage({
         <div className={isPaused ? 'status-chip status-chip--paused' : 'status-chip'}>
           {isPaused ? 'Chasing paused' : 'Chasing active'}
         </div>
+        {voiceDraft === null ? (
+          <VoiceReminderStart
+            organisationId={organisationId}
+            customerId={customerId}
+            idempotencyKey={randomUUID()}
+            action={prepareVoiceReminder}
+          />
+        ) : null}
       </header>
 
       <div className="customer-layout">
         <main>
+          {voiceDraft === null ? null : (
+            <VoiceReminderPanel
+              organisationId={organisationId}
+              draft={voiceDraft}
+              action={approveVoiceReminder}
+            />
+          )}
           <section className="panel">
             <div className="panel__heading">
               <div>

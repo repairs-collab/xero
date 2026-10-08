@@ -218,13 +218,30 @@ const assertDraftSources = async (
     );
   const sourceById = new Map(sourceRows.map((invoice) => [invoice.id, invoice]));
 
+  const canonicalDecimal = (value: string): string | null => {
+    const match = /^([+-]?)(\d+)(?:\.(\d*))?$/.exec(value.trim());
+    if (match === null) return null;
+
+    const integer = (match[2] ?? '').replace(/^0+(?=\d)/, '') || '0';
+    const fraction = (match[3] ?? '').replace(/0+$/, '');
+    const isZero = integer === '0' && fraction === '';
+    const sign = match[1] === '-' && !isZero ? '-' : '';
+    return `${sign}${integer}${fraction === '' ? '' : `.${fraction}`}`;
+  };
+
+  const decimalValuesEqual = (left: string, right: string): boolean => {
+    const canonicalLeft = canonicalDecimal(left);
+    const canonicalRight = canonicalDecimal(right);
+    return canonicalLeft !== null && canonicalLeft === canonicalRight;
+  };
+
   for (const snapshot of input.invoices) {
     const source = sourceById.get(snapshot.invoiceId);
     if (
       source === undefined ||
       source.xeroInvoiceId !== snapshot.xeroInvoiceId ||
       source.invoiceNumber !== snapshot.invoiceNumber ||
-      source.amountDue !== snapshot.amountDue ||
+      !decimalValuesEqual(source.amountDue, snapshot.amountDue) ||
       source.currency !== snapshot.currency ||
       source.dueDate !== snapshot.dueDate ||
       source.syncVersion !== snapshot.syncVersion

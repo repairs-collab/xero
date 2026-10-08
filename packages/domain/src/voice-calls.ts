@@ -62,6 +62,9 @@ export interface VoiceDraftResult {
   currency: string;
 }
 
+export const normaliseVoiceAmount = (value: string): string =>
+  new Decimal(value).toFixed(2);
+
 const voiceInvoiceExclusionReasons = (
   invoice: VoiceDraftInvoiceInput,
   input: VoiceDraftInput
@@ -185,7 +188,7 @@ export function buildVoiceCallDetailVariables(
 ): VoiceCallDetailVariables {
   return {
     callbackNumber: input.callbackNumber,
-    combinedAmount: new Decimal(input.combinedAmount).toFixed(2),
+    combinedAmount: normaliseVoiceAmount(input.combinedAmount),
     currency: input.currency,
     invoices: [...input.invoices]
       .sort(
@@ -195,7 +198,7 @@ export function buildVoiceCallDetailVariables(
       )
       .map((invoice) => ({
         invoiceNumber: invoice.invoiceNumber,
-        amountDue: new Decimal(invoice.amountDue).toFixed(2)
+        amountDue: normaliseVoiceAmount(invoice.amountDue)
       }))
   };
 }
