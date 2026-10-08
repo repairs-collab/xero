@@ -33,6 +33,19 @@ importers:
         specifier: 4.1.2
         version: 4.1.2(@types/node@24.13.5)(vite@8.3.0(@types/node@24.13.5)(esbuild@0.25.12))
 
+  apps/voice-gateway:
+    dependencies:
+      '@bc5000/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      drizzle-orm:
+        specifier: 0.45.2
+        version: 0.45.2(@types/pg@8.23.1)(pg@8.23.0)
+    devDependencies:
+      '@types/node':
+        specifier: ^24.13.5
+        version: 24.13.5
+
   apps/web:
     dependencies:
       '@aws-sdk/client-cognito-identity-provider':

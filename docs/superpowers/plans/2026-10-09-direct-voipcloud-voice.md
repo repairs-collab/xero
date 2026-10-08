@@ -194,21 +194,21 @@ Commit: `feat: add VoIPcloud calling adapter`
 - Produces `GatewayCallEvent` values with stable `eventId`, `gatewayCallId`, monotonic sequence, safe type, safe code, and timestamp.
 - Produces `advanceGatewayCall(state, event): GatewayCallState` as a pure monotonic transition function.
 
-- [ ] **Step 1: Write failing HMAC, replay, idempotency, and state tests**
+- [x] **Step 1: Write failing HMAC, replay, idempotency, and state tests**
 
 Assert timestamp windows, constant-time signature verification, body integrity, replay rejection, same-idempotency reuse, different-command conflict, one active call per user, terminal-state monotonicity, and no protected fields in event metadata.
 
-- [ ] **Step 2: Run the gateway tests and confirm they fail**
+- [x] **Step 2: Run the gateway tests and confirm they fail**
 
 Run: `pnpm exec vitest run apps/voice-gateway/tests`
 
 Expected: FAIL because the app does not exist.
 
-- [ ] **Step 3: Implement the control API and repository**
+- [x] **Step 3: Implement the control API and repository**
 
 Persist the session before provider submission using PostgreSQL and return the local gateway call ID even when the provider result is ambiguous. The route validates a locked flow version and rejects arbitrary script or audio content.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run:
 
