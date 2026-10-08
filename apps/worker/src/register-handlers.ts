@@ -63,7 +63,12 @@ const safeErrorMessages: Record<string, string> = {
   SinchAuthenticationFailure: 'Sinch authentication failed',
   SinchRateLimited: 'Sinch rate limit exceeded',
   SinchRequestFailure: 'Sinch request failed',
-  SinchTransientFailure: 'Sinch temporarily unavailable'
+  SinchTransientFailure: 'Sinch temporarily unavailable',
+  RetellAuthenticationError: 'Retell authentication failed',
+  RetellRateLimitedError: 'Retell rate limit exceeded',
+  RetellPermanentError: 'Retell request failed',
+  RetellTransientError: 'Retell temporarily unavailable',
+  RetellUnknownDispatchError: 'Retell submission outcome is unknown'
 };
 
 const safeErrorMessage = (error: unknown): string =>

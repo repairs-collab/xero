@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  createEnvironmentSecretReader,
   databaseUrlFromEnvironment,
   parseApprovedSmsRecoveryCommand,
   parseInboundReplyRecoveryCommand,
@@ -9,6 +10,33 @@ import {
 } from './runtime-config.js';
 
 describe('worker runtime configuration', () => {
+  it('resolves a hosting-neutral environment secret reference', async () => {
+    const reader = createEnvironmentSecretReader({
+      RETELL_API_KEY: 'private-retell-key'
+    });
+
+    await expect(reader.read('env:RETELL_API_KEY')).resolves.toBe(
+      'private-retell-key'
+    );
+    await expect(reader.read('RETELL_API_KEY')).resolves.toBe(
+      'private-retell-key'
+    );
+  });
+
+  it('rejects unsafe or unavailable secret references without exposing them', async () => {
+    const reader = createEnvironmentSecretReader({});
+
+    await expect(reader.read('env:retell-api-key')).rejects.toThrow(
+      'Secret reference is invalid'
+    );
+    const missing = await reader.read('env:RETELL_API_KEY').catch(
+      (error: unknown) => error
+    );
+    expect(missing).toBeInstanceOf(Error);
+    expect((missing as Error).message).toBe('Managed secret is unavailable');
+    expect((missing as Error).message).not.toContain('RETELL_API_KEY');
+  });
+
   it('constructs a URL without corrupting reserved credential characters', () => {
     expect(
       databaseUrlFromEnvironment({

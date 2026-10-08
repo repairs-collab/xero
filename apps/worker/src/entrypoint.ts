@@ -4,9 +4,11 @@ import {
   createDatabase,
   migrateDatabase,
   operationalResetRuns,
-  organisations
+  organisations,
+  PostgresVoiceCallRepository
 } from '@bc5000/db';
 import { FetchHttpClient } from '@bc5000/integrations/http';
+import { RetellClient } from '@bc5000/integrations/retell';
 import {
   SinchClient,
   type SinchCredentials
@@ -26,6 +28,7 @@ import { executeReminder } from './handlers/reminder-execute.js';
 import { runReminderCycle } from './handlers/automatic-reminder-dispatch.js';
 import { applyRetention } from './handlers/retention-apply.js';
 import { executeTestSms } from './handlers/test-sms-execute.js';
+import { executeVoiceCall } from './handlers/voice-call-execute.js';
 import { processWebhookEvent } from './handlers/webhook-process.js';
 import { runIncrementalSync } from './handlers/xero-incremental-sync.js';
 import { runInitialSync } from './handlers/xero-initial-sync.js';
@@ -39,6 +42,7 @@ import {
 import { createOperationalResetService } from './operations/operational-reset.js';
 import { processInboundReply } from './services/inbound-reply-service.js';
 import {
+  createEnvironmentSecretReader,
   databaseUrlFromEnvironment,
   parseApprovedSmsRecoveryCommand,
   parseInboundReplyRecoveryCommand,
@@ -230,6 +234,10 @@ async function main() {
   });
   const clock = { now: () => new Date() };
   const syncDependencies = { database: databaseClient.db, xero, clock };
+  const voiceCallRepository = new PostgresVoiceCallRepository(
+    databaseClient.db
+  );
+  const voiceSecretReader = createEnvironmentSecretReader(process.env);
   const queue = new DurableJobQueue({
     databaseUrl,
     logger: console
@@ -290,6 +298,21 @@ async function main() {
       [jobNames.testSmsExecute]: (payload) =>
         executeTestSms(
           { database: databaseClient.db, clock, sinch, callbackUrl },
+          payload
+        ).then(() => undefined),
+      [jobNames.voiceCallExecute]: (payload) =>
+        executeVoiceCall(
+          {
+            database: databaseClient.db,
+            repository: voiceCallRepository,
+            clock,
+            secrets: voiceSecretReader,
+            providerFactory: {
+              create: (apiKey) => new RetellClient({ http, apiKey })
+            },
+            publisher: queue,
+            holidays: { list: () => [] }
+          },
           payload
         ).then(() => undefined),
       [jobNames.webhookProcess]: (payload) =>
