@@ -240,19 +240,19 @@ Commit: `feat: add private voice gateway control plane`
 - Produces `PiperRenderer.render(input: { voiceId: string; segments: readonly SpeechSegment[]; outputId: string }): Promise<RenderedAudio>`.
 - Produces `TemporaryAudioStore.purge(callId)` and `purgeExpired(maxAgeMs)`.
 
-- [ ] **Step 1: Write failing formatter and safety tests**
+- [x] **Step 1: Write failing formatter and safety tests**
 
 Assert controlled pronunciation for the approved account name, letters, digits, punctuation, zero values, cents, multiple invoices, maximum invoice count, unsupported characters, and oversized duration. Assert that only the approved account name reaches the opening and no overdue claim, fee, threat, negotiation text, or unapproved field reaches any speech segment.
 
-- [ ] **Step 2: Write failing renderer and cleanup tests**
+- [x] **Step 2: Write failing renderer and cleanup tests**
 
 Use a fake Piper executable to assert argument safety, pinned voice/model lookup, mono WAV validation, 8 kHz Asterisk conversion, tmpfs-only paths, terminal purge, startup purge, one-hour expiry, and cleanup after synthesis failure.
 
-- [ ] **Step 3: Implement with pinned Piper 1.8 and licensed voice assets**
+- [x] **Step 3: Implement with pinned Piper 1.8 and licensed voice assets**
 
 Pin image dependencies and checksums. Record the Piper GPL licence and the selected model card; do not add a voice model until its commercial-use terms have been reviewed. Never pass untrusted text through a shell command string.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run:
 

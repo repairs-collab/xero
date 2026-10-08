@@ -6,7 +6,8 @@
   "exports": {
     ".": "./src/contracts.ts",
     "./call-state": "./src/call-state.ts",
-    "./signatures": "./src/signatures.ts"
+    "./signatures": "./src/signatures.ts",
+    "./speech": "./src/speech/formatter.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
