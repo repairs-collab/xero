@@ -6,6 +6,22 @@ export interface FreePreviewVoice {
   default?: boolean;
 }
 
+export interface FreePreviewPlayback {
+  script: string;
+  voice: FreePreviewVoice | null;
+  lang: string;
+  rate: number;
+  pitch: number;
+  onEnd: () => void;
+  onError: () => void;
+}
+
+export interface FreePreviewPlayer {
+  voices: readonly FreePreviewVoice[];
+  cancel: () => void;
+  speak: (input: FreePreviewPlayback) => void;
+}
+
 const fictionalInvoiceDetails =
   'Invoice DEMO-1001 has an outstanding amount of 120 Australian dollars and 50 cents. Invoice DEMO-1002 has an outstanding amount of 80 Australian dollars and 5 cents. The total outstanding amount is 200 Australian dollars and 55 cents.';
 
@@ -51,3 +67,23 @@ export function describeFreePreviewVoice(
   return `Australian voice unavailable; using ${voice.name} (${voice.lang})`;
 }
 
+export function playFreeVoicePreviewScript(input: {
+  player: FreePreviewPlayer | null;
+  script: string;
+  onEnd: () => void;
+  onError: () => void;
+}): boolean {
+  if (input.player === null) return false;
+  const voice = selectFreePreviewVoice(input.player.voices);
+  input.player.cancel();
+  input.player.speak({
+    script: input.script,
+    voice,
+    lang: voice?.lang ?? 'en-AU',
+    rate: 0.95,
+    pitch: 1,
+    onEnd: input.onEnd,
+    onError: input.onError
+  });
+  return true;
+}

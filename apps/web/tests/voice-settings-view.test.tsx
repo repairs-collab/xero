@@ -11,8 +11,10 @@ import {
 import {
   describeFreePreviewVoice,
   freeVoicePreviewScripts,
+  playFreeVoicePreviewScript,
   selectFreePreviewVoice
 } from '../src/app/(protected)/settings/voice/free-voice-flow.js';
+import { FreeVoiceFlowPreview } from '../src/app/(protected)/settings/voice/free-voice-flow-preview.js';
 import { VoiceSettingsForm } from '../src/app/(protected)/settings/voice/voice-settings-form.js';
 import type { VoiceSettingsView } from '../src/app/(protected)/settings/voice/voice-settings.js';
 import { settingsCardsForRole } from '../src/app/(protected)/settings/settings-cards.js';
@@ -232,5 +234,73 @@ describe('voice settings view', () => {
     expect(describeFreePreviewVoice(null)).toBe(
       "Australian voice unavailable; using this device's default voice"
     );
+  });
+
+  it('cancels prior speech before playing a sample and safely rejects unsupported browsers', () => {
+    const events: string[] = [];
+    let playback:
+      | {
+          script: string;
+          voice: { name: string; lang: string } | null;
+          lang: string;
+          rate: number;
+          pitch: number;
+        }
+      | undefined;
+    const australianVoice = {
+      name: 'Microsoft Natasha',
+      lang: 'en-AU',
+      default: false
+    };
+
+    expect(
+      playFreeVoicePreviewScript({
+        player: {
+          voices: [
+            { name: 'English UK', lang: 'en-GB', default: true },
+            australianVoice
+          ],
+          cancel: () => events.push('cancel'),
+          speak: (input) => {
+            events.push('speak');
+            playback = input;
+          }
+        },
+        script: 'Fictional sample',
+        onEnd: () => undefined,
+        onError: () => undefined
+      })
+    ).toBe(true);
+    expect(events).toEqual(['cancel', 'speak']);
+    expect(playback).toMatchObject({
+      script: 'Fictional sample',
+      voice: australianVoice,
+      lang: 'en-AU',
+      rate: 0.95,
+      pitch: 1
+    });
+    expect(
+      playFreeVoicePreviewScript({
+        player: null,
+        script: 'Fictional sample',
+        onEnd: () => undefined,
+        onError: () => undefined
+      })
+    ).toBe(false);
+  });
+
+  it('renders a browser-only keypad preview without customer or telephone inputs', () => {
+    const html = renderToStaticMarkup(createElement(FreeVoiceFlowPreview));
+
+    expect(html).toContain('Free browser voice preview');
+    expect(html).toContain('Start preview');
+    expect(html).toContain('Press 1 · Hear fictional invoice details');
+    expect(html).toContain('Press 2 · Simulate office transfer');
+    expect(html).toContain('Simulate voicemail');
+    expect(html).toContain('End preview');
+    expect(html).toContain('No customer will be called');
+    expect(html).toContain('No provider account is required');
+    expect(html).not.toMatch(/name="customer|name="phone|name="destination/i);
+    expect(html).not.toContain('href="tel:');
   });
 });

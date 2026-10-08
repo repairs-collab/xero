@@ -43,7 +43,7 @@
 - [x] **Step 2: Run** `pnpm vitest run apps/web/tests/voice-settings-view.test.tsx` and verify failure is caused by the missing module/exports.
 - [x] **Step 3: Implement the pure preview module** with literal, fictional content and deterministic voice selection.
 - [x] **Step 4: Run** `pnpm vitest run apps/web/tests/voice-settings-view.test.tsx`; expected PASS.
-- [ ] **Step 5: Commit** with message `feat: add free voice preview flow`.
+- [x] **Step 5: Commit** with message `feat: add free voice preview flow`.
 
 ### Task 2: Browser-only interactive preview
 
@@ -57,11 +57,11 @@
 - Consumes: `freeVoicePreviewScripts`, `selectFreePreviewVoice`, and `describeFreePreviewVoice` from Task 1.
 - Produces: `FreeVoiceFlowPreview`, rendered unconditionally on the Administrator voice-settings page.
 
-- [ ] **Step 1: Write a failing view test** proving the preview is labelled free/browser-only, contains simulated option 1, option 2, voicemail, and end controls, and contains no telephone-number/customer input.
-- [ ] **Step 2: Run** `pnpm vitest run apps/web/tests/voice-settings-view.test.tsx`; expected FAIL because the component does not exist.
-- [ ] **Step 3: Implement the Client Component** using `window.speechSynthesis`, cancelling before each utterance, preferring the selected Australian voice, and never invoking network or telephone APIs.
-- [ ] **Step 4: Render it unconditionally** on the settings page and add responsive AccountPulse-themed styling.
-- [ ] **Step 5: Run** `pnpm vitest run apps/web/tests/voice-settings-view.test.tsx`; expected PASS.
-- [ ] **Step 6: Run** `pnpm --filter @bc5000/web typecheck`; expected PASS.
-- [ ] **Step 7: Run** `pnpm --filter @bc5000/web build`; expected PASS.
-- [ ] **Step 8: Commit** with message `feat: add browser voice flow preview`.
+- [x] **Step 1: Write a failing view test** proving the preview is labelled free/browser-only, contains simulated option 1, option 2, voicemail, and end controls, and contains no telephone-number/customer input.
+- [x] **Step 2: Run** `pnpm vitest run apps/web/tests/voice-settings-view.test.tsx`; expected FAIL because the component does not exist.
+- [x] **Step 3: Implement the Client Component** using `window.speechSynthesis`, cancelling before each utterance, preferring the selected Australian voice, and never invoking network or telephone APIs.
+- [x] **Step 4: Render it unconditionally** on the settings page and add responsive AccountPulse-themed styling.
+- [x] **Step 5: Run** `pnpm vitest run apps/web/tests/voice-settings-view.test.tsx`; expected PASS.
+- [x] **Step 6: Run** `pnpm --filter @bc5000/web typecheck`; expected PASS.
+- [x] **Step 7: Run** `pnpm --filter @bc5000/web build`; expected PASS.
+- [x] **Step 8: Commit** with message `feat: add browser voice flow preview`.

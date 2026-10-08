@@ -23,6 +23,7 @@ import { createVoiceSettingsService } from './voice-settings.js';
 import { VoiceSettingsForm } from './voice-settings-form.js';
 import { VoiceTestCallPanel } from './voice-test-call-panel.js';
 import { createVoiceTestCallService } from './voice-test-call-service.js';
+import { FreeVoiceFlowPreview } from './free-voice-flow-preview.js';
 
 export default async function VoiceSettingsPage({
   searchParams
@@ -114,6 +115,8 @@ export default async function VoiceSettingsPage({
           customer&apos;s saved contact details or calling frequency.
         </div>
       ) : null}
+
+      <FreeVoiceFlowPreview />
 
       <VoiceSettingsForm
         organisationId={organisationId}
