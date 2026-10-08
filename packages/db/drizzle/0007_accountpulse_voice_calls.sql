@@ -1,6 +1,7 @@
 CREATE TABLE "organisation_voice_settings" (
 	"organisation_id" uuid PRIMARY KEY NOT NULL,
 	"enabled" boolean DEFAULT false NOT NULL,
+	"configuration_version" integer DEFAULT 0 NOT NULL,
 	"provider" varchar(16) DEFAULT 'RETELL' NOT NULL,
 	"secret_reference" text NOT NULL,
 	"preview_public_key" text NOT NULL,
@@ -22,6 +23,7 @@ CREATE TABLE "organisation_voice_settings" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "organisation_voice_settings_provider_ck" CHECK ("organisation_voice_settings"."provider" = 'RETELL'),
 	CONSTRAINT "organisation_voice_settings_agent_version_ck" CHECK ("organisation_voice_settings"."agent_version" >= 0),
+	CONSTRAINT "organisation_voice_settings_configuration_version_ck" CHECK ("organisation_voice_settings"."configuration_version" >= 0),
 	CONSTRAINT "organisation_voice_settings_window_ck" CHECK ("organisation_voice_settings"."weekday_start_local" < "organisation_voice_settings"."weekday_end_local")
 );
 --> statement-breakpoint

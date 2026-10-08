@@ -35,6 +35,13 @@ const settingsCards: SettingsCard[] = [
     href: '/settings/integrations'
   },
   {
+    eyebrow: 'Voice',
+    title: 'Voice reminders',
+    description: 'Configure and test manual, privacy-safe customer calls',
+    href: '/settings/voice',
+    adminOnly: true
+  },
+  {
     eyebrow: 'Access',
     title: 'Users and roles',
     description: 'Administrators, Operators, invitations, and access',

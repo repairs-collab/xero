@@ -33,6 +33,9 @@ export const organisationVoiceSettings = pgTable(
       .primaryKey()
       .references(() => organisations.id, { onDelete: 'cascade' }),
     enabled: boolean('enabled').notNull().default(false),
+    configurationVersion: integer('configuration_version')
+      .notNull()
+      .default(0),
     provider: varchar('provider', { length: 16 })
       .$type<'RETELL'>()
       .notNull()
@@ -78,6 +81,10 @@ export const organisationVoiceSettings = pgTable(
     check(
       'organisation_voice_settings_agent_version_ck',
       sql`${table.agentVersion} >= 0`
+    ),
+    check(
+      'organisation_voice_settings_configuration_version_ck',
+      sql`${table.configurationVersion} >= 0`
     ),
     check(
       'organisation_voice_settings_window_ck',

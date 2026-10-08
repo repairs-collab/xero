@@ -13,6 +13,8 @@ import {
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
+import type { PauseKind } from '@bc5000/domain';
+
 import { conversations } from './messaging.js';
 import { organisations, users } from './organisation.js';
 import { contacts, invoices } from './receivables.js';
@@ -32,7 +34,9 @@ export const pauses = pgTable(
     organisationId: uuid('organisation_id')
       .notNull()
       .references(() => organisations.id, { onDelete: 'cascade' }),
-    kind: varchar('kind', { length: 32 }).$type<TaskKind>().notNull(),
+    kind: varchar('kind', { length: 32 })
+      .$type<PauseKind | 'MANUAL' | 'CUSTOMER_REPLY'>()
+      .notNull(),
     scope: varchar('scope', { length: 16 })
       .$type<'customer' | 'invoice' | 'sequence'>()
       .notNull(),

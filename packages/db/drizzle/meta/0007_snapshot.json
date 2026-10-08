@@ -1,5 +1,5 @@
 {
-  "id": "d2440426-1988-4d60-b487-c66fcaa90fd9",
+  "id": "d036b0cb-6369-48e7-ac47-7b64c0b04ce0",
   "prevId": "65321637-56dd-4b97-acae-93c3b1bed5c6",
   "version": "7",
   "dialect": "postgresql",
@@ -4996,6 +4996,13 @@
           "notNull": true,
           "default": false
         },
+        "configuration_version": {
+          "name": "configuration_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
         "provider": {
           "name": "provider",
           "type": "varchar(16)",
@@ -5155,6 +5162,10 @@
         "organisation_voice_settings_agent_version_ck": {
           "name": "organisation_voice_settings_agent_version_ck",
           "value": "\"organisation_voice_settings\".\"agent_version\" >= 0"
+        },
+        "organisation_voice_settings_configuration_version_ck": {
+          "name": "organisation_voice_settings_configuration_version_ck",
+          "value": "\"organisation_voice_settings\".\"configuration_version\" >= 0"
         },
         "organisation_voice_settings_window_ck": {
           "name": "organisation_voice_settings_window_ck",
