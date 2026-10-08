@@ -143,6 +143,60 @@ describe('PostgresActivityRepository voice timeline', () => {
       reason: 'Wrong person reported',
       consentState: 'SUPPRESSED'
     });
+    const testVoiceCallId = randomUUID();
+    await client.db.insert(voiceCallRequests).values({
+      id: testVoiceCallId,
+      organisationId,
+      contactId,
+      actorUserId,
+      purpose: 'TEST',
+      destinationNumber: '+61400000002',
+      outboundNumber: '+61255501234',
+      combinedAmount: '100.0000',
+      currency: 'AUD',
+      agentId: 'agent_accountpulse',
+      agentVersion: 1,
+      voiceId: 'voice_au',
+      voiceSettingsUpdatedAt: approvedAt,
+      transferTargetLabel: 'Main office',
+      idempotencyKey: randomUUID(),
+      state: 'DRAFT'
+    });
+    await client.db.insert(voiceCallInvoices).values({
+      voiceCallId: testVoiceCallId,
+      organisationId,
+      invoiceId,
+      xeroInvoiceId: randomUUID(),
+      invoiceNumber: 'INV-SAFE-100',
+      amountDue: '100.0000',
+      currency: 'AUD',
+      dueDate: '2026-08-31',
+      syncVersion: 1,
+      snapshotAt: approvedAt
+    });
+    await client.db
+      .update(voiceCallRequests)
+      .set({
+        callFlowVersion: 1,
+        callFlowHash: 'sha256:test-flow',
+        approvedFactsHash: 'sha256:test-facts',
+        state: 'COMPLETED',
+        outcome: 'REMINDER_DELIVERED',
+        approvedAt,
+        queuedAt: new Date('2026-10-08T00:31:00.000Z'),
+        providerAcceptedAt: new Date('2026-10-08T00:32:00.000Z'),
+        completedAt: new Date('2026-10-08T00:35:00.000Z')
+      })
+      .where(eq(voiceCallRequests.id, testVoiceCallId));
+    await client.db.insert(voiceCallEvents).values({
+      organisationId,
+      voiceCallId: testVoiceCallId,
+      providerEventKey: randomUUID(),
+      eventType: 'VOICE_REMINDER_DELIVERED',
+      safeState: 'COMPLETED',
+      safeOutcome: 'REMINDER_DELIVERED',
+      occurredAt: new Date('2026-10-08T00:34:30.000Z')
+    });
 
     const timeline = await new PostgresActivityRepository(
       client.db
@@ -162,6 +216,11 @@ describe('PostgresActivityRepository voice timeline', () => {
         expect.objectContaining({
           label: 'Voice reminders suppressed',
           href: '/escalations'
+        }),
+        expect.objectContaining({
+          label: 'TEST - Voice reminder delivered',
+          source: 'AccountPulse Voice - TEST',
+          detail: 'TEST - Invoice INV-SAFE-100 · initiated by Repairs Admin'
         })
       ])
     );

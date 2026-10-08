@@ -30,7 +30,10 @@ afterAll(async () => client.pool.end());
 
 async function seedCall(
   state: 'ACCEPTED' | 'UNKNOWN',
-  options: { providerCallId?: string | null } = {}
+  options: {
+    providerCallId?: string | null;
+    purpose?: 'CUSTOMER' | 'TEST';
+  } = {}
 ) {
   const organisationId = randomUUID();
   const userId = randomUUID();
@@ -84,7 +87,9 @@ async function seedCall(
     organisationId,
     contactId,
     actorUserId: userId,
-    destinationNumber: '+61412345678',
+    purpose: options.purpose ?? 'CUSTOMER',
+    destinationNumber:
+      options.purpose === 'TEST' ? '+61400000124' : '+61412345678',
     outboundNumber: '+61255501234',
     combinedAmount: '100.00',
     currency: 'AUD',
@@ -312,6 +317,46 @@ describe('voice call reconciliation', () => {
     expect(
       reviewTasks.filter((task) => task.kind === 'VOICE_CONTACT_REVIEW')
     ).toHaveLength(1);
+  });
+
+  it('reconciles a TEST wrong-person outcome without changing customer contact controls', async () => {
+    const seeded = await seedCall('UNKNOWN', { purpose: 'TEST' });
+    const runtime = runtimeFor((callId) =>
+      Promise.resolve({
+        callId,
+        callStatus: 'ended',
+        analysis: {
+          callSuccessful: true,
+          structuredOutcome: {
+            wrongPerson: true,
+            finalResult: 'wrong_person'
+          }
+        }
+      })
+    );
+
+    await expect(
+      reconcileVoiceCall(runtime.dependencies, {
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId
+      })
+    ).resolves.toEqual({
+      kind: 'reconciled',
+      state: 'COMPLETED',
+      outcome: 'WRONG_PERSON'
+    });
+    const suppressionRows = await client.db
+      .select()
+      .from(suppressions)
+      .where(eq(suppressions.organisationId, seeded.organisationId));
+    expect(suppressionRows).toHaveLength(0);
+    const reviewTasks = await client.db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.contactId, seeded.contactId));
+    expect(
+      reviewTasks.filter((task) => task.kind === 'VOICE_CONTACT_REVIEW')
+    ).toHaveLength(0);
   });
 
   it('requires manual review when an unknown call has no provider ID', async () => {

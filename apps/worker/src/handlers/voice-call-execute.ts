@@ -351,6 +351,48 @@ const revalidate = async (
     };
   }
 
+  if (call.purpose === 'TEST') {
+    const connectionReady =
+      settings.lastConnectionTestSucceeded &&
+      settings.lastConnectionTestedAt !== null &&
+      now.getTime() - settings.lastConnectionTestedAt.getTime() <=
+        24 * 60 * 60_000;
+    const policy = evaluateVoiceContactPolicy({
+      now,
+      timezone: settings.timezone,
+      holidays: [...dependencies.holidays.list(payload.organisationId)],
+      weekdayStartLocal: settings.weekdayStartLocal.slice(0, 5),
+      weekdayEndLocal: settings.weekdayEndLocal.slice(0, 5),
+      // A test call is the evidence used before the independent customer
+      // feature switch is enabled. All remaining operational gates stay on.
+      featureEnabled: true,
+      permissionAllowed: true,
+      destinationValid: /^\+[1-9]\d{7,14}$/.test(call.destinationNumber),
+      voiceSuppressed: false,
+      disputeOpen: false,
+      promiseToPayActive: false,
+      paused: false,
+      whitelisted: false,
+      staleAccountData:
+        !connectionReady ||
+        organisation.maintenanceMode ||
+        !['READY', 'RECONCILED'].includes(organisation.operationalState) ||
+        organisation.lastSuccessfulSyncAt === null,
+      organisationCallInFlight: false,
+      attempts: [],
+      includedInvoiceIds: call.invoices.map((invoice) => invoice.invoiceId),
+      excludedInvoices: []
+    });
+    if (!policy.allowed) {
+      return {
+        kind: 'blocked',
+        actorUserId: call.actorUserId,
+        reason: policy.blockCode ?? 'STALE_ACCOUNT_DATA'
+      };
+    }
+    return { kind: 'eligible', value: { call, settings } };
+  }
+
   const invoiceIds = call.invoices.map((invoice) => invoice.invoiceId);
   const chaseRows = await dependencies.database
     .select({

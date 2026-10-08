@@ -195,6 +195,7 @@ const schedulePendingReconciliation = async (
     organisationId: string;
     voiceCallId: string;
     contactId: string;
+    createCustomerReview: boolean;
     state: VoiceCallOperationalState;
     now: Date;
     correlationId?: string;
@@ -247,7 +248,7 @@ const schedulePendingReconciliation = async (
       return nextAttempt;
     }
   );
-  if (attempt === null) {
+  if (attempt === null && input.createCustomerReview) {
     await ensureVoiceReview(dependencies.database, {
       organisationId: input.organisationId,
       contactId: input.contactId,
@@ -297,13 +298,15 @@ export async function reconcileVoiceCall(
     if (call.state === 'DRAFT' || call.state === 'APPROVED' || call.state === 'QUEUED') {
       return { kind: 'pending', state: call.state };
     }
-    await ensureVoiceReview(dependencies.database, {
-      organisationId: payload.organisationId,
-      contactId: call.contactId,
-      now,
-      kind: 'VOICE_OUTCOME_REVIEW',
-      summary: 'Reconcile a voice call with no provider call identifier'
-    });
+    if (call.purpose === 'CUSTOMER') {
+      await ensureVoiceReview(dependencies.database, {
+        organisationId: payload.organisationId,
+        contactId: call.contactId,
+        now,
+        kind: 'VOICE_OUTCOME_REVIEW',
+        summary: 'Reconcile a voice call with no provider call identifier'
+      });
+    }
     return {
       kind: 'manual-review',
       reason: 'PROVIDER_CALL_ID_MISSING'
@@ -353,6 +356,7 @@ export async function reconcileVoiceCall(
         organisationId: payload.organisationId,
         voiceCallId: call.id,
         contactId: call.contactId,
+        createCustomerReview: call.purpose === 'CUSTOMER',
         state: transition.state,
         now,
         ...(payload.correlationId === undefined
@@ -367,6 +371,7 @@ export async function reconcileVoiceCall(
       organisationId: payload.organisationId,
       voiceCallId: call.id,
       contactId: call.contactId,
+      createCustomerReview: call.purpose === 'CUSTOMER',
       state: call.state,
       now,
       ...(payload.correlationId === undefined
@@ -380,13 +385,15 @@ export async function reconcileVoiceCall(
 
   const outcome = safeOutcome(status.analysis?.structuredOutcome);
   if (status.callStatus.toLowerCase() !== 'ended' || outcome === null) {
-    await ensureVoiceReview(dependencies.database, {
-      organisationId: payload.organisationId,
-      contactId: call.contactId,
-      now,
-      kind: 'VOICE_OUTCOME_REVIEW',
-      summary: 'Review an incomplete voice-call reconciliation outcome'
-    });
+    if (call.purpose === 'CUSTOMER') {
+      await ensureVoiceReview(dependencies.database, {
+        organisationId: payload.organisationId,
+        contactId: call.contactId,
+        now,
+        kind: 'VOICE_OUTCOME_REVIEW',
+        summary: 'Review an incomplete voice-call reconciliation outcome'
+      });
+    }
     return { kind: 'manual-review', reason: 'OUTCOME_INCOMPLETE' };
   }
 
@@ -472,7 +479,7 @@ export async function reconcileVoiceCall(
           voiceCallEvents.providerEventKey
         ]
       });
-    if (outcome === 'WRONG_PERSON') {
+    if (outcome === 'WRONG_PERSON' && call.purpose === 'CUSTOMER') {
       await transaction
         .insert(suppressions)
         .values({

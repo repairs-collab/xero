@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createDatabase, migrateDatabase } from '../client.js';
@@ -162,6 +162,7 @@ const seedVoiceCall = async (
     callFlowHash?: string | null;
     approvedFactsHash?: string | null;
     approvedAt?: Date | null;
+    purpose?: 'CUSTOMER' | 'TEST';
   }
 ): Promise<string> => {
   const id = randomUUID();
@@ -171,6 +172,7 @@ const seedVoiceCall = async (
     organisationId: input.organisationId,
     contactId: input.contactId,
     actorUserId: input.actorUserId,
+    ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
     destinationNumber: '+61400000000',
     outboundNumber: '+61255501234',
     combinedAmount: '100.0000',
@@ -201,6 +203,33 @@ const seedVoiceCall = async (
 };
 
 describe('database invariants', () => {
+  it('defaults voice calls to CUSTOMER and accepts the isolated TEST purpose', async () => {
+    const { organisationId, contactId } = await seedStageInstance();
+    const actorUserId = await seedUser('Voice purpose operator');
+    const customerCallId = await seedVoiceCall({
+      organisationId,
+      contactId,
+      actorUserId
+    });
+    const testCallId = await seedVoiceCall({
+      organisationId,
+      contactId,
+      actorUserId,
+      purpose: 'TEST'
+    });
+
+    const rows = await database.db
+      .select({ id: voiceCallRequests.id, purpose: voiceCallRequests.purpose })
+      .from(voiceCallRequests)
+      .where(inArray(voiceCallRequests.id, [customerCallId, testCallId]));
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        { id: customerCallId, purpose: 'CUSTOMER' },
+        { id: testCallId, purpose: 'TEST' }
+      ])
+    );
+  });
+
   it('prevents two outbound rows with the same organisation idempotency key', async () => {
     const { organisationId, stageInstanceId } = await seedStageInstance();
     const idempotencyKey = `${organisationId}:due-date:sms:+61400000000:v1`;

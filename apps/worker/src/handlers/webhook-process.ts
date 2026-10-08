@@ -439,7 +439,7 @@ const processRetellEvent = async (
       }
     }
 
-    if (wrongPerson) {
+    if (wrongPerson && call.purpose === 'CUSTOMER') {
       await transaction
         .insert(suppressions)
         .values({
@@ -472,7 +472,7 @@ const processRetellEvent = async (
         now: stored.receivedAt
       });
     }
-    if (needsReview) {
+    if (needsReview && call.purpose === 'CUSTOMER') {
       await ensureVoiceReviewTask(transaction, {
         organisationId: stored.organisationId,
         contactId: call.contactId,

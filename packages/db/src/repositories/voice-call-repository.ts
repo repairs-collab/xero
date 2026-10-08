@@ -49,6 +49,7 @@ export interface CreateVoiceCallDraftInput {
   organisationId: string;
   contactId: string;
   actorUserId: string;
+  purpose?: 'CUSTOMER' | 'TEST';
   destinationNumber: string;
   outboundNumber: string;
   combinedAmount: string;
@@ -265,6 +266,7 @@ export class PostgresVoiceCallRepository {
           organisationId: input.organisationId,
           contactId: input.contactId,
           actorUserId: input.actorUserId,
+          purpose: input.purpose ?? 'CUSTOMER',
           destinationNumber: input.destinationNumber,
           outboundNumber: input.outboundNumber,
           combinedAmount: input.combinedAmount,
@@ -529,6 +531,7 @@ export class PostgresVoiceCallRepository {
         and(
           eq(voiceCallRequests.organisationId, input.organisationId),
           eq(voiceCallRequests.contactId, input.contactId),
+          eq(voiceCallRequests.purpose, 'CUSTOMER'),
           isNotNull(voiceCallRequests.providerAcceptedAt),
           gte(voiceCallRequests.providerAcceptedAt, input.from),
           lt(voiceCallRequests.providerAcceptedAt, input.before)

@@ -328,6 +328,15 @@ const toView = async (
   };
 };
 
+export const readVoiceSettingsView = (
+  database: Database,
+  organisationId: string,
+  now: Date
+): Promise<VoiceSettingsView> =>
+  loadSettings(database, organisationId).then((settings) =>
+    toView(database, settings, now)
+  );
+
 export function createVoiceSettingsService(
   dependencies: VoiceSettingsServiceDependencies
 ) {

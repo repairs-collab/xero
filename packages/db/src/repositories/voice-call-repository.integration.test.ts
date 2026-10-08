@@ -379,6 +379,9 @@ describe('PostgresVoiceCallRepository', () => {
   it('returns only provider-accepted attempts in the requested organisation and period', async () => {
     const seeded = await seedAccount('Attempt history');
     const accepted = await repository.createDraft(draftInput(seeded));
+    const testCall = await repository.createDraft(
+      draftInput(seeded, { purpose: 'TEST' })
+    );
     const acceptedInput = draftInput(seeded);
     const second = await repository.createDraft(acceptedInput);
     await approveDirectly(
@@ -398,6 +401,20 @@ describe('PostgresVoiceCallRepository', () => {
       providerCallId: `accepted-${randomUUID()}`,
       now: new Date('2026-10-02T00:00:00.000Z')
     });
+    await approveDirectly(
+      seeded.organisationId,
+      testCall.id,
+      seeded.actorUserId,
+      testCall.idempotencyKey
+    );
+    await client.db
+      .update(voiceCallRequests)
+      .set({
+        state: 'ACCEPTED',
+        providerCallId: `test-${randomUUID()}`,
+        providerAcceptedAt: new Date('2026-10-03T00:00:00.000Z')
+      })
+      .where(eq(voiceCallRequests.id, testCall.id));
     await client.db
       .update(voiceCallRequests)
       .set({

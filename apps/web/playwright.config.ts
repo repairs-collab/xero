@@ -20,15 +20,29 @@ export default defineConfig({
     ...devices['Desktop Chrome'],
     ...(process.env.CI ? {} : { channel: 'chrome' })
   },
-  webServer: {
-    command: 'pnpm dev --hostname 127.0.0.1 --port 3100',
-    url: 'http://127.0.0.1:3100/health/live',
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
-    env: {
-      DATABASE_URL: databaseUrl,
-      SESSION_SECRET_BASE64: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
-      NODE_ENV: 'test'
+  webServer: [
+    {
+      command: 'node e2e/fake-retell-server.mjs',
+      url: 'http://127.0.0.1:3201/health',
+      reuseExistingServer: !process.env.CI,
+      timeout: 30_000
+    },
+    {
+      command: 'pnpm dev --hostname 127.0.0.1 --port 3100',
+      url: 'http://127.0.0.1:3100/health/live',
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000,
+      env: {
+        DATABASE_URL: databaseUrl,
+        SESSION_SECRET_BASE64: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+        NODE_ENV: 'test',
+        RETELL_API_BASE_URL: 'http://127.0.0.1:3201',
+        RETELL_API_KEY: 'fake-retell-private-key',
+        VOICE_PREVIEW_ALLOWED_ORIGINS:
+          'https://billchaser.motts.com.au,https://staging.billchaser.motts.com.au',
+        VOICE_PREVIEW_RECAPTCHA_MODE: 'unsupported',
+        VOICE_PREVIEW_RECORDING_DISABLED: 'true'
+      }
     }
-  }
+  ]
 });

@@ -46,7 +46,13 @@ beforeAll(async () => migrateDatabase(client.db));
 afterAll(async () => client.pool.end());
 
 async function seedApprovedCall(
-  options: { callFlowVersion?: number; callFlowHash?: string } = {}
+  options: {
+    callFlowVersion?: number;
+    callFlowHash?: string;
+    purpose?: 'CUSTOMER' | 'TEST';
+    voiceEnabled?: boolean;
+    destinationNumber?: string;
+  } = {}
 ) {
   const organisationId = randomUUID();
   const userId = randomUUID();
@@ -76,7 +82,7 @@ async function seedApprovedCall(
   await client.db.insert(memberships).values({
     organisationId,
     userId,
-    role: 'OPERATOR'
+    role: options.purpose === 'TEST' ? 'ADMIN' : 'OPERATOR'
   });
   await client.db.insert(contacts).values({
     id: contactId,
@@ -96,7 +102,7 @@ async function seedApprovedCall(
   });
   await client.db.insert(organisationVoiceSettings).values({
     organisationId,
-    enabled: true,
+    enabled: options.voiceEnabled ?? true,
     configurationVersion: 2,
     provider: 'RETELL',
     secretReference: 'env:RETELL_API_KEY',
@@ -153,7 +159,8 @@ async function seedApprovedCall(
     organisationId,
     contactId,
     actorUserId: userId,
-    destinationNumber: '+61412345678',
+    ...(options.purpose === undefined ? {} : { purpose: options.purpose }),
+    destinationNumber: options.destinationNumber ?? '+61412345678',
     outboundNumber: '+61255501234',
     combinedAmount: '100.00',
     currency: 'AUD',
@@ -296,6 +303,32 @@ async function insertAdditionalChasedInvoice(
 }
 
 describe('voice call execution', () => {
+  it('executes a TEST call while customer voice is disabled and does not require the staff number on the customer', async () => {
+    const seeded = await seedApprovedCall({
+      purpose: 'TEST',
+      voiceEnabled: false,
+      destinationNumber: '+61400000002'
+    });
+    const createPhoneCall = vi.fn(() =>
+      Promise.resolve({ callId: 'retell-test-call-1', callStatus: 'registered' })
+    );
+    const runtime = executionDependencies(seeded.repository, createPhoneCall);
+
+    await expect(
+      executeVoiceCall(runtime.dependencies, {
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId
+      })
+    ).resolves.toEqual({
+      kind: 'accepted',
+      providerCallId: 'retell-test-call-1'
+    });
+    expect(createPhoneCall).toHaveBeenCalledTimes(1);
+    expect(createPhoneCall).toHaveBeenCalledWith(
+      expect.objectContaining({ toNumber: '+61400000002' })
+    );
+  });
+
   it('revalidates approved facts and submits the minimum protected Retell call', async () => {
     const seeded = await seedApprovedCall();
     const createPhoneCall = vi.fn(() =>

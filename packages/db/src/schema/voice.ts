@@ -110,6 +110,10 @@ export const voiceCallRequests = pgTable(
       .$type<'RETELL'>()
       .notNull()
       .default('RETELL'),
+    purpose: varchar('purpose', { length: 16 })
+      .$type<'CUSTOMER' | 'TEST'>()
+      .notNull()
+      .default('CUSTOMER'),
     destinationNumber: text('destination_number').notNull(),
     outboundNumber: text('outbound_number').notNull(),
     combinedAmount: numeric('combined_amount', {
@@ -180,6 +184,10 @@ export const voiceCallRequests = pgTable(
     check(
       'voice_call_requests_provider_ck',
       sql`${table.provider} = 'RETELL'`
+    ),
+    check(
+      'voice_call_requests_purpose_ck',
+      sql`${table.purpose} in ('CUSTOMER', 'TEST')`
     ),
     check(
       'voice_call_requests_state_ck',

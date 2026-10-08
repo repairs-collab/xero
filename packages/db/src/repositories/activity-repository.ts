@@ -51,6 +51,25 @@ const voiceInvoiceDetail = (invoiceNumbers: readonly string[], actorName?: strin
   return actorName ? `${invoiceDetail} · initiated by ${actorName}` : invoiceDetail;
 };
 
+const voiceCallLabel = (
+  label: string,
+  purpose: 'CUSTOMER' | 'TEST' | undefined
+): string => (purpose === 'TEST' ? `TEST - ${label}` : label);
+
+const voiceCallSource = (
+  purpose: 'CUSTOMER' | 'TEST' | undefined
+): string =>
+  purpose === 'TEST' ? 'AccountPulse Voice - TEST' : 'AccountPulse Voice';
+
+const voiceCallDetail = (
+  invoiceNumbers: readonly string[],
+  purpose: 'CUSTOMER' | 'TEST' | undefined,
+  actorName?: string | null
+): string => {
+  const detail = voiceInvoiceDetail(invoiceNumbers, actorName);
+  return purpose === 'TEST' ? `TEST - ${detail}` : detail;
+};
+
 export class PostgresActivityRepository {
   constructor(private readonly database: Database) {}
 
@@ -123,12 +142,17 @@ export class PostgresActivityRepository {
     for (const audit of auditRows) events.push({ id: `audit:${audit.id}`, occurredAt: audit.occurredAt, label: audit.eventType === 'CUSTOMER_NOTE_ADDED' ? 'Customer note' : audit.eventType.replaceAll('_', ' ').toLowerCase(), source: 'Operator', detail: typeof audit.afterValue?.note === 'string' ? audit.afterValue.note : typeof audit.afterValue?.reason === 'string' ? audit.afterValue.reason : 'Recorded in the audit trail', tone: 'neutral' });
     for (const row of voiceCallRows) {
       const invoiceNumbers = [...(invoicesByCall.get(row.call.id) ?? [])].sort();
-      const detail = voiceInvoiceDetail(invoiceNumbers, row.actorName);
-      if (row.call.approvedAt) events.push({ id: `voice:${row.call.id}:approved`, occurredAt: row.call.approvedAt, label: 'Voice call facts approved', source: 'AccountPulse Voice', detail, tone: 'neutral' });
-      if (row.call.queuedAt) events.push({ id: `voice:${row.call.id}:queued`, occurredAt: row.call.queuedAt, label: 'Voice call queued', source: 'AccountPulse Voice', detail, tone: 'neutral' });
-      if (row.call.providerAcceptedAt) events.push({ id: `voice:${row.call.id}:accepted`, occurredAt: row.call.providerAcceptedAt, label: 'Voice provider accepted the call', source: 'AccountPulse Voice', detail, tone: 'neutral' });
-      if (row.call.state === 'UNKNOWN') events.push({ id: `voice:${row.call.id}:unknown`, occurredAt: row.call.updatedAt, label: 'Voice call outcome needs review', source: 'AccountPulse Voice', detail: `${detail} · outcome could not be confirmed safely`, tone: 'warning', href: '/escalations', actionLabel: 'Review escalation' });
-      if (row.call.state === 'FAILED' && !voiceEventRows.some((event) => event.voiceCallId === row.call.id && event.eventType === 'VOICE_CALL_FAILED')) events.push({ id: `voice:${row.call.id}:failed`, occurredAt: row.call.completedAt ?? row.call.updatedAt, label: 'Voice call failed', source: 'AccountPulse Voice', detail, tone: 'warning' });
+      const detail = voiceCallDetail(
+        invoiceNumbers,
+        row.call.purpose,
+        row.actorName
+      );
+      const source = voiceCallSource(row.call.purpose);
+      if (row.call.approvedAt) events.push({ id: `voice:${row.call.id}:approved`, occurredAt: row.call.approvedAt, label: voiceCallLabel('Voice call facts approved', row.call.purpose), source, detail, tone: 'neutral' });
+      if (row.call.queuedAt) events.push({ id: `voice:${row.call.id}:queued`, occurredAt: row.call.queuedAt, label: voiceCallLabel('Voice call queued', row.call.purpose), source, detail, tone: 'neutral' });
+      if (row.call.providerAcceptedAt) events.push({ id: `voice:${row.call.id}:accepted`, occurredAt: row.call.providerAcceptedAt, label: voiceCallLabel('Voice provider accepted the call', row.call.purpose), source, detail, tone: 'neutral' });
+      if (row.call.state === 'UNKNOWN') events.push({ id: `voice:${row.call.id}:unknown`, occurredAt: row.call.updatedAt, label: voiceCallLabel('Voice call outcome needs review', row.call.purpose), source, detail: `${detail} · outcome could not be confirmed safely`, tone: 'warning', ...(row.call.purpose === 'CUSTOMER' ? { href: '/escalations', actionLabel: 'Review escalation' } : {}) });
+      if (row.call.state === 'FAILED' && !voiceEventRows.some((event) => event.voiceCallId === row.call.id && event.eventType === 'VOICE_CALL_FAILED')) events.push({ id: `voice:${row.call.id}:failed`, occurredAt: row.call.completedAt ?? row.call.updatedAt, label: voiceCallLabel('Voice call failed', row.call.purpose), source, detail, tone: 'warning' });
     }
     for (const event of voiceEventRows) {
       const presentation = voiceEventPresentation[event.eventType];
@@ -137,15 +161,20 @@ export class PostgresActivityRepository {
       events.push({
         id: `voice-event:${event.id}`,
         occurredAt: event.occurredAt,
-        label: presentation.label,
-        source: 'AccountPulse Voice',
-        detail: voiceInvoiceDetail([...(invoicesByCall.get(event.voiceCallId) ?? [])].sort(), call?.actorName),
+        label: voiceCallLabel(presentation.label, call?.call.purpose),
+        source: voiceCallSource(call?.call.purpose),
+        detail: voiceCallDetail(
+          [...(invoicesByCall.get(event.voiceCallId) ?? [])].sort(),
+          call?.call.purpose,
+          call?.actorName
+        ),
         tone: presentation.tone,
-        ...(event.eventType === 'VOICE_WRONG_PERSON_REPORTED' || event.eventType === 'VOICE_INVALID_DESTINATION' ? { href: '/escalations', actionLabel: 'Review escalation' } : {})
+        ...((event.eventType === 'VOICE_WRONG_PERSON_REPORTED' || event.eventType === 'VOICE_INVALID_DESTINATION') && call?.call.purpose === 'CUSTOMER' ? { href: '/escalations', actionLabel: 'Review escalation' } : {})
       });
     }
     const suppressedDestinations = new Map(voiceSuppressionRows.filter((row) => row.consentState === 'SUPPRESSED').map((row) => [row.normalisedDestination, row]));
     for (const row of voiceCallRows) {
+      if (row.call.purpose === 'TEST') continue;
       const suppression = suppressedDestinations.get(row.call.destinationNumber);
       if (!suppression) continue;
       events.push({ id: `voice-suppression:${suppression.id}:${row.call.id}`, occurredAt: suppression.recordedAt, label: 'Voice reminders suppressed', source: 'AccountPulse Voice', detail: voiceInvoiceDetail([...(invoicesByCall.get(row.call.id) ?? [])].sort()), tone: 'warning', href: '/escalations', actionLabel: 'Review escalation' });

@@ -1,0 +1,2 @@
+ALTER TABLE "voice_call_requests" ADD COLUMN "purpose" varchar(16) DEFAULT 'CUSTOMER' NOT NULL;--> statement-breakpoint
+ALTER TABLE "voice_call_requests" ADD CONSTRAINT "voice_call_requests_purpose_ck" CHECK ("voice_call_requests"."purpose" in ('CUSTOMER', 'TEST'));

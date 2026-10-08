@@ -3,9 +3,14 @@
 import { eq } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import { headers } from 'next/headers';
+import { redirect } from 'next/navigation';
 
-import { organisationVoiceSettings } from '@bc5000/db/web';
+import {
+  organisationVoiceSettings,
+  PostgresVoiceCallRepository
+} from '@bc5000/db/web';
 
+import { getJobQueue } from '../../../../server/job-runtime.js';
 import {
   getDatabaseClient,
   getVoiceProviderTester,
@@ -13,6 +18,7 @@ import {
   verifyVoicePreviewSession
 } from '../../../../server/runtime.js';
 import { createVoiceSettingsService } from './voice-settings.js';
+import { createVoiceTestCallService } from './voice-test-call-service.js';
 
 const requiredText = (formData: FormData, name: string): string => {
   const value = formData.get(name);
@@ -49,6 +55,14 @@ async function context() {
       tester: getVoiceProviderTester(),
       previewSessions: { verify: verifyVoicePreviewSession },
       clock: { now: () => new Date() }
+    }),
+    testCalls: createVoiceTestCallService({
+      database,
+      repository: new PostgresVoiceCallRepository(database),
+      publisher: await getJobQueue(),
+      session,
+      clock: { now: () => new Date() },
+      holidays: { list: () => [] }
     })
   };
 }
@@ -117,4 +131,29 @@ export async function setVoiceEnabled(formData: FormData): Promise<void> {
     ...(confirmation === null ? {} : { confirmation })
   });
   revalidatePath('/settings/voice');
+}
+
+export async function prepareVoiceTestCall(formData: FormData): Promise<void> {
+  const { testCalls } = await context();
+  const result = await testCalls.prepare({
+    organisationId: requiredText(formData, 'organisationId'),
+    invoiceNumber: requiredText(formData, 'invoiceNumber'),
+    testNumber: requiredText(formData, 'testNumber'),
+    idempotencyKey: requiredText(formData, 'idempotencyKey')
+  });
+  redirect(
+    `/settings/voice?testVoiceCall=${encodeURIComponent(result.voiceCallId)}`
+  );
+}
+
+export async function approveVoiceTestCall(formData: FormData): Promise<void> {
+  const { testCalls } = await context();
+  await testCalls.approveAndQueue({
+    organisationId: requiredText(formData, 'organisationId'),
+    voiceCallId: requiredText(formData, 'voiceCallId'),
+    idempotencyKey: requiredText(formData, 'idempotencyKey'),
+    confirmed: formData.get('confirmed') === 'yes'
+  });
+  revalidatePath('/settings/voice');
+  redirect('/settings/voice?testVoiceQueued=1');
 }

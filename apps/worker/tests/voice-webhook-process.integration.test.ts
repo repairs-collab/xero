@@ -56,7 +56,12 @@ beforeAll(async () => {
 
 afterAll(async () => client.pool.end());
 
-async function seedAcceptedCall() {
+async function seedAcceptedCall(
+  options: {
+    purpose?: 'CUSTOMER' | 'TEST';
+    destinationNumber?: string;
+  } = {}
+) {
   const contactId = randomUUID();
   const voiceCallId = randomUUID();
   const providerCallId = `retell-${randomUUID()}`;
@@ -72,7 +77,8 @@ async function seedAcceptedCall() {
     organisationId,
     contactId,
     actorUserId: userId,
-    destinationNumber: '+61412345678',
+    purpose: options.purpose ?? 'CUSTOMER',
+    destinationNumber: options.destinationNumber ?? '+61412345678',
     outboundNumber: '+61255501234',
     combinedAmount: '100.00',
     currency: 'AUD',
@@ -309,6 +315,52 @@ describe('Retell webhook processing', () => {
       }
     }
   );
+
+  it('records a TEST wrong-person outcome without suppressing or flagging the customer', async () => {
+    const destinationNumber = '+61400000123';
+    const seeded = await seedAcceptedCall({
+      purpose: 'TEST',
+      destinationNumber
+    });
+    await processRetell(
+      analyzedBody(seeded.providerCallId, {
+        wrong_person: true,
+        final_result: 'wrong_person'
+      })
+    );
+
+    const [stored] = await client.db
+      .select()
+      .from(voiceCallRequests)
+      .where(eq(voiceCallRequests.id, seeded.voiceCallId));
+    expect(stored).toMatchObject({
+      purpose: 'TEST',
+      state: 'COMPLETED',
+      outcome: 'WRONG_PERSON'
+    });
+    const blocked = await client.db
+      .select()
+      .from(suppressions)
+      .where(
+        and(
+          eq(suppressions.organisationId, organisationId),
+          eq(suppressions.channel, 'VOICE'),
+          eq(suppressions.normalisedDestination, destinationNumber)
+        )
+      );
+    expect(blocked).toHaveLength(0);
+    const reviewTasks = await client.db
+      .select()
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.organisationId, organisationId),
+          eq(tasks.contactId, seeded.contactId),
+          eq(tasks.kind, 'VOICE_CONTACT_REVIEW')
+        )
+      );
+    expect(reviewTasks).toHaveLength(0);
+  });
 
   it('is idempotent and monotonic when analyzed, ended, and started arrive out of order', async () => {
     const seeded = await seedAcceptedCall();

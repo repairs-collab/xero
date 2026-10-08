@@ -57,6 +57,13 @@
       "when": 1791321776080,
       "tag": "0007_accountpulse_voice_calls",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1791434904186,
+      "tag": "0008_redundant_mentor",
+      "breakpoints": true
     }
   ]
 }

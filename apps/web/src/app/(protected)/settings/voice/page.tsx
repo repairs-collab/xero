@@ -1,7 +1,12 @@
+import { randomUUID } from 'node:crypto';
+
 import { headers } from 'next/headers';
 import Link from 'next/link';
 import Script from 'next/script';
 
+import { PostgresVoiceCallRepository } from '@bc5000/db/web';
+
+import { getJobQueue } from '../../../../server/job-runtime.js';
 import {
   getDatabaseClient,
   getVoiceProviderTester,
@@ -10,10 +15,21 @@ import {
   verifyVoicePreviewSession
 } from '../../../../server/runtime.js';
 import { GenericFlowPreview } from './generic-flow-preview.js';
+import {
+  approveVoiceTestCall,
+  prepareVoiceTestCall
+} from './actions.js';
 import { createVoiceSettingsService } from './voice-settings.js';
 import { VoiceSettingsForm } from './voice-settings-form.js';
+import { VoiceTestCallPanel } from './voice-test-call-panel.js';
+import { createVoiceTestCallService } from './voice-test-call-service.js';
 
-export default async function VoiceSettingsPage() {
+export default async function VoiceSettingsPage({
+  searchParams
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const query = await searchParams;
   const session = await requireWebSession(
     new Request('http://localhost/', { headers: await headers() })
   );
@@ -21,14 +37,39 @@ export default async function VoiceSettingsPage() {
   if (organisationId === undefined) {
     throw new Error('No active organisation membership');
   }
+  const database = getDatabaseClient().db;
   const settingsService = createVoiceSettingsService({
-    database: getDatabaseClient().db,
+    database,
     session,
     tester: getVoiceProviderTester(),
     previewSessions: { verify: verifyVoicePreviewSession },
     clock: { now: () => new Date() }
   });
   const settings = await settingsService.get(organisationId);
+  const testVoiceCallParameter = query.testVoiceCall;
+  const testVoiceCallId = Array.isArray(testVoiceCallParameter)
+    ? testVoiceCallParameter[0]
+    : testVoiceCallParameter;
+  const testVoiceCallService = createVoiceTestCallService({
+    database,
+    repository: new PostgresVoiceCallRepository(database),
+    publisher: await getJobQueue(),
+    session,
+    clock: { now: () => new Date() },
+    holidays: { list: () => [] }
+  });
+  const testVoiceCallDraft =
+    testVoiceCallId === undefined || testVoiceCallId.trim() === ''
+      ? null
+      : await testVoiceCallService.getDraft(
+          organisationId,
+          testVoiceCallId
+        );
+  const testVoiceQueuedParameter = query.testVoiceQueued;
+  const testVoiceQueued =
+    (Array.isArray(testVoiceQueuedParameter)
+      ? testVoiceQueuedParameter[0]
+      : testVoiceQueuedParameter) === '1';
   const previewSession =
     settings.configured &&
     settings.agentId !== null &&
@@ -67,9 +108,25 @@ export default async function VoiceSettingsPage() {
         </p>
       </header>
 
+      {testVoiceQueued ? (
+        <div className="success-banner" role="status">
+          Test voice call queued. It is labelled TEST and does not change the
+          customer&apos;s saved contact details or calling frequency.
+        </div>
+      ) : null}
+
       <VoiceSettingsForm
         organisationId={organisationId}
         settings={settings}
+      />
+
+      <VoiceTestCallPanel
+        organisationId={organisationId}
+        ready={settings.connectionReady && settings.genericFlowReady}
+        idempotencyKey={randomUUID()}
+        draft={testVoiceCallDraft}
+        prepareAction={prepareVoiceTestCall}
+        approveAction={approveVoiceTestCall}
       />
 
       {previewSession !== null &&
