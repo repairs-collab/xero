@@ -197,7 +197,7 @@ describe('durable job queue', () => {
     const voiceCallId = randomUUID();
     const id = await queue.enqueueUnique(
       jobNames.voiceCallExecute,
-      { organisationId, voiceCallId },
+      { organisationId, voiceCallId, provider: 'VOIPCLOUD' },
       `voice-call:${voiceCallId}`
     );
 

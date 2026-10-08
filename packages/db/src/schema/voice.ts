@@ -26,6 +26,21 @@ import {
 import { organisations, users } from './organisation.js';
 import { contacts, invoices } from './receivables.js';
 
+export type VoiceProvider = 'RETELL' | 'VOIPCLOUD';
+export type NewVoiceProvider = 'VOIPCLOUD';
+
+export type VoiceGatewaySessionState =
+  | 'PENDING'
+  | 'PROVIDER_REQUESTED'
+  | 'GATEWAY_LEG_ANSWERED'
+  | 'CUSTOMER_RINGING'
+  | 'CUSTOMER_ANSWERED'
+  | 'IN_PROGRESS'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'UNKNOWN'
+  | 'CANCELLED';
+
 export const organisationVoiceSettings = pgTable(
   'organisation_voice_settings',
   {
@@ -37,15 +52,18 @@ export const organisationVoiceSettings = pgTable(
       .notNull()
       .default(0),
     provider: varchar('provider', { length: 16 })
-      .$type<'RETELL'>()
+      .$type<VoiceProvider>()
       .notNull()
-      .default('RETELL'),
-    secretReference: text('secret_reference').notNull(),
-    previewPublicKey: text('preview_public_key').notNull(),
-    agentId: text('agent_id').notNull(),
-    agentVersion: integer('agent_version').notNull(),
-    voiceId: text('voice_id').notNull(),
-    voiceLabel: text('voice_label').notNull(),
+      .default('VOIPCLOUD'),
+    secretReference: text('secret_reference'),
+    previewPublicKey: text('preview_public_key'),
+    agentId: text('agent_id'),
+    agentVersion: integer('agent_version'),
+    voiceId: text('voice_id'),
+    voiceLabel: text('voice_label'),
+    voipcloudUserNumber: varchar('voipcloud_user_number', { length: 32 }),
+    ttsVoiceId: text('tts_voice_id'),
+    gatewayFlowVersion: integer('gateway_flow_version'),
     outboundNumber: text('outbound_number').notNull(),
     transferSipUri: text('transfer_sip_uri'),
     fallbackOfficeNumber: text('fallback_office_number').notNull(),
@@ -63,6 +81,15 @@ export const organisationVoiceSettings = pgTable(
     )
       .notNull()
       .default(false),
+    lastGatewayTestedAt: timestamp('last_gateway_tested_at', {
+      withTimezone: true
+    }),
+    lastGatewayTestSucceeded: boolean('last_gateway_test_succeeded')
+      .notNull()
+      .default(false),
+    lastControlledFlowTestedAt: timestamp('last_controlled_flow_tested_at', {
+      withTimezone: true
+    }),
     updatedByUserId: uuid('updated_by_user_id').references(() => users.id, {
       onDelete: 'set null'
     }),
@@ -76,11 +103,15 @@ export const organisationVoiceSettings = pgTable(
   (table) => [
     check(
       'organisation_voice_settings_provider_ck',
-      sql`${table.provider} = 'RETELL'`
+      sql`${table.provider} in ('RETELL', 'VOIPCLOUD')`
     ),
     check(
       'organisation_voice_settings_agent_version_ck',
-      sql`${table.agentVersion} >= 0`
+      sql`${table.agentVersion} is null or ${table.agentVersion} >= 0`
+    ),
+    check(
+      'organisation_voice_settings_gateway_flow_version_ck',
+      sql`${table.gatewayFlowVersion} is null or ${table.gatewayFlowVersion} >= 1`
     ),
     check(
       'organisation_voice_settings_configuration_version_ck',
@@ -107,13 +138,14 @@ export const voiceCallRequests = pgTable(
       onDelete: 'set null'
     }),
     provider: varchar('provider', { length: 16 })
-      .$type<'RETELL'>()
+      .$type<VoiceProvider>()
       .notNull()
-      .default('RETELL'),
+      .default('VOIPCLOUD'),
     purpose: varchar('purpose', { length: 16 })
       .$type<'CUSTOMER' | 'TEST'>()
       .notNull()
       .default('CUSTOMER'),
+    accountName: text('account_name'),
     destinationNumber: text('destination_number').notNull(),
     outboundNumber: text('outbound_number').notNull(),
     combinedAmount: numeric('combined_amount', {
@@ -124,9 +156,12 @@ export const voiceCallRequests = pgTable(
     callFlowVersion: integer('call_flow_version'),
     callFlowHash: text('call_flow_hash'),
     approvedFactsHash: text('approved_facts_hash'),
-    agentId: text('agent_id').notNull(),
-    agentVersion: integer('agent_version').notNull(),
-    voiceId: text('voice_id').notNull(),
+    agentId: text('agent_id'),
+    agentVersion: integer('agent_version'),
+    voiceId: text('voice_id'),
+    voipcloudUserNumber: varchar('voipcloud_user_number', { length: 32 }),
+    ttsVoiceId: text('tts_voice_id'),
+    gatewayFlowVersion: integer('gateway_flow_version'),
     voiceSettingsUpdatedAt: timestamp('voice_settings_updated_at', {
       withTimezone: true
     }).notNull(),
@@ -183,7 +218,15 @@ export const voiceCallRequests = pgTable(
     }),
     check(
       'voice_call_requests_provider_ck',
-      sql`${table.provider} = 'RETELL'`
+      sql`${table.provider} in ('RETELL', 'VOIPCLOUD')`
+    ),
+    check(
+      'voice_call_requests_voipcloud_snapshot_ck',
+      sql`${table.provider} <> 'VOIPCLOUD' or (${table.accountName} is not null and ${table.voipcloudUserNumber} is not null and ${table.ttsVoiceId} is not null and ${table.gatewayFlowVersion} is not null)`
+    ),
+    check(
+      'voice_call_requests_gateway_flow_version_ck',
+      sql`${table.gatewayFlowVersion} is null or ${table.gatewayFlowVersion} >= 1`
     ),
     check(
       'voice_call_requests_purpose_ck',
@@ -260,13 +303,11 @@ export const voiceCallEvents = pgTable(
     organisationId: uuid('organisation_id')
       .notNull()
       .references(() => organisations.id, { onDelete: 'cascade' }),
-    voiceCallId: uuid('voice_call_id')
-      .notNull()
-      .references(() => voiceCallRequests.id, { onDelete: 'cascade' }),
+    voiceCallId: uuid('voice_call_id').notNull(),
     provider: varchar('provider', { length: 16 })
-      .$type<'RETELL'>()
+      .$type<VoiceProvider>()
       .notNull()
-      .default('RETELL'),
+      .default('VOIPCLOUD'),
     providerEventKey: text('provider_event_key').notNull(),
     eventType: varchar('event_type', { length: 64 }).notNull(),
     safeState: varchar('safe_state', { length: 24 }).$type<
@@ -302,7 +343,66 @@ export const voiceCallEvents = pgTable(
     }).onDelete('cascade'),
     check(
       'voice_call_events_provider_ck',
-      sql`${table.provider} = 'RETELL'`
+      sql`${table.provider} in ('RETELL', 'VOIPCLOUD')`
+    )
+  ]
+);
+
+export const voiceGatewaySessions = pgTable(
+  'voice_gateway_sessions',
+  {
+    gatewayCallId: uuid('gateway_call_id').defaultRandom().primaryKey(),
+    organisationId: uuid('organisation_id')
+      .notNull()
+      .references(() => organisations.id, { onDelete: 'cascade' }),
+    voiceCallId: uuid('voice_call_id').notNull(),
+    providerUserNumber: varchar('provider_user_number', {
+      length: 32
+    }).notNull(),
+    idempotencyKey: text('idempotency_key').notNull(),
+    commandHash: text('command_hash').notNull(),
+    state: varchar('state', { length: 32 })
+      .$type<VoiceGatewaySessionState>()
+      .notNull()
+      .default('PENDING'),
+    lastEventSequence: integer('last_event_sequence').notNull().default(0),
+    safeFailureCode: text('safe_failure_code'),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow()
+  },
+  (table) => [
+    foreignKey({
+      name: 'voice_gateway_sessions_org_call_fk',
+      columns: [table.organisationId, table.voiceCallId],
+      foreignColumns: [
+        voiceCallRequests.organisationId,
+        voiceCallRequests.id
+      ]
+    }).onDelete('cascade'),
+    uniqueIndex('voice_gateway_sessions_org_call_uq').on(
+      table.organisationId,
+      table.voiceCallId
+    ),
+    uniqueIndex('voice_gateway_sessions_org_idempotency_uq').on(
+      table.organisationId,
+      table.idempotencyKey
+    ),
+    uniqueIndex('voice_gateway_sessions_org_user_active_uq')
+      .on(table.organisationId, table.providerUserNumber)
+      .where(
+        sql`${table.state} in ('PENDING', 'PROVIDER_REQUESTED', 'GATEWAY_LEG_ANSWERED', 'CUSTOMER_RINGING', 'CUSTOMER_ANSWERED', 'IN_PROGRESS', 'UNKNOWN')`
+      ),
+    check(
+      'voice_gateway_sessions_state_ck',
+      sql`${table.state} in ('PENDING', 'PROVIDER_REQUESTED', 'GATEWAY_LEG_ANSWERED', 'CUSTOMER_RINGING', 'CUSTOMER_ANSWERED', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'UNKNOWN', 'CANCELLED')`
+    ),
+    check(
+      'voice_gateway_sessions_event_sequence_ck',
+      sql`${table.lastEventSequence} >= 0`
     )
   ]
 );

@@ -66,6 +66,7 @@ export interface ApprovedVoiceInvoiceFact {
 }
 
 export interface ApprovedVoiceFacts {
+  accountName: string;
   destinationNumber: string;
   outboundNumber: string;
   combinedAmount: string;
@@ -73,6 +74,9 @@ export interface ApprovedVoiceFacts {
   agentId: string;
   agentVersion: number;
   voiceId: string;
+  voipcloudUserNumber: string;
+  ttsVoiceId: string;
+  gatewayFlowVersion: number;
   voiceSettingsUpdatedAt: string;
   transferTargetLabel: string;
   callFlowVersion: number;
@@ -165,6 +169,7 @@ export const buildApprovedVoiceFactsHash = (
     .digest('hex')}`;
 
 const snapshotFacts = (input: {
+  accountName: string;
   destinationNumber: string;
   outboundNumber: string;
   combinedAmount: string;
@@ -172,11 +177,15 @@ const snapshotFacts = (input: {
   agentId: string;
   agentVersion: number;
   voiceId: string;
+  voipcloudUserNumber: string;
+  ttsVoiceId: string;
+  gatewayFlowVersion: number;
   voiceSettingsUpdatedAt: Date;
   transferTargetLabel: string;
   invoices: ApprovedVoiceInvoiceFact[];
 }): ApprovedVoiceFacts =>
   canonicalFacts({
+    accountName: input.accountName,
     destinationNumber: input.destinationNumber,
     outboundNumber: input.outboundNumber,
     combinedAmount: normaliseVoiceAmount(input.combinedAmount),
@@ -184,6 +193,9 @@ const snapshotFacts = (input: {
     agentId: input.agentId,
     agentVersion: input.agentVersion,
     voiceId: input.voiceId,
+    voipcloudUserNumber: input.voipcloudUserNumber,
+    ttsVoiceId: input.ttsVoiceId,
+    gatewayFlowVersion: input.gatewayFlowVersion,
     voiceSettingsUpdatedAt: input.voiceSettingsUpdatedAt.toISOString(),
     transferTargetLabel: input.transferTargetLabel,
     callFlowVersion: fixedVoiceCallCopy.version,
@@ -497,8 +509,16 @@ export function createVoiceCallService(
           invoiceRows.find((row) => row.id === invoice.id)?.syncVersion ?? 0
       }));
     const approvedFacts =
-      destinationNumber !== null && settings !== undefined
+      destinationNumber !== null &&
+      settings !== undefined &&
+      settings.agentId !== null &&
+      settings.agentVersion !== null &&
+      settings.voiceId !== null &&
+      settings.voipcloudUserNumber !== null &&
+      settings.ttsVoiceId !== null &&
+      settings.gatewayFlowVersion !== null
         ? snapshotFacts({
+            accountName: customer.name,
             destinationNumber,
             outboundNumber: settings.outboundNumber,
             combinedAmount: invoiceDraft.combinedAmount,
@@ -506,6 +526,9 @@ export function createVoiceCallService(
             agentId: settings.agentId,
             agentVersion: settings.agentVersion,
             voiceId: settings.voiceId,
+            voipcloudUserNumber: settings.voipcloudUserNumber,
+            ttsVoiceId: settings.ttsVoiceId,
+            gatewayFlowVersion: settings.gatewayFlowVersion,
             voiceSettingsUpdatedAt: settings.updatedAt,
             transferTargetLabel: settings.officeDestinationLabel,
             invoices: includedInvoices
@@ -579,10 +602,14 @@ export function createVoiceCallService(
       organisationId: input.organisationId,
       contactId: input.customerId,
       actorUserId: dependencies.session.userId,
+      accountName: facts.accountName,
       destinationNumber: facts.destinationNumber,
       outboundNumber: facts.outboundNumber,
       combinedAmount: facts.combinedAmount,
       currency: facts.currency,
+      voipcloudUserNumber: facts.voipcloudUserNumber,
+      ttsVoiceId: facts.ttsVoiceId,
+      gatewayFlowVersion: facts.gatewayFlowVersion,
       agentId: facts.agentId,
       agentVersion: facts.agentVersion,
       voiceId: facts.voiceId,
@@ -635,7 +662,8 @@ export function createVoiceCallService(
         jobNames.voiceCallExecute,
         {
           organisationId: input.organisationId,
-          voiceCallId: input.voiceCallId
+          voiceCallId: input.voiceCallId,
+          provider: 'VOIPCLOUD'
         },
         { singletonKey: `voice-call:${input.voiceCallId}` }
       );
@@ -655,7 +683,19 @@ export function createVoiceCallService(
     ) {
       throw new Error('STALE_ACCOUNT_DATA');
     }
+    if (
+      draft.accountName === null ||
+      draft.agentId === null ||
+      draft.agentVersion === null ||
+      draft.voiceId === null ||
+      draft.voipcloudUserNumber === null ||
+      draft.ttsVoiceId === null ||
+      draft.gatewayFlowVersion === null
+    ) {
+      throw new Error('STALE_ACCOUNT_DATA');
+    }
     const draftFacts = snapshotFacts({
+      accountName: draft.accountName,
       destinationNumber: draft.destinationNumber,
       outboundNumber: draft.outboundNumber,
       combinedAmount: draft.combinedAmount,
@@ -663,6 +703,9 @@ export function createVoiceCallService(
       agentId: draft.agentId,
       agentVersion: draft.agentVersion,
       voiceId: draft.voiceId,
+      voipcloudUserNumber: draft.voipcloudUserNumber,
+      ttsVoiceId: draft.ttsVoiceId,
+      gatewayFlowVersion: draft.gatewayFlowVersion,
       voiceSettingsUpdatedAt: draft.voiceSettingsUpdatedAt,
       transferTargetLabel: draft.transferTargetLabel,
       invoices: draft.invoices.map((invoice) => ({
@@ -708,7 +751,8 @@ export function createVoiceCallService(
       jobNames.voiceCallExecute,
       {
         organisationId: input.organisationId,
-        voiceCallId: input.voiceCallId
+        voiceCallId: input.voiceCallId,
+        provider: 'VOIPCLOUD'
       },
       { singletonKey: `voice-call:${input.voiceCallId}` }
     );

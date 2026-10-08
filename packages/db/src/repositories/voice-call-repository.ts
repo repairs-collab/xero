@@ -50,10 +50,14 @@ export interface CreateVoiceCallDraftInput {
   contactId: string;
   actorUserId: string;
   purpose?: 'CUSTOMER' | 'TEST';
+  accountName: string;
   destinationNumber: string;
   outboundNumber: string;
   combinedAmount: string;
   currency: string;
+  voipcloudUserNumber: string;
+  ttsVoiceId: string;
+  gatewayFlowVersion: number;
   agentId: string;
   agentVersion: number;
   voiceId: string;
@@ -182,7 +186,7 @@ const assertDraftSources = async (
   input: CreateVoiceCallDraftInput
 ): Promise<void> => {
   const [contact] = await transaction
-    .select({ id: contacts.id })
+    .select({ id: contacts.id, name: contacts.name })
     .from(contacts)
     .where(
       and(
@@ -191,7 +195,11 @@ const assertDraftSources = async (
       )
     )
     .limit(1);
-  if (contact === undefined || input.invoices.length === 0) {
+  if (
+    contact === undefined ||
+    contact.name !== input.accountName ||
+    input.invoices.length === 0
+  ) {
     throw new Error('VOICE_CALL_SOURCE_MISMATCH');
   }
 
@@ -266,11 +274,16 @@ export class PostgresVoiceCallRepository {
           organisationId: input.organisationId,
           contactId: input.contactId,
           actorUserId: input.actorUserId,
+          provider: 'VOIPCLOUD',
           purpose: input.purpose ?? 'CUSTOMER',
+          accountName: input.accountName,
           destinationNumber: input.destinationNumber,
           outboundNumber: input.outboundNumber,
           combinedAmount: input.combinedAmount,
           currency: input.currency,
+          voipcloudUserNumber: input.voipcloudUserNumber,
+          ttsVoiceId: input.ttsVoiceId,
+          gatewayFlowVersion: input.gatewayFlowVersion,
           agentId: input.agentId,
           agentVersion: input.agentVersion,
           voiceId: input.voiceId,
@@ -496,6 +509,7 @@ export class PostgresVoiceCallRepository {
         .values({
           organisationId: input.organisationId,
           voiceCallId: input.voiceCallId,
+          provider: 'VOIPCLOUD',
           providerEventKey: input.providerEventKey,
           eventType: input.eventType,
           safeState: input.safeState,
@@ -547,7 +561,8 @@ export class PostgresVoiceCallRepository {
 
   async findByProviderCallId(
     organisationId: string,
-    providerCallId: string
+    providerCallId: string,
+    provider: 'RETELL' | 'VOIPCLOUD' = 'VOIPCLOUD'
   ): Promise<VoiceCallAggregate | null> {
     const [request] = await this.database
       .select({ id: voiceCallRequests.id })
@@ -555,7 +570,7 @@ export class PostgresVoiceCallRepository {
       .where(
         and(
           eq(voiceCallRequests.organisationId, organisationId),
-          eq(voiceCallRequests.provider, 'RETELL'),
+          eq(voiceCallRequests.provider, provider),
           eq(voiceCallRequests.providerCallId, providerCallId)
         )
       )

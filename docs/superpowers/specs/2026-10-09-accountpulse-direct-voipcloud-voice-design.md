@@ -16,12 +16,12 @@ The production voice feature remains disabled until a controlled proof-of-capabi
 
 1. Calls remain manual, customer-level, one at a time, and operator approved.
 2. One call covers every eligible overdue invoice included in the immutable approved snapshot.
-3. The opening is generic and discloses no customer name, invoice number, amount, debt, or overdue status.
+3. The human opening identifies the intended customer/account using the exact account name in the immutable approved Xero snapshot. It discloses no invoice number, amount, debt, or overdue status before option 1. Voicemail remains generic and does not speak the account name.
 4. Pressing **1** attests that the recipient is the account holder or authorised representative. Only then may the gateway speak invoice numbers, invoice amounts, and the combined balance.
 5. Pressing **2** requests transfer to the configured Mott Appliance Repairs office destination. It is available before and after the details.
 6. A detected answering machine receives the existing privacy-safe generic voicemail only.
 7. A wrong-person response cannot be inferred from speech in this non-conversational release. The menu will offer a dedicated keypad option, **9**, for wrong number; selecting it ends the call, suppresses that destination for voice, and creates a contact-review task.
-8. The generic opening, protected detail template, transfer copy, timeout copy, wrong-number copy, and voicemail copy are locked and versioned. Operators cannot edit scripts per customer.
+8. The account-identifying opening template, protected detail template, transfer copy, timeout copy, wrong-number copy, and voicemail copy are locked and versioned. Only the approved account name and protected invoice facts vary by customer; operators cannot edit scripts per customer.
 9. AccountPulse stores facts, state transitions, DTMF outcomes, provider identifiers, and safe failure codes. It does not record or retain customer audio, speech, or transcripts.
 10. The existing independent voice feature switch stays off until the final controlled test succeeds and the product owner explicitly approves enabling it.
 
@@ -111,9 +111,9 @@ Then record `VOICEMAIL_LEFT` and end the call.
 
 ### 5.2 Human menu
 
-Play the locked generic opening:
+Play the locked account-identifying opening, substituting only the approved account name snapshot:
 
-> Hello. This is an automated call from Mott Appliance Repairs. If you are the account holder or authorised to manage the account associated with this telephone number, press 1 to hear the account details. To speak with a representative, press 2. If this is the wrong number, press 9.
+> Hello. This is an automated call from Mott Appliance Repairs intended for the account of [approved account name]. If you are the account holder or authorised to manage this account, press 1 to hear the invoice details. To speak with a representative, press 2. If this is the wrong number, press 9.
 
 - **1:** record identity/authority attestation, then speak the approved invoices and combined balance. Offer **2** again after the details.
 - **2:** request transfer to the configured internal office target, falling back to `+61350324518` only when the configured transfer method requires it. Do not disclose account facts first.
@@ -125,7 +125,7 @@ Play the locked generic opening:
 
 The database must preserve historical Retell rows for audit while making `VOIPCLOUD` the only selectable provider for new settings and calls. Provider checks therefore accept legacy `RETELL` records and new `VOIPCLOUD` records; application creation paths accept only `VOIPCLOUD`.
 
-Retell-specific configuration columns become nullable legacy fields. New settings fields store the VoIPcloud user number, Piper voice ID, gateway flow version, connection/gateway/preview/test evidence, and non-secret destination configuration. New voice-call rows snapshot the provider user, gateway flow version, and TTS voice identifier. A `voice_gateway_sessions` table stores only call/session identifiers, a command hash, provider user, idempotency key, state, event sequence, safe failure code, and timestamps; approved invoice facts remain solely in the existing AccountPulse voice-call snapshot.
+Retell-specific configuration columns become nullable legacy fields. New settings fields store the VoIPcloud user number, Piper voice ID, gateway flow version, connection/gateway/preview/test evidence, and non-secret destination configuration. New voice-call rows snapshot the approved account name, provider user, gateway flow version, and TTS voice identifier. A `voice_gateway_sessions` table stores only call/session identifiers, a command hash, provider user, idempotency key, state, event sequence, safe failure code, and timestamps; approved customer and invoice facts remain solely in the existing AccountPulse voice-call snapshot.
 
 Gateway events use a stable gateway event ID and HMAC signature. Duplicate or out-of-order events cannot regress a terminal call state. Safe event types include `PROVIDER_REQUESTED`, `GATEWAY_LEG_ANSWERED`, `CUSTOMER_RINGING`, `CUSTOMER_ANSWERED`, `VOICEMAIL_DETECTED`, `MENU_PLAYED`, `IDENTITY_CONFIRMED`, `DETAILS_DELIVERED`, `TRANSFER_REQUESTED`, `TRANSFERRED`, `TRANSFER_UNANSWERED`, `WRONG_NUMBER`, `COMPLETED`, `FAILED`, and `UNKNOWN`.
 
@@ -175,7 +175,7 @@ Rollback disables only the voice feature and stops the gateway containers. Histo
 - No live AccountPulse code path creates a Retell call or requires a Retell key.
 - VoIPcloud initiates controlled and customer calls through its Australian API.
 - The OVH gateway provides the approved generic menu, protected details, voicemail, keypad outcomes, and office transfer.
-- No protected facts are disclosed before option 1.
+- Before option 1, only the approved account name may be spoken; invoice numbers, amounts, balances, debt, and overdue status remain protected.
 - Duplicate submissions, provider ambiguity, or timeout never automatically redial.
 - Customer-specific audio is purged and no customer audio/recording/transcript is retained.
 - All proof-of-capability checks and automated verification pass before voice can be enabled.

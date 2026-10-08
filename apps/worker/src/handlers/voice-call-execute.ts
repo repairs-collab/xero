@@ -51,6 +51,10 @@ import {
   type VoiceCallExecutePayload
 } from '@bc5000/jobs';
 
+type VoiceCallExecuteInput = Omit<VoiceCallExecutePayload, 'provider'> & {
+  provider?: 'VOIPCLOUD';
+};
+
 export interface VoiceCallProvider {
   createPhoneCall(
     input: RetellCreatePhoneCallInput
@@ -658,6 +662,7 @@ const queueReconciliation = async (
     {
       organisationId: payload.organisationId,
       voiceCallId: payload.voiceCallId,
+      provider: 'VOIPCLOUD',
       ...(payload.correlationId === undefined
         ? {}
         : { correlationId: payload.correlationId })
@@ -671,8 +676,12 @@ const queueReconciliation = async (
 
 export async function executeVoiceCall(
   dependencies: VoiceCallExecutionDependencies,
-  payload: VoiceCallExecutePayload
+  input: VoiceCallExecuteInput
 ): Promise<VoiceCallExecutionResult> {
+  const payload: VoiceCallExecutePayload = {
+    ...input,
+    provider: 'VOIPCLOUD'
+  };
   const now = dependencies.clock.now();
   const validation = await revalidate(dependencies, payload, now);
   if (validation.kind === 'existing') {
@@ -692,6 +701,13 @@ export async function executeVoiceCall(
   }
 
   let { call, settings } = validation.value;
+  if (
+    settings.secretReference === null ||
+    call.agentId === null ||
+    call.agentVersion === null
+  ) {
+    throw new Error('VOICE_SETTINGS_NOT_CONFIGURED');
+  }
   const apiKey = await dependencies.secrets.read(settings.secretReference);
   const provider = dependencies.providerFactory.create(apiKey);
   await queueReconciliation(
@@ -742,6 +758,9 @@ export async function executeVoiceCall(
     );
   }
   ({ call, settings } = finalValidation.value);
+  if (call.agentId === null || call.agentVersion === null) {
+    throw new Error('VOICE_SETTINGS_NOT_CONFIGURED');
+  }
 
   const detailVariables = buildVoiceCallDetailVariables({
     callbackNumber: settings.fallbackOfficeNumber,

@@ -95,7 +95,7 @@ export interface VoicePreviewSessionVerifier {
 export interface VoiceSettingsView {
   configured: boolean;
   enabled: boolean;
-  provider: 'RETELL';
+  provider: 'RETELL' | 'VOIPCLOUD';
   secretReferenceLabel: string | null;
   previewPublicKey: string | null;
   agentId: string | null;
@@ -194,7 +194,8 @@ const validate = (input: SaveVoiceSettingsInput): void => {
   }
 };
 
-const safeReferenceLabel = (reference: string): string => {
+const safeReferenceLabel = (reference: string | null): string | null => {
+  if (reference === null) return null;
   const withoutScheme = reference.replace(/^env:/, '');
   return withoutScheme.split(/[/:]/).at(-1) ?? withoutScheme;
 };
@@ -439,7 +440,17 @@ export function createVoiceSettingsService(
       dependencies.database,
       input.organisationId
     );
-    if (settings === null) throw new Error('VOICE_SETTINGS_NOT_CONFIGURED');
+    if (
+      settings === null ||
+      settings.provider !== 'RETELL' ||
+      settings.secretReference === null ||
+      settings.previewPublicKey === null ||
+      settings.agentId === null ||
+      settings.agentVersion === null ||
+      settings.voiceId === null
+    ) {
+      throw new Error('VOICE_SETTINGS_NOT_CONFIGURED');
+    }
     const result = await dependencies.tester.test({
       organisationId: input.organisationId,
       provider: settings.provider,
@@ -503,7 +514,14 @@ export function createVoiceSettingsService(
       dependencies.database,
       input.organisationId
     );
-    if (settings === null) throw new Error('VOICE_SETTINGS_NOT_CONFIGURED');
+    if (
+      settings === null ||
+      settings.agentId === null ||
+      settings.agentVersion === null ||
+      settings.voiceId === null
+    ) {
+      throw new Error('VOICE_SETTINGS_NOT_CONFIGURED');
+    }
     const verified = await dependencies.previewSessions.verify({
       organisationId: input.organisationId,
       userId: dependencies.session.userId,

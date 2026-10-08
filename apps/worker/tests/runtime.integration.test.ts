@@ -170,7 +170,8 @@ describe('worker runtime', () => {
         id: 'retell-failed-job',
         data: {
           organisationId: randomUUID(),
-          voiceCallId: randomUUID()
+          voiceCallId: randomUUID(),
+          provider: 'VOIPCLOUD'
         }
       })
     ).rejects.toBe(failure);

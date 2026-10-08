@@ -105,6 +105,9 @@ async function seed() {
     agentVersion: 7,
     voiceId: 'voice_au_1',
     voiceLabel: 'Australian accounts voice',
+    voipcloudUserNumber: '1099',
+    ttsVoiceId: 'en_GB-alba-medium',
+    gatewayFlowVersion: 1,
     outboundNumber: '+61255501234',
     transferSipUri: 'sip:accounts@voipline.example',
     fallbackOfficeNumber: '+61255504321',
@@ -305,6 +308,7 @@ describe('voice call service', () => {
         organisationId: seeded.organisationId,
         contactId: seeded.customerId,
         actorUserId: seeded.userId,
+        provider: 'RETELL' as const,
         destinationNumber: '+61412345678',
         outboundNumber: '+61255501234',
         combinedAmount: '1.00',
@@ -392,7 +396,8 @@ describe('voice call service', () => {
       'voice-call.execute',
       {
         organisationId: seeded.organisationId,
-        voiceCallId: prepared.voiceCallId
+        voiceCallId: prepared.voiceCallId,
+        provider: 'VOIPCLOUD'
       },
       { singletonKey: `voice-call:${prepared.voiceCallId}` }
     );
@@ -401,7 +406,8 @@ describe('voice call service', () => {
       'voice-call.execute',
       {
         organisationId: seeded.organisationId,
-        voiceCallId: prepared.voiceCallId
+        voiceCallId: prepared.voiceCallId,
+        provider: 'VOIPCLOUD'
       },
       { singletonKey: `voice-call:${prepared.voiceCallId}` }
     );

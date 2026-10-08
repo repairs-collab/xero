@@ -81,7 +81,7 @@ export async function saveVoiceSettings(formData: FormData): Promise<void> {
     .where(eq(organisationVoiceSettings.organisationId, organisationId))
     .limit(1);
   const secretReference = submittedReference ?? current?.secretReference;
-  if (secretReference === undefined) {
+  if (secretReference === undefined || secretReference === null) {
     throw new Error('secretReference is required');
   }
   await settings.save({

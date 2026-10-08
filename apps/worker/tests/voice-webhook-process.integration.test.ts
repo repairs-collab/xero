@@ -77,6 +77,7 @@ async function seedAcceptedCall(
     organisationId,
     contactId,
     actorUserId: userId,
+    provider: 'RETELL',
     purpose: options.purpose ?? 'CUSTOMER',
     destinationNumber: options.destinationNumber ?? '+61412345678',
     outboundNumber: '+61255501234',

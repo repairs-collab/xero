@@ -102,8 +102,11 @@ export async function seedVoiceScenario(
         previewPublicKey: 'public_key_e2e_domain_restricted',
         agentId: 'agent_accountpulse',
         agentVersion: 1,
-        voiceId: 'voice_au',
-        voiceLabel: 'Australian English',
+          voiceId: 'voice_au',
+          voiceLabel: 'Australian English',
+          voipcloudUserNumber: '1099',
+          ttsVoiceId: 'en_GB-alba-medium',
+          gatewayFlowVersion: 1,
         outboundNumber: '+61255501234',
         transferSipUri: 'sip:accounts@voipline.test',
         fallbackOfficeNumber: '+61255504321',
@@ -118,9 +121,12 @@ export async function seedVoiceScenario(
       })
       .onConflictDoUpdate({
         target: organisationVoiceSettings.organisationId,
-        set: {
-          enabled: options.enabled ?? false,
-          lastConnectionTestedAt: options.ready ? now : null,
+          set: {
+            enabled: options.enabled ?? false,
+            voipcloudUserNumber: '1099',
+            ttsVoiceId: 'en_GB-alba-medium',
+            gatewayFlowVersion: 1,
+            lastConnectionTestedAt: options.ready ? now : null,
           lastConnectionTestSucceeded: options.ready ?? false,
           updatedAt: now
         }

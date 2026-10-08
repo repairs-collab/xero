@@ -26,6 +26,10 @@ import {
   type VoiceCallReconcilePayload
 } from '@bc5000/jobs';
 
+type VoiceCallReconcileInput = Omit<VoiceCallReconcilePayload, 'provider'> & {
+  provider?: 'VOIPCLOUD';
+};
+
 export interface VoiceCallStatusProvider {
   getCall(callId: string): Promise<RetellCallStatus>;
 }
@@ -263,6 +267,7 @@ const schedulePendingReconciliation = async (
     {
       organisationId: input.organisationId,
       voiceCallId: input.voiceCallId,
+      provider: 'VOIPCLOUD',
       ...(input.correlationId === undefined
         ? {}
         : { correlationId: input.correlationId })
@@ -277,8 +282,12 @@ const schedulePendingReconciliation = async (
 
 export async function reconcileVoiceCall(
   dependencies: VoiceCallReconcileDependencies,
-  payload: VoiceCallReconcilePayload
+  input: VoiceCallReconcileInput
 ): Promise<VoiceCallReconcileResult> {
+  const payload: VoiceCallReconcilePayload = {
+    ...input,
+    provider: 'VOIPCLOUD'
+  };
   const now = dependencies.clock.now();
   const [call] = await dependencies.database
     .select()
@@ -321,6 +330,9 @@ export async function reconcileVoiceCall(
     )
     .limit(1);
   if (settings === undefined) throw new Error('VOICE_SETTINGS_NOT_FOUND');
+  if (settings.secretReference === null) {
+    throw new Error('VOICE_SETTINGS_NOT_CONFIGURED');
+  }
   const apiKey = await dependencies.secrets.read(settings.secretReference);
   const provider = dependencies.providerFactory.create(apiKey);
   const status = await provider.getCall(call.providerCallId);

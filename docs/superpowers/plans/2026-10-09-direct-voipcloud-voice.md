@@ -15,7 +15,7 @@
 - Existing SMS, email, Xero sync, Inbox, and Customer Live settings remain unchanged.
 - The independent voice feature remains disabled until final explicit approval.
 - New call creation accepts `VOIPCLOUD` only; legacy `RETELL` rows remain readable for audit.
-- No customer fact may be spoken before option 1.
+- Before option 1, the locked human greeting may speak only the approved account name; invoice numbers, amounts, balances, debt, and overdue status remain protected. Voicemail remains generic.
 - The gateway may process only one pending/active call per configured VoIPcloud user.
 - Customer audio, recordings, and transcripts are never captured or retained.
 - Customer-specific generated audio lives in memory-backed temporary storage and is purged on terminal state or within one hour after a crash.
@@ -46,21 +46,21 @@
 - Produces `setVoiceEnabled(previousState: VoiceSettingsActionState, formData: FormData): Promise<VoiceSettingsActionState>`.
 - Consumes the existing `VoiceSettingsView.configured`, `connectionReady`, and `genericFlowReady` readiness flags.
 
-- [ ] **Step 1: Write failing service-action and view tests**
+- [x] **Step 1: Write failing service-action and view tests**
 
 Assert known `VOICE_ENABLE_CONFIRMATION_REQUIRED`, `VOICE_SETTINGS_NOT_CONFIGURED`, and `VOICE_SETTINGS_NOT_READY` failures return stable inline messages. Assert an unexpected error still reaches the application error boundary. Assert the enable button is disabled when any readiness flag is false and its unmet requirements are visible.
 
-- [ ] **Step 2: Run the focused tests and confirm they fail**
+- [x] **Step 2: Run the focused tests and confirm they fail**
 
 Run: `pnpm exec vitest run apps/web/tests/voice-settings.integration.test.ts apps/web/tests/voice-settings-view.test.tsx`
 
 Expected: FAIL because the server action throws and the button remains actionable before readiness.
 
-- [ ] **Step 3: Implement typed action results and readiness gating**
+- [x] **Step 3: Implement typed action results and readiness gating**
 
 Follow the installed Next.js 16 server-action guidance in `apps/web/node_modules/next/dist/docs/` when wiring `useActionState`. Map only known domain errors to public messages. Keep disable confirmation and audit behaviour unchanged.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run:
 
@@ -91,25 +91,25 @@ Commit: `fix: keep voice setup errors on the settings page`
 **Interfaces:**
 - Produces `VoiceProvider = 'RETELL' | 'VOIPCLOUD'` for reads and `NewVoiceProvider = 'VOIPCLOUD'` for creation.
 - Adds settings fields `voipcloudUserNumber`, `ttsVoiceId`, `gatewayFlowVersion`, `lastGatewayTestedAt`, `lastGatewayTestSucceeded`, and `lastControlledFlowTestedAt`.
-- Adds call snapshot fields `voipcloudUserNumber`, `ttsVoiceId`, and `gatewayFlowVersion`.
+- Adds call snapshot fields `accountName`, `voipcloudUserNumber`, `ttsVoiceId`, and `gatewayFlowVersion`; `accountName` is checked against and pinned from the reviewed Xero contact.
 - Adds `voiceGatewaySessions` with `gatewayCallId`, `organisationId`, `voiceCallId`, `providerUserNumber`, `idempotencyKey`, `commandHash`, `state`, `lastEventSequence`, `safeFailureCode`, `createdAt`, and `updatedAt`; it stores no approved invoice fact payload.
 - Changes `VoiceCallExecutePayload.provider` to `'VOIPCLOUD'` for new jobs.
 
-- [ ] **Step 1: Write failing schema and repository tests**
+- [x] **Step 1: Write failing schema and repository tests**
 
 Assert legacy Retell call/event rows remain readable, new rows accept `VOIPCLOUD`, new creation rejects `RETELL`, gateway sessions enforce one idempotent session per voice call and contain no invoice-fact column, and the migration disables voice plus invalidates old Retell readiness evidence without touching organisation sending state.
 
-- [ ] **Step 2: Run the migration tests and confirm they fail**
+- [x] **Step 2: Run the migration tests and confirm they fail**
 
 Run: `pnpm exec vitest run packages/db/src/schema/schema.integration.test.ts packages/db/src/repositories/voice-call-repository.integration.test.ts packages/jobs/src/voice-call-payloads.test.ts`
 
 Expected: FAIL because the schema permits only `RETELL`.
 
-- [ ] **Step 3: Implement and generate the additive migration**
+- [x] **Step 3: Implement and generate the additive migration**
 
 Make Retell-specific settings/request columns nullable legacy fields. Preserve historical rows. Update existing organisation voice settings to `provider = 'VOIPCLOUD'`, `enabled = false`, and cleared readiness timestamps; do not copy a Retell secret reference into the VoIPcloud configuration.
 
-- [ ] **Step 4: Verify migration forward and rollback safety**
+- [x] **Step 4: Verify migration forward and rollback safety**
 
 Run:
 
@@ -242,7 +242,7 @@ Commit: `feat: add private voice gateway control plane`
 
 - [ ] **Step 1: Write failing formatter and safety tests**
 
-Assert controlled pronunciation for letters, digits, punctuation, zero values, cents, multiple invoices, maximum invoice count, unsupported characters, and oversized duration. Assert no name, overdue claim, fee, threat, negotiation text, or unapproved field reaches speech segments.
+Assert controlled pronunciation for the approved account name, letters, digits, punctuation, zero values, cents, multiple invoices, maximum invoice count, unsupported characters, and oversized duration. Assert that only the approved account name reaches the opening and no overdue claim, fee, threat, negotiation text, or unapproved field reaches any speech segment.
 
 - [ ] **Step 2: Write failing renderer and cleanup tests**
 
@@ -524,7 +524,7 @@ Commit: `test: verify direct VoIPcloud voice release`
 - Historical Retell audit rows remain readable.
 - The real VoIPcloud capability gate passes on a staff number.
 - A customer call cannot start before all current AccountPulse safety checks pass.
-- The generic opening, option 1 disclosure gate, option 2 transfer, option 9 wrong-number path, voicemail, no-input path, and failure paths pass deterministic and end-to-end tests.
+- The account-identifying human opening, generic voicemail, option 1 invoice-detail gate, option 2 transfer, option 9 wrong-number path, no-input path, and failure paths pass deterministic and end-to-end tests.
 - Duplicate or ambiguous submission never causes an automatic second call.
 - No customer audio, recording, transcript, invoice speech file, or secret remains after its retention boundary.
 - Production deployment leaves voice disabled until explicit approval and leaves Customer Live plus SMS/email/Xero behaviour unchanged.

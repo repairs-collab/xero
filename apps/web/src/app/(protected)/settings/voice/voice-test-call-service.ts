@@ -44,6 +44,7 @@ const normaliseTestNumber = (value: string): string | null => {
 
 const factsHash = (call: {
   purpose: 'CUSTOMER' | 'TEST';
+  accountName: string;
   destinationNumber: string;
   outboundNumber: string;
   combinedAmount: string;
@@ -51,6 +52,9 @@ const factsHash = (call: {
   agentId: string;
   agentVersion: number;
   voiceId: string;
+  voipcloudUserNumber: string;
+  ttsVoiceId: string;
+  gatewayFlowVersion: number;
   voiceSettingsUpdatedAt: Date;
   transferTargetLabel: string;
   invoices: readonly {
@@ -67,6 +71,7 @@ const factsHash = (call: {
     .update(
       JSON.stringify({
         purpose: call.purpose,
+        accountName: call.accountName,
         destinationNumber: call.destinationNumber,
         outboundNumber: call.outboundNumber,
         combinedAmount: normaliseVoiceAmount(call.combinedAmount),
@@ -74,6 +79,9 @@ const factsHash = (call: {
         agentId: call.agentId,
         agentVersion: call.agentVersion,
         voiceId: call.voiceId,
+        voipcloudUserNumber: call.voipcloudUserNumber,
+        ttsVoiceId: call.ttsVoiceId,
+        gatewayFlowVersion: call.gatewayFlowVersion,
         voiceSettingsUpdatedAt: call.voiceSettingsUpdatedAt.toISOString(),
         transferTargetLabel: call.transferTargetLabel,
         callFlowVersion: fixedVoiceCallCopy.version,
@@ -187,6 +195,12 @@ export function createVoiceTestCallService(
     if (
       settings === undefined ||
       organisation === undefined ||
+      settings.agentId === null ||
+      settings.agentVersion === null ||
+      settings.voiceId === null ||
+      settings.voipcloudUserNumber === null ||
+      settings.ttsVoiceId === null ||
+      settings.gatewayFlowVersion === null ||
       !view.connectionReady ||
       !view.genericFlowReady
     ) {
@@ -228,7 +242,15 @@ export function createVoiceTestCallService(
     if (!policy.allowed) {
       throw new Error(policy.blockCode ?? 'VOICE_TEST_NOT_ALLOWED');
     }
-    return settings;
+    return {
+      ...settings,
+      agentId: settings.agentId,
+      agentVersion: settings.agentVersion,
+      voiceId: settings.voiceId,
+      voipcloudUserNumber: settings.voipcloudUserNumber,
+      ttsVoiceId: settings.ttsVoiceId,
+      gatewayFlowVersion: settings.gatewayFlowVersion
+    };
   };
 
   const toView = async (
@@ -311,10 +333,14 @@ export function createVoiceTestCallService(
       contactId: source.contact.id,
       actorUserId: dependencies.session.userId,
       purpose: 'TEST',
+      accountName: source.contact.name,
       destinationNumber,
       outboundNumber: settings.outboundNumber,
       combinedAmount: amountDue,
       currency: source.invoice.currency,
+      voipcloudUserNumber: settings.voipcloudUserNumber,
+      ttsVoiceId: settings.ttsVoiceId,
+      gatewayFlowVersion: settings.gatewayFlowVersion,
       agentId: settings.agentId,
       agentVersion: settings.agentVersion,
       voiceId: settings.voiceId,
@@ -393,6 +419,14 @@ export function createVoiceTestCallService(
         normaliseVoiceAmount(snapshot.amountDue) ||
       source.invoice.syncVersion !== snapshot.syncVersion ||
       source.invoice.dueDate !== snapshot.dueDate ||
+      call.accountName === null ||
+      call.accountName !== source.contact.name ||
+      call.agentId === null ||
+      call.agentVersion === null ||
+      call.voiceId === null ||
+      call.voipcloudUserNumber === null ||
+      call.ttsVoiceId === null ||
+      call.gatewayFlowVersion === null ||
       settings.agentId !== call.agentId ||
       settings.agentVersion !== call.agentVersion ||
       settings.voiceId !== call.voiceId ||
@@ -401,7 +435,16 @@ export function createVoiceTestCallService(
     ) {
       throw new Error('STALE_ACCOUNT_DATA');
     }
-    const approvedFactsHash = factsHash(call);
+    const approvedFactsHash = factsHash({
+      ...call,
+      accountName: call.accountName,
+      agentId: call.agentId,
+      agentVersion: call.agentVersion,
+      voiceId: call.voiceId,
+      voipcloudUserNumber: call.voipcloudUserNumber,
+      ttsVoiceId: call.ttsVoiceId,
+      gatewayFlowVersion: call.gatewayFlowVersion
+    });
     const approved = await dependencies.repository.approveAndQueue({
       organisationId: input.organisationId,
       voiceCallId: input.voiceCallId,
@@ -433,7 +476,8 @@ export function createVoiceTestCallService(
       jobNames.voiceCallExecute,
       {
         organisationId: input.organisationId,
-        voiceCallId: input.voiceCallId
+        voiceCallId: input.voiceCallId,
+        provider: 'VOIPCLOUD'
       },
       { singletonKey: `voice-call:${input.voiceCallId}` }
     );

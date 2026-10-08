@@ -17,11 +17,13 @@ describe('voice call job contracts', () => {
     const execute: VoiceCallExecutePayload = {
       organisationId: 'org-1',
       voiceCallId: 'call-1',
+      provider: 'VOIPCLOUD',
       correlationId: 'correlation-1'
     };
     const reconcile: VoiceCallReconcilePayload = {
       organisationId: 'org-1',
       voiceCallId: 'call-1',
+      provider: 'VOIPCLOUD',
       correlationId: 'correlation-2'
     };
 
@@ -35,13 +37,20 @@ describe('voice call job contracts', () => {
       parseJobPayload(jobNames.webhookProcess, {
         organisationId: 'org-1',
         webhookEventId: 'webhook-1',
-        provider: 'RETELL'
+        provider: 'VOIPCLOUD'
       })
     ).toEqual({
       organisationId: 'org-1',
       webhookEventId: 'webhook-1',
-      provider: 'RETELL'
+      provider: 'VOIPCLOUD'
     });
+    expect(() =>
+      parseJobPayload(jobNames.voiceCallExecute, {
+        organisationId: 'org-1',
+        voiceCallId: 'call-1',
+        provider: 'RETELL'
+      })
+    ).toThrow();
   });
 
   it.each([

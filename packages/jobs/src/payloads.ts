@@ -8,6 +8,7 @@ const voiceCallPayload = z
   .object({
     organisationId: identifier,
     voiceCallId: identifier,
+    provider: z.literal('VOIPCLOUD'),
     correlationId: identifier.optional()
   })
   .strict();
@@ -43,7 +44,7 @@ export const jobPayloadSchemas = {
   [jobNames.webhookProcess]: z.object({
     organisationId: identifier,
     webhookEventId: identifier,
-    provider: z.enum(['XERO', 'SINCH', 'RETELL'])
+    provider: z.enum(['XERO', 'SINCH', 'RETELL', 'VOIPCLOUD'])
   }),
   [jobNames.retentionApply]: organisationPayload
 } satisfies Record<JobName, z.ZodType>;

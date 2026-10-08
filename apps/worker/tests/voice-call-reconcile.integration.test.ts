@@ -74,6 +74,9 @@ async function seedCall(
     agentVersion: 7,
     voiceId: 'voice-au-1',
     voiceLabel: 'Australian accounts voice',
+    voipcloudUserNumber: '1099',
+    ttsVoiceId: 'en_GB-alba-medium',
+    gatewayFlowVersion: 1,
     outboundNumber: '+61255501234',
     fallbackOfficeNumber: '+61255504321',
     officeDestinationLabel: 'Main office accounts queue',
@@ -88,6 +91,7 @@ async function seedCall(
     contactId,
     actorUserId: userId,
     purpose: options.purpose ?? 'CUSTOMER',
+    accountName: 'Reconciliation Customer',
     destinationNumber:
       options.purpose === 'TEST' ? '+61400000124' : '+61412345678',
     outboundNumber: '+61255501234',
@@ -96,6 +100,9 @@ async function seedCall(
     callFlowVersion: 1,
     callFlowHash: 'sha256:flow',
     approvedFactsHash: 'sha256:facts',
+    voipcloudUserNumber: '1099',
+    ttsVoiceId: 'en_GB-alba-medium',
+    gatewayFlowVersion: 1,
     agentId: 'agent-accountpulse',
     agentVersion: 7,
     voiceId: 'voice-au-1',
@@ -224,7 +231,8 @@ describe('voice call reconciliation', () => {
       'voice-call.reconcile',
       {
         organisationId: seeded.organisationId,
-        voiceCallId: seeded.voiceCallId
+        voiceCallId: seeded.voiceCallId,
+        provider: 'VOIPCLOUD'
       },
       {
         singletonKey: `voice-call-reconcile:${seeded.voiceCallId}:follow-up:1`,

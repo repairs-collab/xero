@@ -168,7 +168,7 @@ export const webhookEvents = pgTable(
       .notNull()
       .references(() => organisations.id, { onDelete: 'cascade' }),
     provider: varchar('provider', { length: 16 })
-      .$type<'XERO' | 'SINCH' | 'RETELL'>()
+      .$type<'XERO' | 'SINCH' | 'RETELL' | 'VOIPCLOUD'>()
       .notNull(),
     providerEventKey: text('provider_event_key').notNull(),
     providerEventId: text('provider_event_id'),

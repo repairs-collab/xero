@@ -38,6 +38,7 @@ const seedAccount = async (label: string) => {
   const invoiceId = randomUUID();
   const actorUserId = randomUUID();
   const xeroInvoiceId = randomUUID();
+  const accountName = label + ' customer';
 
   await client.db.insert(organisations).values({
     id: organisationId,
@@ -56,7 +57,7 @@ const seedAccount = async (label: string) => {
     id: contactId,
     organisationId,
     xeroContactId: randomUUID(),
-    name: label + ' customer',
+    name: accountName,
     active: true,
     sourceVersion: 4
   });
@@ -82,7 +83,8 @@ const seedAccount = async (label: string) => {
     contactId,
     invoiceId,
     actorUserId,
-    xeroInvoiceId
+    xeroInvoiceId,
+    accountName
   };
 };
 
@@ -93,10 +95,14 @@ const draftInput = (
   organisationId: seeded.organisationId,
   contactId: seeded.contactId,
   actorUserId: seeded.actorUserId,
+  accountName: seeded.accountName,
   destinationNumber: '+61400000000',
   outboundNumber: '+61255501234',
   combinedAmount: '100.0000',
   currency: 'AUD',
+  voipcloudUserNumber: '1099',
+  ttsVoiceId: 'en_GB-alba-medium',
+  gatewayFlowVersion: 1,
   agentId: 'agent_accountpulse',
   agentVersion: 1,
   voiceId: 'voice_au',
@@ -142,6 +148,11 @@ describe('PostgresVoiceCallRepository', () => {
     const created = await repository.createDraft(input);
 
     expect(created).toMatchObject({
+      provider: 'VOIPCLOUD',
+      accountName: seeded.accountName,
+      voipcloudUserNumber: '1099',
+      ttsVoiceId: 'en_GB-alba-medium',
+      gatewayFlowVersion: 1,
       state: 'DRAFT',
       callFlowVersion: null,
       callFlowHash: null,
@@ -208,6 +219,16 @@ describe('PostgresVoiceCallRepository', () => {
         occurredAt: new Date('2026-10-07T00:05:00.000Z')
       })
     ).rejects.toThrow('VOICE_CALL_NOT_FOUND');
+  });
+
+  it('rejects an account name that does not match the reviewed Xero contact', async () => {
+    const seeded = await seedAccount('Account name snapshot');
+
+    await expect(
+      repository.createDraft(
+        draftInput(seeded, { accountName: 'A different customer' })
+      )
+    ).rejects.toThrow('VOICE_CALL_SOURCE_MISMATCH');
   });
 
   it('creates one queued intent and one winning submission claim for concurrent confirmation', async () => {
@@ -302,6 +323,16 @@ describe('PostgresVoiceCallRepository', () => {
       client.db
         .update(voiceCallRequests)
         .set({ approvedFactsHash: 'sha256:changed-facts' })
+        .where(eq(voiceCallRequests.id, created.id))
+    ).rejects.toMatchObject({
+      cause: {
+        message: 'approved voice call facts are immutable'
+      }
+    });
+    await expect(
+      client.db
+        .update(voiceCallRequests)
+        .set({ accountName: 'Changed customer', voipcloudUserNumber: '9999' })
         .where(eq(voiceCallRequests.id, created.id))
     ).rejects.toMatchObject({
       cause: {

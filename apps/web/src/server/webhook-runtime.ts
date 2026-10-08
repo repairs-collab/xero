@@ -65,7 +65,7 @@ export const getRetellWebhookApiKey = async (
     .from(organisationVoiceSettings)
     .where(eq(organisationVoiceSettings.organisationId, organisationId))
     .limit(1);
-  if (settings === undefined) {
+  if (settings === undefined || settings.secretReference === null) {
     throw new Error('RETELL_WEBHOOK_NOT_CONFIGURED');
   }
   const environmentName = settings.secretReference.replace(/^env:/, '');

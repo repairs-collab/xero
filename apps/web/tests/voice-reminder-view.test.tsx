@@ -59,6 +59,7 @@ const draft = (patch: Partial<VoiceCallDraftView> = {}): VoiceCallDraftView => (
   callFlowVersion: 1,
   callFlowHash: 'sha256:flow-1',
   approvedFacts: {
+    accountName: 'Example Customer',
     destinationNumber: '+61412345678',
     outboundNumber: '+61255501234',
     combinedAmount: '125.50',
@@ -66,6 +67,9 @@ const draft = (patch: Partial<VoiceCallDraftView> = {}): VoiceCallDraftView => (
     agentId: 'agent-accountpulse',
     agentVersion: 7,
     voiceId: 'voice-au-1',
+    voipcloudUserNumber: '1099',
+    ttsVoiceId: 'en_GB-alba-medium',
+    gatewayFlowVersion: 1,
     voiceSettingsUpdatedAt: '2026-10-07T23:30:00.000Z',
     transferTargetLabel: 'Main office accounts queue',
     callFlowVersion: 1,

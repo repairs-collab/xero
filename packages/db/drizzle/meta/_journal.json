@@ -71,6 +71,13 @@
       "when": 1791488379528,
       "tag": "0009_voice_schema_forward_repair",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1791498858150,
+      "tag": "0010_direct_voipcloud_voice",
+      "breakpoints": true
     }
   ]
 }

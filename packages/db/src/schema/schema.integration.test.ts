@@ -21,6 +21,7 @@ import {
   suppressions,
   tasks,
   voiceCallEvents,
+  voiceGatewaySessions,
   voiceCallInvoices,
   voiceCallRequests,
   webhookEvents,
@@ -163,6 +164,7 @@ const seedVoiceCall = async (
     approvedFactsHash?: string | null;
     approvedAt?: Date | null;
     purpose?: 'CUSTOMER' | 'TEST';
+    provider?: 'RETELL' | 'VOIPCLOUD';
   }
 ): Promise<string> => {
   const id = randomUUID();
@@ -172,7 +174,9 @@ const seedVoiceCall = async (
     organisationId: input.organisationId,
     contactId: input.contactId,
     actorUserId: input.actorUserId,
+    provider: input.provider ?? 'VOIPCLOUD',
     ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
+    accountName: 'Test Customer',
     destinationNumber: '+61400000000',
     outboundNumber: '+61255501234',
     combinedAmount: '100.0000',
@@ -192,6 +196,9 @@ const seedVoiceCall = async (
     agentId: 'agent_accountpulse',
     agentVersion: 1,
     voiceId: 'voice_au',
+    voipcloudUserNumber: '1099',
+    ttsVoiceId: 'en_GB-alba-medium',
+    gatewayFlowVersion: 1,
     voiceSettingsUpdatedAt: new Date('2026-10-07T00:00:00.000Z'),
     transferTargetLabel: 'Main office',
     idempotencyKey: input.idempotencyKey ?? randomUUID(),
@@ -274,13 +281,16 @@ describe('database invariants', () => {
     const values = {
       organisationId,
       enabled: false,
-      provider: 'RETELL' as const,
-      secretReference: 'RETELL_API_KEY',
+      provider: 'VOIPCLOUD' as const,
+      secretReference: 'VOIPCLOUD_API_KEY',
       previewPublicKey: 'public_key_accountpulse',
       agentId: 'agent_accountpulse',
       agentVersion: 1,
       voiceId: 'voice_au',
       voiceLabel: 'Australian English',
+      voipcloudUserNumber: '1099',
+      ttsVoiceId: 'en_GB-alba-medium',
+      gatewayFlowVersion: 1,
       outboundNumber: '+61255501234',
       fallbackOfficeNumber: '+61255504321',
       officeDestinationLabel: 'Main office',
@@ -298,6 +308,16 @@ describe('database invariants', () => {
     const columns = await tableColumns('organisation_voice_settings');
     expect(columns).toContain('preview_public_key');
     expect(columns).toContain('secret_reference');
+    expect(columns).toEqual(
+      expect.arrayContaining([
+        'voipcloud_user_number',
+        'tts_voice_id',
+        'gateway_flow_version',
+        'last_gateway_tested_at',
+        'last_gateway_test_succeeded',
+        'last_controlled_flow_tested_at'
+      ])
+    );
     expect(columns).not.toContain('secret_arn');
     expect(columns).not.toContain('voicemail_template');
     expect(columns).not.toContain('api_key');
@@ -313,7 +333,7 @@ describe('database invariants', () => {
       contactId,
       actorUserId,
       idempotencyKey,
-      providerCallId: 'retell-call-1'
+      providerCallId: 'voipcloud-call-1'
     });
 
     await expect(
@@ -329,7 +349,7 @@ describe('database invariants', () => {
         organisationId,
         contactId,
         actorUserId,
-        providerCallId: 'retell-call-1'
+        providerCallId: 'voipcloud-call-1'
       })
     ).rejects.toMatchObject({ cause: { code: '23505' } });
   });
@@ -362,7 +382,7 @@ describe('database invariants', () => {
     ).rejects.toMatchObject({ cause: { code: '23505' } });
   });
 
-  it('deduplicates normalised Retell events by organisation and provider key', async () => {
+  it('deduplicates normalised VoIPcloud events by organisation and provider key', async () => {
     const { organisationId, contactId } = await seedStageInstance();
     const actorUserId = await seedUser('Voice event operator');
     const voiceCallId = await seedVoiceCall({
@@ -373,7 +393,7 @@ describe('database invariants', () => {
     const event = {
       organisationId,
       voiceCallId,
-      provider: 'RETELL' as const,
+      provider: 'VOIPCLOUD' as const,
       providerEventKey: 'call-1:call_started:1',
       eventType: 'CALL_STARTED',
       safeState: 'IN_PROGRESS' as const,
@@ -384,6 +404,117 @@ describe('database invariants', () => {
     await expect(
       database.db.insert(voiceCallEvents).values(event)
     ).rejects.toMatchObject({ cause: { code: '23505' } });
+  });
+
+  it('keeps gateway coordination unique, tenant-bound, and free of billing facts', async () => {
+    const owner = await seedStageInstance();
+    const ownerUserId = await seedUser('Gateway session owner');
+    const firstCallId = await seedVoiceCall({
+      organisationId: owner.organisationId,
+      contactId: owner.contactId,
+      actorUserId: ownerUserId
+    });
+    const secondCallId = await seedVoiceCall({
+      organisationId: owner.organisationId,
+      contactId: owner.contactId,
+      actorUserId: ownerUserId
+    });
+    const firstSession = {
+      organisationId: owner.organisationId,
+      voiceCallId: firstCallId,
+      providerUserNumber: '1099',
+      idempotencyKey: 'gateway-session-one',
+      commandHash: 'sha256:gateway-command-one'
+    };
+
+    await database.db.insert(voiceGatewaySessions).values(firstSession);
+    await expect(
+      database.db.insert(voiceGatewaySessions).values({
+        ...firstSession,
+        providerUserNumber: '1100',
+        idempotencyKey: 'gateway-session-duplicate-call'
+      })
+    ).rejects.toMatchObject({ cause: { code: '23505' } });
+    await expect(
+      database.db.insert(voiceGatewaySessions).values({
+        ...firstSession,
+        voiceCallId: secondCallId,
+        providerUserNumber: '1100'
+      })
+    ).rejects.toMatchObject({ cause: { code: '23505' } });
+    await expect(
+      database.db.insert(voiceGatewaySessions).values({
+        ...firstSession,
+        voiceCallId: secondCallId,
+        idempotencyKey: 'gateway-session-two'
+      })
+    ).rejects.toMatchObject({ cause: { code: '23505' } });
+
+    await database.db
+      .update(voiceGatewaySessions)
+      .set({ state: 'COMPLETED' })
+      .where(eq(voiceGatewaySessions.voiceCallId, firstCallId));
+    await expect(
+      database.db.insert(voiceGatewaySessions).values({
+        ...firstSession,
+        voiceCallId: secondCallId,
+        idempotencyKey: 'gateway-session-two',
+        commandHash: 'sha256:gateway-command-two'
+      })
+    ).resolves.toBeDefined();
+
+    const outsider = await seedStageInstance();
+    await expect(
+      database.db.insert(voiceGatewaySessions).values({
+        organisationId: outsider.organisationId,
+        voiceCallId: firstCallId,
+        providerUserNumber: '1200',
+        idempotencyKey: 'gateway-session-cross-tenant',
+        commandHash: 'sha256:gateway-command-cross-tenant'
+      })
+    ).rejects.toMatchObject({ cause: { code: '23503' } });
+
+    const columns = await tableColumns('voice_gateway_sessions');
+    expect(columns).toEqual(
+      expect.arrayContaining([
+        'gateway_call_id',
+        'organisation_id',
+        'voice_call_id',
+        'provider_user_number',
+        'idempotency_key',
+        'command_hash',
+        'state',
+        'last_event_sequence',
+        'safe_failure_code'
+      ])
+    );
+    expect(columns).not.toEqual(
+      expect.arrayContaining([
+        'invoice_number',
+        'amount_due',
+        'destination_number',
+        'approved_facts',
+        'script',
+        'audio'
+      ])
+    );
+  });
+
+  it('preserves legacy Retell voice rows for audit reads', async () => {
+    const { organisationId, contactId } = await seedStageInstance();
+    const actorUserId = await seedUser('Legacy Retell audit operator');
+    const voiceCallId = await seedVoiceCall({
+      organisationId,
+      contactId,
+      actorUserId,
+      provider: 'RETELL'
+    });
+
+    const [row] = await database.db
+      .select({ provider: voiceCallRequests.provider })
+      .from(voiceCallRequests)
+      .where(eq(voiceCallRequests.id, voiceCallId));
+    expect(row).toEqual({ provider: 'RETELL' });
   });
 
   it('allows direct approval with pinned flow and fact hashes', async () => {
@@ -422,7 +553,7 @@ describe('database invariants', () => {
     ).rejects.toMatchObject({ cause: { code: '23514' } });
   });
 
-  it('round-trips VOICE channels, RETELL providers, and voice review task kinds', async () => {
+  it('round-trips VOICE channels, legacy and current voice providers, and voice review task kinds', async () => {
     const { organisationId, contactId } = await seedStageInstance();
     const userId = await seedUser('Voice review administrator');
     await database.db.insert(contactChannels).values({
@@ -443,7 +574,7 @@ describe('database invariants', () => {
     });
     await database.db.insert(webhookEvents).values({
       organisationId,
-      provider: 'RETELL',
+      provider: 'VOIPCLOUD',
       providerEventKey: randomUUID(),
       bodyHash: 'sha256:retell',
       signatureValid: true,
@@ -477,6 +608,94 @@ describe('database invariants', () => {
       'VOICE_CONTACT_REVIEW',
       'VOICE_OUTCOME_REVIEW'
     ]);
+  });
+
+  it('disables legacy voice configuration without changing Customer Live messaging', async () => {
+    const client = await database.pool.connect();
+    const organisationId = randomUUID();
+
+    try {
+      await client.query('begin');
+      await client.query(
+        `insert into organisations
+          (id, xero_organisation_id, name, time_zone, base_currency,
+           send_mode, rollout_scope, live_send_acknowledged)
+         values ($1, $2, 'Voice migration safety', 'Australia/Sydney', 'AUD',
+                 'live', 'CUSTOMER', true)`,
+        [organisationId, randomUUID()]
+      );
+      await client.query(
+        `insert into organisation_voice_settings
+          (organisation_id, enabled, provider, secret_reference,
+           preview_public_key, agent_id, agent_version, voice_id, voice_label,
+           outbound_number, fallback_office_number, office_destination_label,
+           timezone, weekday_start_local, weekday_end_local,
+           last_connection_tested_at, last_connection_test_succeeded)
+         values ($1, true, 'RETELL', 'env:RETELL_API_KEY', 'legacy-public-key',
+                 'legacy-agent', 1, 'legacy-voice', 'Australian English',
+                 '+61255501234', '+61350324518', 'Main office',
+                 'Australia/Sydney', '09:00', '17:00', now(), true)`,
+        [organisationId]
+      );
+      const migration = await readFile(
+        new URL(
+          '../../drizzle/0010_direct_voipcloud_voice.sql',
+          import.meta.url
+        ),
+        'utf8'
+      );
+      const reset = migration
+        .split('-- direct-voipcloud-settings-reset:start')[1]
+        ?.split('-- direct-voipcloud-settings-reset:end')[0]
+        ?.trim();
+      expect(reset).toBeDefined();
+      await client.query(reset ?? 'select 1');
+
+      const settings = await client.query<{
+        enabled: boolean;
+        provider: string;
+        secret_reference: string | null;
+        agent_id: string | null;
+        last_connection_test_succeeded: boolean;
+        last_gateway_test_succeeded: boolean;
+        configuration_version: number;
+      }>(
+        `select enabled, provider, secret_reference, agent_id,
+                last_connection_test_succeeded, last_gateway_test_succeeded,
+                configuration_version
+           from organisation_voice_settings
+          where organisation_id = $1`,
+        [organisationId]
+      );
+      const organisation = await client.query<{
+        send_mode: string;
+        rollout_scope: string;
+        live_send_acknowledged: boolean;
+      }>(
+        `select send_mode, rollout_scope, live_send_acknowledged
+           from organisations
+          where id = $1`,
+        [organisationId]
+      );
+
+      expect(settings.rows[0]).toEqual({
+        enabled: false,
+        provider: 'VOIPCLOUD',
+        secret_reference: null,
+        agent_id: null,
+        last_connection_test_succeeded: false,
+        last_gateway_test_succeeded: false,
+        configuration_version: 1
+      });
+      expect(organisation.rows[0]).toEqual({
+        send_mode: 'live',
+        rollout_scope: 'CUSTOMER',
+        live_send_acknowledged: true
+      });
+    } finally {
+      await client.query('rollback');
+      client.release();
+    }
   });
 
   it('keeps an existing live organisation controlled after rollout migration', async () => {

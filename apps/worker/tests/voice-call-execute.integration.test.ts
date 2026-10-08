@@ -111,6 +111,9 @@ async function seedApprovedCall(
     agentVersion: 7,
     voiceId: 'voice-au-1',
     voiceLabel: 'Australian accounts voice',
+    voipcloudUserNumber: '1099',
+    ttsVoiceId: 'en_GB-alba-medium',
+    gatewayFlowVersion: 1,
     outboundNumber: '+61255501234',
     transferSipUri: 'sip:accounts@voipline.example',
     fallbackOfficeNumber: '+61255504321',
@@ -160,10 +163,14 @@ async function seedApprovedCall(
     contactId,
     actorUserId: userId,
     ...(options.purpose === undefined ? {} : { purpose: options.purpose }),
+    accountName: 'Example Customer',
     destinationNumber: options.destinationNumber ?? '+61412345678',
     outboundNumber: '+61255501234',
     combinedAmount: '100.00',
     currency: 'AUD',
+    voipcloudUserNumber: '1099',
+    ttsVoiceId: 'en_GB-alba-medium',
+    gatewayFlowVersion: 1,
     agentId: 'agent-accountpulse',
     agentVersion: 7,
     voiceId: 'voice-au-1',
@@ -249,6 +256,7 @@ async function insertAcceptedAttempt(
     organisationId: seeded.organisationId,
     contactId: seeded.contactId,
     actorUserId: seeded.userId,
+    provider: 'RETELL',
     destinationNumber: '+61412345678',
     outboundNumber: '+61255501234',
     combinedAmount: '100.00',
@@ -391,6 +399,7 @@ describe('voice call execution', () => {
       {
         organisationId: seeded.organisationId,
         voiceCallId: seeded.voiceCallId,
+        provider: 'VOIPCLOUD',
         correlationId: 'correlation-1'
       },
       {
@@ -1006,6 +1015,7 @@ describe('voice call execution', () => {
       {
         organisationId: seeded.organisationId,
         voiceCallId: seeded.voiceCallId,
+        provider: 'VOIPCLOUD',
         correlationId: 'correlation-unknown'
       },
       {
@@ -1040,6 +1050,7 @@ describe('voice call execution', () => {
       {
         organisationId: seeded.organisationId,
         voiceCallId: seeded.voiceCallId,
+        provider: 'VOIPCLOUD',
         correlationId: 'correlation-unknown-retry'
       },
       { singletonKey: `voice-call-reconcile:${seeded.voiceCallId}` }
