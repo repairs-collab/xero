@@ -29,6 +29,7 @@ import { runReminderCycle } from './handlers/automatic-reminder-dispatch.js';
 import { applyRetention } from './handlers/retention-apply.js';
 import { executeTestSms } from './handlers/test-sms-execute.js';
 import { executeVoiceCall } from './handlers/voice-call-execute.js';
+import { reconcileVoiceCall } from './handlers/voice-call-reconcile.js';
 import { processWebhookEvent } from './handlers/webhook-process.js';
 import { runIncrementalSync } from './handlers/xero-incremental-sync.js';
 import { runInitialSync } from './handlers/xero-initial-sync.js';
@@ -312,6 +313,19 @@ async function main() {
             },
             publisher: queue,
             holidays: { list: () => [] }
+          },
+          payload
+        ).then(() => undefined),
+      [jobNames.voiceCallReconcile]: (payload) =>
+        reconcileVoiceCall(
+          {
+            database: databaseClient.db,
+            clock,
+            secrets: voiceSecretReader,
+            providerFactory: {
+              create: (apiKey) => new RetellClient({ http, apiKey })
+            },
+            publisher: queue
           },
           payload
         ).then(() => undefined),

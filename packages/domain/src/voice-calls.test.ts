@@ -397,6 +397,16 @@ describe('transitionVoiceCallState', () => {
       { state: 'IN_PROGRESS', outcome: 'TRANSFER_REQUESTED' },
       'TRANSFERRED',
       { state: 'COMPLETED', outcome: 'TRANSFERRED' }
+    ],
+    [
+      { state: 'IN_PROGRESS', outcome: null },
+      'NO_ANSWER',
+      { state: 'COMPLETED', outcome: 'NO_ANSWER' }
+    ],
+    [
+      { state: 'IN_PROGRESS', outcome: null },
+      'PROVIDER_REJECTED',
+      { state: 'FAILED', outcome: 'PROVIDER_REJECTED' }
     ]
   ] as const)(
     'maps %j plus %s to the expected terminal state',

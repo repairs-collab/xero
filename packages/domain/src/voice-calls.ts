@@ -530,6 +530,16 @@ const voiceTransitions: VoiceTransitionTable = {
       state: 'COMPLETED',
       outcome: 'TRANSFER_UNANSWERED'
     },
+    NO_ANSWER: { state: 'COMPLETED', outcome: 'NO_ANSWER' },
+    BUSY: { state: 'COMPLETED', outcome: 'BUSY' },
+    INVALID_DESTINATION: {
+      state: 'FAILED',
+      outcome: 'INVALID_DESTINATION'
+    },
+    PROVIDER_REJECTED: {
+      state: 'FAILED',
+      outcome: 'PROVIDER_REJECTED'
+    },
     CALL_ENDED: { state: 'COMPLETED' }
   },
   UNKNOWN: {

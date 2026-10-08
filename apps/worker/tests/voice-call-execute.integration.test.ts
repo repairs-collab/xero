@@ -265,6 +265,36 @@ async function insertAcceptedAttempt(
   });
 }
 
+async function insertAdditionalChasedInvoice(
+  seeded: Awaited<ReturnType<typeof seedApprovedCall>>
+): Promise<string> {
+  const invoiceId = randomUUID();
+  await client.db.insert(invoices).values({
+    id: invoiceId,
+    organisationId: seeded.organisationId,
+    xeroInvoiceId: `xero-${invoiceId}`,
+    contactId: seeded.contactId,
+    invoiceNumber: `INV-${invoiceId.slice(0, 8)}`,
+    type: 'ACCREC',
+    status: 'AUTHORISED',
+    issueDate: '2026-09-15',
+    dueDate: '2026-09-20',
+    amountDue: '50.0000',
+    total: '50.0000',
+    currency: 'AUD',
+    syncVersion: 1,
+    updatedAt: new Date('2026-10-07T23:50:00.000Z')
+  });
+  await client.db.insert(invoiceChases).values({
+    organisationId: seeded.organisationId,
+    invoiceId,
+    sequenceId: seeded.sequenceId,
+    customerId: seeded.contactId,
+    status: 'ACTIVE'
+  });
+  return invoiceId;
+}
+
 describe('voice call execution', () => {
   it('revalidates approved facts and submits the minimum protected Retell call', async () => {
     const seeded = await seedApprovedCall();
@@ -323,6 +353,18 @@ describe('voice call execution', () => {
     );
     expect(JSON.stringify(events)).not.toContain('+61412345678');
     expect(JSON.stringify(events)).not.toContain('INV-VOICE-1');
+    expect(runtime.publish).toHaveBeenCalledWith(
+      'voice-call.reconcile',
+      {
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId,
+        correlationId: 'correlation-1'
+      },
+      {
+        singletonKey: `voice-call-reconcile:${seeded.voiceCallId}`,
+        startAfter: new Date('2026-10-08T00:15:00.000Z')
+      }
+    );
   });
 
   it('lets concurrent workers produce exactly one provider request', async () => {
@@ -426,6 +468,155 @@ describe('voice call execution', () => {
       expect(createPhoneCall).not.toHaveBeenCalled();
     }
   );
+
+  it('cancels when a newly eligible invoice was not part of the approval', async () => {
+    const seeded = await seedApprovedCall();
+    await insertAdditionalChasedInvoice(seeded);
+    const createPhoneCall = vi.fn(() =>
+      Promise.resolve({ callId: 'not-used', callStatus: 'registered' })
+    );
+    const runtime = executionDependencies(seeded.repository, createPhoneCall);
+
+    await expect(
+      executeVoiceCall(runtime.dependencies, {
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId
+      })
+    ).resolves.toEqual({ kind: 'cancelled', reason: 'STALE_ACCOUNT_DATA' });
+    expect(createPhoneCall).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: 'disputed',
+      exclude: async (
+        seeded: Awaited<ReturnType<typeof seedApprovedCall>>,
+        invoiceId: string
+      ) => {
+        await client.db.insert(disputes).values({
+          organisationId: seeded.organisationId,
+          contactId: seeded.contactId,
+          invoiceId,
+          status: 'OPEN',
+          reason: 'Different invoice is disputed'
+        });
+      }
+    },
+    {
+      name: 'paused',
+      exclude: async (
+        seeded: Awaited<ReturnType<typeof seedApprovedCall>>,
+        invoiceId: string
+      ) => {
+        await client.db.insert(pauses).values({
+          organisationId: seeded.organisationId,
+          kind: 'MANUAL',
+          scope: 'invoice',
+          invoiceId,
+          active: true,
+          reason: 'Different invoice is paused'
+        });
+      }
+    },
+    {
+      name: 'whitelisted',
+      exclude: async (
+        seeded: Awaited<ReturnType<typeof seedApprovedCall>>,
+        invoiceId: string
+      ) => {
+        await client.db.insert(reminderWhitelistEntries).values({
+          organisationId: seeded.organisationId,
+          scope: 'INVOICE',
+          contactId: seeded.contactId,
+          invoiceId,
+          reason: 'Different invoice is managed manually'
+        });
+      }
+    }
+  ])('does not invalidate approval for a separately $name invoice', async ({ exclude }) => {
+    const seeded = await seedApprovedCall();
+    const additionalInvoiceId = await insertAdditionalChasedInvoice(seeded);
+    await exclude(seeded, additionalInvoiceId);
+    const createPhoneCall = vi.fn(() =>
+      Promise.resolve({ callId: 'retell-excluded-extra', callStatus: 'registered' })
+    );
+    const runtime = executionDependencies(seeded.repository, createPhoneCall);
+
+    await expect(
+      executeVoiceCall(runtime.dependencies, {
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId
+      })
+    ).resolves.toEqual({
+      kind: 'accepted',
+      providerCallId: 'retell-excluded-extra'
+    });
+    expect(createPhoneCall).toHaveBeenCalledTimes(1);
+  });
+
+  it('revalidates again after claiming and cancels a last-moment data change', async () => {
+    const seeded = await seedApprovedCall();
+    const createPhoneCall = vi.fn(() =>
+      Promise.resolve({ callId: 'not-used', callStatus: 'registered' })
+    );
+    const runtime = executionDependencies(seeded.repository, createPhoneCall);
+    runtime.readSecret.mockImplementation(async () => {
+      await client.db
+        .update(invoices)
+        .set({ amountDue: '125.0000' })
+        .where(eq(invoices.id, seeded.invoiceId));
+      return 'retell-private-key';
+    });
+
+    await expect(
+      executeVoiceCall(runtime.dependencies, {
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId
+      })
+    ).resolves.toEqual({ kind: 'cancelled', reason: 'STALE_ACCOUNT_DATA' });
+    expect(createPhoneCall).not.toHaveBeenCalled();
+    const [stored] = await client.db
+      .select()
+      .from(voiceCallRequests)
+      .where(eq(voiceCallRequests.id, seeded.voiceCallId));
+    expect(stored).toMatchObject({
+      state: 'CANCELLED',
+      failureCode: 'STALE_ACCOUNT_DATA'
+    });
+  });
+
+  it('uses a fresh post-claim time for the final calling-window check', async () => {
+    const seeded = await seedApprovedCall();
+    const createPhoneCall = vi.fn(() =>
+      Promise.resolve({ callId: 'not-used', callStatus: 'registered' })
+    );
+    const runtime = executionDependencies(seeded.repository, createPhoneCall);
+    const clockNow = vi
+      .fn()
+      .mockReturnValueOnce(new Date('2026-10-08T05:59:00.000Z'))
+      .mockReturnValue(new Date('2026-10-08T06:01:00.000Z'));
+    runtime.dependencies.clock.now = clockNow;
+
+    await expect(
+      executeVoiceCall(runtime.dependencies, {
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId
+      })
+    ).resolves.toEqual({
+      kind: 'cancelled',
+      reason: 'CALLING_WINDOW_CLOSED'
+    });
+    expect(clockNow).toHaveBeenCalledTimes(2);
+    expect(createPhoneCall).not.toHaveBeenCalled();
+    const [stored] = await client.db
+      .select()
+      .from(voiceCallRequests)
+      .where(eq(voiceCallRequests.id, seeded.voiceCallId));
+    expect(stored).toMatchObject({
+      state: 'CANCELLED',
+      completedAt: new Date('2026-10-08T06:01:00.000Z')
+    });
+  });
 
   it('cancels as stale when the approved customer phone changes', async () => {
     const seeded = await seedApprovedCall();
@@ -784,7 +975,10 @@ describe('voice call execution', () => {
         voiceCallId: seeded.voiceCallId,
         correlationId: 'correlation-unknown'
       },
-      { singletonKey: `voice-call-reconcile:${seeded.voiceCallId}` }
+      {
+        singletonKey: `voice-call-reconcile:${seeded.voiceCallId}`,
+        startAfter: new Date('2026-10-08T00:15:00.000Z')
+      }
     );
     expect(JSON.stringify(runtime.publish.mock.calls)).not.toContain(
       'voice-call.execute'

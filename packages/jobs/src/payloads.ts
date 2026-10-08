@@ -43,7 +43,7 @@ export const jobPayloadSchemas = {
   [jobNames.webhookProcess]: z.object({
     organisationId: identifier,
     webhookEventId: identifier,
-    provider: z.enum(['XERO', 'SINCH'])
+    provider: z.enum(['XERO', 'SINCH', 'RETELL'])
   }),
   [jobNames.retentionApply]: organisationPayload
 } satisfies Record<JobName, z.ZodType>;

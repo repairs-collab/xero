@@ -1,4 +1,10 @@
-import { organisations, PostgresWebhookRepository } from '@bc5000/db/web';
+import { eq } from 'drizzle-orm';
+
+import {
+  organisations,
+  organisationVoiceSettings,
+  PostgresWebhookRepository
+} from '@bc5000/db/web';
 import { getDatabaseClient } from './runtime.js';
 import { getJobQueue } from './job-runtime.js';
 
@@ -48,4 +54,25 @@ export const getSinchWebhookToken = (): string => {
     throw new Error('SINCH_WEBHOOK_TOKEN must contain at least 32 characters');
   }
   return token;
+};
+
+export const getRetellWebhookApiKey = async (
+  organisationId: string
+): Promise<string> => {
+  const database = getDatabaseClient().db;
+  const [settings] = await database
+    .select({ secretReference: organisationVoiceSettings.secretReference })
+    .from(organisationVoiceSettings)
+    .where(eq(organisationVoiceSettings.organisationId, organisationId))
+    .limit(1);
+  if (settings === undefined) {
+    throw new Error('RETELL_WEBHOOK_NOT_CONFIGURED');
+  }
+  const environmentName = settings.secretReference.replace(/^env:/, '');
+  if (!/^[A-Z][A-Z0-9_]*$/.test(environmentName)) {
+    throw new Error('RETELL_WEBHOOK_SECRET_UNAVAILABLE');
+  }
+  const apiKey = process.env[environmentName]?.trim();
+  if (!apiKey) throw new Error('RETELL_WEBHOOK_SECRET_UNAVAILABLE');
+  return apiKey;
 };

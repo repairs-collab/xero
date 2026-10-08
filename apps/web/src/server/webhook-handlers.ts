@@ -2,6 +2,10 @@ import { timingSafeEqual } from 'node:crypto';
 
 import type { WebhookRepository } from '@bc5000/db/web';
 import {
+  parseRetellWebhook,
+  verifyRetellWebhook
+} from '@bc5000/integrations/retell';
+import {
   parseSinchEvent,
   verifySinchCallback
 } from '@bc5000/integrations/sinch';
@@ -17,7 +21,7 @@ interface WebhookQueue {
     payload: {
       organisationId: string;
       webhookEventId: string;
-      provider: 'XERO' | 'SINCH';
+      provider: 'XERO' | 'SINCH' | 'RETELL';
     },
     singletonKey: string
   ): Promise<string>;
@@ -34,7 +38,7 @@ const byteBody = async (request: Request): Promise<Uint8Array> =>
 
 const enqueueRecorded = async (
   dependencies: CommonDependencies,
-  provider: 'XERO' | 'SINCH',
+  provider: 'XERO' | 'SINCH' | 'RETELL',
   eventId: string,
   rawBody: Uint8Array
 ): Promise<void> => {
@@ -45,7 +49,6 @@ const enqueueRecorded = async (
     rawBody: Buffer.from(rawBody).toString('utf8'),
     signatureValid: true
   });
-  if (recorded.kind === 'duplicate') return;
   await dependencies.queue.enqueueUnique(
     jobNames.webhookProcess,
     {
@@ -133,6 +136,42 @@ export function createSinchWebhookHandler(
           ? event.replyId
           : event.notificationId;
     await enqueueRecorded(dependencies, 'SINCH', eventId, rawBody);
+    return new Response('', { status: 202 });
+  };
+}
+
+export function createRetellWebhookHandler(
+  dependencies: CommonDependencies & {
+    apiKey: string;
+    clock: { now(): Date };
+  }
+): (request: Request) => Promise<Response> {
+  return async (request) => {
+    const rawBody = await byteBody(request);
+    const signature = request.headers.get('x-retell-signature') ?? '';
+    if (
+      !verifyRetellWebhook({
+        rawBody,
+        signature,
+        apiKey: dependencies.apiKey,
+        now: dependencies.clock.now()
+      })
+    ) {
+      return new Response('', { status: 401 });
+    }
+
+    let event;
+    try {
+      event = parseRetellWebhook(rawBody);
+    } catch {
+      return new Response('', { status: 400 });
+    }
+    await enqueueRecorded(
+      dependencies,
+      'RETELL',
+      event.eventKey,
+      rawBody
+    );
     return new Response('', { status: 202 });
   };
 }

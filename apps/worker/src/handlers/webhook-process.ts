@@ -2,10 +2,26 @@ import { and, desc, eq, sql } from 'drizzle-orm';
 
 import {
   type Database,
+  type DbTransaction,
   operationalResetRuns,
   organisations,
+  suppressions,
+  tasks,
+  voiceCallEvents,
+  voiceCallRequests,
   webhookEvents
 } from '@bc5000/db';
+import {
+  transitionVoiceCallState,
+  type VoiceCallEvent,
+  type VoiceCallOperationalState,
+  type VoiceCallOutcome
+} from '@bc5000/domain';
+import {
+  parseRetellWebhook,
+  type RetellStructuredOutcome,
+  type RetellWebhookEvent
+} from '@bc5000/integrations/retell';
 import { parseSinchEvent } from '@bc5000/integrations/sinch';
 import {
   jobNames,
@@ -78,6 +94,420 @@ const processXeroEvent = async (
       singletonKey: `xero.invoice-refresh:${event.organisationId}:${matching.resourceId}:${event.id}`
     }
   );
+};
+
+interface VoiceMilestone {
+  domainEvent?: VoiceCallEvent;
+  eventType: string;
+}
+
+const startedMilestone: VoiceMilestone = {
+  domainEvent: 'CALL_STARTED',
+  eventType: 'VOICE_CALL_STARTED'
+};
+
+const terminalMilestone = (
+  event: VoiceCallEvent,
+  eventType: string
+): VoiceMilestone => ({ domainEvent: event, eventType });
+
+const outcomeIsContradictory = (
+  outcome: RetellStructuredOutcome
+): boolean => {
+  const wrongPerson = outcome.wrongPerson === true || outcome.finalResult === 'wrong_person';
+  const voicemail = outcome.voicemailLeft === true || outcome.finalResult === 'voicemail_left';
+  const identityConfirmed = outcome.identityResult === 'confirmed';
+  const identityRejected = outcome.identityResult === 'not_confirmed';
+  const financialOrTransfer =
+    outcome.finalResult === 'details_delivered' ||
+    outcome.finalResult === 'transferred' ||
+    outcome.finalResult === 'transfer_unanswered' ||
+    outcome.transferRequested === true ||
+    outcome.transferResult !== undefined;
+  return (
+    (wrongPerson && (identityConfirmed || identityRejected || voicemail || financialOrTransfer)) ||
+    (voicemail && (identityConfirmed || identityRejected || financialOrTransfer)) ||
+    (identityRejected && financialOrTransfer) ||
+    (outcome.finalResult === 'transferred' && outcome.transferResult !== 'bridged') ||
+    (outcome.finalResult === 'transfer_unanswered' &&
+      !['unanswered', 'failed'].includes(outcome.transferResult ?? ''))
+  );
+};
+
+const analyzedMilestones = (
+  outcome: RetellStructuredOutcome
+): {
+  milestones: VoiceMilestone[];
+  wrongPerson: boolean;
+  needsReview: boolean;
+} => {
+  const wrongPerson = outcome.wrongPerson === true || outcome.finalResult === 'wrong_person';
+  const voicemail = outcome.voicemailLeft === true || outcome.finalResult === 'voicemail_left';
+  const contradictory = outcomeIsContradictory(outcome);
+  if (wrongPerson) {
+    return {
+      milestones: [
+        startedMilestone,
+        terminalMilestone('WRONG_PERSON', 'VOICE_WRONG_PERSON_REPORTED')
+      ],
+      wrongPerson: true,
+      needsReview: contradictory
+    };
+  }
+  if (voicemail) {
+    return {
+      milestones: [terminalMilestone('VOICEMAIL_LEFT', 'VOICE_VOICEMAIL_LEFT')],
+      wrongPerson: false,
+      needsReview: contradictory
+    };
+  }
+  if (outcome.identityResult === 'not_confirmed') {
+    return {
+      milestones: [
+        startedMilestone,
+        terminalMilestone(
+          'IDENTITY_NOT_CONFIRMED',
+          'VOICE_IDENTITY_NOT_CONFIRMED'
+        )
+      ],
+      wrongPerson: false,
+      needsReview: contradictory
+    };
+  }
+
+  const milestones: VoiceMilestone[] = [];
+  const conversational =
+    outcome.identityResult === 'confirmed' ||
+    outcome.transferRequested === true ||
+    outcome.transferResult !== undefined ||
+    ['details_delivered', 'transferred', 'transfer_unanswered'].includes(
+      outcome.finalResult ?? ''
+    );
+  if (conversational) milestones.push(startedMilestone);
+  if (outcome.identityResult === 'confirmed') {
+    milestones.push({
+      domainEvent: 'IDENTITY_CONFIRMED',
+      eventType: 'VOICE_IDENTITY_CONFIRMED'
+    });
+  }
+
+  const detailsDelivered =
+    outcome.identityResult === 'confirmed' &&
+    (outcome.finalResult === 'details_delivered' ||
+      outcome.finalResult === 'transferred' ||
+      outcome.finalResult === 'transfer_unanswered');
+  if (detailsDelivered) {
+    milestones.push({
+      domainEvent: 'REMINDER_DELIVERED',
+      eventType: 'VOICE_REMINDER_DELIVERED'
+    });
+  }
+  if (outcome.transferRequested === true) {
+    milestones.push({
+      domainEvent: 'TRANSFER_REQUESTED',
+      eventType: 'VOICE_TRANSFER_REQUESTED'
+    });
+  }
+
+  switch (outcome.finalResult) {
+    case 'details_delivered':
+      if (detailsDelivered) {
+        milestones.push({
+          domainEvent: 'CALL_ENDED',
+          eventType: 'VOICE_CALL_COMPLETED'
+        });
+      }
+      break;
+    case 'transferred':
+      milestones.push(terminalMilestone('TRANSFERRED', 'VOICE_TRANSFERRED'));
+      break;
+    case 'transfer_unanswered':
+      milestones.push(
+        terminalMilestone(
+          'TRANSFER_UNANSWERED',
+          'VOICE_TRANSFER_UNANSWERED'
+        )
+      );
+      break;
+    case 'no_answer':
+      milestones.push(terminalMilestone('NO_ANSWER', 'VOICE_NO_ANSWER'));
+      break;
+    case 'busy':
+      milestones.push(terminalMilestone('BUSY', 'VOICE_BUSY'));
+      break;
+    case 'invalid_destination':
+      milestones.push(
+        terminalMilestone(
+          'INVALID_DESTINATION',
+          'VOICE_INVALID_DESTINATION'
+        )
+      );
+      break;
+    case 'provider_rejected':
+      milestones.push(
+        terminalMilestone('PROVIDER_REJECTED', 'VOICE_CALL_FAILED')
+      );
+      break;
+    default:
+      break;
+  }
+  const conclusive = outcome.finalResult !== undefined;
+  return {
+    milestones,
+    wrongPerson: false,
+    needsReview: contradictory || !conclusive
+  };
+};
+
+const knownEndedMilestone = (
+  disconnectionReason: string | undefined
+): VoiceMilestone | null => {
+  switch (disconnectionReason?.toLowerCase()) {
+    case 'no_answer':
+    case 'dial_no_answer':
+      return terminalMilestone('NO_ANSWER', 'VOICE_NO_ANSWER');
+    case 'busy':
+    case 'dial_busy':
+      return terminalMilestone('BUSY', 'VOICE_BUSY');
+    case 'invalid_destination':
+    case 'invalid_number':
+      return terminalMilestone(
+        'INVALID_DESTINATION',
+        'VOICE_INVALID_DESTINATION'
+      );
+    case 'provider_rejected':
+      return terminalMilestone('PROVIDER_REJECTED', 'VOICE_CALL_FAILED');
+    default:
+      return null;
+  }
+};
+
+const retellOccurredAt = (
+  event: RetellWebhookEvent,
+  fallback: Date
+): Date => {
+  const timestamp =
+    event.eventType === 'call_started'
+      ? event.startTimestamp
+      : event.endTimestamp ?? event.startTimestamp;
+  if (timestamp === undefined) return fallback;
+  const occurredAt = new Date(timestamp);
+  return Number.isFinite(occurredAt.getTime()) ? occurredAt : fallback;
+};
+
+const ensureVoiceReviewTask = async (
+  transaction: DbTransaction,
+  input: {
+    organisationId: string;
+    contactId: string;
+    kind: 'VOICE_CONTACT_REVIEW' | 'VOICE_OUTCOME_REVIEW';
+    summary: string;
+    now: Date;
+  }
+): Promise<void> => {
+  await transaction.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${input.contactId}, 1))`
+  );
+  const [existing] = await transaction
+    .select({ id: tasks.id })
+    .from(tasks)
+    .where(
+      and(
+        eq(tasks.organisationId, input.organisationId),
+        eq(tasks.contactId, input.contactId),
+        eq(tasks.kind, input.kind),
+        eq(tasks.status, 'OPEN')
+      )
+    )
+    .limit(1);
+  if (existing !== undefined) return;
+  await transaction.insert(tasks).values({
+    organisationId: input.organisationId,
+    kind: input.kind,
+    contactId: input.contactId,
+    status: 'OPEN',
+    summary: input.summary,
+    createdAt: input.now,
+    updatedAt: input.now
+  });
+};
+
+const processRetellEvent = async (
+  dependencies: WebhookProcessDependencies,
+  stored: typeof webhookEvents.$inferSelect,
+  rawBody: string
+): Promise<void> => {
+  const providerEvent = parseRetellWebhook(Buffer.from(rawBody));
+  if (providerEvent.eventKey !== stored.providerEventId) {
+    throw new Error('RETELL_WEBHOOK_EVENT_MISMATCH');
+  }
+  const occurredAt = retellOccurredAt(providerEvent, stored.receivedAt);
+  await dependencies.database.transaction(async (transaction) => {
+    const [call] = await transaction
+      .select()
+      .from(voiceCallRequests)
+      .where(
+        and(
+          eq(voiceCallRequests.organisationId, stored.organisationId),
+          eq(voiceCallRequests.provider, 'RETELL'),
+          eq(voiceCallRequests.providerCallId, providerEvent.callId)
+        )
+      )
+      .for('update')
+      .limit(1);
+    if (call === undefined) throw new Error('VOICE_CALL_NOT_FOUND');
+
+    let current: {
+      state: VoiceCallOperationalState;
+      outcome: VoiceCallOutcome | null;
+    } = { state: call.state, outcome: call.outcome };
+    let answered = call.answeredAt !== null;
+
+    const append = async (
+      suffix: string,
+      eventType: string,
+      domainEvent?: VoiceCallEvent
+    ): Promise<void> => {
+      const mayApply =
+        domainEvent !== 'CALL_STARTED' || current.state === 'ACCEPTED';
+      const transition =
+        domainEvent === undefined || !mayApply
+          ? { ...current, changed: false }
+          : transitionVoiceCallState(current, domainEvent);
+      const inserted = await transaction
+        .insert(voiceCallEvents)
+        .values({
+          organisationId: stored.organisationId,
+          voiceCallId: call.id,
+          providerEventKey: `${providerEvent.eventKey}:${suffix}`,
+          eventType,
+          safeState: transition.state,
+          safeOutcome: transition.outcome,
+          occurredAt,
+          receivedAt: stored.receivedAt
+        })
+        .onConflictDoNothing({
+          target: [
+            voiceCallEvents.organisationId,
+            voiceCallEvents.provider,
+            voiceCallEvents.providerEventKey
+          ]
+        })
+        .returning({ id: voiceCallEvents.id });
+      if (inserted.length === 0 || !transition.changed) return;
+      current = { state: transition.state, outcome: transition.outcome };
+      if (
+        domainEvent === 'CALL_STARTED' ||
+        domainEvent === 'IDENTITY_CONFIRMED' ||
+        domainEvent === 'IDENTITY_NOT_CONFIRMED' ||
+        domainEvent === 'WRONG_PERSON' ||
+        domainEvent === 'TRANSFER_REQUESTED' ||
+        domainEvent === 'TRANSFERRED' ||
+        domainEvent === 'TRANSFER_UNANSWERED'
+      ) {
+        answered = true;
+      }
+    };
+
+    let wrongPerson = false;
+    let needsReview = false;
+    if (providerEvent.eventType === 'call_started') {
+      await append('started', 'VOICE_CALL_STARTED', 'CALL_STARTED');
+    } else if (providerEvent.eventType === 'call_ended') {
+      await append('ended-observed', 'VOICE_CALL_ENDED');
+      const ended = knownEndedMilestone(providerEvent.disconnectionReason);
+      if (ended !== null) {
+        await append(
+          `outcome-${ended.domainEvent}`,
+          ended.eventType,
+          ended.domainEvent
+        );
+      }
+    } else {
+      await append('analyzed', 'VOICE_CALL_ANALYZED');
+      const normalized = analyzedMilestones(
+        providerEvent.analysis?.structuredOutcome ?? {}
+      );
+      wrongPerson = normalized.wrongPerson;
+      needsReview = normalized.needsReview;
+      for (const [index, milestone] of normalized.milestones.entries()) {
+        await append(
+          `milestone-${index}-${milestone.domainEvent ?? 'observed'}`,
+          milestone.eventType,
+          milestone.domainEvent
+        );
+      }
+    }
+
+    if (wrongPerson) {
+      await transaction
+        .insert(suppressions)
+        .values({
+          organisationId: stored.organisationId,
+          channel: 'VOICE',
+          normalisedDestination: call.destinationNumber,
+          source: 'RETELL_WRONG_PERSON',
+          reason: 'Wrong-person voice outcome',
+          consentState: 'SUPPRESSED',
+          recordedAt: occurredAt
+        })
+        .onConflictDoUpdate({
+          target: [
+            suppressions.organisationId,
+            suppressions.channel,
+            suppressions.normalisedDestination
+          ],
+          set: {
+            source: 'RETELL_WRONG_PERSON',
+            reason: 'Wrong-person voice outcome',
+            consentState: 'SUPPRESSED',
+            recordedAt: occurredAt
+          }
+        });
+      await ensureVoiceReviewTask(transaction, {
+        organisationId: stored.organisationId,
+        contactId: call.contactId,
+        kind: 'VOICE_CONTACT_REVIEW',
+        summary: 'Review voice contact after a wrong-person outcome',
+        now: stored.receivedAt
+      });
+    }
+    if (needsReview) {
+      await ensureVoiceReviewTask(transaction, {
+        organisationId: stored.organisationId,
+        contactId: call.contactId,
+        kind: 'VOICE_OUTCOME_REVIEW',
+        summary: 'Review an incomplete or contradictory voice-call outcome',
+        now: stored.receivedAt
+      });
+    }
+
+    const terminal = ['COMPLETED', 'FAILED', 'CANCELLED'].includes(
+      current.state
+    );
+    await transaction
+      .update(voiceCallRequests)
+      .set({
+        state: current.state,
+        outcome: current.outcome,
+        ...(answered && call.answeredAt === null
+          ? { answeredAt: occurredAt }
+          : {}),
+        ...(terminal && call.completedAt === null
+          ? { completedAt: occurredAt }
+          : {}),
+        ...(current.state === 'FAILED'
+          ? { failureCode: current.outcome ?? 'PROVIDER_FAILED' }
+          : {}),
+        updatedAt: stored.receivedAt
+      })
+      .where(
+        and(
+          eq(voiceCallRequests.organisationId, stored.organisationId),
+          eq(voiceCallRequests.id, call.id)
+        )
+      );
+  });
 };
 
 export async function processWebhookEvent(
@@ -190,7 +620,7 @@ export async function processWebhookEvent(
     const rawBody = rawBodyFrom(stored.providerPayload);
     if (stored.provider === 'XERO') {
       await processXeroEvent(dependencies, stored, rawBody);
-    } else {
+    } else if (stored.provider === 'SINCH') {
       const event = parseSinchEvent(Buffer.from(rawBody));
       const providerPayload = parseRecord(rawBody);
       if (event.kind === 'reply') {
@@ -213,6 +643,8 @@ export async function processWebhookEvent(
           event
         );
       }
+    } else {
+      await processRetellEvent(dependencies, stored, rawBody);
     }
     await dependencies.database
       .update(webhookEvents)

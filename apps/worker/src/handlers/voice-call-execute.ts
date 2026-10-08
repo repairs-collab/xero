@@ -159,7 +159,8 @@ const cancel = async (
   payload: VoiceCallExecutePayload,
   actorUserId: string | null,
   reason: VoiceCallCancellationCode,
-  now: Date
+  now: Date,
+  expectedState: 'QUEUED' | 'SUBMITTING' = 'QUEUED'
 ): Promise<VoiceCallExecutionResult> => {
   await dependencies.database
     .update(voiceCallRequests)
@@ -173,7 +174,7 @@ const cancel = async (
       and(
         eq(voiceCallRequests.organisationId, payload.organisationId),
         eq(voiceCallRequests.id, payload.voiceCallId),
-        eq(voiceCallRequests.state, 'QUEUED')
+        eq(voiceCallRequests.state, expectedState)
       )
     );
   await audit(dependencies.database, {
@@ -201,7 +202,8 @@ interface RevalidatedCall {
 const revalidate = async (
   dependencies: VoiceCallExecutionDependencies,
   payload: VoiceCallExecutePayload,
-  now: Date
+  now: Date,
+  expectedState: 'QUEUED' | 'SUBMITTING' = 'QUEUED'
 ): Promise<
   | { kind: 'eligible'; value: RevalidatedCall }
   | {
@@ -222,7 +224,9 @@ const revalidate = async (
       reason: 'VOICE_CALL_NOT_FOUND'
     };
   }
-  if (call.state !== 'QUEUED') return { kind: 'existing', state: call.state };
+  if (call.state !== expectedState) {
+    return { kind: 'existing', state: call.state };
+  }
 
   const [organisationRows, settingsRows, contactRows, actorRows] =
     await Promise.all([
@@ -351,7 +355,12 @@ const revalidate = async (
   const chaseRows = await dependencies.database
     .select({
       invoiceId: invoiceChases.invoiceId,
-      sequenceId: invoiceChases.sequenceId
+      sequenceId: invoiceChases.sequenceId,
+      type: invoices.type,
+      status: invoices.status,
+      amountDue: invoices.amountDue,
+      currency: invoices.currency,
+      dueDate: invoices.dueDate
     })
     .from(invoiceChases)
     .innerJoin(
@@ -362,22 +371,24 @@ const revalidate = async (
         eq(reminderSequences.enabled, true)
       )
     )
+    .innerJoin(
+      invoices,
+      and(
+        eq(invoices.id, invoiceChases.invoiceId),
+        eq(invoices.organisationId, payload.organisationId),
+        eq(invoices.contactId, call.contactId)
+      )
+    )
     .where(
       and(
         eq(invoiceChases.organisationId, payload.organisationId),
         eq(invoiceChases.customerId, call.contactId),
-        eq(invoiceChases.status, 'ACTIVE'),
-        inArray(invoiceChases.invoiceId, invoiceIds)
+        eq(invoiceChases.status, 'ACTIVE')
       )
     );
-  const activeChaseIds = new Set(chaseRows.map((row) => row.invoiceId));
-  if (invoiceIds.some((invoiceId) => !activeChaseIds.has(invoiceId))) {
-    return {
-      kind: 'blocked',
-      actorUserId: call.actorUserId,
-      reason: 'STALE_ACCOUNT_DATA'
-    };
-  }
+  const candidateInvoiceIds = [
+    ...new Set(chaseRows.map((row) => row.invoiceId))
+  ];
   const sequenceIds = [...new Set(chaseRows.map((row) => row.sequenceId))];
   const [
     channels,
@@ -418,7 +429,10 @@ const revalidate = async (
             eq(disputes.organisationId, payload.organisationId),
             eq(disputes.contactId, call.contactId),
             eq(disputes.status, 'OPEN'),
-            or(isNull(disputes.invoiceId), inArray(disputes.invoiceId, invoiceIds))
+            or(
+              isNull(disputes.invoiceId),
+              inArray(disputes.invoiceId, candidateInvoiceIds)
+            )
           )
         ),
       dependencies.database
@@ -441,7 +455,7 @@ const revalidate = async (
             or(isNull(pauses.expiresAt), gt(pauses.expiresAt, now)),
             or(
               eq(pauses.contactId, call.contactId),
-              inArray(pauses.invoiceId, invoiceIds),
+              inArray(pauses.invoiceId, candidateInvoiceIds),
               inArray(pauses.sequenceId, sequenceIds)
             )
           )
@@ -456,11 +470,83 @@ const revalidate = async (
             isNull(reminderWhitelistEntries.removedAt),
             or(
               eq(reminderWhitelistEntries.scope, 'CLIENT'),
-              inArray(reminderWhitelistEntries.invoiceId, invoiceIds)
+              inArray(
+                reminderWhitelistEntries.invoiceId,
+                candidateInvoiceIds
+              )
             )
           )
         ),
     ]);
+  const today = localDate(now, settings.timezone);
+  const approvedInvoiceIds = new Set(invoiceIds);
+  const disputedInvoiceIds = new Set(
+    disputesRows.flatMap((row) =>
+      row.invoiceId === null ? [] : [row.invoiceId]
+    )
+  );
+  const pausedInvoiceIds = new Set(
+    pausesRows.flatMap((row) =>
+      row.invoiceId === null ? [] : [row.invoiceId]
+    )
+  );
+  const pausedSequenceIds = new Set(
+    pausesRows.flatMap((row) =>
+      row.sequenceId === null ? [] : [row.sequenceId]
+    )
+  );
+  const whitelistedInvoiceIds = new Set(
+    whitelistRows.flatMap((row) =>
+      row.invoiceId === null ? [] : [row.invoiceId]
+    )
+  );
+  const eligibleInvoiceIds = new Set(
+    chaseRows
+      .filter(
+        (row) =>
+          row.type === 'ACCREC' &&
+          row.status === 'AUTHORISED' &&
+          decimalIsPositive(row.amountDue) &&
+          row.currency === call.currency &&
+          row.dueDate < today &&
+          (approvedInvoiceIds.has(row.invoiceId) ||
+            (!disputedInvoiceIds.has(row.invoiceId) &&
+              !pausedInvoiceIds.has(row.invoiceId) &&
+              !pausedSequenceIds.has(row.sequenceId) &&
+              !whitelistedInvoiceIds.has(row.invoiceId)))
+      )
+      .map((row) => row.invoiceId)
+  );
+  if (
+    eligibleInvoiceIds.size !== approvedInvoiceIds.size ||
+    invoiceIds.some((invoiceId) => !eligibleInvoiceIds.has(invoiceId))
+  ) {
+    return {
+      kind: 'blocked',
+      actorUserId: call.actorUserId,
+      reason: 'STALE_ACCOUNT_DATA'
+    };
+  }
+  const approvedSequenceIds = new Set(
+    chaseRows
+      .filter((row) => approvedInvoiceIds.has(row.invoiceId))
+      .map((row) => row.sequenceId)
+  );
+  const approvedDisputeOpen = disputesRows.some(
+    (row) =>
+      row.invoiceId === null || approvedInvoiceIds.has(row.invoiceId)
+  );
+  const approvedPauseActive = pausesRows.some(
+    (row) =>
+      row.contactId === call.contactId ||
+      (row.invoiceId !== null && approvedInvoiceIds.has(row.invoiceId)) ||
+      (row.sequenceId !== null && approvedSequenceIds.has(row.sequenceId))
+  );
+  const approvedWhitelistActive = whitelistRows.some(
+    (row) =>
+      row.scope === 'CLIENT' ||
+      (row.invoiceId !== null && approvedInvoiceIds.has(row.invoiceId))
+  );
   const destinationIsCurrent = channels.some(
     (channel) => channel.normalisedValue === call.destinationNumber
   );
@@ -478,7 +564,6 @@ const revalidate = async (
     from: new Date(now.getTime() - 40 * 24 * 60 * 60 * 1000),
     before: now
   });
-  const today = localDate(now, settings.timezone);
   const policy = evaluateVoiceContactPolicy({
     now,
     timezone: settings.timezone,
@@ -489,12 +574,12 @@ const revalidate = async (
     permissionAllowed: true,
     destinationValid: destinationIsCurrent,
     voiceSuppressed: suppressionsRows.length > 0,
-    disputeOpen: disputesRows.length > 0,
+    disputeOpen: approvedDisputeOpen,
     promiseToPayActive: promisesRows.some((promise) =>
       promiseIsActive(promise, today)
     ),
-    paused: pausesRows.length > 0,
-    whitelisted: whitelistRows.length > 0,
+    paused: approvedPauseActive,
+    whitelisted: approvedWhitelistActive,
     staleAccountData:
       organisation.maintenanceMode ||
       !['READY', 'RECONCILED'].includes(organisation.operationalState) ||
@@ -523,7 +608,8 @@ const knownProviderFailure = (error: unknown): boolean =>
 
 const queueReconciliation = async (
   dependencies: VoiceCallExecutionDependencies,
-  payload: VoiceCallExecutePayload
+  payload: VoiceCallExecutePayload,
+  startAfter?: Date
 ): Promise<void> => {
   await dependencies.publisher.publish(
     jobNames.voiceCallReconcile,
@@ -534,7 +620,10 @@ const queueReconciliation = async (
         ? {}
         : { correlationId: payload.correlationId })
     },
-    { singletonKey: `voice-call-reconcile:${payload.voiceCallId}` }
+    {
+      singletonKey: `voice-call-reconcile:${payload.voiceCallId}`,
+      ...(startAfter === undefined ? {} : { startAfter })
+    }
   );
 };
 
@@ -560,9 +649,14 @@ export async function executeVoiceCall(
     );
   }
 
-  const { call, settings } = validation.value;
+  let { call, settings } = validation.value;
   const apiKey = await dependencies.secrets.read(settings.secretReference);
   const provider = dependencies.providerFactory.create(apiKey);
+  await queueReconciliation(
+    dependencies,
+    payload,
+    new Date(now.getTime() + 15 * 60 * 1_000)
+  );
 
   const claim = await dependencies.repository.claimForSubmission({
     organisationId: payload.organisationId,
@@ -584,6 +678,28 @@ export async function executeVoiceCall(
       now
     );
   }
+
+  const submissionNow = dependencies.clock.now();
+  const finalValidation = await revalidate(
+    dependencies,
+    payload,
+    submissionNow,
+    'SUBMITTING'
+  );
+  if (finalValidation.kind === 'existing') {
+    return { kind: 'existing', state: finalValidation.state };
+  }
+  if (finalValidation.kind === 'blocked') {
+    return cancel(
+      dependencies,
+      payload,
+      finalValidation.actorUserId,
+      finalValidation.reason,
+      submissionNow,
+      'SUBMITTING'
+    );
+  }
+  ({ call, settings } = finalValidation.value);
 
   const detailVariables = buildVoiceCallDetailVariables({
     callbackNumber: settings.fallbackOfficeNumber,
@@ -622,7 +738,7 @@ export async function executeVoiceCall(
       organisationId: payload.organisationId,
       voiceCallId: call.id,
       providerCallId: result.callId,
-      now
+      now: submissionNow
     });
     await audit(dependencies.database, {
       organisationId: payload.organisationId,
@@ -633,7 +749,7 @@ export async function executeVoiceCall(
         : { correlationId: payload.correlationId }),
       eventType: 'VOICE_CALL_PROVIDER_ACCEPTED',
       state: 'ACCEPTED',
-      occurredAt: now
+      occurredAt: submissionNow
     });
     return { kind: 'accepted', providerCallId: result.callId };
   } catch (error) {
@@ -643,7 +759,7 @@ export async function executeVoiceCall(
         .set({
           state: 'UNKNOWN',
           failureCode: 'DISPATCH_OUTCOME_UNKNOWN',
-          updatedAt: now
+          updatedAt: submissionNow
         })
         .where(
           and(
@@ -652,7 +768,6 @@ export async function executeVoiceCall(
             eq(voiceCallRequests.state, 'SUBMITTING')
           )
         );
-      await queueReconciliation(dependencies, payload);
       await audit(dependencies.database, {
         organisationId: payload.organisationId,
         actorUserId: call.actorUserId,
@@ -663,7 +778,7 @@ export async function executeVoiceCall(
         eventType: 'VOICE_CALL_OUTCOME_UNKNOWN',
         state: 'UNKNOWN',
         safeCode: 'DISPATCH_OUTCOME_UNKNOWN',
-        occurredAt: now
+        occurredAt: submissionNow
       });
       return { kind: 'unknown' };
     }
@@ -674,8 +789,8 @@ export async function executeVoiceCall(
           state: 'FAILED',
           outcome: 'PROVIDER_REJECTED',
           failureCode: 'PROVIDER_REJECTED',
-          completedAt: now,
-          updatedAt: now
+          completedAt: submissionNow,
+          updatedAt: submissionNow
         })
         .where(
           and(
@@ -694,7 +809,7 @@ export async function executeVoiceCall(
         eventType: 'VOICE_CALL_FAILED',
         state: 'FAILED',
         safeCode: 'PROVIDER_REJECTED',
-        occurredAt: now
+        occurredAt: submissionNow
       });
       return { kind: 'failed', reason: 'PROVIDER_REJECTED' };
     }

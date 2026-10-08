@@ -6,7 +6,7 @@ import {
 } from 'node:crypto';
 
 import { eq } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
   createDatabase,
@@ -19,6 +19,7 @@ import { sinchCallbackCanonicalBytes } from '@bc5000/integrations/sinch';
 import { jobNames } from '@bc5000/jobs';
 
 import {
+  createRetellWebhookHandler,
   createSinchWebhookHandler,
   createXeroWebhookHandler
 } from '../src/server/webhook-handlers.js';
@@ -35,6 +36,8 @@ const queued: Array<{
 }> = [];
 const queue = {
   enqueueUnique(name: string, payload: unknown, singletonKey: string) {
+    const existing = queued.find((job) => job.singletonKey === singletonKey);
+    if (existing !== undefined) return Promise.resolve(singletonKey);
     queued.push({ name, payload, singletonKey });
     return Promise.resolve(randomUUID());
   }
@@ -56,6 +59,17 @@ afterAll(async () => {
 });
 
 describe('public webhook endpoints', () => {
+  const retellNow = new Date('2026-10-08T00:00:00.000Z');
+  const retellApiKey = 'retell-private-api-key';
+  const retellSignature = (
+    rawBody: string,
+    signedAt = retellNow.getTime()
+  ): string =>
+    `v=${signedAt},d=${createHmac('sha256', retellApiKey)
+      .update(Buffer.from(rawBody))
+      .update(String(signedAt))
+      .digest('hex')}`;
+
   it('returns 401 for an invalid Xero signature without enqueuing', async () => {
     const before = queued.length;
     const handler = createXeroWebhookHandler({
@@ -248,5 +262,150 @@ describe('public webhook endpoints', () => {
       })
     );
     expect(response.status).toBe(401);
+  });
+
+  it('verifies exact Retell bytes, records once, and queues protected processing', async () => {
+    const callId = `retell-${randomUUID()}`;
+    const body = `{
+  "event": "call_started",
+  "call": {
+    "call_id": "${callId}",
+    "call_status": "ongoing",
+    "start_timestamp": ${retellNow.getTime()},
+    "to_number": "+61412345678",
+    "transcript": "private customer speech",
+    "recording_url": "https://example.invalid/private.wav",
+    "retell_llm_dynamic_variables": {
+      "invoice_details_json": "private invoice details"
+    }
+  }
+}`;
+    const beforeQueued = queued.filter(
+      (job) => (job.payload as { provider?: string }).provider === 'RETELL'
+    ).length;
+    const handler = createRetellWebhookHandler({
+      organisationId,
+      apiKey: retellApiKey,
+      clock: { now: () => retellNow },
+      repository: new PostgresWebhookRepository(client.db),
+      queue
+    });
+    const request = () =>
+      new Request('https://bill-chaser.test/api/webhooks/retell', {
+        method: 'POST',
+        headers: { 'x-retell-signature': retellSignature(body) },
+        body
+      });
+
+    expect((await handler(request())).status).toBe(202);
+    expect((await handler(request())).status).toBe(202);
+
+    const matchingJobs = queued.filter(
+      (job) =>
+        (job.payload as { provider?: string }).provider === 'RETELL' &&
+        job.singletonKey.includes(organisationId)
+    );
+    expect(matchingJobs).toHaveLength(beforeQueued + 1);
+    expect(JSON.stringify(matchingJobs.at(-1))).not.toMatch(
+      /private customer speech|private invoice details|private-retell-api-key|\+61412345678/
+    );
+    const stored = await client.db
+      .select()
+      .from(webhookEvents)
+      .where(eq(webhookEvents.organisationId, organisationId));
+    const retellRows = stored.filter(
+      (event) =>
+        event.provider === 'RETELL' &&
+        JSON.stringify(event.providerPayload).includes(callId)
+    );
+    expect(retellRows).toHaveLength(1);
+    expect(retellRows[0]).toMatchObject({
+      provider: 'RETELL',
+      signatureValid: true
+    });
+    expect(retellRows[0]?.providerPayload).toEqual({ rawBody: body });
+  });
+
+  it('re-enqueues a stored Retell event when the first queue publish fails', async () => {
+    const callId = `retell-retry-${randomUUID()}`;
+    const body = JSON.stringify({
+      event: 'call_started',
+      call: {
+        call_id: callId,
+        call_status: 'ongoing',
+        start_timestamp: retellNow.getTime()
+      }
+    });
+    const enqueueUnique = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('temporary queue failure'))
+      .mockResolvedValueOnce('queued-after-retry');
+    const handler = createRetellWebhookHandler({
+      organisationId,
+      apiKey: retellApiKey,
+      clock: { now: () => retellNow },
+      repository: new PostgresWebhookRepository(client.db),
+      queue: { enqueueUnique }
+    });
+    const request = () =>
+      new Request('https://bill-chaser.test/api/webhooks/retell', {
+        method: 'POST',
+        headers: { 'x-retell-signature': retellSignature(body) },
+        body
+      });
+
+    await expect(handler(request())).rejects.toThrow('temporary queue failure');
+    expect((await handler(request())).status).toBe(202);
+    expect(enqueueUnique).toHaveBeenCalledTimes(2);
+    expect(enqueueUnique.mock.calls[1]?.[1]).toMatchObject({
+      organisationId,
+      provider: 'RETELL'
+    });
+  });
+
+  it.each([
+    ['missing', '', retellNow],
+    ['invalid', `v=${retellNow.getTime()},d=${'0'.repeat(64)}`, retellNow],
+    [
+      'stale',
+      'signed',
+      new Date(retellNow.getTime() + 5 * 60 * 1_000 + 1)
+    ]
+  ] as const)('rejects a %s Retell signature before recording', async (_name, signature, clockTime) => {
+    const callId = `retell-rejected-${randomUUID()}`;
+    const body = JSON.stringify({
+      event: 'call_started',
+      call: {
+        call_id: callId,
+        call_status: 'ongoing',
+        start_timestamp: retellNow.getTime()
+      }
+    });
+    const suppliedSignature =
+      signature === 'signed' ? retellSignature(body) : signature;
+    const beforeQueued = queued.length;
+    const handler = createRetellWebhookHandler({
+      organisationId,
+      apiKey: retellApiKey,
+      clock: { now: () => clockTime },
+      repository: new PostgresWebhookRepository(client.db),
+      queue
+    });
+
+    const response = await handler(
+      new Request('https://bill-chaser.test/api/webhooks/retell', {
+        method: 'POST',
+        headers: { 'x-retell-signature': suppliedSignature },
+        body
+      })
+    );
+
+    expect(response.status).toBe(401);
+    expect(queued).toHaveLength(beforeQueued);
+    const stored = await client.db
+      .select()
+      .from(webhookEvents)
+      .where(eq(webhookEvents.organisationId, organisationId));
+    expect(JSON.stringify(stored)).not.toContain(callId);
   });
 });

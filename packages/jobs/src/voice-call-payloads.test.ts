@@ -31,6 +31,17 @@ describe('voice call job contracts', () => {
     expect(parseJobPayload(jobNames.voiceCallReconcile, reconcile)).toEqual(
       reconcile
     );
+    expect(
+      parseJobPayload(jobNames.webhookProcess, {
+        organisationId: 'org-1',
+        webhookEventId: 'webhook-1',
+        provider: 'RETELL'
+      })
+    ).toEqual({
+      organisationId: 'org-1',
+      webhookEventId: 'webhook-1',
+      provider: 'RETELL'
+    });
   });
 
   it.each([
