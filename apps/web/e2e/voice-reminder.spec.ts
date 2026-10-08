@@ -26,7 +26,12 @@ test('keeps setup fictional, locked, and independently disabled until ready', as
   await expect(page.getByText(fixedVoiceCallCopy.voicemail)).toBeVisible();
   await expect(page.getByText('Wording cannot be edited on this page.')).toBeVisible();
   await expect(page.locator('textarea')).toHaveCount(0);
-  await expect(page.getByText('No customer will be called.')).toBeVisible();
+  await expect(
+    page.getByText(
+      'No customer will be called. No provider account is required, and AccountPulse makes no speech-provider or telephone request.',
+      { exact: true }
+    )
+  ).toBeVisible();
 
   await page.getByRole('button', { name: 'Test provider setup' }).click();
   await recordVoicePreviewEvidence();
