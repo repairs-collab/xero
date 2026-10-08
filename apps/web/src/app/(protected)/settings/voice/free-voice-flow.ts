@@ -9,7 +9,7 @@ export interface FreePreviewVoice {
 export interface FreePreviewPlayback {
   script: string;
   voice: FreePreviewVoice | null;
-  lang: string;
+  lang: string | null;
   rate: number;
   pitch: number;
   onEnd: () => void;
@@ -20,6 +20,11 @@ export interface FreePreviewPlayer {
   voices: readonly FreePreviewVoice[];
   cancel: () => void;
   speak: (input: FreePreviewPlayback) => void;
+}
+
+export interface FreeVoicePlaybackGuard {
+  begin: () => () => boolean;
+  invalidate: () => void;
 }
 
 const fictionalInvoiceDetails =
@@ -67,6 +72,19 @@ export function describeFreePreviewVoice(
   return `Australian voice unavailable; using ${voice.name} (${voice.lang})`;
 }
 
+export function createFreeVoicePlaybackGuard(): FreeVoicePlaybackGuard {
+  let generation = 0;
+  return {
+    begin: () => {
+      const activeGeneration = ++generation;
+      return () => activeGeneration === generation;
+    },
+    invalidate: () => {
+      generation += 1;
+    }
+  };
+}
+
 export function playFreeVoicePreviewScript(input: {
   player: FreePreviewPlayer | null;
   script: string;
@@ -79,7 +97,7 @@ export function playFreeVoicePreviewScript(input: {
   input.player.speak({
     script: input.script,
     voice,
-    lang: voice?.lang ?? 'en-AU',
+    lang: voice?.lang ?? null,
     rate: 0.95,
     pitch: 1,
     onEnd: input.onEnd,

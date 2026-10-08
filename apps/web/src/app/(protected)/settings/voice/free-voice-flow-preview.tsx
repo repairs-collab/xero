@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import {
+  createFreeVoicePlaybackGuard,
   describeFreePreviewVoice,
   freeVoicePreviewScripts,
   playFreeVoicePreviewScript,
@@ -27,6 +28,7 @@ const stepLabel: Record<PreviewStep, string> = {
 };
 
 export function FreeVoiceFlowPreview() {
+  const playbackGuard = useRef(createFreeVoicePlaybackGuard());
   const [supported, setSupported] = useState<boolean | null>(null);
   const [voiceLabel, setVoiceLabel] = useState(
     'Checking this device for an Australian voice'
@@ -57,6 +59,7 @@ export function FreeVoiceFlowPreview() {
     refreshVoice();
     speech.addEventListener('voiceschanged', refreshVoice);
     return () => {
+      playbackGuard.current.invalidate();
       speech.removeEventListener('voiceschanged', refreshVoice);
       speech.cancel();
     };
@@ -76,6 +79,7 @@ export function FreeVoiceFlowPreview() {
     setStep(nextStep);
     setStatus(stepLabel[nextStep]);
     const speech = window.speechSynthesis;
+    const isCurrentPlayback = playbackGuard.current.begin();
     playFreeVoicePreviewScript({
       player: {
         voices: speech.getVoices(),
@@ -85,7 +89,7 @@ export function FreeVoiceFlowPreview() {
           if (playback.voice !== null) {
             utterance.voice = playback.voice as SpeechSynthesisVoice;
           }
-          utterance.lang = playback.lang;
+          if (playback.lang !== null) utterance.lang = playback.lang;
           utterance.rate = playback.rate;
           utterance.pitch = playback.pitch;
           utterance.onend = playback.onEnd;
@@ -94,15 +98,23 @@ export function FreeVoiceFlowPreview() {
         }
       },
       script,
-      onEnd: () => setStatus(`${stepLabel[nextStep]} — finished`),
-      onError: () =>
-        setStatus(
-          'The browser could not play this sample. Try another voice-enabled browser.'
-        )
+      onEnd: () => {
+        if (isCurrentPlayback()) {
+          setStatus(`${stepLabel[nextStep]} — finished`);
+        }
+      },
+      onError: () => {
+        if (isCurrentPlayback()) {
+          setStatus(
+            'The browser could not play this sample. Try another voice-enabled browser.'
+          );
+        }
+      }
     });
   };
 
   const endPreview = () => {
+    playbackGuard.current.invalidate();
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
     }

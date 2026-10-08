@@ -9,6 +9,7 @@ import {
   GenericFlowPreview
 } from '../src/app/(protected)/settings/voice/generic-flow-preview.js';
 import {
+  createFreeVoicePlaybackGuard,
   describeFreePreviewVoice,
   freeVoicePreviewScripts,
   playFreeVoicePreviewScript,
@@ -242,7 +243,7 @@ describe('voice settings view', () => {
       | {
           script: string;
           voice: { name: string; lang: string } | null;
-          lang: string;
+          lang: string | null;
           rate: number;
           pitch: number;
         }
@@ -287,6 +288,35 @@ describe('voice settings view', () => {
         onError: () => undefined
       })
     ).toBe(false);
+
+    let defaultPlayback:
+      | { voice: { name: string; lang: string } | null; lang: string | null }
+      | undefined;
+    playFreeVoicePreviewScript({
+      player: {
+        voices: [],
+        cancel: () => undefined,
+        speak: (input) => {
+          defaultPlayback = input;
+        }
+      },
+      script: 'Device default sample',
+      onEnd: () => undefined,
+      onError: () => undefined
+    });
+    expect(defaultPlayback).toMatchObject({ voice: null, lang: null });
+  });
+
+  it('invalidates callbacks from cancelled or superseded speech', () => {
+    const guard = createFreeVoicePlaybackGuard();
+    const firstPlaybackIsCurrent = guard.begin();
+    const secondPlaybackIsCurrent = guard.begin();
+
+    expect(firstPlaybackIsCurrent()).toBe(false);
+    expect(secondPlaybackIsCurrent()).toBe(true);
+
+    guard.invalidate();
+    expect(secondPlaybackIsCurrent()).toBe(false);
   });
 
   it('renders a browser-only keypad preview without customer or telephone inputs', () => {
