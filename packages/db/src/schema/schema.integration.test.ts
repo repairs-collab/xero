@@ -821,6 +821,212 @@ describe('database invariants', () => {
     });
   });
 
+  it('upgrades the originally applied voice schema forward without losing legacy references', async () => {
+    const client = await database.pool.connect();
+    const schemaName = `voice_upgrade_${randomUUID().replaceAll('-', '_')}`;
+    const organisationId = randomUUID();
+    const contactId = randomUUID();
+    const invoiceId = randomUUID();
+    const voiceCallId = randomUUID();
+
+    try {
+      await client.query('begin');
+      await client.query(`create schema "${schemaName}"`);
+      await client.query(`set local search_path to "${schemaName}"`);
+      await client.query(`
+        create table contacts (
+          id uuid primary key,
+          organisation_id uuid not null
+        );
+        create table invoices (
+          id uuid primary key,
+          organisation_id uuid not null
+        );
+        create table organisation_voice_settings (
+          organisation_id uuid primary key,
+          enabled boolean default false not null,
+          provider varchar(16) default 'RETELL' not null,
+          secret_arn text not null,
+          preview_public_key text not null,
+          agent_id text not null,
+          agent_version integer not null,
+          voice_id text not null,
+          voice_label text not null,
+          outbound_number text not null,
+          transfer_sip_uri text,
+          fallback_office_number text not null,
+          office_destination_label text not null,
+          timezone varchar(64) not null,
+          weekday_start_local time(0) not null,
+          weekday_end_local time(0) not null,
+          voicemail_template text not null,
+          last_connection_tested_at timestamptz,
+          last_connection_test_succeeded boolean default false not null,
+          updated_by_user_id uuid,
+          created_at timestamptz default now() not null,
+          updated_at timestamptz default now() not null
+        );
+        create table voice_call_requests (
+          id uuid primary key,
+          organisation_id uuid not null,
+          contact_id uuid not null,
+          actor_user_id uuid,
+          provider varchar(16) default 'RETELL' not null,
+          purpose varchar(16) default 'CUSTOMER' not null,
+          destination_number text not null,
+          outbound_number text not null,
+          combined_amount numeric(19, 4) not null,
+          currency char(3) not null,
+          approved_script text,
+          script_hash text,
+          script_version integer,
+          agent_id text not null,
+          agent_version integer not null,
+          voice_id text not null,
+          voice_settings_updated_at timestamptz not null,
+          transfer_target_label text not null,
+          idempotency_key text not null,
+          state varchar(24) default 'DRAFT' not null,
+          outcome varchar(32),
+          provider_call_id text,
+          previewed_at timestamptz,
+          approved_at timestamptz,
+          queued_at timestamptz,
+          provider_accepted_at timestamptz,
+          answered_at timestamptz,
+          completed_at timestamptz,
+          failure_code text,
+          failure_detail text,
+          created_at timestamptz default now() not null,
+          updated_at timestamptz default now() not null,
+          constraint voice_call_requests_state_ck check (
+            state in ('DRAFT', 'PREVIEWED', 'APPROVED', 'QUEUED', 'SUBMITTING', 'ACCEPTED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED', 'FAILED', 'UNKNOWN')
+          ),
+          constraint voice_call_requests_approved_facts_ck check (
+            state not in ('APPROVED', 'QUEUED', 'SUBMITTING', 'ACCEPTED', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'UNKNOWN')
+            or (approved_script is not null and script_hash is not null and script_version is not null and previewed_at is not null and approved_at is not null)
+          )
+        );
+        create table voice_call_invoices (
+          voice_call_id uuid not null,
+          organisation_id uuid not null,
+          invoice_id uuid not null
+        );
+        create table voice_call_events (
+          organisation_id uuid not null,
+          voice_call_id uuid not null,
+          provider varchar(16) default 'RETELL' not null,
+          provider_event_key text not null,
+          occurred_at timestamptz not null
+        );
+      `);
+      await client.query(
+        `insert into contacts (id, organisation_id) values ($1, $2)`,
+        [contactId, organisationId]
+      );
+      await client.query(
+        `insert into invoices (id, organisation_id) values ($1, $2)`,
+        [invoiceId, organisationId]
+      );
+      await client.query(
+        `insert into organisation_voice_settings (
+          organisation_id, secret_arn, preview_public_key, agent_id,
+          agent_version, voice_id, voice_label, outbound_number,
+          fallback_office_number, office_destination_label, timezone,
+          weekday_start_local, weekday_end_local, voicemail_template
+        ) values ($1, $2, 'preview-key', 'agent', 1, 'voice', 'Australian',
+                  '+61255501234', '+61350324518', 'Main office',
+                  'Australia/Sydney', '09:00', '17:00', 'Legacy voicemail')`,
+        [organisationId, 'env:RETELL_API_KEY']
+      );
+      await client.query(
+        `insert into voice_call_requests (
+          id, organisation_id, contact_id, destination_number,
+          outbound_number, combined_amount, currency, approved_script,
+          script_hash, script_version, agent_id, agent_version, voice_id,
+          voice_settings_updated_at, transfer_target_label, idempotency_key,
+          state, previewed_at, approved_at
+        ) values ($1, $2, $3, '+61400000000', '+61255501234', 100, 'AUD',
+                  'Legacy script', 'sha256:legacy-script', 1, 'agent', 1,
+                  'voice', now(), 'Main office', 'legacy-call', 'COMPLETED',
+                  now(), now())`,
+        [voiceCallId, organisationId, contactId]
+      );
+
+      const migration = await readFile(
+        new URL(
+          '../../drizzle/0009_voice_schema_forward_repair.sql',
+          import.meta.url
+        ),
+        'utf8'
+      );
+      for (const statement of migration
+        .split('--> statement-breakpoint')
+        .map((value) => value.trim())
+        .filter(Boolean)) {
+        await client.query(statement);
+      }
+
+      const settingsColumns = await client.query<{ column_name: string }>(
+        `select column_name
+           from information_schema.columns
+          where table_schema = $1 and table_name = 'organisation_voice_settings'`,
+        [schemaName]
+      );
+      const requestColumns = await client.query<{ column_name: string }>(
+        `select column_name
+           from information_schema.columns
+          where table_schema = $1 and table_name = 'voice_call_requests'`,
+        [schemaName]
+      );
+      const settings = await client.query<{
+        configuration_version: number;
+        secret_reference: string;
+      }>('select configuration_version, secret_reference from organisation_voice_settings');
+      const request = await client.query<{
+        approved_facts_hash: string;
+        call_flow_hash: string;
+        call_flow_version: number;
+      }>(
+        'select approved_facts_hash, call_flow_hash, call_flow_version from voice_call_requests'
+      );
+
+      expect(settingsColumns.rows.map((row) => row.column_name)).toEqual(
+        expect.arrayContaining(['configuration_version', 'secret_reference'])
+      );
+      expect(settingsColumns.rows.map((row) => row.column_name)).not.toEqual(
+        expect.arrayContaining(['secret_arn', 'voicemail_template'])
+      );
+      expect(requestColumns.rows.map((row) => row.column_name)).toEqual(
+        expect.arrayContaining([
+          'call_flow_version',
+          'call_flow_hash',
+          'approved_facts_hash'
+        ])
+      );
+      expect(requestColumns.rows.map((row) => row.column_name)).not.toEqual(
+        expect.arrayContaining([
+          'approved_script',
+          'script_hash',
+          'script_version',
+          'previewed_at'
+        ])
+      );
+      expect(settings.rows[0]).toEqual({
+        configuration_version: 0,
+        secret_reference: 'env:RETELL_API_KEY'
+      });
+      expect(request.rows[0]).toEqual({
+        approved_facts_hash: `legacy-unverified:${voiceCallId}`,
+        call_flow_hash: 'sha256:legacy-script',
+        call_flow_version: 1
+      });
+    } finally {
+      await client.query('rollback');
+      client.release();
+    }
+  });
+
   it.each(['update', 'delete'] as const)(
     'prevents %s operations on append-only audit events',
     async (operation) => {

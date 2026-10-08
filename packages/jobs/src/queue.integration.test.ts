@@ -61,17 +61,19 @@ describe('durable job queue', () => {
   it('deduplicates an active Xero sync but allows a fresh sync after completion', async () => {
     const organisationId = randomUUID();
     const singletonKey = `${jobNames.xeroIncrementalSync}:${organisationId}`;
+    const testPriority = Date.now() % 2_000_000_000;
 
     const scheduledId = await queueController.send(
       jobNames.xeroIncrementalSync,
       { organisationId },
-      { singletonKey, priority: 1_000_000 }
+      { singletonKey, priority: testPriority }
     );
     expect(scheduledId).not.toBeNull();
     if (scheduledId === null) throw new Error('Scheduled job was not created');
-    const [active] = await queueController.fetch(
-      jobNames.xeroIncrementalSync
-    );
+    const [active] = await queueController.fetch(jobNames.xeroIncrementalSync, {
+      minPriority: testPriority,
+      maxPriority: testPriority
+    });
     expect(active?.id).toBe(scheduledId);
 
     const manualCollisionId = await queue.publish(
