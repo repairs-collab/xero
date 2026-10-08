@@ -8,6 +8,11 @@ import {
   createGenericFlowPreviewConfiguration,
   GenericFlowPreview
 } from '../src/app/(protected)/settings/voice/generic-flow-preview.js';
+import {
+  describeFreePreviewVoice,
+  freeVoicePreviewScripts,
+  selectFreePreviewVoice
+} from '../src/app/(protected)/settings/voice/free-voice-flow.js';
 import { VoiceSettingsForm } from '../src/app/(protected)/settings/voice/voice-settings-form.js';
 import type { VoiceSettingsView } from '../src/app/(protected)/settings/voice/voice-settings.js';
 import { settingsCardsForRole } from '../src/app/(protected)/settings/settings-cards.js';
@@ -183,5 +188,49 @@ describe('voice settings view', () => {
       if (previousSecret === undefined) delete process.env.SESSION_SECRET_BASE64;
       else process.env.SESSION_SECRET_BASE64 = previousSecret;
     }
+  });
+
+  it('keeps fictional invoice facts behind option 1 and out of voicemail', () => {
+    expect(freeVoicePreviewScripts.opening).toBe(fixedVoiceCallCopy.opening);
+    expect(freeVoicePreviewScripts.details).toBe(
+      'Invoice DEMO-1001 has an outstanding amount of 120 Australian dollars and 50 cents. Invoice DEMO-1002 has an outstanding amount of 80 Australian dollars and 5 cents. The total outstanding amount is 200 Australian dollars and 55 cents. To speak with a representative, press 2. Otherwise, you may contact Mott Appliance Repairs during business hours.'
+    );
+    expect(freeVoicePreviewScripts.voicemail).toBe(
+      'This is Mott Appliance Repairs calling. Please call our office on 03 5032 4518 during business hours.'
+    );
+    expect(
+      `${freeVoicePreviewScripts.opening} ${freeVoicePreviewScripts.voicemail}`
+    ).not.toMatch(/DEMO-|120|80|200|outstanding amount|invoice number/i);
+    expect(freeVoicePreviewScripts.transfer).toBe(
+      'This is a browser-only simulation. A live call would now transfer to the main office. No telephone call has been placed.'
+    );
+  });
+
+  it('prefers Australian browser speech and falls back through nearby English voices', () => {
+    const voices = [
+      { name: 'Device default', lang: 'en-US', default: true },
+      { name: 'English UK', lang: 'en-GB', default: false },
+      { name: 'English New Zealand', lang: 'en-NZ', default: false },
+      { name: 'Microsoft Natasha', lang: 'en-AU', default: false }
+    ];
+
+    expect(selectFreePreviewVoice(voices)).toEqual(voices[3]);
+    expect(describeFreePreviewVoice(voices[3] ?? null)).toBe(
+      'Australian voice: Microsoft Natasha'
+    );
+    expect(selectFreePreviewVoice(voices.slice(0, 3))).toEqual(voices[2]);
+    expect(selectFreePreviewVoice(voices.slice(0, 2))).toEqual(voices[1]);
+    expect(selectFreePreviewVoice(voices.slice(0, 1))).toEqual(voices[0]);
+  });
+
+  it('uses the device default when the browser has no English voice', () => {
+    expect(
+      selectFreePreviewVoice([
+        { name: 'French', lang: 'fr-FR', default: true }
+      ])
+    ).toBeNull();
+    expect(describeFreePreviewVoice(null)).toBe(
+      "Australian voice unavailable; using this device's default voice"
+    );
   });
 });
