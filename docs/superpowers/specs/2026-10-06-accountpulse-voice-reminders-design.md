@@ -4,7 +4,7 @@
 
 **Revised:** 8 October 2026
 
-**Status:** Revised call-flow design approved in chat; pending written-spec review
+**Status:** Approved for implementation on 8 October 2026
 
 **Scope:** Manually initiated, combined-account voice reminders using Retell AI over a VoIPline SIP trunk
 
