@@ -143,21 +143,21 @@ Commit: `feat: add direct VoIPcloud voice schema`
 - Produces error classes `VoipcloudAuthenticationError`, `VoipcloudLicenceError`, `VoipcloudRateLimitedError`, `VoipcloudPermanentError`, `VoipcloudTransientError`, and `VoipcloudUnknownDispatchError`.
 - Uses fixed default base URL `https://au.voipcloud.online/api/integration/v2`.
 
-- [ ] **Step 1: Write failing contract tests against a fake HTTP transport**
+- [x] **Step 1: Write failing contract tests against a fake HTTP transport**
 
 Pin the provider's exact user number, E.164 destination, optional caller ID, API-key header, response parsing, redaction, timeout classification, malformed-success handling, 401/403, licensing failure, 429, 5xx, and call-history parsing. Assert no API key appears in thrown messages.
 
-- [ ] **Step 2: Run the adapter tests and confirm they fail**
+- [x] **Step 2: Run the adapter tests and confirm they fail**
 
 Run: `pnpm exec vitest run packages/integrations/src/voipcloud/client.test.ts packages/testing/src/provider-clients.test.ts`
 
 Expected: FAIL because the VoIPcloud module does not exist.
 
-- [ ] **Step 3: Implement the minimal adapter**
+- [x] **Step 3: Implement the minimal adapter**
 
 Keep all provider request/response shapes inside `packages/integrations/src/voipcloud`. Treat connection loss after a POST begins as unknown dispatch. Do not invent a provider call ID when the response omits one.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run:
 

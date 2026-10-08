@@ -25,6 +25,20 @@ export interface HarnessCall {
   recordedAt: string;
 }
 
+interface HarnessVoipcloudCall {
+  unique_call_id: string;
+  type: 'user_outbound_answered';
+  caller_id?: string;
+  caller_name: string;
+  dest_number: string;
+  user_name: string;
+  user_number: string;
+  call_start_at: string;
+  connected_at: string;
+  call_duration: number;
+  conversation_duration: number;
+}
+
 export interface HarnessInvoice {
   id: string;
   contactId: string;
@@ -125,6 +139,9 @@ export class ProviderHarness {
     }) => SignedSinchWebhook;
     lastMessageId: () => string | undefined;
   };
+  readonly voipcloud: {
+    onSubmit: (outcome: ProviderOutcome) => void;
+  };
 
   private currentTime: Date;
   private readonly server: Server;
@@ -134,6 +151,9 @@ export class ProviderHarness {
   private xeroEmailOutcome: ProviderOutcome = 'accepted';
   private sinchMessageCount = 0;
   private lastSinchMessageId: string | undefined;
+  private voipcloudOutcome: ProviderOutcome = 'accepted';
+  private voipcloudCallCount = 0;
+  private readonly voipcloudCalls: HarnessVoipcloudCall[] = [];
 
   private constructor(
     server: Server,
@@ -224,6 +244,11 @@ export class ProviderHarness {
           sinchKeyId
         ),
       lastMessageId: () => this.lastSinchMessageId
+    };
+    this.voipcloud = {
+      onSubmit: (outcome) => {
+        this.voipcloudOutcome = outcome;
+      }
     };
   }
 
@@ -363,6 +388,95 @@ export class ProviderHarness {
       if (url.pathname === '/v1/replies' && method === 'GET') {
         this.record(method, url, body);
         json(response, 200, { replies: [] });
+        return;
+      }
+      if (
+        url.pathname === '/api/integration/v2/call-to-number' &&
+        method === 'POST'
+      ) {
+        if (request.headers.token !== 'test-voipcloud-key') {
+          this.record(method, url, body);
+          json(response, 401, { error: 'not_authorised' });
+          return;
+        }
+        const field = (name: string): string | undefined => {
+          const match = body.match(
+            new RegExp(`name="${name}"\\r\\n\\r\\n([^\\r\\n]+)`)
+          );
+          return match?.[1];
+        };
+        const userNumber = field('user_number');
+        const destinationNumber = field('number_to_call');
+        const callerId = field('caller_id');
+        if (userNumber === undefined || destinationNumber === undefined) {
+          this.record(method, url, body);
+          json(response, 400, { error: 'invalid_request' });
+          return;
+        }
+        const recordAcceptedCall = (): HarnessVoipcloudCall => {
+          this.voipcloudCallCount += 1;
+          const call: HarnessVoipcloudCall = {
+            unique_call_id: `voipcloud-call-${this.voipcloudCallCount}`,
+            type: 'user_outbound_answered',
+            ...(callerId === undefined ? {} : { caller_id: callerId }),
+            caller_name: 'Mott Appliance Repairs',
+            dest_number: destinationNumber,
+            user_name: 'AccountPulse Gateway',
+            user_number: userNumber,
+            call_start_at: this.currentTime.toISOString(),
+            connected_at: new Date(
+              this.currentTime.getTime() + 4_000
+            ).toISOString(),
+            call_duration: 28,
+            conversation_duration: 14
+          };
+          this.voipcloudCalls.push(call);
+          this.record(method, url, body);
+          return call;
+        };
+        if (this.voipcloudOutcome === 'timeout-before-dispatch') {
+          response.destroy();
+          return;
+        }
+        if (this.voipcloudOutcome === 'timeout-after-dispatch') {
+          recordAcceptedCall();
+          response.destroy();
+          return;
+        }
+        if (this.voipcloudOutcome === 'rate-limit') {
+          this.record(method, url, body);
+          response.setHeader('retry-after', '2');
+          json(response, 429, { error: 'rate_limited' });
+          return;
+        }
+        if (this.voipcloudOutcome === 'rejected') {
+          this.record(method, url, body);
+          json(response, 400, { error: 'rejected' });
+          return;
+        }
+        const accepted = recordAcceptedCall();
+        json(response, 200, {
+          code: 200,
+          data: {
+            user_name: accepted.user_name,
+            user_number: accepted.user_number,
+            caller_id: accepted.caller_id,
+            dest_number: accepted.dest_number
+          },
+          message: { status: 'success' }
+        });
+        return;
+      }
+      if (
+        url.pathname === '/api/integration/v2/get-user-calls' &&
+        method === 'GET'
+      ) {
+        this.record(method, url, body);
+        if (request.headers.token !== 'test-voipcloud-key') {
+          json(response, 401, { error: 'not_authorised' });
+          return;
+        }
+        json(response, 200, { code: 200, data: this.voipcloudCalls });
         return;
       }
       this.record(method, url, body);
