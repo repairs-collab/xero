@@ -1,3 +1,7 @@
+'use client';
+
+import { useActionState } from 'react';
+
 import { fixedVoiceCallCopy } from '@bc5000/domain';
 
 import {
@@ -6,6 +10,7 @@ import {
   testVoiceConnection
 } from './actions.js';
 import type { VoiceSettingsView } from './voice-settings.js';
+import { voiceSettingsInitialActionState } from './voice-settings-enable-action.js';
 
 export interface VoiceSettingsFormProps {
   organisationId: string;
@@ -19,6 +24,28 @@ export function VoiceSettingsForm({
   organisationId,
   settings
 }: VoiceSettingsFormProps) {
+  const enableReady =
+    settings.configured &&
+    settings.connectionReady &&
+    settings.genericFlowReady;
+  const enablementRequirements = [
+    ...(settings.configured
+      ? []
+      : ['Save the voice provider settings before enabling manual voice calls.']),
+    ...(settings.connectionReady
+      ? []
+      : [
+          'Run a successful provider connection test before enabling manual voice calls.'
+        ]),
+    ...(settings.genericFlowReady
+      ? []
+      : ['Complete the generic flow test before enabling manual voice calls.'])
+  ];
+  const [enableActionState, enableAction, enablePending] = useActionState(
+    setVoiceEnabled,
+    voiceSettingsInitialActionState
+  );
+
   return (
     <div className="page-stack">
       <section className="panel">
@@ -59,7 +86,17 @@ export function VoiceSettingsForm({
             </p>
           </article>
         </div>
-        <form action={setVoiceEnabled} className="settings-form">
+        {!settings.enabled && enablementRequirements.length > 0 ? (
+          <div className="notice" role="status">
+            <strong>Before enabling manual voice calls</strong>
+            <ul>
+              {enablementRequirements.map((requirement) => (
+                <li key={requirement}>{requirement}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        <form action={enableAction} className="settings-form">
           <input type="hidden" name="organisationId" value={organisationId} />
           <input
             type="hidden"
@@ -69,11 +106,38 @@ export function VoiceSettingsForm({
           {!settings.enabled ? (
             <label>
               Type ENABLE VOICE CALLS to enable
-              <input name="confirmation" autoComplete="off" required />
+              <input
+                name="confirmation"
+                autoComplete="off"
+                required={enableReady}
+                disabled={!enableReady}
+              />
             </label>
           ) : null}
-          <button className="button button--primary">
-            {settings.enabled ? 'Disable manual voice calls' : 'Enable manual voice calls'}
+          {enableActionState.status !== 'idle' ? (
+            <p
+              className={
+                enableActionState.status === 'error'
+                  ? 'form-error'
+                  : 'success-banner'
+              }
+              role={enableActionState.status === 'error' ? 'alert' : 'status'}
+              aria-live="polite"
+            >
+              {enableActionState.message}
+            </p>
+          ) : null}
+          <button
+            className="button button--primary"
+            disabled={
+              enablePending || (!settings.enabled && !enableReady)
+            }
+          >
+            {enablePending
+              ? 'Saving…'
+              : settings.enabled
+                ? 'Disable manual voice calls'
+                : 'Enable manual voice calls'}
           </button>
         </form>
       </section>

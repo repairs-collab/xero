@@ -18,6 +18,10 @@ import {
   verifyVoicePreviewSession
 } from '../../../../server/runtime.js';
 import { createVoiceSettingsService } from './voice-settings.js';
+import {
+  runSetVoiceEnabledAction,
+  type VoiceSettingsActionState
+} from './voice-settings-enable-action.js';
 import { createVoiceTestCallService } from './voice-test-call-service.js';
 
 const requiredText = (formData: FormData, name: string): string => {
@@ -122,15 +126,23 @@ export async function recordGenericFlowTest(
   revalidatePath('/settings/voice');
 }
 
-export async function setVoiceEnabled(formData: FormData): Promise<void> {
+export async function setVoiceEnabled(
+  _previousState: VoiceSettingsActionState,
+  formData: FormData
+): Promise<VoiceSettingsActionState> {
   const { settings } = await context();
   const confirmation = optionalText(formData, 'confirmation');
-  await settings.setEnabled({
-    organisationId: requiredText(formData, 'organisationId'),
-    enabled: requiredText(formData, 'enabled') === 'true',
-    ...(confirmation === null ? {} : { confirmation })
-  });
-  revalidatePath('/settings/voice');
+  return runSetVoiceEnabledAction(
+    {
+      settings,
+      revalidate: () => revalidatePath('/settings/voice')
+    },
+    {
+      organisationId: requiredText(formData, 'organisationId'),
+      enabled: requiredText(formData, 'enabled') === 'true',
+      ...(confirmation === null ? {} : { confirmation })
+    }
+  );
 }
 
 export async function prepareVoiceTestCall(formData: FormData): Promise<void> {

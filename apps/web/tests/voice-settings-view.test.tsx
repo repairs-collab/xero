@@ -17,6 +17,10 @@ import {
 } from '../src/app/(protected)/settings/voice/free-voice-flow.js';
 import { FreeVoiceFlowPreview } from '../src/app/(protected)/settings/voice/free-voice-flow-preview.js';
 import { VoiceSettingsForm } from '../src/app/(protected)/settings/voice/voice-settings-form.js';
+import {
+  runSetVoiceEnabledAction,
+  voiceSettingsInitialActionState
+} from '../src/app/(protected)/settings/voice/voice-settings-enable-action.js';
 import type { VoiceSettingsView } from '../src/app/(protected)/settings/voice/voice-settings.js';
 import { settingsCardsForRole } from '../src/app/(protected)/settings/settings-cards.js';
 import {
@@ -50,6 +54,79 @@ const configuredSettings: VoiceSettingsView = {
 };
 
 describe('voice settings view', () => {
+  it.each([
+    [
+      'VOICE_ENABLE_CONFIRMATION_REQUIRED',
+      'Type ENABLE VOICE CALLS exactly to enable manual voice calls.'
+    ],
+    [
+      'VOICE_SETTINGS_NOT_CONFIGURED',
+      'Save the voice provider settings before enabling manual voice calls.'
+    ],
+    [
+      'VOICE_SETTINGS_NOT_READY',
+      'Complete the connection test and generic flow test before enabling manual voice calls.'
+    ]
+  ])('returns the expected inline message for %s', async (code, message) => {
+    const result = await runSetVoiceEnabledAction(
+      {
+        settings: {
+          setEnabled: async () => {
+            throw new Error(code);
+          }
+        },
+        revalidate: () => {
+          throw new Error('revalidation must not run after a rejected change');
+        }
+      },
+      {
+        organisationId: 'org-1',
+        enabled: true,
+        confirmation: 'ENABLE VOICE CALLS'
+      }
+    );
+
+    expect(result).toEqual({ status: 'error', code, message });
+  });
+
+  it('rethrows unexpected enablement errors for the application error boundary', async () => {
+    await expect(
+      runSetVoiceEnabledAction(
+        {
+          settings: {
+            setEnabled: async () => {
+              throw new Error('DATABASE_CONNECTION_LOST');
+            }
+          },
+          revalidate: () => undefined
+        },
+        { organisationId: 'org-1', enabled: false }
+      )
+    ).rejects.toThrow('DATABASE_CONNECTION_LOST');
+  });
+
+  it('returns success and revalidates after changing voice enablement', async () => {
+    let revalidated = false;
+    const result = await runSetVoiceEnabledAction(
+      {
+        settings: {
+          setEnabled: async () => ({ enabled: false })
+        },
+        revalidate: () => {
+          revalidated = true;
+        }
+      },
+      { organisationId: 'org-1', enabled: false }
+    );
+
+    expect(voiceSettingsInitialActionState).toEqual({ status: 'idle' });
+    expect(result).toEqual({
+      status: 'success',
+      message: 'Manual voice calls disabled.'
+    });
+    expect(revalidated).toBe(true);
+  });
+
   it('shows the voice settings entry only to Administrators', () => {
     expect(settingsCardsForRole('ADMIN').map((card) => card.href)).toContain(
       '/settings/voice'
@@ -77,6 +154,40 @@ describe('voice settings view', () => {
     expect(html).toContain('RETELL_API_KEY');
     expect(html).not.toContain('env:RETELL_API_KEY');
     expect(html).not.toMatch(/private key|api key value|authorization:/i);
+  });
+
+  it('blocks enablement in the page until every voice readiness check passes', () => {
+    const html = renderToStaticMarkup(
+      createElement(VoiceSettingsForm, {
+        organisationId: 'org-1',
+        settings: configuredSettings
+      })
+    );
+
+    expect(html).toContain(
+      'Complete the generic flow test before enabling manual voice calls.'
+    );
+    expect(html).toMatch(
+      /<button[^>]*disabled=""[^>]*>Enable manual voice calls<\/button>/
+    );
+
+    const unconfiguredHtml = renderToStaticMarkup(
+      createElement(VoiceSettingsForm, {
+        organisationId: 'org-1',
+        settings: {
+          ...configuredSettings,
+          configured: false,
+          connectionReady: false,
+          genericFlowReady: false
+        }
+      })
+    );
+    expect(unconfiguredHtml).toContain(
+      'Save the voice provider settings before enabling manual voice calls.'
+    );
+    expect(unconfiguredHtml).toContain(
+      'Run a successful provider connection test before enabling manual voice calls.'
+    );
   });
 
   it('shows the locked opening and voicemail as non-editable call-flow copy', () => {
