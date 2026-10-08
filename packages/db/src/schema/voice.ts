@@ -8,6 +8,7 @@ import {
   char,
   check,
   date,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -36,7 +37,7 @@ export const organisationVoiceSettings = pgTable(
       .$type<'RETELL'>()
       .notNull()
       .default('RETELL'),
-    secretArn: text('secret_arn').notNull(),
+    secretReference: text('secret_reference').notNull(),
     previewPublicKey: text('preview_public_key').notNull(),
     agentId: text('agent_id').notNull(),
     agentVersion: integer('agent_version').notNull(),
@@ -51,7 +52,6 @@ export const organisationVoiceSettings = pgTable(
       precision: 0
     }).notNull(),
     weekdayEndLocal: time('weekday_end_local', { precision: 0 }).notNull(),
-    voicemailTemplate: text('voicemail_template').notNull(),
     lastConnectionTestedAt: timestamp('last_connection_tested_at', {
       withTimezone: true
     }),
@@ -110,9 +110,9 @@ export const voiceCallRequests = pgTable(
       scale: 4
     }).notNull(),
     currency: char('currency', { length: 3 }).notNull(),
-    approvedScript: text('approved_script'),
-    scriptHash: text('script_hash'),
-    scriptVersion: integer('script_version'),
+    callFlowVersion: integer('call_flow_version'),
+    callFlowHash: text('call_flow_hash'),
+    approvedFactsHash: text('approved_facts_hash'),
     agentId: text('agent_id').notNull(),
     agentVersion: integer('agent_version').notNull(),
     voiceId: text('voice_id').notNull(),
@@ -127,7 +127,6 @@ export const voiceCallRequests = pgTable(
       .default('DRAFT'),
     outcome: varchar('outcome', { length: 32 }).$type<VoiceCallOutcome>(),
     providerCallId: text('provider_call_id'),
-    previewedAt: timestamp('previewed_at', { withTimezone: true }),
     approvedAt: timestamp('approved_at', { withTimezone: true }),
     queuedAt: timestamp('queued_at', { withTimezone: true }),
     providerAcceptedAt: timestamp('provider_accepted_at', {
@@ -145,6 +144,10 @@ export const voiceCallRequests = pgTable(
       .defaultNow()
   },
   (table) => [
+    uniqueIndex('voice_call_requests_org_id_uq').on(
+      table.organisationId,
+      table.id
+    ),
     uniqueIndex('voice_call_requests_org_idempotency_uq').on(
       table.organisationId,
       table.idempotencyKey
@@ -162,13 +165,18 @@ export const voiceCallRequests = pgTable(
       table.contactId,
       table.createdAt
     ),
+    foreignKey({
+      name: 'voice_call_requests_org_contact_fk',
+      columns: [table.organisationId, table.contactId],
+      foreignColumns: [contacts.organisationId, contacts.id]
+    }),
     check(
       'voice_call_requests_provider_ck',
       sql`${table.provider} = 'RETELL'`
     ),
     check(
       'voice_call_requests_state_ck',
-      sql`${table.state} in ('DRAFT', 'PREVIEWED', 'APPROVED', 'QUEUED', 'SUBMITTING', 'ACCEPTED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED', 'FAILED', 'UNKNOWN')`
+      sql`${table.state} in ('DRAFT', 'APPROVED', 'QUEUED', 'SUBMITTING', 'ACCEPTED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED', 'FAILED', 'UNKNOWN')`
     ),
     check(
       'voice_call_requests_outcome_ck',
@@ -176,7 +184,11 @@ export const voiceCallRequests = pgTable(
     ),
     check(
       'voice_call_requests_approved_facts_ck',
-      sql`${table.state} not in ('APPROVED', 'QUEUED', 'SUBMITTING', 'ACCEPTED', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'UNKNOWN') or (${table.approvedScript} is not null and ${table.scriptHash} is not null and ${table.scriptVersion} is not null and ${table.previewedAt} is not null and ${table.approvedAt} is not null)`
+      sql`${table.state} not in ('APPROVED', 'QUEUED', 'SUBMITTING', 'ACCEPTED', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'UNKNOWN') or (${table.callFlowVersion} is not null and ${table.callFlowHash} is not null and ${table.approvedFactsHash} is not null and ${table.approvedAt} is not null)`
+    ),
+    check(
+      'voice_call_requests_draft_facts_ck',
+      sql`${table.state} <> 'DRAFT' or (${table.callFlowVersion} is null and ${table.callFlowHash} is null and ${table.approvedFactsHash} is null and ${table.approvedAt} is null and ${table.queuedAt} is null)`
     )
   ]
 );
@@ -209,7 +221,20 @@ export const voiceCallInvoices = pgTable(
     index('voice_call_invoices_org_invoice_idx').on(
       table.organisationId,
       table.invoiceId
-    )
+    ),
+    foreignKey({
+      name: 'voice_call_invoices_org_call_fk',
+      columns: [table.organisationId, table.voiceCallId],
+      foreignColumns: [
+        voiceCallRequests.organisationId,
+        voiceCallRequests.id
+      ]
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'voice_call_invoices_org_invoice_fk',
+      columns: [table.organisationId, table.invoiceId],
+      foreignColumns: [invoices.organisationId, invoices.id]
+    })
   ]
 );
 
@@ -252,6 +277,14 @@ export const voiceCallEvents = pgTable(
       table.voiceCallId,
       table.occurredAt
     ),
+    foreignKey({
+      name: 'voice_call_events_org_call_fk',
+      columns: [table.organisationId, table.voiceCallId],
+      foreignColumns: [
+        voiceCallRequests.organisationId,
+        voiceCallRequests.id
+      ]
+    }).onDelete('cascade'),
     check(
       'voice_call_events_provider_ck',
       sql`${table.provider} = 'RETELL'`

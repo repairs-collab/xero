@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  buildVoiceCallDetailVariables,
   buildCombinedVoiceDraft,
   evaluateVoiceContactPolicy,
-  renderVoiceCallScript,
+  fixedVoiceCallCopy,
   transitionVoiceCallState,
   type VoiceDraftInvoiceInput,
   type VoiceContactPolicyInput,
@@ -120,64 +121,62 @@ describe('buildCombinedVoiceDraft', () => {
   });
 });
 
-describe('renderVoiceCallScript', () => {
-  const input = {
-    businessName: 'Mott Appliance Repairs',
-    customerName: 'Alex Customer',
-    callbackNumber: '02 5550 1234',
-    combinedAmount: '200.55',
-    currency: 'AUD',
-    invoices: [
-      {
-        invoiceNumber: 'INV-1001',
-        amountDue: '120.50'
-      },
-      {
-        invoiceNumber: 'INV-1002',
-        amountDue: '80.05'
-      }
-    ],
-    explanatoryWording:
-      'Our records show the following invoices remain unpaid.'
-  };
-
-  it('keeps customer name in the private identity prompt but keeps balance and invoice facts out of pre-confirmation and voicemail text', () => {
-    const script = renderVoiceCallScript(input);
-
-    expect(script.identityPrompt).toContain('Alex Customer');
-    expect(script.identityPrompt).not.toMatch(/200\.55|INV-1001|INV-1002/i);
-    expect(script.accountReminder).toMatch(/200\.55/);
-    expect(script.accountReminder).toContain('INV-1001');
-    expect(script.accountReminder).toContain('INV-1002');
-    expect(script.voicemail).toBe(
-      'This is Mott Appliance Repairs calling about your account. Please call our office on 02 5550 1234 during business hours.'
-    );
-    expect(script.voicemail).not.toMatch(
-      /Alex Customer|200\.55|INV-1001|INV-1002|payment link|debt|overdue/i
+describe('fixed voice call flow', () => {
+  it('uses the approved generic opening and voicemail without customer-specific wording', () => {
+    expect(fixedVoiceCallCopy).toEqual({
+      version: 1,
+      opening:
+        'Hello. This is an automated call from Mott Appliance Repairs. If you are the account holder or authorised to manage the account associated with this telephone number, press 1 to hear the account details. To speak with a representative, press 2. If this is the wrong number, please say "wrong number".',
+      invoiceDetailPattern:
+        'Invoice [invoice number], outstanding amount [currency and amount].',
+      totalPattern:
+        'The total outstanding amount is [currency and combined amount].',
+      afterDetails:
+        'To speak with a representative, press 2. Otherwise, you may contact Mott Appliance Repairs during business hours.',
+      voicemail:
+        'This is Mott Appliance Repairs calling. Please call our office on [office number] during business hours.'
+    });
+    expect(JSON.stringify(fixedVoiceCallCopy)).not.toMatch(
+      /customerName|balance due|payment link|debt|overdue/i
     );
   });
 
-  it('produces deterministic protected facts and marks ordinary explanatory text as editable', () => {
-    const first = renderVoiceCallScript(input);
-    const second = renderVoiceCallScript({
+  it('builds deterministic protected invoice variables without editable wording', () => {
+    const input = {
+      callbackNumber: '02 5550 1234',
+      combinedAmount: '200.55',
+      currency: 'AUD',
+      invoices: [
+        {
+          invoiceNumber: 'INV-1002',
+          amountDue: '80.05',
+          dueDate: '2026-09-15'
+        },
+        {
+          invoiceNumber: 'INV-1001',
+          amountDue: '120.50',
+          dueDate: '2026-09-01'
+        }
+      ]
+    };
+    const first = buildVoiceCallDetailVariables(input);
+    const second = buildVoiceCallDetailVariables({
       ...input,
       invoices: [...input.invoices].reverse()
     });
 
-    expect(first.protectedFacts).toEqual({
-      businessName: 'Mott Appliance Repairs',
-      customerName: 'Alex Customer',
+    expect(first).toEqual({
       callbackNumber: '02 5550 1234',
       combinedAmount: '200.55',
       currency: 'AUD',
-      invoiceLines: [
-        'Invoice INV-1001: AUD 120.50',
-        'Invoice INV-1002: AUD 80.05'
+      invoices: [
+        { invoiceNumber: 'INV-1001', amountDue: '120.50' },
+        { invoiceNumber: 'INV-1002', amountDue: '80.05' }
       ]
     });
-    expect(second.protectedFacts).toEqual(first.protectedFacts);
-    expect(first.editableFields).toEqual(['explanatoryWording']);
-    expect(first.explanatoryWording).toBe(input.explanatoryWording);
+    expect(second).toEqual(first);
+    expect(first).not.toHaveProperty('customerName');
+    expect(first).not.toHaveProperty('explanatoryWording');
   });
 });
 
@@ -330,7 +329,6 @@ describe('transitionVoiceCallState', () => {
       state: VoiceCallState['state'];
       outcome: VoiceCallState['outcome'];
     }> = [
-      { event: 'PREVIEW_RECORDED', state: 'PREVIEWED', outcome: null },
       { event: 'APPROVED', state: 'APPROVED', outcome: null },
       { event: 'QUEUED', state: 'QUEUED', outcome: null },
       { event: 'SUBMISSION_STARTED', state: 'SUBMITTING', outcome: null },
@@ -419,11 +417,11 @@ describe('transitionVoiceCallState', () => {
   it('treats a duplicate event as a no-op', () => {
     expect(
       transitionVoiceCallState(
-        { state: 'PREVIEWED', outcome: null },
-        'PREVIEW_RECORDED'
+        { state: 'APPROVED', outcome: null },
+        'APPROVED'
       )
     ).toEqual({
-      state: 'PREVIEWED',
+      state: 'APPROVED',
       outcome: null,
       changed: false,
       ignoredReason: 'DUPLICATE_EVENT'

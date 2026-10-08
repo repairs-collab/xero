@@ -166,7 +166,7 @@ export const providerConnections = pgTable(
       .notNull()
       .references(() => organisations.id, { onDelete: 'cascade' }),
     provider: varchar('provider', { length: 16 })
-      .$type<'XERO' | 'SINCH' | 'RETELL'>()
+      .$type<'XERO' | 'SINCH'>()
       .notNull(),
     secretArn: text('secret_arn').notNull(),
     region: varchar('region', { length: 32 }),

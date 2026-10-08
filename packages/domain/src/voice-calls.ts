@@ -143,102 +143,60 @@ export function buildCombinedVoiceDraft(
   };
 }
 
-export interface VoiceScriptInvoiceInput {
+export interface VoiceCallDetailInvoiceInput {
   invoiceNumber: string;
   amountDue: string;
+  dueDate: string;
 }
 
-export interface VoiceScriptInput {
-  businessName: string;
-  customerName: string;
+export interface VoiceCallDetailInput {
   callbackNumber: string;
   combinedAmount: string;
   currency: string;
-  invoices: readonly VoiceScriptInvoiceInput[];
-  explanatoryWording: string;
+  invoices: readonly VoiceCallDetailInvoiceInput[];
 }
 
-export interface VoiceScriptProtectedFacts {
-  businessName: string;
-  customerName: string;
+export interface VoiceCallDetailVariables {
   callbackNumber: string;
   combinedAmount: string;
   currency: string;
-  invoiceLines: string[];
+  invoices: Array<{
+    invoiceNumber: string;
+    amountDue: string;
+  }>;
 }
 
-export interface VoiceCallScript {
-  identityPrompt: string;
-  explanatoryWording: string;
-  accountReminder: string;
-  transferWording: string;
-  voicemail: string;
-  protectedFacts: VoiceScriptProtectedFacts;
-  editableFields: ['explanatoryWording'];
-}
+export const fixedVoiceCallCopy = Object.freeze({
+  version: 1,
+  opening:
+    'Hello. This is an automated call from Mott Appliance Repairs. If you are the account holder or authorised to manage the account associated with this telephone number, press 1 to hear the account details. To speak with a representative, press 2. If this is the wrong number, please say "wrong number".',
+  invoiceDetailPattern:
+    'Invoice [invoice number], outstanding amount [currency and amount].',
+  totalPattern:
+    'The total outstanding amount is [currency and combined amount].',
+  afterDetails:
+    'To speak with a representative, press 2. Otherwise, you may contact Mott Appliance Repairs during business hours.',
+  voicemail:
+    'This is Mott Appliance Repairs calling. Please call our office on [office number] during business hours.'
+} as const);
 
-export function renderVoiceCallScript(
-  input: VoiceScriptInput
-): VoiceCallScript {
-  const invoiceLines = [...input.invoices]
-    .sort((left, right) =>
-      left.invoiceNumber.localeCompare(right.invoiceNumber)
-    )
-    .map(
-      (invoice) =>
-        'Invoice ' +
-        invoice.invoiceNumber +
-        ': ' +
-        input.currency +
-        ' ' +
-        new Decimal(invoice.amountDue).toFixed(2)
-    );
-
-  const identityPrompt =
-    'Hello. This is a private accounts call from ' +
-    input.businessName +
-    ' for ' +
-    input.customerName +
-    '. If you are this person or authorised to manage this account, press 1. ' +
-    'If we have reached the wrong person, press 2 or say that this is the wrong number.';
-
-  const accountReminder =
-    input.explanatoryWording +
-    ' The combined amount is ' +
-    input.currency +
-    ' ' +
-    new Decimal(input.combinedAmount).toFixed(2) +
-    '. ' +
-    invoiceLines.join('. ') +
-    '.';
-
-  const transferWording =
-    'To speak with our accounts team now, press 1. Otherwise, you may contact ' +
-    input.businessName +
-    ' during business hours.';
-
-  const voicemail =
-    'This is ' +
-    input.businessName +
-    ' calling about your account. Please call our office on ' +
-    input.callbackNumber +
-    ' during business hours.';
-
+export function buildVoiceCallDetailVariables(
+  input: VoiceCallDetailInput
+): VoiceCallDetailVariables {
   return {
-    identityPrompt,
-    explanatoryWording: input.explanatoryWording,
-    accountReminder,
-    transferWording,
-    voicemail,
-    protectedFacts: {
-      businessName: input.businessName,
-      customerName: input.customerName,
-      callbackNumber: input.callbackNumber,
-      combinedAmount: new Decimal(input.combinedAmount).toFixed(2),
-      currency: input.currency,
-      invoiceLines
-    },
-    editableFields: ['explanatoryWording']
+    callbackNumber: input.callbackNumber,
+    combinedAmount: new Decimal(input.combinedAmount).toFixed(2),
+    currency: input.currency,
+    invoices: [...input.invoices]
+      .sort(
+        (left, right) =>
+          left.dueDate.localeCompare(right.dueDate) ||
+          left.invoiceNumber.localeCompare(right.invoiceNumber)
+      )
+      .map((invoice) => ({
+        invoiceNumber: invoice.invoiceNumber,
+        amountDue: new Decimal(invoice.amountDue).toFixed(2)
+      }))
   };
 }
 
@@ -426,7 +384,6 @@ export function evaluateVoiceContactPolicy(
 
 export type VoiceCallOperationalState =
   | 'DRAFT'
-  | 'PREVIEWED'
   | 'APPROVED'
   | 'QUEUED'
   | 'SUBMITTING'
@@ -457,7 +414,6 @@ export interface VoiceCallState {
 }
 
 export type VoiceCallEvent =
-  | 'PREVIEW_RECORDED'
   | 'APPROVED'
   | 'QUEUED'
   | 'SUBMISSION_STARTED'
@@ -507,15 +463,11 @@ type VoiceTransitionTable = Partial<
 
 const voiceTransitions: VoiceTransitionTable = {
   DRAFT: {
-    PREVIEW_RECORDED: { state: 'PREVIEWED' },
-    CANCELLED: { state: 'CANCELLED' }
-  },
-  PREVIEWED: {
-    PREVIEW_RECORDED: { state: 'PREVIEWED' },
     APPROVED: { state: 'APPROVED' },
     CANCELLED: { state: 'CANCELLED' }
   },
   APPROVED: {
+    APPROVED: { state: 'APPROVED' },
     QUEUED: { state: 'QUEUED' },
     CANCELLED: { state: 'CANCELLED' }
   },

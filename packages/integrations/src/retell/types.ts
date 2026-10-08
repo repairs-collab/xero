@@ -1,20 +1,48 @@
+export interface RetellVoiceCallDynamicVariables {
+  accountpulse_call_id: string;
+  invoice_details_json: string;
+  combined_amount: string;
+  currency: string;
+  callback_number: string;
+  fallback_office_number: string;
+  transfer_sip_uri?: string;
+}
+
 export interface RetellCreatePhoneCallInput {
   fromNumber: string;
   toNumber: string;
   idempotencyKey: string;
   agentId: string;
   agentVersion: number;
-  dynamicVariables: Readonly<Record<string, string>>;
-  metadata: Readonly<Record<string, string>>;
+  dynamicVariables: Readonly<RetellVoiceCallDynamicVariables>;
+  metadata: Readonly<RetellSafeMetadata>;
 }
 
+export interface RetellSafeMetadata {
+  organisation_id: string;
+  voice_call_id: string;
+}
+
+export type RetellIdentityResult = 'confirmed' | 'not_confirmed';
+export type RetellTransferResult = 'bridged' | 'unanswered' | 'failed';
+export type RetellFinalResult =
+  | 'details_delivered'
+  | 'transferred'
+  | 'transfer_unanswered'
+  | 'voicemail_left'
+  | 'wrong_person'
+  | 'no_answer'
+  | 'busy'
+  | 'invalid_destination'
+  | 'provider_rejected';
+
 export interface RetellStructuredOutcome {
-  identityResult?: string;
+  identityResult?: RetellIdentityResult;
   wrongPerson?: boolean;
   voicemailLeft?: boolean;
   transferRequested?: boolean;
-  transferResult?: string;
-  finalResult?: string;
+  transferResult?: RetellTransferResult;
+  finalResult?: RetellFinalResult;
 }
 
 export interface RetellSafeAnalysis {

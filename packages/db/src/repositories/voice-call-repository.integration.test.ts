@@ -9,6 +9,7 @@ import {
   invoices,
   organisations,
   users,
+  voiceCallEvents,
   voiceCallInvoices,
   voiceCallRequests
 } from '../schema/index.js';
@@ -96,9 +97,6 @@ const draftInput = (
   outboundNumber: '+61255501234',
   combinedAmount: '100.0000',
   currency: 'AUD',
-  script: 'Approved facts for one invoice.',
-  scriptHash: 'sha256:draft',
-  scriptVersion: 1,
   agentId: 'agent_accountpulse',
   agentVersion: 1,
   voiceId: 'voice_au',
@@ -121,31 +119,54 @@ const draftInput = (
   ...patch
 });
 
-const previewAndApprove = async (
+const approveDirectly = async (
   organisationId: string,
   voiceCallId: string,
   actorUserId: string,
   idempotencyKey: string
-) => {
-  await repository.markPreviewed({
-    organisationId,
-    voiceCallId,
-    script: 'Approved facts for one invoice.',
-    scriptHash: 'sha256:approved',
-    scriptVersion: 1,
-    now: new Date('2026-10-07T00:01:00.000Z')
-  });
-  return repository.approveAndQueue({
+) => repository.approveAndQueue({
     organisationId,
     voiceCallId,
     actorUserId,
-    idempotencyKey,
-    scriptHash: 'sha256:approved',
+  idempotencyKey,
+  callFlowVersion: 1,
+  callFlowHash: 'sha256:flow-v1',
+  approvedFactsHash: 'sha256:facts',
     now: new Date('2026-10-07T00:02:00.000Z')
   });
-};
 
 describe('PostgresVoiceCallRepository', () => {
+  it('pins the reviewed flow and fact hashes only in the approval transaction', async () => {
+    const seeded = await seedAccount('Atomic voice approval');
+    const input = draftInput(seeded);
+    const created = await repository.createDraft(input);
+
+    expect(created).toMatchObject({
+      state: 'DRAFT',
+      callFlowVersion: null,
+      callFlowHash: null,
+      approvedFactsHash: null,
+      approvedAt: null
+    });
+
+    await approveDirectly(
+      seeded.organisationId,
+      created.id,
+      seeded.actorUserId,
+      input.idempotencyKey
+    );
+
+    await expect(
+      repository.loadForExecution(seeded.organisationId, created.id)
+    ).resolves.toMatchObject({
+      state: 'QUEUED',
+      callFlowVersion: 1,
+      callFlowHash: 'sha256:flow-v1',
+      approvedFactsHash: 'sha256:facts',
+      approvedAt: new Date('2026-10-07T00:02:00.000Z')
+    });
+  });
+
   it('scopes every aggregate lookup and mutation to the organisation', async () => {
     const owner = await seedAccount('Voice owner');
     const outsider = await seedAccount('Voice outsider');
@@ -161,12 +182,14 @@ describe('PostgresVoiceCallRepository', () => {
       )
     ).resolves.toBeNull();
     await expect(
-      repository.markPreviewed({
+      repository.approveAndQueue({
         organisationId: outsider.organisationId,
         voiceCallId: created.id,
-        script: 'Cross-organisation mutation',
-        scriptHash: 'sha256:cross-org',
-        scriptVersion: 1,
+        actorUserId: outsider.actorUserId,
+        idempotencyKey: created.idempotencyKey,
+        callFlowVersion: 1,
+        callFlowHash: 'sha256:flow-v1',
+        approvedFactsHash: 'sha256:facts',
         now: new Date('2026-10-07T00:01:00.000Z')
       })
     ).rejects.toThrow('VOICE_CALL_NOT_FOUND');
@@ -193,22 +216,15 @@ describe('PostgresVoiceCallRepository', () => {
     const created = await repository.createDraft(
       draftInput(seeded, { idempotencyKey })
     );
-    await repository.markPreviewed({
-      organisationId: seeded.organisationId,
-      voiceCallId: created.id,
-      script: 'Approved facts for one invoice.',
-      scriptHash: 'sha256:approved',
-      scriptVersion: 1,
-      now: new Date('2026-10-07T00:01:00.000Z')
-    });
-
     const approvals = await Promise.all([
       repository.approveAndQueue({
         organisationId: seeded.organisationId,
         voiceCallId: created.id,
         actorUserId: seeded.actorUserId,
         idempotencyKey,
-        scriptHash: 'sha256:approved',
+        callFlowVersion: 1,
+        callFlowHash: 'sha256:flow-v1',
+        approvedFactsHash: 'sha256:facts',
         now: new Date('2026-10-07T00:02:00.000Z')
       }),
       repository.approveAndQueue({
@@ -216,7 +232,9 @@ describe('PostgresVoiceCallRepository', () => {
         voiceCallId: created.id,
         actorUserId: seeded.actorUserId,
         idempotencyKey,
-        scriptHash: 'sha256:approved',
+        callFlowVersion: 1,
+        callFlowHash: 'sha256:flow-v1',
+        approvedFactsHash: 'sha256:facts',
         now: new Date('2026-10-07T00:02:00.000Z')
       })
     ]);
@@ -254,18 +272,42 @@ describe('PostgresVoiceCallRepository', () => {
     expect(claims.filter((result) => result.kind === 'existing')).toHaveLength(
       1
     );
+
+    await expect(
+      repository.approveAndQueue({
+        organisationId: seeded.organisationId,
+        voiceCallId: created.id,
+        actorUserId: seeded.actorUserId,
+        idempotencyKey,
+        callFlowVersion: 1,
+        callFlowHash: 'sha256:flow-v1',
+        approvedFactsHash: 'sha256:facts',
+        now: new Date('2026-10-07T00:04:00.000Z')
+      })
+    ).resolves.toEqual({ voiceCallId: created.id, created: false });
   });
 
-  it('makes approved invoice snapshots immutable', async () => {
+  it('makes approved fact hashes and invoice snapshots immutable', async () => {
     const seeded = await seedAccount('Immutable voice');
     const input = draftInput(seeded);
     const created = await repository.createDraft(input);
-    await previewAndApprove(
+    await approveDirectly(
       seeded.organisationId,
       created.id,
       seeded.actorUserId,
       input.idempotencyKey
     );
+
+    await expect(
+      client.db
+        .update(voiceCallRequests)
+        .set({ approvedFactsHash: 'sha256:changed-facts' })
+        .where(eq(voiceCallRequests.id, created.id))
+    ).rejects.toMatchObject({
+      cause: {
+        message: 'approved voice call facts are immutable'
+      }
+    });
 
     await expect(
       client.db
@@ -286,6 +328,52 @@ describe('PostgresVoiceCallRepository', () => {
         message: 'approved voice call invoice snapshots are immutable'
       }
     });
+
+    const secondDraft = await repository.createDraft(draftInput(seeded));
+    await client.db
+      .delete(voiceCallInvoices)
+      .where(eq(voiceCallInvoices.voiceCallId, secondDraft.id));
+    await expect(
+      client.db
+        .update(voiceCallInvoices)
+        .set({ voiceCallId: secondDraft.id })
+        .where(eq(voiceCallInvoices.voiceCallId, created.id))
+    ).rejects.toMatchObject({
+      cause: {
+        message: 'approved voice call invoice snapshots are immutable'
+      }
+    });
+  });
+
+  it('enforces organisation ownership for invoice snapshots and events in the database', async () => {
+    const owner = await seedAccount('Voice tenant owner');
+    const outsider = await seedAccount('Voice tenant outsider');
+    const created = await repository.createDraft(draftInput(owner));
+
+    await expect(
+      client.db.insert(voiceCallInvoices).values({
+        voiceCallId: created.id,
+        organisationId: outsider.organisationId,
+        invoiceId: outsider.invoiceId,
+        xeroInvoiceId: outsider.xeroInvoiceId,
+        invoiceNumber: 'CROSS-TENANT',
+        amountDue: '1.0000',
+        currency: 'AUD',
+        dueDate: '2026-08-31',
+        syncVersion: 7,
+        snapshotAt: new Date('2026-10-07T00:00:00.000Z')
+      })
+    ).rejects.toMatchObject({ cause: { code: '23503' } });
+
+    await expect(
+      client.db.insert(voiceCallEvents).values({
+        organisationId: outsider.organisationId,
+        voiceCallId: created.id,
+        providerEventKey: `cross-tenant:${randomUUID()}`,
+        eventType: 'CALL_STARTED',
+        occurredAt: new Date('2026-10-07T00:05:00.000Z')
+      })
+    ).rejects.toMatchObject({ cause: { code: '23503' } });
   });
 
   it('returns only provider-accepted attempts in the requested organisation and period', async () => {
@@ -293,17 +381,23 @@ describe('PostgresVoiceCallRepository', () => {
     const accepted = await repository.createDraft(draftInput(seeded));
     const acceptedInput = draftInput(seeded);
     const second = await repository.createDraft(acceptedInput);
-    await client.db
-      .update(voiceCallRequests)
-      .set({
-        state: 'ACCEPTED',
-        approvedScript: 'Approved facts',
-        scriptHash: 'sha256:accepted',
-        previewedAt: new Date('2026-10-01T00:00:00.000Z'),
-        approvedAt: new Date('2026-10-01T00:01:00.000Z'),
-        providerAcceptedAt: new Date('2026-10-02T00:00:00.000Z')
-      })
-      .where(eq(voiceCallRequests.id, accepted.id));
+    await approveDirectly(
+      seeded.organisationId,
+      accepted.id,
+      seeded.actorUserId,
+      accepted.idempotencyKey
+    );
+    await repository.claimForSubmission({
+      organisationId: seeded.organisationId,
+      voiceCallId: accepted.id,
+      now: new Date('2026-10-01T00:01:00.000Z')
+    });
+    await repository.recordProviderAccepted({
+      organisationId: seeded.organisationId,
+      voiceCallId: accepted.id,
+      providerCallId: `accepted-${randomUUID()}`,
+      now: new Date('2026-10-02T00:00:00.000Z')
+    });
     await client.db
       .update(voiceCallRequests)
       .set({
@@ -333,7 +427,7 @@ describe('PostgresVoiceCallRepository', () => {
     const seeded = await seedAccount('Unknown voice');
     const unknownInput = draftInput(seeded);
     const unknown = await repository.createDraft(unknownInput);
-    await previewAndApprove(
+    await approveDirectly(
       seeded.organisationId,
       unknown.id,
       seeded.actorUserId,
@@ -346,7 +440,7 @@ describe('PostgresVoiceCallRepository', () => {
 
     const nextInput = draftInput(seeded);
     const next = await repository.createDraft(nextInput);
-    await previewAndApprove(
+    await approveDirectly(
       seeded.organisationId,
       next.id,
       seeded.actorUserId,
@@ -369,7 +463,7 @@ describe('PostgresVoiceCallRepository', () => {
     const seeded = await seedAccount('Provider event');
     const input = draftInput(seeded);
     const created = await repository.createDraft(input);
-    await previewAndApprove(
+    await approveDirectly(
       seeded.organisationId,
       created.id,
       seeded.actorUserId,

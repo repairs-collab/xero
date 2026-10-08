@@ -53,9 +53,6 @@ export interface CreateVoiceCallDraftInput {
   outboundNumber: string;
   combinedAmount: string;
   currency: string;
-  script: string;
-  scriptHash: string;
-  scriptVersion: number;
   agentId: string;
   agentVersion: number;
   voiceId: string;
@@ -66,21 +63,14 @@ export interface CreateVoiceCallDraftInput {
   now: Date;
 }
 
-export interface PreviewVoiceCallInput {
-  organisationId: string;
-  voiceCallId: string;
-  script: string;
-  scriptHash: string;
-  scriptVersion: number;
-  now: Date;
-}
-
 export interface ApproveVoiceCallInput {
   organisationId: string;
   voiceCallId: string;
   actorUserId: string;
   idempotencyKey: string;
-  scriptHash: string;
+  callFlowVersion: number;
+  callFlowHash: string;
+  approvedFactsHash: string;
   now: Date;
 }
 
@@ -262,9 +252,6 @@ export class PostgresVoiceCallRepository {
           outboundNumber: input.outboundNumber,
           combinedAmount: input.combinedAmount,
           currency: input.currency,
-          approvedScript: input.script,
-          scriptHash: input.scriptHash,
-          scriptVersion: input.scriptVersion,
           agentId: input.agentId,
           agentVersion: input.agentVersion,
           voiceId: input.voiceId,
@@ -295,53 +282,6 @@ export class PostgresVoiceCallRepository {
     });
   }
 
-  async markPreviewed(
-    input: PreviewVoiceCallInput
-  ): Promise<VoiceCallAggregate> {
-    return this.database.transaction(async (transaction) => {
-      const [current] = await transaction
-        .select({ state: voiceCallRequests.state })
-        .from(voiceCallRequests)
-        .where(
-          and(
-            eq(voiceCallRequests.organisationId, input.organisationId),
-            eq(voiceCallRequests.id, input.voiceCallId)
-          )
-        )
-        .for('update')
-        .limit(1);
-      if (current === undefined) throw new Error('VOICE_CALL_NOT_FOUND');
-      if (!['DRAFT', 'PREVIEWED'].includes(current.state)) {
-        throw new Error('VOICE_CALL_NOT_EDITABLE');
-      }
-
-      await transaction
-        .update(voiceCallRequests)
-        .set({
-          state: 'PREVIEWED',
-          approvedScript: input.script,
-          scriptHash: input.scriptHash,
-          scriptVersion: input.scriptVersion,
-          previewedAt: input.now,
-          approvedAt: null,
-          updatedAt: input.now
-        })
-        .where(
-          and(
-            eq(voiceCallRequests.organisationId, input.organisationId),
-            eq(voiceCallRequests.id, input.voiceCallId)
-          )
-        );
-      const aggregate = await loadAggregate(
-        transaction,
-        input.organisationId,
-        input.voiceCallId
-      );
-      if (aggregate === null) throw new Error('VOICE_CALL_NOT_FOUND');
-      return aggregate;
-    });
-  }
-
   async approveAndQueue(
     input: ApproveVoiceCallInput
   ): Promise<{ voiceCallId: string; created: boolean }> {
@@ -351,7 +291,10 @@ export class PostgresVoiceCallRepository {
           id: voiceCallRequests.id,
           state: voiceCallRequests.state,
           idempotencyKey: voiceCallRequests.idempotencyKey,
-          scriptHash: voiceCallRequests.scriptHash
+          callFlowVersion: voiceCallRequests.callFlowVersion,
+          callFlowHash: voiceCallRequests.callFlowHash,
+          approvedFactsHash: voiceCallRequests.approvedFactsHash,
+          approvedAt: voiceCallRequests.approvedAt
         })
         .from(voiceCallRequests)
         .where(
@@ -363,23 +306,28 @@ export class PostgresVoiceCallRepository {
         .for('update')
         .limit(1);
       if (current === undefined) throw new Error('VOICE_CALL_NOT_FOUND');
-      if (
-        current.idempotencyKey !== input.idempotencyKey ||
-        current.scriptHash !== input.scriptHash
-      ) {
+      if (current.idempotencyKey !== input.idempotencyKey) {
         throw new Error('VOICE_CALL_APPROVAL_MISMATCH');
       }
-      if (current.state === 'QUEUED') {
-        return { voiceCallId: current.id, created: false };
-      }
-      if (current.state !== 'PREVIEWED') {
-        throw new Error('VOICE_CALL_NOT_PREVIEWED');
+      if (current.state !== 'DRAFT') {
+        if (
+          current.approvedAt !== null &&
+          current.callFlowVersion === input.callFlowVersion &&
+          current.callFlowHash === input.callFlowHash &&
+          current.approvedFactsHash === input.approvedFactsHash
+        ) {
+          return { voiceCallId: current.id, created: false };
+        }
+        throw new Error('VOICE_CALL_APPROVAL_MISMATCH');
       }
 
       await transaction
         .update(voiceCallRequests)
         .set({
           actorUserId: input.actorUserId,
+          callFlowVersion: input.callFlowVersion,
+          callFlowHash: input.callFlowHash,
+          approvedFactsHash: input.approvedFactsHash,
           state: 'QUEUED',
           approvedAt: input.now,
           queuedAt: input.now,
@@ -389,7 +337,7 @@ export class PostgresVoiceCallRepository {
           and(
             eq(voiceCallRequests.organisationId, input.organisationId),
             eq(voiceCallRequests.id, input.voiceCallId),
-            eq(voiceCallRequests.state, 'PREVIEWED')
+            eq(voiceCallRequests.state, 'DRAFT')
           )
         );
       return { voiceCallId: current.id, created: true };

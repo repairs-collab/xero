@@ -1,5 +1,5 @@
 {
-  "id": "ab3984ef-f436-4434-83ec-cf0e5d2c6c31",
+  "id": "d2440426-1988-4d60-b487-c66fcaa90fd9",
   "prevId": "65321637-56dd-4b97-acae-93c3b1bed5c6",
   "version": "7",
   "dialect": "postgresql",
@@ -3028,6 +3028,27 @@
         }
       },
       "indexes": {
+        "contacts_org_id_uq": {
+          "name": "contacts_org_id_uq",
+          "columns": [
+            {
+              "expression": "organisation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "contacts_org_xero_contact_uq": {
           "name": "contacts_org_xero_contact_uq",
           "columns": [
@@ -3209,6 +3230,27 @@
         }
       },
       "indexes": {
+        "invoices_org_id_uq": {
+          "name": "invoices_org_id_uq",
+          "columns": [
+            {
+              "expression": "organisation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "invoices_org_xero_invoice_uq": {
           "name": "invoices_org_xero_invoice_uq",
           "columns": [
@@ -4961,8 +5003,8 @@
           "notNull": true,
           "default": "'RETELL'"
         },
-        "secret_arn": {
-          "name": "secret_arn",
+        "secret_reference": {
+          "name": "secret_reference",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -5036,12 +5078,6 @@
         "weekday_end_local": {
           "name": "weekday_end_local",
           "type": "time(0)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "voicemail_template": {
-          "name": "voicemail_template",
-          "type": "text",
           "primaryKey": false,
           "notNull": true
         },
@@ -5283,6 +5319,21 @@
           ],
           "onDelete": "cascade",
           "onUpdate": "no action"
+        },
+        "voice_call_events_org_call_fk": {
+          "name": "voice_call_events_org_call_fk",
+          "tableFrom": "voice_call_events",
+          "tableTo": "voice_call_requests",
+          "columnsFrom": [
+            "organisation_id",
+            "voice_call_id"
+          ],
+          "columnsTo": [
+            "organisation_id",
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -5423,6 +5474,36 @@
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
+        },
+        "voice_call_invoices_org_call_fk": {
+          "name": "voice_call_invoices_org_call_fk",
+          "tableFrom": "voice_call_invoices",
+          "tableTo": "voice_call_requests",
+          "columnsFrom": [
+            "organisation_id",
+            "voice_call_id"
+          ],
+          "columnsTo": [
+            "organisation_id",
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "voice_call_invoices_org_invoice_fk": {
+          "name": "voice_call_invoices_org_invoice_fk",
+          "tableFrom": "voice_call_invoices",
+          "tableTo": "invoices",
+          "columnsFrom": [
+            "organisation_id",
+            "invoice_id"
+          ],
+          "columnsTo": [
+            "organisation_id",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
@@ -5499,21 +5580,21 @@
           "primaryKey": false,
           "notNull": true
         },
-        "approved_script": {
-          "name": "approved_script",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "script_hash": {
-          "name": "script_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "script_version": {
-          "name": "script_version",
+        "call_flow_version": {
+          "name": "call_flow_version",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "call_flow_hash": {
+          "name": "call_flow_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "approved_facts_hash": {
+          "name": "approved_facts_hash",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         },
@@ -5569,12 +5650,6 @@
         "provider_call_id": {
           "name": "provider_call_id",
           "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "previewed_at": {
-          "name": "previewed_at",
-          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
@@ -5636,6 +5711,27 @@
         }
       },
       "indexes": {
+        "voice_call_requests_org_id_uq": {
+          "name": "voice_call_requests_org_id_uq",
+          "columns": [
+            {
+              "expression": "organisation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "voice_call_requests_org_idempotency_uq": {
           "name": "voice_call_requests_org_idempotency_uq",
           "columns": [
@@ -5779,6 +5875,21 @@
           ],
           "onDelete": "set null",
           "onUpdate": "no action"
+        },
+        "voice_call_requests_org_contact_fk": {
+          "name": "voice_call_requests_org_contact_fk",
+          "tableFrom": "voice_call_requests",
+          "tableTo": "contacts",
+          "columnsFrom": [
+            "organisation_id",
+            "contact_id"
+          ],
+          "columnsTo": [
+            "organisation_id",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -5791,7 +5902,7 @@
         },
         "voice_call_requests_state_ck": {
           "name": "voice_call_requests_state_ck",
-          "value": "\"voice_call_requests\".\"state\" in ('DRAFT', 'PREVIEWED', 'APPROVED', 'QUEUED', 'SUBMITTING', 'ACCEPTED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED', 'FAILED', 'UNKNOWN')"
+          "value": "\"voice_call_requests\".\"state\" in ('DRAFT', 'APPROVED', 'QUEUED', 'SUBMITTING', 'ACCEPTED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED', 'FAILED', 'UNKNOWN')"
         },
         "voice_call_requests_outcome_ck": {
           "name": "voice_call_requests_outcome_ck",
@@ -5799,7 +5910,11 @@
         },
         "voice_call_requests_approved_facts_ck": {
           "name": "voice_call_requests_approved_facts_ck",
-          "value": "\"voice_call_requests\".\"state\" not in ('APPROVED', 'QUEUED', 'SUBMITTING', 'ACCEPTED', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'UNKNOWN') or (\"voice_call_requests\".\"approved_script\" is not null and \"voice_call_requests\".\"script_hash\" is not null and \"voice_call_requests\".\"script_version\" is not null and \"voice_call_requests\".\"previewed_at\" is not null and \"voice_call_requests\".\"approved_at\" is not null)"
+          "value": "\"voice_call_requests\".\"state\" not in ('APPROVED', 'QUEUED', 'SUBMITTING', 'ACCEPTED', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'UNKNOWN') or (\"voice_call_requests\".\"call_flow_version\" is not null and \"voice_call_requests\".\"call_flow_hash\" is not null and \"voice_call_requests\".\"approved_facts_hash\" is not null and \"voice_call_requests\".\"approved_at\" is not null)"
+        },
+        "voice_call_requests_draft_facts_ck": {
+          "name": "voice_call_requests_draft_facts_ck",
+          "value": "\"voice_call_requests\".\"state\" <> 'DRAFT' or (\"voice_call_requests\".\"call_flow_version\" is null and \"voice_call_requests\".\"call_flow_hash\" is null and \"voice_call_requests\".\"approved_facts_hash\" is null and \"voice_call_requests\".\"approved_at\" is null and \"voice_call_requests\".\"queued_at\" is null)"
         }
       },
       "isRLSEnabled": false

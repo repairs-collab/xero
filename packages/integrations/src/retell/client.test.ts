@@ -29,12 +29,18 @@ const createClient = (http: HttpClient) =>
 const createInput = {
   fromNumber: '+61255501234',
   toNumber: '+61400000001',
-  idempotencyKey: 'accountpulse:org-1:voice-1',
+  idempotencyKey: 'accountpulse_org-1_voice-1',
   agentId: 'agent_accountpulse',
   agentVersion: 7,
   dynamicVariables: {
-    approved_script: 'Approved reminder script',
-    accountpulse_call_id: 'voice-1'
+    accountpulse_call_id: 'voice-1',
+    invoice_details_json:
+      '[{"invoiceNumber":"INV-1001","amountDue":"120.50"}]',
+    combined_amount: '120.50',
+    currency: 'AUD',
+    callback_number: '+61255504321',
+    transfer_sip_uri: 'sip:accounts@example.invalid',
+    fallback_office_number: '+61255504321'
   },
   metadata: {
     organisation_id: 'org-1',
@@ -80,13 +86,19 @@ describe('RetellClient.createPhoneCall', () => {
     expect(body).toEqual({
       from_number: '+61255501234',
       to_number: '+61400000001',
-      idempotency_key: 'accountpulse:org-1:voice-1',
+      idempotency_key: 'accountpulse_org-1_voice-1',
       honor_internal_dnc: true,
       override_agent_id: 'agent_accountpulse',
       override_agent_version: 7,
       retell_llm_dynamic_variables: {
-        approved_script: 'Approved reminder script',
-        accountpulse_call_id: 'voice-1'
+        accountpulse_call_id: 'voice-1',
+        invoice_details_json:
+          '[{"invoiceNumber":"INV-1001","amountDue":"120.50"}]',
+        combined_amount: '120.50',
+        currency: 'AUD',
+        callback_number: '+61255504321',
+        transfer_sip_uri: 'sip:accounts@example.invalid',
+        fallback_office_number: '+61255504321'
       },
       metadata: {
         organisation_id: 'org-1',
@@ -94,8 +106,72 @@ describe('RetellClient.createPhoneCall', () => {
       }
     });
     expect(JSON.stringify(body)).not.toMatch(
-      /record|transcript|data_storage|retention/i
+      /record|transcript|data_storage|retention|customer_name|approved_script|generated_script/i
     );
+  });
+
+  it('rejects unapproved customer-specific dynamic variables before dispatch', async () => {
+    const http = new FakeHttpClient();
+
+    await expect(
+      createClient(http).createPhoneCall({
+        ...createInput,
+        dynamicVariables: {
+          ...createInput.dynamicVariables,
+          customer_name: 'Alex Customer',
+          generated_script: 'Customer-specific wording'
+        } as unknown as typeof createInput.dynamicVariables
+      })
+    ).rejects.toBeInstanceOf(RetellPermanentError);
+    expect(http.requests).toHaveLength(0);
+  });
+
+  it('rejects unapproved customer data hidden inside invoice JSON before dispatch', async () => {
+    const http = new FakeHttpClient();
+
+    await expect(
+      createClient(http).createPhoneCall({
+        ...createInput,
+        dynamicVariables: {
+          ...createInput.dynamicVariables,
+          invoice_details_json: JSON.stringify([
+            {
+              invoiceNumber: 'INV-1001',
+              amountDue: '120.50',
+              customerName: 'Alex Customer'
+            }
+          ])
+        }
+      })
+    ).rejects.toBeInstanceOf(RetellPermanentError);
+    expect(http.requests).toHaveLength(0);
+  });
+
+  it('rejects unapproved provider metadata before dispatch', async () => {
+    const http = new FakeHttpClient();
+
+    await expect(
+      createClient(http).createPhoneCall({
+        ...createInput,
+        metadata: {
+          ...createInput.metadata,
+          customer_name: 'Alex Customer'
+        } as unknown as typeof createInput.metadata
+      })
+    ).rejects.toBeInstanceOf(RetellPermanentError);
+    expect(http.requests).toHaveLength(0);
+  });
+
+  it('rejects provider idempotency keys outside the documented contract', async () => {
+    const http = new FakeHttpClient();
+
+    await expect(
+      createClient(http).createPhoneCall({
+        ...createInput,
+        idempotencyKey: 'accountpulse:org-1:voice-1'
+      })
+    ).rejects.toBeInstanceOf(RetellPermanentError);
+    expect(http.requests).toHaveLength(0);
   });
 
   it('rejects invalid phone numbers before dispatch', async () => {
@@ -226,5 +302,35 @@ describe('RetellClient.getCall', () => {
       RetellPermanentError
     );
     expect(http.requests).toHaveLength(0);
+  });
+
+  it('discards unrecognised analysis values that could contain customer speech', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push({
+      status: 200,
+      headers: {},
+      body: JSON.stringify({
+        call_id: 'call_unsafe_analysis',
+        call_status: 'ended',
+        call_analysis: {
+          custom_analysis_data: {
+            identity_result: 'the customer described their situation',
+            transfer_result: 'ask for Jane in accounts',
+            final_result: 'free-form private summary',
+            wrong_person: true
+          }
+        }
+      })
+    });
+
+    await expect(createClient(http).getCall('call_unsafe_analysis')).resolves.toEqual({
+      callId: 'call_unsafe_analysis',
+      callStatus: 'ended',
+      analysis: {
+        structuredOutcome: {
+          wrongPerson: true
+        }
+      }
+    });
   });
 });

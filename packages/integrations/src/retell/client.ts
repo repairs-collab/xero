@@ -3,10 +3,14 @@ import {
   RetellAuthenticationError,
   type RetellCallStatus,
   type RetellCreatePhoneCallInput,
+  type RetellFinalResult,
+  type RetellIdentityResult,
   RetellPermanentError,
   RetellRateLimitedError,
   type RetellSafeAnalysis,
+  type RetellSafeMetadata,
   type RetellStructuredOutcome,
+  type RetellTransferResult,
   RetellTransientError,
   RetellUnknownDispatchError
 } from './types.js';
@@ -18,6 +22,116 @@ export interface RetellClientOptions {
 }
 
 const e164Pattern = /^\+[1-9]\d{7,14}$/;
+const idempotencyKeyPattern = /^[A-Za-z0-9_-]{5,255}$/;
+const amountPattern = /^\d+(?:\.\d{1,4})?$/;
+const approvedDynamicVariableNames = new Set([
+  'accountpulse_call_id',
+  'invoice_details_json',
+  'combined_amount',
+  'currency',
+  'callback_number',
+  'fallback_office_number',
+  'transfer_sip_uri'
+]);
+const requiredDynamicVariableNames = [
+  'accountpulse_call_id',
+  'invoice_details_json',
+  'combined_amount',
+  'currency',
+  'callback_number',
+  'fallback_office_number'
+] as const;
+const approvedMetadataNames = new Set([
+  'organisation_id',
+  'voice_call_id'
+]);
+const identityResults = new Set<RetellIdentityResult>([
+  'confirmed',
+  'not_confirmed'
+]);
+const transferResults = new Set<RetellTransferResult>([
+  'bridged',
+  'unanswered',
+  'failed'
+]);
+const finalResults = new Set<RetellFinalResult>([
+  'details_delivered',
+  'transferred',
+  'transfer_unanswered',
+  'voicemail_left',
+  'wrong_person',
+  'no_answer',
+  'busy',
+  'invalid_destination',
+  'provider_rejected'
+]);
+
+const isApprovedInvoiceDetailsJson = (value: string): boolean => {
+  try {
+    const details: unknown = JSON.parse(value);
+    return (
+      Array.isArray(details) &&
+      details.length > 0 &&
+      details.every((detail) => {
+        const item = asRecord(detail);
+        if (item === null) return false;
+        const names = Object.keys(item);
+        return (
+          names.length === 2 &&
+          names.every((name) =>
+            ['invoiceNumber', 'amountDue'].includes(name)
+          ) &&
+          nonEmptyString(item.invoiceNumber) !== undefined &&
+          typeof item.amountDue === 'string' &&
+          amountPattern.test(item.amountDue)
+        );
+      })
+    );
+  } catch {
+    return false;
+  }
+};
+
+const assertApprovedDynamicVariables = (
+  variables: Readonly<Record<string, string>>
+): void => {
+  if (
+    Object.keys(variables).some(
+      (name) => !approvedDynamicVariableNames.has(name)
+    ) ||
+    requiredDynamicVariableNames.some(
+      (name) => variables[name]?.trim() === '' || variables[name] === undefined
+    ) ||
+    !isApprovedInvoiceDetailsJson(variables.invoice_details_json ?? '') ||
+    !amountPattern.test(variables.combined_amount ?? '') ||
+    !/^[A-Z]{3}$/.test(variables.currency ?? '') ||
+    !e164Pattern.test(variables.callback_number ?? '') ||
+    !e164Pattern.test(variables.fallback_office_number ?? '') ||
+    (variables.transfer_sip_uri !== undefined &&
+      !/^sips?:[^\s]+$/i.test(variables.transfer_sip_uri))
+  ) {
+    throw new RetellPermanentError(
+      null,
+      'Retell dynamic variables contain unapproved or missing fields'
+    );
+  }
+};
+
+const assertApprovedMetadata = (
+  metadata: Readonly<RetellSafeMetadata>
+): void => {
+  const values = metadata as Readonly<Record<string, string>>;
+  if (
+    Object.keys(values).some((name) => !approvedMetadataNames.has(name)) ||
+    values.organisation_id?.trim() === '' ||
+    values.voice_call_id?.trim() === ''
+  ) {
+    throw new RetellPermanentError(
+      null,
+      'Retell metadata contains unapproved or missing fields'
+    );
+  }
+};
 
 const headerNumber = (
   headers: Record<string, string>,
@@ -45,6 +159,14 @@ const finiteNumber = (value: unknown): number | undefined =>
 const booleanValue = (value: unknown): boolean | undefined =>
   typeof value === 'boolean' ? value : undefined;
 
+const approvedValue = <Value extends string>(
+  value: unknown,
+  approved: ReadonlySet<Value>
+): Value | undefined =>
+  typeof value === 'string' && approved.has(value as Value)
+    ? (value as Value)
+    : undefined;
+
 const optionalProperty = <Key extends string, Value>(
   key: Key,
   value: Value | undefined
@@ -57,15 +179,24 @@ export const parseRetellStructuredOutcome = (
   const data = asRecord(value);
   if (data === null) return {};
   return {
-    ...optionalProperty('identityResult', nonEmptyString(data.identity_result)),
+    ...optionalProperty(
+      'identityResult',
+      approvedValue(data.identity_result, identityResults)
+    ),
     ...optionalProperty('wrongPerson', booleanValue(data.wrong_person)),
     ...optionalProperty('voicemailLeft', booleanValue(data.voicemail_left)),
     ...optionalProperty(
       'transferRequested',
       booleanValue(data.transfer_requested)
     ),
-    ...optionalProperty('transferResult', nonEmptyString(data.transfer_result)),
-    ...optionalProperty('finalResult', nonEmptyString(data.final_result))
+    ...optionalProperty(
+      'transferResult',
+      approvedValue(data.transfer_result, transferResults)
+    ),
+    ...optionalProperty(
+      'finalResult',
+      approvedValue(data.final_result, finalResults)
+    )
   };
 };
 
@@ -124,7 +255,7 @@ export class RetellClient {
       );
     }
     if (
-      input.idempotencyKey.trim() === '' ||
+      !idempotencyKeyPattern.test(input.idempotencyKey) ||
       input.agentId.trim() === '' ||
       !Number.isInteger(input.agentVersion) ||
       input.agentVersion < 0
@@ -134,6 +265,8 @@ export class RetellClient {
         'Retell call identifiers and pinned agent version are required'
       );
     }
+    assertApprovedDynamicVariables(input.dynamicVariables);
+    assertApprovedMetadata(input.metadata);
 
     const path = '/v2/create-phone-call';
     let response: HttpResponse;

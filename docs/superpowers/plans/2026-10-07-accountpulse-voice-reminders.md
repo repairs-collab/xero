@@ -6,7 +6,7 @@
 
 **Architecture:** The web app prepares immutable invoice snapshots and records an operator's approved call intent; it never places the phone call directly. A worker revalidates every safeguard, claims the request idempotently, and calls a provider-neutral Retell adapter, while signed Retell webhooks and reconciliation move the internal state machine forward. Retell supplies the AI conversation flow and VoIPline supplies the verified outbound identity, SIP transport, and office transfer destination.
 
-**Tech Stack:** Node.js `>=24 <25`, pnpm `10.20.0`, TypeScript, Next.js `16.3.6`, React `19.3.0`, PostgreSQL, Drizzle ORM `0.45.2`, Vitest `4.1.2`, Playwright `1.55.1`, AWS CDK `2.259.0`, Retell AI, VoIPline SIP, Luxon.
+**Tech Stack:** Node.js `>=24 <25`, pnpm `10.20.0`, TypeScript, Next.js `16.3.6`, React `19.3.0`, PostgreSQL, Drizzle ORM `0.45.2`, Vitest `4.1.2`, Playwright `1.55.1`, the active hosting platform, Retell AI, VoIPline SIP, Luxon.
 
 **Spec:** `docs/superpowers/specs/2026-10-06-accountpulse-voice-reminders-design.md`
 
@@ -26,7 +26,7 @@
 - Enforce no more than three provider-accepted attempts in a rolling seven-day period and ten in a rolling calendar month.
 - Identity, destination, suppression, dispute, promise, pause, whitelist, calling-window, frequency, permission, freshness, and duplicate-call checks are non-bypassable.
 - Accept voice destinations only after E.164 normalisation and voice-callable classification.
-- Store private Retell credentials only in AWS Secrets Manager and expose only a domain-restricted Retell public preview key to the browser.
+- Store private Retell credentials only in the active hosting platform's managed secret system, consume them through a hosting-neutral runtime secret reader, and expose only a domain-restricted Retell public preview key to the browser.
 - Use the repository's established organisation-scoped database, audit, background-job, server-action, integration-adapter, and test patterns.
 - Follow test-driven development. Every task begins with a failing test and ends with focused verification and a commit.
 
@@ -74,7 +74,7 @@
 - Create `apps/worker/src/handlers/voice-call-execute.ts` and `voice-call-reconcile.ts`.
 - Extend `apps/worker/src/handlers/webhook-process.ts` for Retell events.
 - Modify worker registration/runtime configuration.
-- Modify the data, service, and observability CDK stacks for the Retell secret, task access, and alarms.
+- Modify the active hosting platform's deployment, secret-injection, service, and monitoring configuration after the hosting migration is present on this branch.
 - Add `docs/runbooks/accountpulse-voice-reminders.md` for provider setup and controlled release.
 
 ---
@@ -379,6 +379,7 @@ git commit -m "feat: add Retell voice provider adapter"
 - Replaces generated-script functions with locked `fixedVoiceCallCopy` and `buildVoiceCallDetailVariables(input): VoiceCallDetailVariables`.
 - Removes per-call `PREVIEWED` state and repository `markPreviewed` operations.
 - Stores immutable `callFlowVersion`, `callFlowHash`, and `approvedFactsHash` instead of approved script text or script hashes.
+- Replaces AWS-specific `secretArn` storage with a hosting-neutral non-secret `secretReference`.
 - Limits Retell outbound variables to the AccountPulse call identifier, approved invoice-detail values, callback number, and safe transfer configuration.
 
 - [ ] **Step 1: Write failing fixed-flow domain tests**
@@ -387,7 +388,7 @@ Assert the opening and voicemail exactly match the approved specification, conta
 
 - [ ] **Step 2: Write failing schema and repository tests**
 
-Assert there are no generated-script or per-call-preview fields/methods. Assert approval atomically pins the call-flow version/hash and approved-facts hash, approved snapshots cannot be changed, and duplicate approval uses the original idempotency record.
+Assert there are no generated-script or per-call-preview fields/methods and no AWS-specific voice credential column. Assert settings store only a non-secret `secretReference`; approval atomically pins the call-flow version/hash and approved-facts hash, approved snapshots cannot be changed, and duplicate approval uses the original idempotency record.
 
 - [ ] **Step 3: Run the focused tests and confirm the old baseline fails**
 
@@ -457,7 +458,7 @@ git commit -m "refactor: use fixed voice call flow"
 
 - [ ] **Step 1: Write failing settings-service tests**
 
-Assert an Administrator can save provider, secret ARN, domain-restricted public preview key, pinned agent/call-flow version, voice ID/label, E.164 outbound/fallback numbers, optional SIP URI, destination label, timezone, and `09:00`/`17:00` window. Assert an Operator cannot mutate settings, private keys are never returned, invalid phone/timezone/SIP inputs fail safely, and audit events list changed field names without secret values.
+Assert an Administrator can save provider, hosting-neutral managed-secret reference, domain-restricted public preview key, pinned agent/call-flow version, voice ID/label, E.164 outbound/fallback numbers, optional SIP URI, destination label, timezone, and `09:00`/`17:00` window. Assert an Operator cannot mutate settings, private keys are never returned, invalid phone/timezone/SIP inputs fail safely, and audit events list changed field names without secret values.
 
 Assert a successful setup test records the current call-flow hash, agent version, and voice identifier. Changing any of them makes the test stale and disables voice until an Administrator tests and enables the new pinned version.
 
@@ -590,7 +591,7 @@ Expected: FAIL because the handler is unregistered.
 
 - [ ] **Step 3: Implement the execution path**
 
-Fetch the Retell API key through the configured Secrets Manager reference. Log only organisation/call/correlation IDs and safe codes. Pass the protected approved detail variables, safe callback/transfer configuration, caller/destination, pinned agent/version, `honor_internal_dnc: true`, and the provider idempotency key. Do not pass a generated script or customer name.
+Resolve the Retell API key through the injected hosting-neutral secret reader using the configured non-secret reference. Log only organisation/call/correlation IDs and safe codes. Pass the protected approved detail variables, safe callback/transfer configuration, caller/destination, pinned agent/version, `honor_internal_dnc: true`, and the provider idempotency key. Do not pass a generated script or customer name.
 
 - [ ] **Step 4: Add failing final-revalidation tests**
 
@@ -693,10 +694,8 @@ git commit -m "feat: process Retell voice outcomes"
 - Create: `apps/web/tests/voice-customer-timeline.test.tsx`
 - Modify: `apps/web/src/components/customer-timeline.tsx`
 - Modify: `apps/web/src/app/(protected)/customers/[customerId]/page.tsx`
-- Modify: `infra/lib/data-stack.ts`
-- Modify: `infra/lib/service-stack.ts`
-- Modify: `infra/lib/observability-stack.ts`
-- Modify: `infra/test/stacks.test.ts`
+- Modify: active hosting platform deployment/service configuration (after the hosting migration is integrated)
+- Modify: active hosting platform monitoring tests/configuration (after the hosting migration is integrated)
 
 **Interfaces:**
 - Produces safe customer timeline rows and metrics:
@@ -718,26 +717,24 @@ Add voice entries to the existing customer timeline aggregation. Display operati
 
 Assert:
 
-- DataStack creates a production/staging Retell secret initialized only with a non-working placeholder;
+- production/staging define the Retell credential only in the hosting platform's managed secret system;
 - worker receives private API-key access;
-- web receives only the same secret for server-side webhook verification, never as a public environment variable;
-- task roles are scoped to the Retell secret;
+- web receives the verification credential only server-side, never through a public environment variable;
+- service access is scoped to the Retell credential;
 - alarms exist for repeated authentication/signature failure, provider failure spikes, unknown backlog, and stale voice jobs;
 - no stack change mutates existing sending mode or customer-live settings.
 
 - [ ] **Step 4: Implement infrastructure and metrics**
 
-Inject the secret ARN/value through the existing secret pattern. The browser public preview key remains organisation configuration returned only on the authorised Administrator settings-preview page. Add metric filters/alarms using safe codes rather than raw provider payloads.
+Inject or resolve the secret through the active platform's established managed-secret pattern and the hosting-neutral runtime reader. The browser public preview key remains organisation configuration returned only on the authorised Administrator settings-preview page. Add platform-native metrics/alerts using safe codes rather than raw provider payloads. Do not modify or revive legacy AWS infrastructure for this feature.
 
 - [ ] **Step 5: Verify and commit**
 
 Run:
 
 ```bash
-pnpm exec vitest run apps/web/tests/voice-customer-timeline.test.tsx infra/test/stacks.test.ts
+pnpm exec vitest run apps/web/tests/voice-customer-timeline.test.tsx
 pnpm --filter @bc5000/web typecheck
-pnpm --filter @bc5000/infra typecheck
-pnpm --filter @bc5000/infra build
 ```
 
 Expected: PASS.
@@ -745,7 +742,7 @@ Expected: PASS.
 Commit:
 
 ```bash
-git add packages/db/src/repositories/activity-repository.ts apps/web infra
+git add packages/db/src/repositories/activity-repository.ts apps/web apps/worker .env.example
 git commit -m "feat: add voice call visibility and infrastructure"
 ```
 
@@ -786,7 +783,7 @@ Document:
 5. dynamic-variable and structured-outcome names used by the adapter;
 6. public preview-key domain allow-list for `billchaser.motts.com.au` and the controlled staging hostname, plus reCAPTCHA where supported, with the key exposed only on the authorised settings-preview page;
 7. signed webhook registration and health check;
-8. Secrets Manager population without writing secrets to source, logs, tickets, or PostgreSQL;
+8. managed-secret population on the active hosting platform without writing secrets to source, logs, tickets, or PostgreSQL;
 9. the ten staging scenarios from the spec;
 10. one staff-controlled production call and one real office warm-transfer call;
 11. comparison of AccountPulse, Retell, and VoIPline records;

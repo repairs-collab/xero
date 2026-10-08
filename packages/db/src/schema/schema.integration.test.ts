@@ -15,7 +15,6 @@ import {
   organisationVoiceSettings,
   organisations,
   outboundMessages,
-  providerConnections,
   reminderSequenceVersions,
   reminderSequences,
   stageInstances,
@@ -159,13 +158,14 @@ const seedVoiceCall = async (
     idempotencyKey?: string;
     providerCallId?: string;
     state?: 'DRAFT' | 'APPROVED';
-    approvedScript?: string | null;
-    scriptHash?: string | null;
-    previewedAt?: Date | null;
+    callFlowVersion?: number | null;
+    callFlowHash?: string | null;
+    approvedFactsHash?: string | null;
     approvedAt?: Date | null;
   }
 ): Promise<string> => {
   const id = randomUUID();
+  const approved = input.state === 'APPROVED';
   await database.db.insert(voiceCallRequests).values({
     id,
     organisationId: input.organisationId,
@@ -175,9 +175,18 @@ const seedVoiceCall = async (
     outboundNumber: '+61255501234',
     combinedAmount: '100.0000',
     currency: 'AUD',
-    approvedScript: input.approvedScript,
-    scriptHash: input.scriptHash,
-    scriptVersion: 1,
+    callFlowVersion:
+      input.callFlowVersion === undefined
+        ? approved ? 1 : null
+        : input.callFlowVersion,
+    callFlowHash:
+      input.callFlowHash === undefined
+        ? approved ? 'sha256:flow-v1' : null
+        : input.callFlowHash,
+    approvedFactsHash:
+      input.approvedFactsHash === undefined
+        ? approved ? 'sha256:facts' : null
+        : input.approvedFactsHash,
     agentId: 'agent_accountpulse',
     agentVersion: 1,
     voiceId: 'voice_au',
@@ -186,7 +195,6 @@ const seedVoiceCall = async (
     idempotencyKey: input.idempotencyKey ?? randomUUID(),
     state: input.state ?? 'DRAFT',
     providerCallId: input.providerCallId,
-    previewedAt: input.previewedAt,
     approvedAt: input.approvedAt
   });
   return id;
@@ -238,7 +246,7 @@ describe('database invariants', () => {
       organisationId,
       enabled: false,
       provider: 'RETELL' as const,
-      secretArn: 'arn:aws:secretsmanager:ap-southeast-2:123:secret:retell',
+      secretReference: 'RETELL_API_KEY',
       previewPublicKey: 'public_key_accountpulse',
       agentId: 'agent_accountpulse',
       agentVersion: 1,
@@ -250,8 +258,6 @@ describe('database invariants', () => {
       timezone: 'Australia/Sydney',
       weekdayStartLocal: '09:00',
       weekdayEndLocal: '17:00',
-      voicemailTemplate:
-        'This is Mott Appliance Repairs calling about your account.',
       updatedByUserId: userId
     };
 
@@ -262,6 +268,9 @@ describe('database invariants', () => {
 
     const columns = await tableColumns('organisation_voice_settings');
     expect(columns).toContain('preview_public_key');
+    expect(columns).toContain('secret_reference');
+    expect(columns).not.toContain('secret_arn');
+    expect(columns).not.toContain('voicemail_template');
     expect(columns).not.toContain('api_key');
     expect(columns).not.toContain('sip_password');
   });
@@ -348,7 +357,7 @@ describe('database invariants', () => {
     ).rejects.toMatchObject({ cause: { code: '23505' } });
   });
 
-  it('requires previewed approved facts before a voice request can be approved', async () => {
+  it('allows direct approval with pinned flow and fact hashes', async () => {
     const { organisationId, contactId } = await seedStageInstance();
     const actorUserId = await seedUser('Voice approval operator');
 
@@ -358,9 +367,27 @@ describe('database invariants', () => {
         contactId,
         actorUserId,
         state: 'APPROVED',
-        approvedScript: null,
-        scriptHash: null,
-        previewedAt: null,
+        callFlowVersion: 1,
+        callFlowHash: 'sha256:flow-v1',
+        approvedFactsHash: 'sha256:facts',
+        approvedAt: new Date('2026-10-08T00:00:00.000Z')
+      })
+    ).resolves.toBeTypeOf('string');
+  });
+
+  it('requires pinned flow and fact hashes before a voice request can be approved', async () => {
+    const { organisationId, contactId } = await seedStageInstance();
+    const actorUserId = await seedUser('Voice approval guard operator');
+
+    await expect(
+      seedVoiceCall({
+        organisationId,
+        contactId,
+        actorUserId,
+        state: 'APPROVED',
+        callFlowVersion: null,
+        callFlowHash: null,
+        approvedFactsHash: null,
         approvedAt: null
       })
     ).rejects.toMatchObject({ cause: { code: '23514' } });
@@ -384,11 +411,6 @@ describe('database invariants', () => {
       reason: 'Wrong person reported',
       consentState: 'SUPPRESSED',
       recordedByUserId: userId
-    });
-    await database.db.insert(providerConnections).values({
-      organisationId,
-      provider: 'RETELL',
-      secretArn: 'arn:aws:secretsmanager:ap-southeast-2:123:secret:retell'
     });
     await database.db.insert(webhookEvents).values({
       organisationId,

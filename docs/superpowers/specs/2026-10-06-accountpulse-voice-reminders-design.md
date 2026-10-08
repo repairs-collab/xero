@@ -273,7 +273,7 @@ Add `organisation_voice_settings`:
 - `organisation_id` primary key;
 - `enabled`;
 - `provider` (`RETELL` initially);
-- `secret_arn` for the Retell credential reference;
+- `secret_reference` for the Retell credential lookup key in the active hosting platform's managed secret system;
 - `preview_public_key` for the domain-restricted Retell browser preview (this is not a private API credential);
 - `agent_id` and pinned `agent_version`;
 - `voice_id` and operator-facing voice label;
@@ -283,7 +283,7 @@ Add `organisation_voice_settings`:
 - `office_destination_label`;
 - `timezone`;
 - `weekday_start_local` and `weekday_end_local`;
-- `voicemail_template`;
+- the fixed voicemail wording is owned by the pinned call-flow version and is not an editable database setting;
 - `updated_by_user_id`, `updated_at`.
 
 Raw API secrets and SIP passwords never enter PostgreSQL.
@@ -341,7 +341,7 @@ The provider event key is unique per organisation/provider. Raw payloads remain 
 
 - Extend contact channels with `VOICE` and retain Xero source type plus approved override provenance.
 - Extend suppressions with channel `VOICE`.
-- Extend provider connections and webhook provider types with `RETELL`; VoIPline SIP credentials remain provider-managed and secret-referenced.
+- Extend webhook provider types with `RETELL`. Store the Retell private credential locator only as the hosting-neutral `secret_reference` in organisation voice settings; do not add Retell to the legacy AWS-shaped provider-connections contract. VoIPline SIP credentials remain provider-managed and secret-referenced.
 - Extend task kinds with `VOICE_CONTACT_REVIEW` and `VOICE_OUTCOME_REVIEW`.
 - Extend customer activity aggregation with voice-call events.
 - Add `voice-call.execute` and `voice-call.reconcile` job payloads.
@@ -392,7 +392,7 @@ All reads and mutations include the active organisation identifier in database p
 
 ## 11. Security, privacy, and compliance controls
 
-- Credentials remain in AWS Secrets Manager and are fetched only by the server/worker task roles that require them.
+- Credentials remain in the active hosting platform's managed secret system and are injected or fetched only by the server/worker services that require them.
 - Retell API calls originate from the worker; no private API key is exposed to the browser.
 - Setup-preview access uses Retell's public browser-preview key, restricted to the production AccountPulse hostname (and staging hostname when required), plus an Administrator-only sample session that cannot initiate an external telephone call or transfer. Retell reCAPTCHA protection is enabled where supported.
 - Provider webhook signatures are verified against the unmodified body before processing.
