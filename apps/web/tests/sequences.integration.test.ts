@@ -26,12 +26,39 @@ async function seedSequence() {
 }
 
 function draft(organisationId: string, sequenceId: string): SequenceDraft {
-  return { organisationId, sequenceId, dailyBasis: 'BUSINESS_DAYS', smsAggregation: 'CONSOLIDATED_CUSTOMER', sendTime: '09:00', socialWindowStart: '08:00', socialWindowEnd: '18:00', minimumBalance: '0', maxSmsSegments: 3, xeroEmailAfterSmsOptOut: true, allowedCurrencies: ['AUD'], exclusions: [], stages: [
+  return { organisationId, sequenceId, kind: 'MESSAGING', dailyBasis: 'BUSINESS_DAYS', smsAggregation: 'CONSOLIDATED_CUSTOMER', sendTime: '09:00', socialWindowStart: '08:00', socialWindowEnd: '18:00', minimumBalance: '0', maxSmsSegments: 3, xeroEmailAfterSmsOptOut: true, allowedCurrencies: ['AUD'], exclusions: [], stages: [
     { key: 'due-date', offsetDays: 0, channels: ['SMS'], template: 'Hi {{customer_name}}, invoice {{invoice_number}} is due today.' },
     { key: 'seven-days', offsetDays: 7, channels: ['XERO_EMAIL', 'SMS'], template: 'Invoice {{invoice_number}} is now 7 days overdue.' },
     { key: 'twenty-one-days', offsetDays: 21, channels: ['SMS'], template: 'Final reminder: {{invoice_number}} remains overdue.' },
     { key: 'thirty-days', offsetDays: 30, channels: ['TASK', 'SMS_DAILY'], template: 'Please contact us about {{invoice_number}}.' }
   ] };
+}
+
+function voiceDraft(
+  organisationId: string,
+  sequenceId: string
+): SequenceDraft {
+  return {
+    organisationId,
+    sequenceId,
+    kind: 'VOICE',
+    dailyBasis: 'BUSINESS_DAYS',
+    smsAggregation: 'CONSOLIDATED_CUSTOMER',
+    sendTime: '10:30',
+    socialWindowStart: '09:00',
+    socialWindowEnd: '16:30',
+    minimumBalance: '0',
+    maxSmsSegments: 3,
+    xeroEmailAfterSmsOptOut: true,
+    maxCallsPerRun: 5,
+    cooldownSeconds: 120,
+    allowedCurrencies: ['AUD'],
+    exclusions: [],
+    stages: [
+      { key: 'seven-days-voice', offsetDays: 7, channels: ['VOICE'] },
+      { key: 'twenty-one-days-voice', offsetDays: 21, channels: ['VOICE'] }
+    ]
+  };
 }
 
 describe('sequence administration', () => {
@@ -50,7 +77,7 @@ describe('sequence administration', () => {
     expect(second).toEqual({ sequenceId: first.sequenceId, created: false });
     const sequences = await client.db.select().from(reminderSequences).where(eq(reminderSequences.organisationId, organisationId));
     expect(sequences).toHaveLength(1);
-    expect(sequences[0]).toMatchObject({ id: first.sequenceId, name: 'Standard bill chasing', mode: 'REVIEW', enabled: true });
+    expect(sequences[0]).toMatchObject({ id: first.sequenceId, name: 'Standard bill chasing', kind: 'MESSAGING', mode: 'REVIEW', enabled: true });
     const versions = await client.db.select().from(reminderSequenceVersions).where(eq(reminderSequenceVersions.sequenceId, first.sequenceId));
     expect(versions).toHaveLength(1);
     expect(versions[0]).toMatchObject({ versionNumber: 1, status: 'ACTIVE', dailyBasis: 'BUSINESS_DAYS', smsAggregation: 'CONSOLIDATED_CUSTOMER', sendTime: '09:00:00', socialWindowStart: '08:00:00', socialWindowEnd: '18:00:00', maxSmsSegments: 3, xeroEmailAfterSmsOptOut: true, configuration: { allowedCurrencies: ['AUD'] } });
@@ -99,6 +126,84 @@ describe('sequence administration', () => {
     expect(versions.map((row) => [row.versionNumber, row.status])).toEqual(expect.arrayContaining([[1, 'RETIRED'], [2, 'ACTIVE']]));
     const stages = await client.db.select().from(sequenceStages).where(eq(sequenceStages.sequenceVersionId, result.versionId));
     expect(stages).toHaveLength(6);
+  });
+
+  it('creates a separate standard voice sequence with only voice stages', async () => {
+    const organisationId = randomUUID();
+    const userId = randomUUID();
+    await client.db.insert(organisations).values({ id: organisationId, xeroOrganisationId: randomUUID(), name: 'Voice sequence test', timeZone: 'Australia/Sydney', baseCurrency: 'AUD' });
+    await client.db.insert(users).values({ id: userId, cognitoSubject: randomUUID(), email: `${userId}@example.invalid`, displayName: 'Admin' });
+    const session: AppSession = { userId, cognitoSubject: randomUUID(), displayName: 'Admin', expiresAt: '2026-09-18T10:00:00Z', memberships: [{ organisationId, role: 'ADMIN', active: true }] };
+    const service = createSequenceService({ database: client.db, clock: { now: () => now } });
+
+    const result = await service.createStandardVoiceSequence(session, { organisationId });
+    const [sequence] = await client.db.select().from(reminderSequences).where(eq(reminderSequences.id, result.sequenceId));
+    const [version] = await client.db.select().from(reminderSequenceVersions).where(eq(reminderSequenceVersions.sequenceId, result.sequenceId));
+    const stages = await client.db.select().from(sequenceStages).where(eq(sequenceStages.sequenceVersionId, version!.id));
+
+    expect(sequence).toMatchObject({ kind: 'VOICE', mode: 'REVIEW', enabled: true });
+    expect(version?.configuration).toEqual({
+      allowedCurrencies: ['AUD'],
+      maxCallsPerRun: 5,
+      cooldownSeconds: 120
+    });
+    expect(new Set(stages.map((stage) => stage.channel))).toEqual(new Set(['VOICE']));
+  });
+
+  it('accepts only channels belonging to the sequence kind', async () => {
+    const seeded = await seedSequence();
+    const service = createSequenceService({ database: client.db, clock: { now: () => now } });
+    const messaging = draft(seeded.organisationId, seeded.sequenceId);
+    messaging.stages.push({ key: 'voice', offsetDays: 40, channels: ['VOICE'] });
+    await expect(service.saveSequenceDraft(seeded.session('ADMIN'), messaging)).rejects.toThrow('MESSAGING_SEQUENCE_REJECTS_VOICE');
+
+    await client.db.update(reminderSequences).set({ kind: 'VOICE' }).where(eq(reminderSequences.id, seeded.sequenceId));
+    const voice = voiceDraft(seeded.organisationId, seeded.sequenceId);
+    voice.stages.push({ key: 'email', offsetDays: 30, channels: ['XERO_EMAIL'] });
+    await expect(service.saveSequenceDraft(seeded.session('ADMIN'), voice)).rejects.toThrow('VOICE_SEQUENCE_REQUIRES_VOICE_ONLY');
+
+    voice.stages = [{ key: 'voice', offsetDays: 21, channels: ['VOICE'] }];
+    await expect(service.saveSequenceDraft(seeded.session('ADMIN'), voice)).resolves.toMatchObject({ versionNumber: 2 });
+  });
+
+  it.each([
+    ['zero max calls', (value: SequenceDraft) => { value.maxCallsPerRun = 0; }],
+    ['excessive max calls', (value: SequenceDraft) => { value.maxCallsPerRun = 26; }],
+    ['zero cooldown', (value: SequenceDraft) => { value.cooldownSeconds = 0; }],
+    ['excessive cooldown', (value: SequenceDraft) => { value.cooldownSeconds = 3_601; }]
+  ])('rejects unsafe voice capacity: %s', async (_label, mutate) => {
+    const seeded = await seedSequence();
+    await client.db.update(reminderSequences).set({ kind: 'VOICE' }).where(eq(reminderSequences.id, seeded.sequenceId));
+    const value = voiceDraft(seeded.organisationId, seeded.sequenceId);
+    mutate(value);
+    const service = createSequenceService({ database: client.db, clock: { now: () => now } });
+    await expect(service.saveSequenceDraft(seeded.session('ADMIN'), value)).rejects.toThrow('INVALID_VOICE_CAPACITY');
+  });
+
+  it('enables and disables one sequence without changing the other kind', async () => {
+    const seeded = await seedSequence();
+    const voiceSequenceId = randomUUID();
+    await client.db.insert(reminderSequences).values({
+      id: voiceSequenceId,
+      organisationId: seeded.organisationId,
+      name: `Voice ${voiceSequenceId}`,
+      kind: 'VOICE',
+      mode: 'REVIEW',
+      enabled: true
+    });
+    const service = createSequenceService({ database: client.db, clock: { now: () => now } });
+
+    await service.setSequenceEnabled(seeded.session('ADMIN'), {
+      organisationId: seeded.organisationId,
+      sequenceId: voiceSequenceId,
+      enabled: false
+    });
+    const rows = await client.db.select({ id: reminderSequences.id, enabled: reminderSequences.enabled }).from(reminderSequences).where(eq(reminderSequences.organisationId, seeded.organisationId));
+
+    expect(rows).toEqual(expect.arrayContaining([
+      { id: seeded.sequenceId, enabled: true },
+      { id: voiceSequenceId, enabled: false }
+    ]));
   });
 
   it.each([
