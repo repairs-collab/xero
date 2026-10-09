@@ -25,9 +25,17 @@ import {
 
 import { organisations, users } from './organisation.js';
 import { contacts, invoices } from './receivables.js';
+import {
+  reminderSequences,
+  reminderSequenceVersions
+} from './reminders.js';
 
 export type VoiceProvider = 'RETELL' | 'VOIPCLOUD';
 export type NewVoiceProvider = 'VOIPCLOUD';
+export type VoiceCallSource =
+  | 'MANUAL'
+  | 'SEQUENCE_REVIEW'
+  | 'SEQUENCE_AUTOMATIC';
 
 export type VoiceGatewaySessionState =
   | 'PENDING'
@@ -48,6 +56,7 @@ export const organisationVoiceSettings = pgTable(
       .primaryKey()
       .references(() => organisations.id, { onDelete: 'cascade' }),
     enabled: boolean('enabled').notNull().default(false),
+    automaticEnabled: boolean('automatic_enabled').notNull().default(false),
     configurationVersion: integer('configuration_version')
       .notNull()
       .default(0),
@@ -145,6 +154,17 @@ export const voiceCallRequests = pgTable(
       .$type<'CUSTOMER' | 'TEST'>()
       .notNull()
       .default('CUSTOMER'),
+    source: varchar('source', { length: 24 })
+      .$type<VoiceCallSource>()
+      .notNull()
+      .default('MANUAL'),
+    sequenceId: uuid('sequence_id').references(() => reminderSequences.id),
+    sequenceVersionId: uuid('sequence_version_id').references(
+      () => reminderSequenceVersions.id
+    ),
+    stageKey: varchar('stage_key', { length: 64 }),
+    scheduledAt: timestamp('scheduled_at', { withTimezone: true }),
+    localOccurrenceDate: date('local_occurrence_date'),
     accountName: text('account_name'),
     destinationNumber: text('destination_number').notNull(),
     outboundNumber: text('outbound_number').notNull(),
@@ -211,6 +231,9 @@ export const voiceCallRequests = pgTable(
       table.contactId,
       table.createdAt
     ),
+    index('voice_call_requests_org_due_sequence_idx')
+      .on(table.organisationId, table.state, table.scheduledAt)
+      .where(sql`${table.source} <> 'MANUAL'`),
     foreignKey({
       name: 'voice_call_requests_org_contact_fk',
       columns: [table.organisationId, table.contactId],
@@ -231,6 +254,28 @@ export const voiceCallRequests = pgTable(
     check(
       'voice_call_requests_purpose_ck',
       sql`${table.purpose} in ('CUSTOMER', 'TEST')`
+    ),
+    check(
+      'voice_call_requests_source_ck',
+      sql`${table.source} in ('MANUAL', 'SEQUENCE_REVIEW', 'SEQUENCE_AUTOMATIC')`
+    ),
+    check(
+      'voice_call_requests_sequence_source_ck',
+      sql`(
+        ${table.source} = 'MANUAL'
+        and ${table.sequenceId} is null
+        and ${table.sequenceVersionId} is null
+        and ${table.stageKey} is null
+        and ${table.scheduledAt} is null
+        and ${table.localOccurrenceDate} is null
+      ) or (
+        ${table.source} in ('SEQUENCE_REVIEW', 'SEQUENCE_AUTOMATIC')
+        and ${table.sequenceId} is not null
+        and ${table.sequenceVersionId} is not null
+        and ${table.stageKey} is not null
+        and ${table.scheduledAt} is not null
+        and ${table.localOccurrenceDate} is not null
+      )`
     ),
     check(
       'voice_call_requests_state_ck',

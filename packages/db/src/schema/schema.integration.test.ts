@@ -137,7 +137,14 @@ const seedStageInstance = async () => {
     sourceVersion: 1
   });
 
-  return { organisationId, contactId, invoiceId, stageInstanceId };
+  return {
+    organisationId,
+    contactId,
+    invoiceId,
+    sequenceId,
+    sequenceVersionId,
+    stageInstanceId
+  };
 };
 
 const seedUser = async (label: string): Promise<string> => {
@@ -210,6 +217,127 @@ const seedVoiceCall = async (
 };
 
 describe('database invariants', () => {
+  it('defaults existing-compatible records to messaging, manual and automatic voice off', async () => {
+    const { organisationId, contactId, sequenceId } =
+      await seedStageInstance();
+    const actorUserId = await seedUser('Voice default operator');
+    const voiceCallId = await seedVoiceCall({
+      organisationId,
+      contactId,
+      actorUserId
+    });
+    await database.db.insert(organisationVoiceSettings).values({
+      organisationId,
+      outboundNumber: '+61255501234',
+      fallbackOfficeNumber: '+61350324518',
+      officeDestinationLabel: 'Main office',
+      timezone: 'Australia/Sydney',
+      weekdayStartLocal: '09:00',
+      weekdayEndLocal: '17:00'
+    });
+
+    const sequence = await database.pool.query<{ kind: string }>(
+      'select kind from reminder_sequences where id = $1',
+      [sequenceId]
+    );
+    const call = await database.pool.query<{ source: string }>(
+      'select source from voice_call_requests where id = $1',
+      [voiceCallId]
+    );
+    const settings = await database.pool.query<{
+      automatic_enabled: boolean;
+    }>(
+      'select automatic_enabled from organisation_voice_settings where organisation_id = $1',
+      [organisationId]
+    );
+
+    expect(sequence.rows[0]).toEqual({ kind: 'MESSAGING' });
+    expect(call.rows[0]).toEqual({ source: 'MANUAL' });
+    expect(settings.rows[0]).toEqual({ automatic_enabled: false });
+  });
+
+  it('round-trips an auditable scheduled voice call source', async () => {
+    const {
+      organisationId,
+      contactId,
+      sequenceId,
+      sequenceVersionId
+    } = await seedStageInstance();
+    const actorUserId = await seedUser('Scheduled voice operator');
+    const scheduledCallId = await seedVoiceCall({
+      organisationId,
+      contactId,
+      actorUserId
+    });
+    const incompleteCallId = await seedVoiceCall({
+      organisationId,
+      contactId,
+      actorUserId
+    });
+    const scheduledAt = new Date('2026-10-11T00:00:00.000Z');
+
+    await database.pool.query(
+      `update voice_call_requests
+          set source = 'SEQUENCE_REVIEW',
+              sequence_id = $2,
+              sequence_version_id = $3,
+              stage_key = 'twenty-one-days',
+              scheduled_at = $4,
+              local_occurrence_date = '2026-10-11'
+        where id = $1`,
+      [scheduledCallId, sequenceId, sequenceVersionId, scheduledAt]
+    );
+    const row = await database.pool.query<{
+      source: string;
+      sequence_id: string;
+      sequence_version_id: string;
+      stage_key: string;
+      scheduled_at: Date;
+      local_occurrence_date: string;
+    }>(
+      `select source, sequence_id, sequence_version_id, stage_key,
+              scheduled_at, local_occurrence_date::text as local_occurrence_date
+         from voice_call_requests
+        where id = $1`,
+      [scheduledCallId]
+    );
+
+    expect(row.rows[0]).toEqual({
+      source: 'SEQUENCE_REVIEW',
+      sequence_id: sequenceId,
+      sequence_version_id: sequenceVersionId,
+      stage_key: 'twenty-one-days',
+      scheduled_at: scheduledAt,
+      local_occurrence_date: '2026-10-11'
+    });
+    await database.pool.query(
+      `update voice_call_requests
+          set state = 'APPROVED',
+              call_flow_version = 1,
+              call_flow_hash = 'sha256:flow-v1',
+              approved_facts_hash = 'sha256:facts',
+              approved_at = now()
+        where id = $1`,
+      [scheduledCallId]
+    );
+    await expect(
+      database.pool.query(
+        `update voice_call_requests
+            set stage_key = 'changed-after-approval'
+          where id = $1`,
+        [scheduledCallId]
+      )
+    ).rejects.toThrow('approved voice call facts are immutable');
+    await expect(
+      database.pool.query(
+        `update voice_call_requests
+            set source = 'SEQUENCE_AUTOMATIC'
+          where id = $1`,
+        [incompleteCallId]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+  });
+
   it('defaults voice calls to CUSTOMER and accepts the isolated TEST purpose', async () => {
     const { organisationId, contactId } = await seedStageInstance();
     const actorUserId = await seedUser('Voice purpose operator');

@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import {
   boolean,
+  check,
   index,
   integer,
   jsonb,
@@ -17,6 +18,8 @@ import {
 import { organisations, users } from './organisation.js';
 import { contacts, invoices } from './receivables.js';
 
+export type SequenceKind = 'MESSAGING' | 'VOICE';
+
 export const reminderSequences = pgTable(
   'reminder_sequences',
   {
@@ -25,6 +28,10 @@ export const reminderSequences = pgTable(
       .notNull()
       .references(() => organisations.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
+    kind: varchar('kind', { length: 16 })
+      .$type<SequenceKind>()
+      .notNull()
+      .default('MESSAGING'),
     mode: varchar('mode', { length: 16 })
       .$type<'REVIEW' | 'AUTOMATIC'>()
       .notNull()
@@ -38,6 +45,10 @@ export const reminderSequences = pgTable(
       .defaultNow()
   },
   (table) => [
+    check(
+      'reminder_sequences_kind_ck',
+      sql`${table.kind} in ('MESSAGING', 'VOICE')`
+    ),
     uniqueIndex('reminder_sequences_org_name_uq').on(
       table.organisationId,
       table.name
