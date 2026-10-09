@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import {
   boolean,
   check,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -48,6 +49,10 @@ export const reminderSequences = pgTable(
     check(
       'reminder_sequences_kind_ck',
       sql`${table.kind} in ('MESSAGING', 'VOICE')`
+    ),
+    uniqueIndex('reminder_sequences_org_id_uq').on(
+      table.organisationId,
+      table.id
     ),
     uniqueIndex('reminder_sequences_org_name_uq').on(
       table.organisationId,
@@ -106,11 +111,25 @@ export const reminderSequenceVersions = pgTable(
       .defaultNow()
   },
   (table) => [
+    uniqueIndex('reminder_sequence_versions_org_id_uq').on(
+      table.organisationId,
+      table.id
+    ),
+    uniqueIndex('reminder_sequence_versions_org_sequence_id_uq').on(
+      table.organisationId,
+      table.sequenceId,
+      table.id
+    ),
     uniqueIndex('sequence_versions_org_sequence_version_uq').on(
       table.organisationId,
       table.sequenceId,
       table.versionNumber
-    )
+    ),
+    foreignKey({
+      name: 'reminder_sequence_versions_org_sequence_fk',
+      columns: [table.organisationId, table.sequenceId],
+      foreignColumns: [reminderSequences.organisationId, reminderSequences.id]
+    })
   ]
 );
 
@@ -141,7 +160,15 @@ export const sequenceStages = pgTable(
       table.sequenceVersionId,
       table.stageKey,
       table.channel
-    )
+    ),
+    foreignKey({
+      name: 'sequence_stages_org_version_fk',
+      columns: [table.organisationId, table.sequenceVersionId],
+      foreignColumns: [
+        reminderSequenceVersions.organisationId,
+        reminderSequenceVersions.id
+      ]
+    })
   ]
 );
 

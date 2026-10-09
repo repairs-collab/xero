@@ -24,7 +24,9 @@ import {
   paymentPromises,
   type PostgresVoiceCallRepository,
   reminderSequences,
+  reminderSequenceVersions,
   reminderWhitelistEntries,
+  sequenceStages,
   suppressions,
   users,
   voiceCallRequests
@@ -69,11 +71,13 @@ export interface VoiceCallExecutionDependencies {
   providerFactory: { create(apiKey: string): VoiceCallProvider };
   publisher: JobPublisher;
   holidays: { list(organisationId: string): readonly string[] };
+  acceptCustomerVoiceCalls: boolean;
 }
 
 export type VoiceCallCancellationCode =
   | VoicePolicyBlockCode
   | 'VOICE_CALL_NOT_FOUND'
+  | 'DEPLOYMENT_DISABLED'
   | 'INITIATING_USER_DISABLED'
   | 'UNKNOWN_OUTCOME'
   | 'STALE_ACCOUNT_DATA';
@@ -300,6 +304,72 @@ const revalidate = async (
       actorUserId: call.actorUserId,
       reason: 'INITIATING_USER_DISABLED'
     };
+  }
+
+  if (call.purpose === 'CUSTOMER' && !dependencies.acceptCustomerVoiceCalls) {
+    return {
+      kind: 'blocked',
+      actorUserId: call.actorUserId,
+      reason: 'DEPLOYMENT_DISABLED'
+    };
+  }
+
+  if (call.source !== 'MANUAL') {
+    if (
+      call.sequenceId === null ||
+      call.sequenceVersionId === null ||
+      call.stageKey === null ||
+      (call.source === 'SEQUENCE_AUTOMATIC' && !settings.automaticEnabled)
+    ) {
+      return {
+        kind: 'blocked',
+        actorUserId: call.actorUserId,
+        reason: 'STALE_ACCOUNT_DATA'
+      };
+    }
+
+    const [source] = await dependencies.database
+      .select({ id: sequenceStages.id })
+      .from(reminderSequences)
+      .innerJoin(
+        reminderSequenceVersions,
+        and(
+          eq(reminderSequenceVersions.id, call.sequenceVersionId),
+          eq(reminderSequenceVersions.organisationId, payload.organisationId),
+          eq(reminderSequenceVersions.sequenceId, reminderSequences.id),
+          eq(reminderSequenceVersions.status, 'ACTIVE')
+        )
+      )
+      .innerJoin(
+        sequenceStages,
+        and(
+          eq(sequenceStages.organisationId, payload.organisationId),
+          eq(sequenceStages.sequenceVersionId, reminderSequenceVersions.id),
+          eq(sequenceStages.stageKey, call.stageKey),
+          eq(sequenceStages.channel, 'VOICE'),
+          eq(sequenceStages.enabled, true)
+        )
+      )
+      .where(
+        and(
+          eq(reminderSequences.id, call.sequenceId),
+          eq(reminderSequences.organisationId, payload.organisationId),
+          eq(reminderSequences.kind, 'VOICE'),
+          eq(reminderSequences.enabled, true),
+          eq(
+            reminderSequences.mode,
+            call.source === 'SEQUENCE_AUTOMATIC' ? 'AUTOMATIC' : 'REVIEW'
+          )
+        )
+      )
+      .limit(1);
+    if (source === undefined) {
+      return {
+        kind: 'blocked',
+        actorUserId: call.actorUserId,
+        reason: 'STALE_ACCOUNT_DATA'
+      };
+    }
   }
 
   const currentInvoices =

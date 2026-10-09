@@ -21,6 +21,7 @@ import {
   reminderSequences,
   reminderSequenceVersions,
   reminderWhitelistEntries,
+  sequenceStages,
   suppressions,
   users,
   voiceCallRequests
@@ -106,6 +107,7 @@ async function seedApprovedCall(
   await client.db.insert(organisationVoiceSettings).values({
     organisationId,
     enabled: options.voiceEnabled ?? true,
+    automaticEnabled: options.scheduledAutomatic ?? false,
     configurationVersion: 2,
     provider: 'RETELL',
     secretReference: 'env:RETELL_API_KEY',
@@ -143,6 +145,14 @@ async function seedApprovedCall(
     sequenceId,
     versionNumber: 1,
     status: 'ACTIVE'
+  });
+  await client.db.insert(sequenceStages).values({
+    organisationId,
+    sequenceVersionId,
+    stageKey: 'twenty-one-days-voice',
+    offsetDays: 21,
+    channel: 'VOICE',
+    enabled: true
   });
   await client.db.insert(invoices).values({
     id: invoiceId,
@@ -248,6 +258,7 @@ async function seedApprovedCall(
     contactId,
     invoiceId,
     sequenceId,
+    sequenceVersionId,
     voiceCallId: draft.id,
     idempotencyKey,
     repository
@@ -263,6 +274,7 @@ const executionDependencies = (
   options: {
     executionTime?: Date;
     holidays?: readonly string[];
+    acceptCustomerVoiceCalls?: boolean;
   } = {}
 ) => {
   const readSecret = vi.fn(() => Promise.resolve('retell-private-key'));
@@ -279,7 +291,8 @@ const executionDependencies = (
       secrets: { read: readSecret },
       providerFactory: { create: createProvider },
       publisher: { publish },
-      holidays: { list: () => options.holidays ?? [] }
+      holidays: { list: () => options.holidays ?? [] },
+      acceptCustomerVoiceCalls: options.acceptCustomerVoiceCalls ?? true
     },
     readSecret,
     createProvider,
@@ -371,6 +384,79 @@ describe('voice call execution', () => {
       providerCallId: 'retell-automatic-call-1'
     });
     expect(createPhoneCall).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    {
+      name: 'automatic voice is disabled',
+      mutate: (seeded: Awaited<ReturnType<typeof seedApprovedCall>>) =>
+        client.db.update(organisationVoiceSettings)
+          .set({ automaticEnabled: false })
+          .where(eq(organisationVoiceSettings.organisationId, seeded.organisationId))
+    },
+    {
+      name: 'the source sequence is disabled',
+      mutate: (seeded: Awaited<ReturnType<typeof seedApprovedCall>>) =>
+        client.db.update(reminderSequences)
+          .set({ enabled: false })
+          .where(eq(reminderSequences.id, seeded.sequenceId))
+    },
+    {
+      name: 'the source sequence mode changes',
+      mutate: (seeded: Awaited<ReturnType<typeof seedApprovedCall>>) =>
+        client.db.update(reminderSequences)
+          .set({ mode: 'REVIEW' })
+          .where(eq(reminderSequences.id, seeded.sequenceId))
+    },
+    {
+      name: 'the source version is retired',
+      mutate: (seeded: Awaited<ReturnType<typeof seedApprovedCall>>) =>
+        client.db.update(reminderSequenceVersions)
+          .set({ status: 'RETIRED' })
+          .where(eq(reminderSequenceVersions.id, seeded.sequenceVersionId))
+    },
+    {
+      name: 'the source stage is disabled',
+      mutate: (seeded: Awaited<ReturnType<typeof seedApprovedCall>>) =>
+        client.db.update(sequenceStages)
+          .set({ enabled: false })
+          .where(and(
+            eq(sequenceStages.organisationId, seeded.organisationId),
+            eq(sequenceStages.sequenceVersionId, seeded.sequenceVersionId),
+            eq(sequenceStages.stageKey, 'twenty-one-days-voice')
+          ))
+    }
+  ])('cancels a queued automatic call when $name', async ({ mutate }) => {
+    const seeded = await seedApprovedCall({ scheduledAutomatic: true });
+    await mutate(seeded);
+    const createPhoneCall = vi.fn(() => Promise.resolve({
+      callId: 'not-used',
+      callStatus: 'registered'
+    }));
+    const runtime = executionDependencies(seeded.repository, createPhoneCall);
+
+    await expect(executeVoiceCall(runtime.dependencies, {
+      organisationId: seeded.organisationId,
+      voiceCallId: seeded.voiceCallId
+    })).resolves.toEqual({ kind: 'cancelled', reason: 'STALE_ACCOUNT_DATA' });
+    expect(createPhoneCall).not.toHaveBeenCalled();
+  });
+
+  it('cancels queued customer calls when the deployment gate closes', async () => {
+    const seeded = await seedApprovedCall({ scheduledAutomatic: true });
+    const createPhoneCall = vi.fn(() => Promise.resolve({
+      callId: 'not-used',
+      callStatus: 'registered'
+    }));
+    const runtime = executionDependencies(seeded.repository, createPhoneCall, {
+      acceptCustomerVoiceCalls: false
+    });
+
+    await expect(executeVoiceCall(runtime.dependencies, {
+      organisationId: seeded.organisationId,
+      voiceCallId: seeded.voiceCallId
+    })).resolves.toEqual({ kind: 'cancelled', reason: 'DEPLOYMENT_DISABLED' });
+    expect(createPhoneCall).not.toHaveBeenCalled();
   });
 
   it('executes a TEST call while customer voice is disabled and does not require the staff number on the customer', async () => {

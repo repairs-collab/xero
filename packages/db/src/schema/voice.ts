@@ -239,6 +239,27 @@ export const voiceCallRequests = pgTable(
       columns: [table.organisationId, table.contactId],
       foreignColumns: [contacts.organisationId, contacts.id]
     }),
+    foreignKey({
+      name: 'voice_call_requests_org_sequence_fk',
+      columns: [table.organisationId, table.sequenceId],
+      foreignColumns: [
+        reminderSequences.organisationId,
+        reminderSequences.id
+      ]
+    }),
+    foreignKey({
+      name: 'voice_call_requests_org_sequence_version_fk',
+      columns: [
+        table.organisationId,
+        table.sequenceId,
+        table.sequenceVersionId
+      ],
+      foreignColumns: [
+        reminderSequenceVersions.organisationId,
+        reminderSequenceVersions.sequenceId,
+        reminderSequenceVersions.id
+      ]
+    }),
     check(
       'voice_call_requests_provider_ck',
       sql`${table.provider} in ('RETELL', 'VOIPCLOUD')`

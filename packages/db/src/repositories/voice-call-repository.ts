@@ -18,6 +18,11 @@ import {
 import type { Database, DbTransaction } from '../client.js';
 import { contacts, invoices } from '../schema/receivables.js';
 import {
+  reminderSequences,
+  reminderSequenceVersions,
+  sequenceStages
+} from '../schema/reminders.js';
+import {
   voiceCallEvents,
   voiceCallInvoices,
   voiceCallRequests,
@@ -292,6 +297,52 @@ const assertDraftSources = async (
   }
 };
 
+const assertPreparedSource = async (
+  transaction: DbTransaction,
+  input: CreateVoiceCallPreparedInput
+): Promise<void> => {
+  if (input.source.source === 'MANUAL') return;
+
+  const [source] = await transaction
+    .select({ id: sequenceStages.id })
+    .from(reminderSequences)
+    .innerJoin(
+      reminderSequenceVersions,
+      and(
+        eq(reminderSequenceVersions.id, input.source.sequenceVersionId),
+        eq(reminderSequenceVersions.organisationId, input.organisationId),
+        eq(reminderSequenceVersions.sequenceId, reminderSequences.id),
+        eq(reminderSequenceVersions.status, 'ACTIVE')
+      )
+    )
+    .innerJoin(
+      sequenceStages,
+      and(
+        eq(sequenceStages.organisationId, input.organisationId),
+        eq(sequenceStages.sequenceVersionId, reminderSequenceVersions.id),
+        eq(sequenceStages.stageKey, input.source.stageKey),
+        eq(sequenceStages.channel, 'VOICE'),
+        eq(sequenceStages.enabled, true)
+      )
+    )
+    .where(
+      and(
+        eq(reminderSequences.id, input.source.sequenceId),
+        eq(reminderSequences.organisationId, input.organisationId),
+        eq(reminderSequences.kind, 'VOICE'),
+        eq(reminderSequences.enabled, true),
+        eq(
+          reminderSequences.mode,
+          input.source.source === 'SEQUENCE_AUTOMATIC'
+            ? 'AUTOMATIC'
+            : 'REVIEW'
+        )
+      )
+    )
+    .limit(1);
+  if (source === undefined) throw new Error('VOICE_CALL_SOURCE_MISMATCH');
+};
+
 export class PostgresVoiceCallRepository {
   constructor(private readonly database: Database) {}
 
@@ -321,6 +372,7 @@ export class PostgresVoiceCallRepository {
     }
     return this.database.transaction(async (transaction) => {
       await assertDraftSources(transaction, input);
+      await assertPreparedSource(transaction, input);
       const [created] = await transaction
         .insert(voiceCallRequests)
         .values({
@@ -581,7 +633,6 @@ export class PostgresVoiceCallRepository {
         .where(
           and(
             eq(voiceCallRequests.organisationId, input.organisationId),
-            eq(voiceCallRequests.contactId, current.contactId),
             eq(voiceCallRequests.state, 'UNKNOWN'),
             ne(voiceCallRequests.id, current.id)
           )

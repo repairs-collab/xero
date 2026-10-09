@@ -19,6 +19,7 @@ import {
   PostgresVoiceCallRepository,
   reminderSequenceVersions,
   reminderSequences,
+  sequenceStages,
   stageInstances,
   users,
   voiceCallRequests
@@ -125,6 +126,14 @@ async function seedVoiceApprovals() {
       maxCallsPerRun: 5,
       cooldownSeconds: 120
     }
+  });
+  await client.db.insert(sequenceStages).values({
+    organisationId,
+    sequenceVersionId: versionId,
+    stageKey: 'twenty-one-days-voice',
+    offsetDays: 21,
+    channel: 'VOICE',
+    enabled: true
   });
   const repository = new PostgresVoiceCallRepository(client.db);
   const addCall = async (label: string, amountDue: string) => {

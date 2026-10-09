@@ -338,6 +338,45 @@ describe('database invariants', () => {
     ).rejects.toMatchObject({ code: '23514' });
   });
 
+  it('rejects cross-organisation scheduled voice source metadata', async () => {
+    const owner = await seedStageInstance();
+    const other = await seedStageInstance();
+    const actorUserId = await seedUser('Cross tenant voice operator');
+    const callId = await seedVoiceCall({
+      organisationId: owner.organisationId,
+      contactId: owner.contactId,
+      actorUserId
+    });
+    const connection = await database.pool.connect();
+    let errorCode: string | undefined;
+    try {
+      await connection.query('begin');
+      await connection.query(
+        `update voice_call_requests
+            set source = 'SEQUENCE_REVIEW',
+                sequence_id = $2,
+                sequence_version_id = $3,
+                stage_key = 'cross-tenant-stage',
+                scheduled_at = $4,
+                local_occurrence_date = '2026-10-11'
+          where id = $1`,
+        [
+          callId,
+          other.sequenceId,
+          other.sequenceVersionId,
+          new Date('2026-10-11T00:00:00.000Z')
+        ]
+      );
+    } catch (error) {
+      errorCode = (error as { code?: string }).code;
+    } finally {
+      await connection.query('rollback');
+      connection.release();
+    }
+
+    expect(errorCode).toBe('23503');
+  });
+
   it('defaults voice calls to CUSTOMER and accepts the isolated TEST purpose', async () => {
     const { organisationId, contactId } = await seedStageInstance();
     const actorUserId = await seedUser('Voice purpose operator');

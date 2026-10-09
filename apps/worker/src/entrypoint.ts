@@ -383,7 +383,9 @@ async function main() {
               create: (apiKey) => new RetellClient({ http, apiKey })
             },
             publisher: queue,
-            holidays: { list: () => [] }
+            holidays: { list: () => [] },
+            acceptCustomerVoiceCalls:
+              process.env.VOICE_GATEWAY_ACCEPT_CALLS === 'true'
           },
           payload
         ).then(() => undefined),

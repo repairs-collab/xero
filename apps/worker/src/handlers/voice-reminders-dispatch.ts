@@ -112,7 +112,6 @@ export async function dispatchDueVoiceReminders(
             eq(voiceCallRequests.organisationId, organisationId),
             eq(voiceCallRequests.purpose, 'CUSTOMER'),
             inArray(voiceCallRequests.state, [
-              'QUEUED',
               'SUBMITTING',
               'ACCEPTED',
               'IN_PROGRESS',
@@ -131,6 +130,39 @@ export async function dispatchDueVoiceReminders(
                 ? 'UNKNOWN_OUTCOME'
                 : 'ORGANISATION_CALL_IN_FLIGHT'
           } as VoiceDispatchSummary
+        };
+      }
+
+      const [queuedCall] = await transaction
+        .select({
+          id: voiceCallRequests.id,
+          idempotencyKey: voiceCallRequests.idempotencyKey
+        })
+        .from(voiceCallRequests)
+        .where(
+          and(
+            eq(voiceCallRequests.organisationId, organisationId),
+            eq(voiceCallRequests.purpose, 'CUSTOMER'),
+            eq(voiceCallRequests.state, 'QUEUED'),
+            ne(voiceCallRequests.source, 'MANUAL')
+          )
+        )
+        .orderBy(
+          asc(voiceCallRequests.queuedAt),
+          asc(voiceCallRequests.createdAt),
+          asc(voiceCallRequests.id)
+        )
+        .limit(1);
+      if (queuedCall !== undefined) {
+        return {
+          summary: {
+            status: 'DISPATCHED',
+            voiceCallId: queuedCall.id
+          } as VoiceDispatchSummary,
+          job: {
+            voiceCallId: queuedCall.id,
+            correlationId: queuedCall.idempotencyKey
+          }
         };
       }
 

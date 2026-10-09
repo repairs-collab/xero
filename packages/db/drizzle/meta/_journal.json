@@ -85,6 +85,13 @@
       "when": 1791520054620,
       "tag": "0011_independent_voice_sequences",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1791526155176,
+      "tag": "0012_illegal_dragon_lord",
+      "breakpoints": true
     }
   ]
 }

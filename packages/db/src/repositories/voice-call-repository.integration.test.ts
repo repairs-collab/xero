@@ -10,6 +10,7 @@ import {
   organisations,
   reminderSequences,
   reminderSequenceVersions,
+  sequenceStages,
   users,
   voiceCallEvents,
   voiceCallInvoices,
@@ -164,6 +165,14 @@ describe('PostgresVoiceCallRepository', () => {
       versionNumber: 1,
       status: 'ACTIVE'
     });
+    await client.db.insert(sequenceStages).values({
+      organisationId: seeded.organisationId,
+      sequenceVersionId,
+      stageKey: 'twenty-one-days-voice',
+      offsetDays: 21,
+      channel: 'VOICE',
+      enabled: true
+    });
     const scheduled = await repository.createPrepared({
       ...input,
       actorUserId: null,
@@ -204,6 +213,53 @@ describe('PostgresVoiceCallRepository', () => {
       state: 'QUEUED',
       queuedAt: new Date('2026-10-07T00:02:00.000Z')
     });
+  });
+
+  it('rejects scheduled source metadata owned by another organisation', async () => {
+    const seeded = await seedAccount('Source owner');
+    const other = await seedAccount('Other source owner');
+    const sequenceId = randomUUID();
+    const sequenceVersionId = randomUUID();
+    await client.db.insert(reminderSequences).values({
+      id: sequenceId,
+      organisationId: other.organisationId,
+      name: `Other voice ${sequenceId}`,
+      kind: 'VOICE',
+      mode: 'REVIEW',
+      enabled: true
+    });
+    await client.db.insert(reminderSequenceVersions).values({
+      id: sequenceVersionId,
+      organisationId: other.organisationId,
+      sequenceId,
+      versionNumber: 1,
+      status: 'ACTIVE'
+    });
+    await client.db.insert(sequenceStages).values({
+      organisationId: other.organisationId,
+      sequenceVersionId,
+      stageKey: 'review-voice',
+      offsetDays: 7,
+      channel: 'VOICE',
+      enabled: true
+    });
+
+    await expect(repository.createPrepared({
+      ...draftInput(seeded),
+      actorUserId: seeded.actorUserId,
+      initialState: 'DRAFT',
+      source: {
+        source: 'SEQUENCE_REVIEW',
+        sequenceId,
+        sequenceVersionId,
+        stageKey: 'review-voice',
+        scheduledAt: new Date('2026-10-07T00:01:00.000Z'),
+        localOccurrenceDate: '2026-10-07'
+      },
+      callFlowVersion: null,
+      callFlowHash: null,
+      approvedFactsHash: null
+    })).rejects.toThrow('VOICE_CALL_SOURCE_MISMATCH');
   });
 
   it('pins the reviewed flow and fact hashes only in the approval transaction', async () => {
@@ -535,7 +591,7 @@ describe('PostgresVoiceCallRepository', () => {
     ]);
   });
 
-  it('blocks a new submission while the same account has an unknown provider outcome', async () => {
+  it('blocks another customer while the organisation has an unknown provider outcome', async () => {
     const seeded = await seedAccount('Unknown voice');
     const unknownInput = draftInput(seeded);
     const unknown = await repository.createDraft(unknownInput);
@@ -550,7 +606,47 @@ describe('PostgresVoiceCallRepository', () => {
       .set({ state: 'UNKNOWN' })
       .where(eq(voiceCallRequests.id, unknown.id));
 
-    const nextInput = draftInput(seeded);
+    const secondContactId = randomUUID();
+    const secondInvoiceId = randomUUID();
+    const secondXeroInvoiceId = randomUUID();
+    await client.db.insert(contacts).values({
+      id: secondContactId,
+      organisationId: seeded.organisationId,
+      xeroContactId: randomUUID(),
+      name: 'Second customer',
+      active: true,
+      sourceVersion: 1
+    });
+    await client.db.insert(invoices).values({
+      id: secondInvoiceId,
+      organisationId: seeded.organisationId,
+      xeroInvoiceId: secondXeroInvoiceId,
+      contactId: secondContactId,
+      invoiceNumber: 'INV-SECOND',
+      type: 'ACCREC',
+      status: 'AUTHORISED',
+      issueDate: '2026-08-01',
+      dueDate: '2026-08-31',
+      amountDue: '50.0000',
+      total: '50.0000',
+      currency: 'AUD',
+      syncVersion: 1
+    });
+    const nextInput = draftInput(seeded, {
+      contactId: secondContactId,
+      accountName: 'Second customer',
+      combinedAmount: '50.0000',
+      invoices: [{
+        invoiceId: secondInvoiceId,
+        xeroInvoiceId: secondXeroInvoiceId,
+        invoiceNumber: 'INV-SECOND',
+        amountDue: '50.0000',
+        currency: 'AUD',
+        dueDate: '2026-08-31',
+        syncVersion: 1,
+        snapshotAt: new Date('2026-10-07T00:00:00.000Z')
+      }]
+    });
     const next = await repository.createDraft(nextInput);
     await approveDirectly(
       seeded.organisationId,

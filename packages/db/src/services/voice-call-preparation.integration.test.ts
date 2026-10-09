@@ -17,6 +17,7 @@ import {
   reminderSequenceVersions,
   reminderSequences,
   reminderWhitelistEntries,
+  sequenceStages,
   suppressions,
   users
 } from '../schema/index.js';
@@ -109,6 +110,14 @@ async function seedPreparationFixture() {
     status: 'ACTIVE',
     configuration: {}
   });
+  await database.db.insert(sequenceStages).values({
+    organisationId,
+    sequenceVersionId,
+    stageKey: 'twenty-one-days',
+    offsetDays: 21,
+    channel: 'VOICE',
+    enabled: true
+  });
   await database.db.insert(invoices).values(
     invoiceIds.map((id, index) => ({
       id,
@@ -192,6 +201,10 @@ describe('voice call preparation service', () => {
 
   it('stores every sequence invoice once with exact source metadata', async () => {
     const seeded = await seedPreparationFixture();
+    await database.db
+      .update(reminderSequences)
+      .set({ mode: 'AUTOMATIC' })
+      .where(eq(reminderSequences.id, seeded.sequenceId));
     const scheduledAt = new Date('2026-10-08T00:00:00.000Z');
     const created = await seeded.service.create({
       ...seeded.manualInput,

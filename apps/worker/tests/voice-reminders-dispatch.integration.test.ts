@@ -314,6 +314,28 @@ describe('dispatchDueVoiceReminders', () => {
     expect(messageStage?.status).toBe('SENT');
   });
 
+  it('republishes a stranded queued call after a publish failure', async () => {
+    const seeded = await seedDispatch();
+    const due = await seeded.addCall({
+      scheduledAt: new Date('2026-10-09T00:00:00.000Z')
+    });
+    const jobs = publisher();
+    jobs.publish.mockRejectedValueOnce(new Error('queue unavailable'));
+
+    await expect(
+      run(seeded, new Date('2026-10-09T00:30:00.000Z'), jobs)
+    ).rejects.toThrow('queue unavailable');
+    await expect(
+      seeded.repository.loadForExecution(seeded.organisationId, due.call.id)
+    ).resolves.toMatchObject({ state: 'QUEUED' });
+
+    jobs.publish.mockResolvedValueOnce(randomUUID());
+    await expect(
+      run(seeded, new Date('2026-10-09T00:31:00.000Z'), jobs)
+    ).resolves.toMatchObject({ status: 'DISPATCHED', voiceCallId: due.call.id });
+    expect(jobs.publish).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps automatic calls approved until both deployment and organisation automatic gates are open', async () => {
     for (const scenario of [
       { automaticEnabled: true, deployment: false },
@@ -448,14 +470,25 @@ describe('dispatchDueVoiceReminders', () => {
   });
 
   it('does not dispatch from a disabled sequence or retired version, or beyond the occurrence cap', async () => {
-    for (const options of [
-      { sequenceEnabled: false },
-      { versionStatus: 'RETIRED' as const }
+    for (const change of [
+      { kind: 'sequence' as const },
+      { kind: 'version' as const }
     ]) {
-      const seeded = await seedDispatch(options);
+      const seeded = await seedDispatch();
       const due = await seeded.addCall({
         scheduledAt: new Date('2026-10-09T00:00:00.000Z')
       });
+      if (change.kind === 'sequence') {
+        await client.db
+          .update(reminderSequences)
+          .set({ enabled: false })
+          .where(eq(reminderSequences.id, seeded.sequenceId));
+      } else {
+        await client.db
+          .update(reminderSequenceVersions)
+          .set({ status: 'RETIRED' })
+          .where(eq(reminderSequenceVersions.id, seeded.sequenceVersionId));
+      }
       const jobs = publisher();
       await run(seeded, new Date('2026-10-09T00:30:00.000Z'), jobs);
       await expect(
