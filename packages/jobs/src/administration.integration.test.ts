@@ -70,6 +70,20 @@ const send = async (
 const stateOf = async (name: JobName, id: string) =>
   (await controller.findJobs(name, { id }))[0]?.state;
 
+const setState = async (
+  name: JobName,
+  id: string,
+  state: 'active' | 'completed' | 'retry'
+) => {
+  await database.pool.query(
+    `UPDATE pgboss.job
+        SET state = $3::pgboss.job_state
+      WHERE id = $1::uuid
+        AND name = $2::text`,
+    [id, name, state]
+  );
+};
+
 describe('purgeOrganisationOperationalJobs', () => {
   it('deletes only target created and retry operational jobs and returns exact counts', async () => {
     const organisationId = randomUUID();
@@ -78,24 +92,19 @@ describe('purgeOrganisationOperationalJobs', () => {
     const activeId = await send(jobNames.reminderExecute, organisationId, {
       priority: 2_000_000_000
     });
-    const [active] = await controller.fetch(jobNames.reminderExecute);
-    expect(active?.id).toBe(activeId);
+    await setState(jobNames.reminderExecute, activeId, 'active');
 
     const completedId = await send(jobNames.xeroInitialSync, organisationId, {
       priority: 2_000_000_000
     });
-    const [completed] = await controller.fetch(jobNames.xeroInitialSync);
-    expect(completed?.id).toBe(completedId);
-    await controller.complete(jobNames.xeroInitialSync, completedId);
+    await setState(jobNames.xeroInitialSync, completedId, 'completed');
 
     const retryId = await send(
       jobNames.xeroIncrementalSync,
       organisationId,
       { priority: 2_000_000_000, retryLimit: 1 }
     );
-    const [retry] = await controller.fetch(jobNames.xeroIncrementalSync);
-    expect(retry?.id).toBe(retryId);
-    await controller.fail(jobNames.xeroIncrementalSync, retryId);
+    await setState(jobNames.xeroIncrementalSync, retryId, 'retry');
     expect(await stateOf(jobNames.xeroIncrementalSync, retryId)).toBe('retry');
 
     const createdTargetIds = new Map<JobName, string>();
