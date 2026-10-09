@@ -3,14 +3,31 @@
 import { headers } from 'next/headers';
 import { revalidatePath } from 'next/cache';
 
+import { PostgresVoiceCallRepository } from '@bc5000/db/web';
+
 import { createApprovalService } from './approval-service.js';
+import { createVoiceApprovalService } from './voice-approval-service.js';
 import { getJobQueue } from '../../../server/job-runtime.js';
 import { getDatabaseClient, requireWebSession } from '../../../server/runtime.js';
 import { createReminderWhitelistService } from '../../../server/reminder-whitelist-service.js';
 
 async function service() {
   const session = await requireWebSession(new Request('http://localhost/', { headers: await headers() }));
-  return { session, approvals: createApprovalService({ database: getDatabaseClient().db, publisher: await getJobQueue(), clock: { now: () => new Date() } }) };
+  const database = getDatabaseClient().db;
+  return {
+    session,
+    approvals: createApprovalService({
+      database,
+      publisher: await getJobQueue(),
+      clock: { now: () => new Date() }
+    }),
+    voiceApprovals: createVoiceApprovalService({
+      database,
+      repository: new PostgresVoiceCallRepository(database),
+      clock: { now: () => new Date() },
+      holidays: { list: () => [] }
+    })
+  };
 }
 
 const requiredText = (formData: FormData, name: string): string => {
@@ -20,14 +37,36 @@ const requiredText = (formData: FormData, name: string): string => {
 };
 
 export async function approveReminder(formData: FormData): Promise<void> {
-  const { session, approvals } = await service();
-  await approvals.approveReminder(session, { organisationId: requiredText(formData, 'organisationId'), approvalId: requiredText(formData, 'approvalId') });
+  const { session, approvals, voiceApprovals } = await service();
+  const organisationId = requiredText(formData, 'organisationId');
+  if (formData.get('kind') === 'VOICE') {
+    await voiceApprovals.approve(session, {
+      organisationId,
+      voiceCallId: requiredText(formData, 'voiceCallId')
+    });
+  } else {
+    await approvals.approveReminder(session, {
+      organisationId,
+      approvalId: requiredText(formData, 'approvalId')
+    });
+  }
   revalidatePath('/approvals');
 }
 
 export async function rejectReminder(formData: FormData): Promise<void> {
-  const { session, approvals } = await service();
-  await approvals.rejectReminder(session, { organisationId: requiredText(formData, 'organisationId'), approvalId: requiredText(formData, 'approvalId') });
+  const { session, approvals, voiceApprovals } = await service();
+  const organisationId = requiredText(formData, 'organisationId');
+  if (formData.get('kind') === 'VOICE') {
+    await voiceApprovals.reject(session, {
+      organisationId,
+      voiceCallId: requiredText(formData, 'voiceCallId')
+    });
+  } else {
+    await approvals.rejectReminder(session, {
+      organisationId,
+      approvalId: requiredText(formData, 'approvalId')
+    });
+  }
   revalidatePath('/approvals');
 }
 
@@ -40,8 +79,23 @@ export async function snoozeReminder(formData: FormData): Promise<void> {
 }
 
 export async function bulkApproveReminders(formData: FormData): Promise<void> {
-  const { session, approvals } = await service();
-  await approvals.bulkApprove(session, { organisationId: requiredText(formData, 'organisationId'), approvalIds: formData.getAll('approvalId').filter((value): value is string => typeof value === 'string') });
+  const { session, approvals, voiceApprovals } = await service();
+  const organisationId = requiredText(formData, 'organisationId');
+  const approvalIds = formData
+    .getAll('approvalId')
+    .filter((value): value is string => typeof value === 'string');
+  const voiceCallIds = formData
+    .getAll('voiceCallId')
+    .filter((value): value is string => typeof value === 'string');
+  if (approvalIds.length > 0) {
+    await approvals.bulkApprove(session, { organisationId, approvalIds });
+  }
+  if (voiceCallIds.length > 0) {
+    await voiceApprovals.bulkApprove(session, {
+      organisationId,
+      voiceCallIds
+    });
+  }
   revalidatePath('/approvals');
 }
 
