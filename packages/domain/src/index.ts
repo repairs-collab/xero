@@ -9,3 +9,4 @@ export * from './send-policy.js';
 export * from './state-machine.js';
 export * from './templates.js';
 export * from './voice-calls.js';
+export * from './voice-sequences.js';

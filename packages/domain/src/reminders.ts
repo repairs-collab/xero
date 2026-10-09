@@ -7,7 +7,8 @@ export type ReminderStageChannel =
   | 'SMS'
   | 'XERO_EMAIL'
   | 'TASK'
-  | 'SMS_DAILY';
+  | 'SMS_DAILY'
+  | 'VOICE';
 
 export interface ReminderStage {
   id: string;
@@ -43,7 +44,7 @@ export interface StageOccurrence {
   stageId: string;
   invoiceId: string;
   customerId: string;
-  channel: 'SMS' | 'XERO_EMAIL' | 'TASK';
+  channel: 'SMS' | 'XERO_EMAIL' | 'TASK' | 'VOICE';
   scheduledAtUtc: string;
   localDate: string;
 }

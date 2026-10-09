@@ -105,4 +105,31 @@ describe('calculateStageOccurrences', () => {
 
     expect(result[0]?.scheduledAtUtc).toBe('2026-10-03T22:00:00.000Z');
   });
+
+  it('schedules a voice stage at the exact Sydney local time', () => {
+    const result = calculateStageOccurrences(
+      sequenceFixture({
+        asOfLocalDate: '2026-10-04',
+        sendTime: '09:00',
+        stages: [{ id: 'due-date-voice', offsetDays: 0, channels: ['VOICE'] }]
+      }),
+      [
+        {
+          invoiceId: 'invoice-voice-1',
+          customerId: 'customer-1',
+          dueDate: '2026-10-04',
+          amountDue: '500.00',
+          currency: 'AUD'
+        }
+      ],
+      calendar
+    );
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        channel: 'VOICE',
+        scheduledAtUtc: '2026-10-03T22:00:00.000Z'
+      })
+    ]);
+  });
 });
