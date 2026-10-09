@@ -57,6 +57,8 @@ describe('OVH voice deployment', () => {
     expect(result.status, result.stderr).toBe(0);
     const resolved = JSON.parse(result.stdout) as {
       services: {
+        worker: { environment: { VOICE_GATEWAY_ACCEPT_CALLS: string } };
+        'voice-gateway': { environment: { VOICE_GATEWAY_ACCEPT_CALLS: string } };
         asterisk: {
           environment: {
             VOIPCLOUD_SIP_DOMAIN: string;
@@ -66,6 +68,8 @@ describe('OVH voice deployment', () => {
         };
       };
     };
+    expect(resolved.services.worker.environment.VOICE_GATEWAY_ACCEPT_CALLS).toBe('false');
+    expect(resolved.services['voice-gateway'].environment.VOICE_GATEWAY_ACCEPT_CALLS).toBe('false');
     expect(resolved.services.asterisk.environment.VOIPCLOUD_SIP_SERVER).toBe(
       'sipm2.au.voipcloud.online:7060'
     );
@@ -119,6 +123,18 @@ describe('OVH voice deployment', () => {
       )
     ).toHaveLength(2);
     expect(compose).not.toContain('VOICE_GATEWAY_ACCEPT_CALLS: true');
+  });
+
+  it('never enables automatic customer voice through a migration or Compose default', () => {
+    const compose = deploymentFile('docker-compose.yml');
+    const migration = readFileSync(
+      resolve(process.cwd(), 'packages', 'db', 'drizzle', '0011_independent_voice_sequences.sql'),
+      'utf8'
+    );
+
+    expect(migration).toContain('"automatic_enabled" boolean DEFAULT false NOT NULL');
+    expect(migration).not.toMatch(/automatic_enabled[^;]*(?:DEFAULT|=)\s*true/i);
+    expect(compose).not.toMatch(/AUTOMATIC_(?:CUSTOMER_)?VOICE[^\n]*true/i);
   });
 
   it('runs the bounded voice monitor from an OVH systemd timer', () => {

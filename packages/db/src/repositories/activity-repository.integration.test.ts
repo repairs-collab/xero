@@ -8,6 +8,8 @@ import {
   contacts,
   invoices,
   organisations,
+  reminderSequences,
+  reminderSequenceVersions,
   suppressions,
   tasks,
   users,
@@ -133,8 +135,8 @@ describe('PostgresActivityRepository voice timeline', () => {
     await client.db.insert(tasks).values({
       organisationId,
       contactId,
-      kind: 'VOICE_OUTCOME_REVIEW',
-      summary: 'Outcome could not be confirmed safely'
+      kind: 'VOICE_CONTACT_REVIEW',
+      summary: `Provider destination ${destination}; providerCallId=private-call-id`
     });
     await client.db.insert(suppressions).values({
       organisationId,
@@ -209,10 +211,12 @@ describe('PostgresActivityRepository voice timeline', () => {
       expect.arrayContaining([
         expect.objectContaining({
           label: 'Voice reminder delivered',
-          detail: 'Invoice INV-SAFE-100 · initiated by Repairs Admin'
+          detail: 'Invoice INV-SAFE-100 · initiated by Repairs Admin',
+          source: 'AccountPulse Voice - Manual'
         }),
         expect.objectContaining({
-          label: 'Voice outcome needs review',
+          label: 'Voice contact details need review',
+          detail: 'Review the customer\'s phone details before another voice reminder.',
           href: '/escalations'
         }),
         expect.objectContaining({
@@ -227,7 +231,189 @@ describe('PostgresActivityRepository voice timeline', () => {
       ])
     );
     expect(serialised).not.toContain(destination);
+    expect(serialised).not.toContain('private-call-id');
     expect(serialised).not.toContain('must never be shown');
     expect(serialised).not.toContain('providerCallId');
+  });
+
+  it('identifies scheduled sources and links every invoice in a consolidated call', async () => {
+    const organisationId = randomUUID();
+    const contactId = randomUUID();
+    const firstInvoiceId = randomUUID();
+    const secondInvoiceId = randomUUID();
+    const sequenceId = randomUUID();
+    const sequenceVersionId = randomUUID();
+    const automaticCallId = randomUUID();
+    const reviewCallId = randomUUID();
+    const scheduledAt = new Date('2026-10-09T00:00:00.000Z');
+
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: randomUUID(),
+      name: 'Scheduled timeline test',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await client.db.insert(contacts).values({
+      id: contactId,
+      organisationId,
+      xeroContactId: randomUUID(),
+      name: 'Scheduled Customer',
+      active: true,
+      sourceVersion: 1
+    });
+    await client.db.insert(invoices).values([
+      {
+        id: firstInvoiceId,
+        organisationId,
+        xeroInvoiceId: randomUUID(),
+        contactId,
+        invoiceNumber: 'INV-SCHEDULE-100',
+        type: 'ACCREC',
+        status: 'AUTHORISED',
+        issueDate: '2026-08-01',
+        dueDate: '2026-08-31',
+        amountDue: '100.0000',
+        total: '100.0000',
+        currency: 'AUD',
+        syncVersion: 1,
+        xeroUpdatedAt: scheduledAt
+      },
+      {
+        id: secondInvoiceId,
+        organisationId,
+        xeroInvoiceId: randomUUID(),
+        contactId,
+        invoiceNumber: 'INV-SCHEDULE-200',
+        type: 'ACCREC',
+        status: 'AUTHORISED',
+        issueDate: '2026-08-02',
+        dueDate: '2026-08-31',
+        amountDue: '200.0000',
+        total: '200.0000',
+        currency: 'AUD',
+        syncVersion: 1,
+        xeroUpdatedAt: scheduledAt
+      }
+    ]);
+    await client.db.insert(reminderSequences).values({
+      id: sequenceId,
+      organisationId,
+      name: 'Voice collections',
+      kind: 'VOICE'
+    });
+    await client.db.insert(reminderSequenceVersions).values({
+      id: sequenceVersionId,
+      organisationId,
+      sequenceId,
+      versionNumber: 1,
+      status: 'ACTIVE'
+    });
+
+    const callFacts = {
+      organisationId,
+      contactId,
+      provider: 'RETELL' as const,
+      purpose: 'CUSTOMER' as const,
+      sequenceId,
+      sequenceVersionId,
+      stageKey: 'twenty-one-days',
+      scheduledAt,
+      localOccurrenceDate: '2026-10-09',
+      destinationNumber: '+61400000009',
+      outboundNumber: '+61255501234',
+      combinedAmount: '300.0000',
+      currency: 'AUD',
+      agentId: 'agent_accountpulse',
+      agentVersion: 1,
+      voiceId: 'voice_au',
+      voiceSettingsUpdatedAt: scheduledAt,
+      transferTargetLabel: 'Main office',
+      state: 'DRAFT' as const
+    };
+    await client.db.insert(voiceCallRequests).values([
+      {
+        ...callFacts,
+        id: automaticCallId,
+        source: 'SEQUENCE_AUTOMATIC' as const,
+        idempotencyKey: randomUUID()
+      },
+      {
+        ...callFacts,
+        id: reviewCallId,
+        source: 'SEQUENCE_REVIEW' as const,
+        idempotencyKey: randomUUID()
+      }
+    ]);
+    await client.db.insert(voiceCallInvoices).values([
+      {
+        voiceCallId: automaticCallId,
+        organisationId,
+        invoiceId: firstInvoiceId,
+        xeroInvoiceId: randomUUID(),
+        invoiceNumber: 'INV-SCHEDULE-100',
+        amountDue: '100.0000',
+        currency: 'AUD',
+        dueDate: '2026-08-31',
+        syncVersion: 1,
+        snapshotAt: scheduledAt
+      },
+      {
+        voiceCallId: automaticCallId,
+        organisationId,
+        invoiceId: secondInvoiceId,
+        xeroInvoiceId: randomUUID(),
+        invoiceNumber: 'INV-SCHEDULE-200',
+        amountDue: '200.0000',
+        currency: 'AUD',
+        dueDate: '2026-08-31',
+        syncVersion: 1,
+        snapshotAt: scheduledAt
+      },
+      {
+        voiceCallId: reviewCallId,
+        organisationId,
+        invoiceId: firstInvoiceId,
+        xeroInvoiceId: randomUUID(),
+        invoiceNumber: 'INV-SCHEDULE-100',
+        amountDue: '100.0000',
+        currency: 'AUD',
+        dueDate: '2026-08-31',
+        syncVersion: 1,
+        snapshotAt: scheduledAt
+      }
+    ]);
+    for (const callId of [automaticCallId, reviewCallId]) {
+      await client.db.update(voiceCallRequests).set({
+        callFlowVersion: 1,
+        callFlowHash: 'sha256:flow',
+        approvedFactsHash: 'sha256:facts',
+        state: 'APPROVED',
+        approvedAt: scheduledAt
+      }).where(eq(voiceCallRequests.id, callId));
+    }
+
+    const timeline = await new PostgresActivityRepository(client.db)
+      .customerTimeline(organisationId, contactId);
+
+    const automaticEvent = timeline.find(
+      (event) => event.id === `voice:${automaticCallId}:approved`
+    );
+    const reviewEvent = timeline.find(
+      (event) => event.id === `voice:${reviewCallId}:approved`
+    );
+    expect(automaticEvent).toMatchObject({
+      source: 'AccountPulse Voice - Sequence automatic',
+      links: [
+        { href: `/invoices/${firstInvoiceId}`, label: 'INV-SCHEDULE-100' },
+        { href: `/invoices/${secondInvoiceId}`, label: 'INV-SCHEDULE-200' }
+      ]
+    });
+    expect(automaticEvent?.detail).toContain(
+      'Voice collections - stage twenty-one-days'
+    );
+    expect(reviewEvent).toMatchObject({
+      source: 'AccountPulse Voice - Sequence review'
+    });
   });
 });

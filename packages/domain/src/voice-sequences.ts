@@ -68,8 +68,14 @@ export function groupVoiceSequenceCandidates(
   }
 
   return [...groups.values()]
-    .map(({ invoiceIds: _invoiceIds, ...candidate }) => ({
-      ...candidate,
+    .map((candidate) => ({
+      organisationId: candidate.organisationId,
+      sequenceVersionId: candidate.sequenceVersionId,
+      stageKey: candidate.stageKey,
+      customerId: candidate.customerId,
+      localOccurrenceDate: candidate.localOccurrenceDate,
+      currency: candidate.currency,
+      invoices: candidate.invoices,
       combinedAmount: candidate.invoices
         .reduce(
           (total, invoice) => total.plus(invoice.amountDue),
