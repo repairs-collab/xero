@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { describe, expect, it, vi } from 'vitest';
 
+import { RetellAuthenticationError } from '@bc5000/integrations/retell';
 import { jobNames, type JobName } from '@bc5000/jobs';
 
 import {
@@ -146,6 +147,44 @@ describe('worker runtime', () => {
       'super-secret-token'
     );
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain('hunter2');
+  });
+
+  it('logs Retell failures with a fixed credential-safe message', async () => {
+    const queue = new FakeWorkerQueue();
+    const logger = { error: vi.fn() };
+    const failure = new RetellAuthenticationError(
+      401,
+      'Bearer private-retell-key was rejected'
+    );
+    await registerHandlers(
+      queue,
+      {
+        [jobNames.voiceCallExecute]: () => Promise.reject(failure)
+      },
+      new InFlightJobs(),
+      logger
+    );
+
+    await expect(
+      queue.run(jobNames.voiceCallExecute, {
+        id: 'retell-failed-job',
+        data: {
+          organisationId: randomUUID(),
+          voiceCallId: randomUUID(),
+          provider: 'VOIPCLOUD'
+        }
+      })
+    ).rejects.toBe(failure);
+    expect(logger.error).toHaveBeenCalledWith('Worker job failed', {
+      jobName: jobNames.voiceCallExecute,
+      jobId: 'retell-failed-job',
+      errorName: 'RetellAuthenticationError',
+      errorMessage: 'Retell authentication failed',
+      status: 401
+    });
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain(
+      'private-retell-key'
+    );
   });
 
   it('stops claiming, waits for active work, and closes resources', async () => {

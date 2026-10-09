@@ -1,0 +1,173 @@
+name: bc5000
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: bc5000-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DATABASE_NAME:?DATABASE_NAME is required}
+      POSTGRES_USER: ${DATABASE_USER:?DATABASE_USER is required}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - /srv/data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [private]
+
+  web:
+    image: ${ACCOUNT_PULSE_WEB_IMAGE:?ACCOUNT_PULSE_WEB_IMAGE is required}
+    container_name: bc5000-web
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AWS_REGION: ${AWS_REGION:?AWS_REGION is required}
+      DATABASE_NAME: ${DATABASE_NAME:?DATABASE_NAME is required}
+      SEND_MODE: ${SEND_MODE:?SEND_MODE is required}
+      COGNITO_DOMAIN: ${COGNITO_DOMAIN:?COGNITO_DOMAIN is required}
+      DATABASE_HOST: postgres
+      DATABASE_PORT: "5432"
+      COGNITO_REDIRECT_URI: ${COGNITO_REDIRECT_URI:?COGNITO_REDIRECT_URI is required}
+      NODE_ENV: ${NODE_ENV:?NODE_ENV is required}
+      COGNITO_ISSUER: ${COGNITO_ISSUER:?COGNITO_ISSUER is required}
+      COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID:?COGNITO_CLIENT_ID is required}
+      COGNITO_USER_POOL_ID: ${COGNITO_USER_POOL_ID:?COGNITO_USER_POOL_ID is required}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      DATABASE_USER: ${DATABASE_USER:?DATABASE_USER is required}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+      SESSION_SECRET_BASE64: ${SESSION_SECRET_BASE64:?SESSION_SECRET_BASE64 is required}
+      XERO_WEBHOOK_KEY: ${XERO_WEBHOOK_KEY:?XERO_WEBHOOK_KEY is required}
+      SINCH_CALLBACK_PUBLIC_KEYS_JSON: ${SINCH_CALLBACK_PUBLIC_KEYS_JSON:?SINCH_CALLBACK_PUBLIC_KEYS_JSON is required}
+      SINCH_WEBHOOK_TOKEN: ${SINCH_WEBHOOK_TOKEN:?SINCH_WEBHOOK_TOKEN is required}
+      RETELL_API_KEY: ${RETELL_API_KEY:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+    networks: [private]
+
+  worker:
+    image: ${ACCOUNT_PULSE_WORKER_IMAGE:?ACCOUNT_PULSE_WORKER_IMAGE is required}
+    container_name: bc5000-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: &worker-environment
+      AWS_REGION: ${AWS_REGION:?AWS_REGION is required}
+      DATABASE_NAME: ${DATABASE_NAME:?DATABASE_NAME is required}
+      SEND_MODE: ${SEND_MODE:?SEND_MODE is required}
+      DATABASE_HOST: postgres
+      DATABASE_PORT: "5432"
+      NODE_ENV: ${NODE_ENV:?NODE_ENV is required}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?PUBLIC_BASE_URL is required}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      DATABASE_USER: ${DATABASE_USER:?DATABASE_USER is required}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+      XERO_API_CREDENTIALS: ${XERO_API_CREDENTIALS:?XERO_API_CREDENTIALS is required}
+      SINCH_API_CREDENTIALS: ${SINCH_API_CREDENTIALS:?SINCH_API_CREDENTIALS is required}
+      RETELL_API_KEY: ${RETELL_API_KEY:-}
+      VOICE_GATEWAY_ACCEPT_CALLS: ${VOICE_GATEWAY_ACCEPT_CALLS:-false}
+    networks: [private]
+
+  voice-monitor:
+    profiles: [monitor]
+    image: ${ACCOUNT_PULSE_WORKER_IMAGE:?ACCOUNT_PULSE_WORKER_IMAGE is required}
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["node", "/app/worker.mjs", "voice-monitor"]
+    environment:
+      <<: *worker-environment
+      RETELL_API_KEY: ${RETELL_API_KEY:-}
+      VOICE_QUEUE_AGE_ALARM_SECONDS: ${VOICE_QUEUE_AGE_ALARM_SECONDS:-300}
+      RETELL_WEBHOOK_LAG_ALARM_SECONDS: ${RETELL_WEBHOOK_LAG_ALARM_SECONDS:-300}
+    networks: [private]
+
+  asterisk:
+    profiles: [voice-capability]
+    image: ${ACCOUNT_PULSE_ASTERISK_IMAGE:?ACCOUNT_PULSE_ASTERISK_IMAGE is required}
+    container_name: bc5000-asterisk
+    restart: unless-stopped
+    environment:
+      ASTERISK_ARI_USERNAME: ${ASTERISK_ARI_USERNAME:?ASTERISK_ARI_USERNAME is required}
+      ASTERISK_ARI_PASSWORD: ${ASTERISK_ARI_PASSWORD:?ASTERISK_ARI_PASSWORD is required}
+      ASTERISK_EXTERNAL_ADDRESS: ${ASTERISK_EXTERNAL_ADDRESS:?ASTERISK_EXTERNAL_ADDRESS is required}
+      VOIPCLOUD_SIP_SERVER: ${VOIPCLOUD_SIP_SERVER:-sipm2.au.voipcloud.online:7060}
+      VOIPCLOUD_SIP_DOMAIN: ${VOIPCLOUD_SIP_DOMAIN:-sipm2.au.voipcloud.online}
+      VOIPCLOUD_API_USER_NUMBER: ${VOIPCLOUD_API_USER_NUMBER:?VOIPCLOUD_API_USER_NUMBER is required}
+      VOIPCLOUD_SIP_USER_NUMBER: ${VOIPCLOUD_SIP_USER_NUMBER:?VOIPCLOUD_SIP_USER_NUMBER is required}
+      VOIPCLOUD_SIP_PASSWORD: ${VOIPCLOUD_SIP_PASSWORD:?VOIPCLOUD_SIP_PASSWORD is required}
+    ports:
+      - "${VOICE_SIP_BIND_IP:?VOICE_SIP_BIND_IP is required}:5060:5060/tcp"
+      - "${VOICE_RTP_BIND_IP:?VOICE_RTP_BIND_IP is required}:10000-10100:10000-10100/udp"
+    volumes:
+      - voice_audio:/var/lib/asterisk/sounds/accountpulse:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          asterisk -rx "module show like chan_pjsip" | grep -q "Running" &&
+          asterisk -rx "http show status" | grep -q "Enabled and Bound"
+      interval: 15s
+      timeout: 5s
+      retries: 12
+    networks: [private]
+
+  voice-gateway:
+    profiles: [voice-capability]
+    image: ${ACCOUNT_PULSE_VOICE_GATEWAY_IMAGE:?ACCOUNT_PULSE_VOICE_GATEWAY_IMAGE is required}
+    container_name: bc5000-voice-gateway
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      asterisk:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      VOICE_GATEWAY_SIGNING_SECRET: ${VOICE_GATEWAY_SIGNING_SECRET:?VOICE_GATEWAY_SIGNING_SECRET is required}
+      VOICE_GATEWAY_ACCEPT_CALLS: ${VOICE_GATEWAY_ACCEPT_CALLS:-false}
+      VOIPCLOUD_API_KEY: ${VOIPCLOUD_API_KEY:?VOIPCLOUD_API_KEY is required}
+      ASTERISK_ARI_URL: http://asterisk:8088/ari
+      ASTERISK_ARI_EVENTS_URL: ws://asterisk:8088/ari/events
+      ASTERISK_ARI_USERNAME: ${ASTERISK_ARI_USERNAME:?ASTERISK_ARI_USERNAME is required}
+      ASTERISK_ARI_PASSWORD: ${ASTERISK_ARI_PASSWORD:?ASTERISK_ARI_PASSWORD is required}
+      VOICE_OFFICE_QUEUE_EXTENSION: ${VOICE_OFFICE_QUEUE_EXTENSION:?VOICE_OFFICE_QUEUE_EXTENSION is required}
+    volumes:
+      - voice_audio:/dev/shm/accountpulse-voice
+    networks: [private]
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: bc5000-caddy
+    restart: unless-stopped
+    depends_on: [web]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - /opt/bc5000/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /srv/data/caddy/data:/data
+      - /srv/data/caddy/config:/config
+    networks: [private]
+
+networks:
+  private:
+    driver: bridge
+
+volumes:
+  voice_audio:
+    name: accountpulse_voice_audio
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: uid=1000,gid=1000,mode=0700

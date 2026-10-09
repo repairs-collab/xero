@@ -1,0 +1,7 @@
+CREATE UNIQUE INDEX "reminder_sequence_versions_org_id_uq" ON "reminder_sequence_versions" USING btree ("organisation_id","id");--> statement-breakpoint
+CREATE UNIQUE INDEX "reminder_sequence_versions_org_sequence_id_uq" ON "reminder_sequence_versions" USING btree ("organisation_id","sequence_id","id");--> statement-breakpoint
+CREATE UNIQUE INDEX "reminder_sequences_org_id_uq" ON "reminder_sequences" USING btree ("organisation_id","id");--> statement-breakpoint
+ALTER TABLE "reminder_sequence_versions" ADD CONSTRAINT "reminder_sequence_versions_org_sequence_fk" FOREIGN KEY ("organisation_id","sequence_id") REFERENCES "public"."reminder_sequences"("organisation_id","id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "sequence_stages" ADD CONSTRAINT "sequence_stages_org_version_fk" FOREIGN KEY ("organisation_id","sequence_version_id") REFERENCES "public"."reminder_sequence_versions"("organisation_id","id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "voice_call_requests" ADD CONSTRAINT "voice_call_requests_org_sequence_fk" FOREIGN KEY ("organisation_id","sequence_id") REFERENCES "public"."reminder_sequences"("organisation_id","id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "voice_call_requests" ADD CONSTRAINT "voice_call_requests_org_sequence_version_fk" FOREIGN KEY ("organisation_id","sequence_id","sequence_version_id") REFERENCES "public"."reminder_sequence_versions"("organisation_id","sequence_id","id") ON DELETE no action ON UPDATE no action;

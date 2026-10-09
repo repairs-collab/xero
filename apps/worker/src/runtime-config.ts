@@ -1,5 +1,29 @@
 type Environment = Record<string, string | undefined>;
 
+export interface ManagedSecretReader {
+  read(reference: string): Promise<string>;
+}
+
+export function createEnvironmentSecretReader(
+  environment: Environment
+): ManagedSecretReader {
+  return {
+    read: (reference) => {
+      const name = reference.startsWith('env:')
+        ? reference.slice('env:'.length)
+        : reference;
+      if (!/^[A-Z][A-Z0-9_]*$/.test(name)) {
+        return Promise.reject(new Error('Secret reference is invalid'));
+      }
+      const value = environment[name]?.trim();
+      if (!value) {
+        return Promise.reject(new Error('Managed secret is unavailable'));
+      }
+      return Promise.resolve(value);
+    }
+  };
+}
+
 export type OperationalResetCommand =
   | {
       kind: 'prepare';

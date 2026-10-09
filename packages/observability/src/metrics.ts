@@ -1,4 +1,4 @@
-export type MetricName = 'sync_freshness_seconds' | 'queue_age_seconds' | 'pending_approvals' | 'paused_customers' | 'open_tasks' | 'send_outcomes_total' | 'replies_total' | 'opt_outs_total' | 'api_headroom' | 'webhook_failures_total' | 'unknown_send_results_total';
+export type MetricName = 'sync_freshness_seconds' | 'queue_age_seconds' | 'pending_approvals' | 'paused_customers' | 'open_tasks' | 'send_outcomes_total' | 'replies_total' | 'opt_outs_total' | 'api_headroom' | 'webhook_failures_total' | 'unknown_send_results_total' | 'voice_unknown_outcomes_total' | 'voice_provider_failures_total' | 'retell_webhook_signature_failures_total' | 'voice_queue_age_seconds' | 'retell_webhook_lag_seconds';
 export type MetricLabels = Readonly<Record<string, string>>;
 export interface Metrics { increment(name: MetricName, value?: number, labels?: MetricLabels): void; gauge(name: MetricName, value: number, labels?: MetricLabels): void; }
 

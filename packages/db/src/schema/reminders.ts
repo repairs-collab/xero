@@ -1,6 +1,8 @@
 import { sql } from 'drizzle-orm';
 import {
   boolean,
+  check,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -17,6 +19,8 @@ import {
 import { organisations, users } from './organisation.js';
 import { contacts, invoices } from './receivables.js';
 
+export type SequenceKind = 'MESSAGING' | 'VOICE';
+
 export const reminderSequences = pgTable(
   'reminder_sequences',
   {
@@ -25,6 +29,10 @@ export const reminderSequences = pgTable(
       .notNull()
       .references(() => organisations.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
+    kind: varchar('kind', { length: 16 })
+      .$type<SequenceKind>()
+      .notNull()
+      .default('MESSAGING'),
     mode: varchar('mode', { length: 16 })
       .$type<'REVIEW' | 'AUTOMATIC'>()
       .notNull()
@@ -38,6 +46,14 @@ export const reminderSequences = pgTable(
       .defaultNow()
   },
   (table) => [
+    check(
+      'reminder_sequences_kind_ck',
+      sql`${table.kind} in ('MESSAGING', 'VOICE')`
+    ),
+    uniqueIndex('reminder_sequences_org_id_uq').on(
+      table.organisationId,
+      table.id
+    ),
     uniqueIndex('reminder_sequences_org_name_uq').on(
       table.organisationId,
       table.name
@@ -95,11 +111,25 @@ export const reminderSequenceVersions = pgTable(
       .defaultNow()
   },
   (table) => [
+    uniqueIndex('reminder_sequence_versions_org_id_uq').on(
+      table.organisationId,
+      table.id
+    ),
+    uniqueIndex('reminder_sequence_versions_org_sequence_id_uq').on(
+      table.organisationId,
+      table.sequenceId,
+      table.id
+    ),
     uniqueIndex('sequence_versions_org_sequence_version_uq').on(
       table.organisationId,
       table.sequenceId,
       table.versionNumber
-    )
+    ),
+    foreignKey({
+      name: 'reminder_sequence_versions_org_sequence_fk',
+      columns: [table.organisationId, table.sequenceId],
+      foreignColumns: [reminderSequences.organisationId, reminderSequences.id]
+    })
   ]
 );
 
@@ -116,7 +146,7 @@ export const sequenceStages = pgTable(
     stageKey: varchar('stage_key', { length: 64 }).notNull(),
     offsetDays: integer('offset_days').notNull(),
     channel: varchar('channel', { length: 24 })
-      .$type<'SMS' | 'XERO_EMAIL' | 'TASK' | 'SMS_DAILY'>()
+      .$type<'SMS' | 'XERO_EMAIL' | 'TASK' | 'SMS_DAILY' | 'VOICE'>()
       .notNull(),
     template: text('template'),
     enabled: boolean('enabled').notNull().default(true),
@@ -130,7 +160,15 @@ export const sequenceStages = pgTable(
       table.sequenceVersionId,
       table.stageKey,
       table.channel
-    )
+    ),
+    foreignKey({
+      name: 'sequence_stages_org_version_fk',
+      columns: [table.organisationId, table.sequenceVersionId],
+      foreignColumns: [
+        reminderSequenceVersions.organisationId,
+        reminderSequenceVersions.id
+      ]
+    })
   ]
 );
 

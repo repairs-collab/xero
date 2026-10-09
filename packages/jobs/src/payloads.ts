@@ -4,6 +4,14 @@ import { jobNames, type JobName } from './names.js';
 
 const identifier = z.string().trim().min(1);
 const organisationPayload = z.object({ organisationId: identifier });
+const voiceCallPayload = z
+  .object({
+    organisationId: identifier,
+    voiceCallId: identifier,
+    provider: z.literal('VOIPCLOUD'),
+    correlationId: identifier.optional()
+  })
+  .strict();
 
 export const jobPayloadSchemas = {
   [jobNames.xeroInitialSync]: organisationPayload,
@@ -15,6 +23,8 @@ export const jobPayloadSchemas = {
   }),
   [jobNames.xeroNightlyReconcile]: organisationPayload,
   [jobNames.remindersCalculate]: organisationPayload,
+  [jobNames.voiceRemindersCalculate]: organisationPayload,
+  [jobNames.voiceRemindersDispatch]: organisationPayload,
   [jobNames.reminderExecute]: z.object({
     organisationId: identifier,
     stageInstanceId: identifier
@@ -27,6 +37,8 @@ export const jobPayloadSchemas = {
     organisationId: identifier,
     outboundMessageId: identifier
   }),
+  [jobNames.voiceCallExecute]: voiceCallPayload,
+  [jobNames.voiceCallReconcile]: voiceCallPayload,
   [jobNames.providerConnectionTest]: z.object({
     organisationId: identifier,
     provider: z.enum(['XERO', 'SINCH'])
@@ -34,7 +46,7 @@ export const jobPayloadSchemas = {
   [jobNames.webhookProcess]: z.object({
     organisationId: identifier,
     webhookEventId: identifier,
-    provider: z.enum(['XERO', 'SINCH'])
+    provider: z.enum(['XERO', 'SINCH', 'RETELL', 'VOIPCLOUD'])
   }),
   [jobNames.retentionApply]: organisationPayload
 } satisfies Record<JobName, z.ZodType>;
@@ -46,6 +58,8 @@ export type JobPayloads = {
 export type XeroInitialSyncJob = JobPayloads['xero.initial-sync'];
 export type XeroIncrementalSyncJob = JobPayloads['xero.incremental-sync'];
 export type XeroInvoiceRefreshJob = JobPayloads['xero.invoice-refresh'];
+export type VoiceCallExecutePayload = JobPayloads['voice-call.execute'];
+export type VoiceCallReconcilePayload = JobPayloads['voice-call.reconcile'];
 
 export function parseJobPayload<Name extends JobName>(
   name: Name,

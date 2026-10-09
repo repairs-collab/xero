@@ -13,10 +13,19 @@ import {
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
+import type { PauseKind } from '@bc5000/domain';
+
 import { conversations } from './messaging.js';
 import { organisations, users } from './organisation.js';
 import { contacts, invoices } from './receivables.js';
 import { reminderSequences } from './reminders.js';
+
+export type TaskKind =
+  | 'DEBT_ESCALATION'
+  | 'DATA_QUALITY_PHONE'
+  | 'MESSAGE_SEND_REVIEW'
+  | 'VOICE_CONTACT_REVIEW'
+  | 'VOICE_OUTCOME_REVIEW';
 
 export const pauses = pgTable(
   'pauses',
@@ -25,7 +34,9 @@ export const pauses = pgTable(
     organisationId: uuid('organisation_id')
       .notNull()
       .references(() => organisations.id, { onDelete: 'cascade' }),
-    kind: varchar('kind', { length: 32 }).notNull(),
+    kind: varchar('kind', { length: 32 })
+      .$type<PauseKind | 'MANUAL' | 'CUSTOMER_REPLY'>()
+      .notNull(),
     scope: varchar('scope', { length: 16 })
       .$type<'customer' | 'invoice' | 'sequence'>()
       .notNull(),
@@ -157,7 +168,7 @@ export const webhookEvents = pgTable(
       .notNull()
       .references(() => organisations.id, { onDelete: 'cascade' }),
     provider: varchar('provider', { length: 16 })
-      .$type<'XERO' | 'SINCH'>()
+      .$type<'XERO' | 'SINCH' | 'RETELL' | 'VOIPCLOUD'>()
       .notNull(),
     providerEventKey: text('provider_event_key').notNull(),
     providerEventId: text('provider_event_id'),

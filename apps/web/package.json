@@ -22,7 +22,8 @@
     "libphonenumber-js": "^1.12.23",
     "next": "16.3.6",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "retell-client-js-sdk": "3.0.2"
   },
   "devDependencies": {
     "@bc5000/testing": "workspace:*",

@@ -8,4 +8,6 @@ export * from './repositories/message-repository.js';
 export * from './repositories/reminder-whitelist-repository.js';
 export * from './repositories/organisation-safety-repository.js';
 export * from './repositories/webhook-repository.js';
+export * from './repositories/voice-call-repository.js';
+export * from './services/voice-call-preparation.js';
 export * from './schema/index.js';

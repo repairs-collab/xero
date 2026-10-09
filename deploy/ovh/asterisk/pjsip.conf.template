@@ -1,0 +1,57 @@
+[global]
+type = global
+user_agent = AccountPulse Voice Gateway
+
+[transport-tcp]
+type = transport
+protocol = tcp
+bind = 0.0.0.0:5060
+external_signaling_address = ${ASTERISK_EXTERNAL_ADDRESS}
+external_media_address = ${ASTERISK_EXTERNAL_ADDRESS}
+local_net = 172.16.0.0/12
+
+[voipcloud-auth]
+type = auth
+auth_type = userpass
+username = ${VOIPCLOUD_SIP_USER_NUMBER}
+password = ${VOIPCLOUD_SIP_PASSWORD}
+
+[voipcloud-aor]
+type = aor
+contact = sip:${VOIPCLOUD_SIP_SERVER}
+qualify_frequency = 60
+
+[voipcloud-outbound]
+type = endpoint
+transport = transport-tcp
+context = accountpulse-inbound
+disallow = all
+allow = alaw
+allow = ulaw
+direct_media = no
+dtmf_mode = rfc4733
+force_rport = yes
+rewrite_contact = yes
+rtp_symmetric = yes
+set_var = ACCOUNT_PULSE_PROVIDER_USER_NUMBER=${VOIPCLOUD_API_USER_NUMBER}
+outbound_auth = voipcloud-auth
+aors = voipcloud-aor
+from_user = ${VOIPCLOUD_SIP_USER_NUMBER}
+from_domain = ${VOIPCLOUD_SIP_DOMAIN}
+
+[voipcloud-registration]
+type = registration
+transport = transport-tcp
+outbound_auth = voipcloud-auth
+server_uri = sip:${VOIPCLOUD_SIP_SERVER}
+client_uri = sip:${VOIPCLOUD_SIP_USER_NUMBER}@${VOIPCLOUD_SIP_SERVER}
+contact_user = ${VOIPCLOUD_SIP_USER_NUMBER}
+retry_interval = 60
+forbidden_retry_interval = 600
+expiration = 300
+auth_rejection_permanent = no
+
+[voipcloud-identify]
+type = identify
+endpoint = voipcloud-outbound
+match = ${VOIPCLOUD_SIP_SERVER}

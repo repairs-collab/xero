@@ -35,6 +35,10 @@ export const contacts = pgTable(
       .defaultNow()
   },
   (table) => [
+    uniqueIndex('contacts_org_id_uq').on(
+      table.organisationId,
+      table.id
+    ),
     uniqueIndex('contacts_org_xero_contact_uq').on(
       table.organisationId,
       table.xeroContactId
@@ -54,7 +58,7 @@ export const contactChannels = pgTable(
       .notNull()
       .references(() => contacts.id, { onDelete: 'cascade' }),
     kind: varchar('kind', { length: 16 })
-      .$type<'SMS' | 'EMAIL'>()
+      .$type<'SMS' | 'EMAIL' | 'VOICE'>()
       .notNull(),
     sourceValue: text('source_value').notNull(),
     normalisedValue: text('normalised_value').notNull(),
@@ -125,6 +129,10 @@ export const invoices = pgTable(
       .defaultNow()
   },
   (table) => [
+    uniqueIndex('invoices_org_id_uq').on(
+      table.organisationId,
+      table.id
+    ),
     uniqueIndex('invoices_org_xero_invoice_uq').on(
       table.organisationId,
       table.xeroInvoiceId

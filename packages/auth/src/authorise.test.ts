@@ -41,7 +41,19 @@ describe('authorise', () => {
     ['ADMIN', 'reminder-whitelist.remove', true],
     ['OPERATOR', 'reminder-whitelist.remove', false],
     ['ADMIN', 'message.test-sms', true],
-    ['OPERATOR', 'message.test-sms', false]
+    ['OPERATOR', 'message.test-sms', false],
+    ['ADMIN', 'voice-call.read', true],
+    ['OPERATOR', 'voice-call.read', true],
+    ['ADMIN', 'voice-call.prepare', true],
+    ['OPERATOR', 'voice-call.prepare', true],
+    ['ADMIN', 'voice-call.place', true],
+    ['OPERATOR', 'voice-call.place', true],
+    ['ADMIN', 'voice-contact.override', true],
+    ['OPERATOR', 'voice-contact.override', true],
+    ['ADMIN', 'voice-suppression.clear', true],
+    ['OPERATOR', 'voice-suppression.clear', false],
+    ['ADMIN', 'voice-settings.manage', true],
+    ['OPERATOR', 'voice-settings.manage', false]
   ] as const)('%s permission for %s is %s', (role, action, allowed) => {
     const attempt = () =>
       authorise(sessionFixture({ role }), action, 'org-1');
@@ -70,5 +82,8 @@ describe('authorise', () => {
     expect(permissions.OPERATOR).not.toContain('sequence.set-automatic');
     expect(permissions.OPERATOR).not.toContain('reminder-whitelist.remove');
     expect(permissions.OPERATOR).not.toContain('message.test-sms');
+    expect(permissions.OPERATOR).toContain('voice-contact.override');
+    expect(permissions.OPERATOR).not.toContain('voice-suppression.clear');
+    expect(permissions.OPERATOR).not.toContain('voice-settings.manage');
   });
 });

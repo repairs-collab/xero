@@ -5,6 +5,7 @@ import { parsePhoneNumberFromString } from 'libphonenumber-js';
 
 import { authorise, type AppSession } from '@bc5000/auth';
 import { approvals, auditEvents, contactChannels, type Database, disputes, invoiceChases, invoices, pauses, paymentPromises, stageInstances, tasks } from '@bc5000/db/web';
+import type { PauseKind } from '@bc5000/domain';
 import { jobNames, type JobPublisher } from '@bc5000/jobs';
 
 import { createManualReminderService } from '../../../../server/manual-reminder-service.js';
@@ -37,7 +38,7 @@ export function createCustomerOperations(dependencies: { database: Database; pub
     return { normalisedPhone };
   };
 
-  const pauseChasing = async (session: AppSession, input: { organisationId: string; customerId: string; reason: string; kind?: string }) => {
+  const pauseChasing = async (session: AppSession, input: { organisationId: string; customerId: string; reason: string; kind?: PauseKind | 'MANUAL' | 'CUSTOMER_REPLY' }) => {
     authorise(session, 'chase.operate', input.organisationId);
     const reason = input.reason.trim(); if (reason === '') throw new Error('PAUSE_REASON_REQUIRED');
     const now = dependencies.clock.now();

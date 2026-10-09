@@ -14,6 +14,22 @@ test.beforeEach(async ({ page }) => {
   await loginAs(page, 'ADMIN');
 });
 
+test('keeps messaging and voice sequences on independent tabs', async ({ page }) => {
+  await page.goto('/sequences');
+
+  await expect(
+    page.getByRole('link', { name: 'SMS & Email Sequences' })
+  ).toBeVisible();
+  await expect(page.getByText('Standard bill chasing')).toBeVisible();
+  await page.getByRole('link', { name: 'Voice Reminder Sequences' }).click();
+
+  await expect(page).toHaveURL(/\/sequences\?tab=voice/);
+  await expect(
+    page.getByRole('button', { name: 'Create standard voice sequence' })
+  ).toBeVisible();
+  await expect(page.getByText('Standard bill chasing')).toHaveCount(0);
+});
+
 test('an administrator switches one sequence to automatic with the 7-day email and SMS stage', async ({ page }) => {
   await page.goto(`/sequences/${launchScenario.sequenceId}`);
 

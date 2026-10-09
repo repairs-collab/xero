@@ -61,17 +61,19 @@ describe('durable job queue', () => {
   it('deduplicates an active Xero sync but allows a fresh sync after completion', async () => {
     const organisationId = randomUUID();
     const singletonKey = `${jobNames.xeroIncrementalSync}:${organisationId}`;
+    const testPriority = Date.now() % 2_000_000_000;
 
     const scheduledId = await queueController.send(
       jobNames.xeroIncrementalSync,
       { organisationId },
-      { singletonKey, priority: 1_000_000 }
+      { singletonKey, priority: testPriority }
     );
     expect(scheduledId).not.toBeNull();
     if (scheduledId === null) throw new Error('Scheduled job was not created');
-    const [active] = await queueController.fetch(
-      jobNames.xeroIncrementalSync
-    );
+    const [active] = await queueController.fetch(jobNames.xeroIncrementalSync, {
+      minPriority: testPriority,
+      maxPriority: testPriority
+    });
     expect(active?.id).toBe(scheduledId);
 
     const manualCollisionId = await queue.publish(
@@ -190,6 +192,19 @@ describe('durable job queue', () => {
     expect(job?.retryLimit).toBe(0);
   });
 
+  it('never automatically retries a voice call submission', async () => {
+    const organisationId = randomUUID();
+    const voiceCallId = randomUUID();
+    const id = await queue.enqueueUnique(
+      jobNames.voiceCallExecute,
+      { organisationId, voiceCallId, provider: 'VOIPCLOUD' },
+      `voice-call:${voiceCallId}`
+    );
+
+    const [job] = await queue.findJobs(jobNames.voiceCallExecute, { id });
+    expect(job?.retryLimit).toBe(0);
+  });
+
   it('validates test-SMS jobs and never retries their external send', async () => {
     const organisationId = randomUUID();
     const outboundMessageId = randomUUID();
@@ -220,13 +235,23 @@ describe('durable job queue', () => {
     const ownedSchedules = schedules.filter((schedule) =>
       schedule.key.endsWith(`/${organisationId}`)
     );
-    expect(ownedSchedules).toHaveLength(4);
+    expect(ownedSchedules).toHaveLength(6);
     expect(ownedSchedules.every((schedule) => schedule.timezone === 'UTC')).toBe(
       true
     );
     expect(
       ownedSchedules.filter(
         (schedule) => schedule.name === jobNames.xeroIncrementalSync
+      )
+    ).toHaveLength(1);
+    expect(
+      ownedSchedules.filter(
+        (schedule) => schedule.name === jobNames.voiceRemindersCalculate
+      )
+    ).toHaveLength(1);
+    expect(
+      ownedSchedules.filter(
+        (schedule) => schedule.name === jobNames.voiceRemindersDispatch
       )
     ).toHaveLength(1);
   });

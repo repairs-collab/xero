@@ -1,21 +1,30 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createDatabase, migrateDatabase } from '../client.js';
 import {
   approvals,
   auditEvents,
+  contactChannels,
   contacts,
   invoiceChases,
   invoices,
+  organisationVoiceSettings,
   organisations,
   outboundMessages,
   reminderSequenceVersions,
   reminderSequences,
   stageInstances,
+  suppressions,
+  tasks,
+  voiceCallEvents,
+  voiceGatewaySessions,
+  voiceCallInvoices,
+  voiceCallRequests,
+  webhookEvents,
   users
 } from './index.js';
 import * as schema from './index.js';
@@ -128,10 +137,273 @@ const seedStageInstance = async () => {
     sourceVersion: 1
   });
 
-  return { organisationId, contactId, invoiceId, stageInstanceId };
+  return {
+    organisationId,
+    contactId,
+    invoiceId,
+    sequenceId,
+    sequenceVersionId,
+    stageInstanceId
+  };
+};
+
+const seedUser = async (label: string): Promise<string> => {
+  const id = randomUUID();
+  await database.db.insert(users).values({
+    id,
+    cognitoSubject: randomUUID(),
+    email: id + '@example.invalid',
+    displayName: label
+  });
+  return id;
+};
+
+const seedVoiceCall = async (
+  input: {
+    organisationId: string;
+    contactId: string;
+    actorUserId: string;
+    idempotencyKey?: string;
+    providerCallId?: string;
+    state?: 'DRAFT' | 'APPROVED';
+    callFlowVersion?: number | null;
+    callFlowHash?: string | null;
+    approvedFactsHash?: string | null;
+    approvedAt?: Date | null;
+    purpose?: 'CUSTOMER' | 'TEST';
+    provider?: 'RETELL' | 'VOIPCLOUD';
+  }
+): Promise<string> => {
+  const id = randomUUID();
+  const approved = input.state === 'APPROVED';
+  await database.db.insert(voiceCallRequests).values({
+    id,
+    organisationId: input.organisationId,
+    contactId: input.contactId,
+    actorUserId: input.actorUserId,
+    provider: input.provider ?? 'VOIPCLOUD',
+    ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
+    accountName: 'Test Customer',
+    destinationNumber: '+61400000000',
+    outboundNumber: '+61255501234',
+    combinedAmount: '100.0000',
+    currency: 'AUD',
+    callFlowVersion:
+      input.callFlowVersion === undefined
+        ? approved ? 1 : null
+        : input.callFlowVersion,
+    callFlowHash:
+      input.callFlowHash === undefined
+        ? approved ? 'sha256:flow-v1' : null
+        : input.callFlowHash,
+    approvedFactsHash:
+      input.approvedFactsHash === undefined
+        ? approved ? 'sha256:facts' : null
+        : input.approvedFactsHash,
+    agentId: 'agent_accountpulse',
+    agentVersion: 1,
+    voiceId: 'voice_au',
+    voipcloudUserNumber: '1099',
+    ttsVoiceId: 'en_GB-alba-medium',
+    gatewayFlowVersion: 1,
+    voiceSettingsUpdatedAt: new Date('2026-10-07T00:00:00.000Z'),
+    transferTargetLabel: 'Main office',
+    idempotencyKey: input.idempotencyKey ?? randomUUID(),
+    state: input.state ?? 'DRAFT',
+    providerCallId: input.providerCallId,
+    approvedAt: input.approvedAt
+  });
+  return id;
 };
 
 describe('database invariants', () => {
+  it('defaults existing-compatible records to messaging, manual and automatic voice off', async () => {
+    const { organisationId, contactId, sequenceId } =
+      await seedStageInstance();
+    const actorUserId = await seedUser('Voice default operator');
+    const voiceCallId = await seedVoiceCall({
+      organisationId,
+      contactId,
+      actorUserId
+    });
+    await database.db.insert(organisationVoiceSettings).values({
+      organisationId,
+      outboundNumber: '+61255501234',
+      fallbackOfficeNumber: '+61350324518',
+      officeDestinationLabel: 'Main office',
+      timezone: 'Australia/Sydney',
+      weekdayStartLocal: '09:00',
+      weekdayEndLocal: '17:00'
+    });
+
+    const sequence = await database.pool.query<{ kind: string }>(
+      'select kind from reminder_sequences where id = $1',
+      [sequenceId]
+    );
+    const call = await database.pool.query<{ source: string }>(
+      'select source from voice_call_requests where id = $1',
+      [voiceCallId]
+    );
+    const settings = await database.pool.query<{
+      automatic_enabled: boolean;
+    }>(
+      'select automatic_enabled from organisation_voice_settings where organisation_id = $1',
+      [organisationId]
+    );
+
+    expect(sequence.rows[0]).toEqual({ kind: 'MESSAGING' });
+    expect(call.rows[0]).toEqual({ source: 'MANUAL' });
+    expect(settings.rows[0]).toEqual({ automatic_enabled: false });
+  });
+
+  it('round-trips an auditable scheduled voice call source', async () => {
+    const {
+      organisationId,
+      contactId,
+      sequenceId,
+      sequenceVersionId
+    } = await seedStageInstance();
+    const actorUserId = await seedUser('Scheduled voice operator');
+    const scheduledCallId = await seedVoiceCall({
+      organisationId,
+      contactId,
+      actorUserId
+    });
+    const incompleteCallId = await seedVoiceCall({
+      organisationId,
+      contactId,
+      actorUserId
+    });
+    const scheduledAt = new Date('2026-10-11T00:00:00.000Z');
+
+    await database.pool.query(
+      `update voice_call_requests
+          set source = 'SEQUENCE_REVIEW',
+              sequence_id = $2,
+              sequence_version_id = $3,
+              stage_key = 'twenty-one-days',
+              scheduled_at = $4,
+              local_occurrence_date = '2026-10-11'
+        where id = $1`,
+      [scheduledCallId, sequenceId, sequenceVersionId, scheduledAt]
+    );
+    const row = await database.pool.query<{
+      source: string;
+      sequence_id: string;
+      sequence_version_id: string;
+      stage_key: string;
+      scheduled_at: Date;
+      local_occurrence_date: string;
+    }>(
+      `select source, sequence_id, sequence_version_id, stage_key,
+              scheduled_at, local_occurrence_date::text as local_occurrence_date
+         from voice_call_requests
+        where id = $1`,
+      [scheduledCallId]
+    );
+
+    expect(row.rows[0]).toEqual({
+      source: 'SEQUENCE_REVIEW',
+      sequence_id: sequenceId,
+      sequence_version_id: sequenceVersionId,
+      stage_key: 'twenty-one-days',
+      scheduled_at: scheduledAt,
+      local_occurrence_date: '2026-10-11'
+    });
+    await database.pool.query(
+      `update voice_call_requests
+          set state = 'APPROVED',
+              call_flow_version = 1,
+              call_flow_hash = 'sha256:flow-v1',
+              approved_facts_hash = 'sha256:facts',
+              approved_at = now()
+        where id = $1`,
+      [scheduledCallId]
+    );
+    await expect(
+      database.pool.query(
+        `update voice_call_requests
+            set stage_key = 'changed-after-approval'
+          where id = $1`,
+        [scheduledCallId]
+      )
+    ).rejects.toThrow('approved voice call facts are immutable');
+    await expect(
+      database.pool.query(
+        `update voice_call_requests
+            set source = 'SEQUENCE_AUTOMATIC'
+          where id = $1`,
+        [incompleteCallId]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+  });
+
+  it('rejects cross-organisation scheduled voice source metadata', async () => {
+    const owner = await seedStageInstance();
+    const other = await seedStageInstance();
+    const actorUserId = await seedUser('Cross tenant voice operator');
+    const callId = await seedVoiceCall({
+      organisationId: owner.organisationId,
+      contactId: owner.contactId,
+      actorUserId
+    });
+    const connection = await database.pool.connect();
+    let errorCode: string | undefined;
+    try {
+      await connection.query('begin');
+      await connection.query(
+        `update voice_call_requests
+            set source = 'SEQUENCE_REVIEW',
+                sequence_id = $2,
+                sequence_version_id = $3,
+                stage_key = 'cross-tenant-stage',
+                scheduled_at = $4,
+                local_occurrence_date = '2026-10-11'
+          where id = $1`,
+        [
+          callId,
+          other.sequenceId,
+          other.sequenceVersionId,
+          new Date('2026-10-11T00:00:00.000Z')
+        ]
+      );
+    } catch (error) {
+      errorCode = (error as { code?: string }).code;
+    } finally {
+      await connection.query('rollback');
+      connection.release();
+    }
+
+    expect(errorCode).toBe('23503');
+  });
+
+  it('defaults voice calls to CUSTOMER and accepts the isolated TEST purpose', async () => {
+    const { organisationId, contactId } = await seedStageInstance();
+    const actorUserId = await seedUser('Voice purpose operator');
+    const customerCallId = await seedVoiceCall({
+      organisationId,
+      contactId,
+      actorUserId
+    });
+    const testCallId = await seedVoiceCall({
+      organisationId,
+      contactId,
+      actorUserId,
+      purpose: 'TEST'
+    });
+
+    const rows = await database.db
+      .select({ id: voiceCallRequests.id, purpose: voiceCallRequests.purpose })
+      .from(voiceCallRequests)
+      .where(inArray(voiceCallRequests.id, [customerCallId, testCallId]));
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        { id: customerCallId, purpose: 'CUSTOMER' },
+        { id: testCallId, purpose: 'TEST' }
+      ])
+    );
+  });
+
   it('prevents two outbound rows with the same organisation idempotency key', async () => {
     const { organisationId, stageInstanceId } = await seedStageInstance();
     const idempotencyKey = `${organisationId}:due-date:sms:+61400000000:v1`;
@@ -168,6 +440,429 @@ describe('database invariants', () => {
   it('exports reset manifests and rollout reconciliations', () => {
     expect(schema).toHaveProperty('operationalResetRuns');
     expect(schema).toHaveProperty('rolloutReconciliations');
+  });
+
+  it('keeps one voice settings row per organisation without secret material columns', async () => {
+    const { organisationId } = await seedStageInstance();
+    const userId = await seedUser('Voice settings administrator');
+    const values = {
+      organisationId,
+      enabled: false,
+      provider: 'VOIPCLOUD' as const,
+      secretReference: 'VOIPCLOUD_API_KEY',
+      previewPublicKey: 'public_key_accountpulse',
+      agentId: 'agent_accountpulse',
+      agentVersion: 1,
+      voiceId: 'voice_au',
+      voiceLabel: 'Australian English',
+      voipcloudUserNumber: '1099',
+      ttsVoiceId: 'en_GB-alba-medium',
+      gatewayFlowVersion: 1,
+      outboundNumber: '+61255501234',
+      fallbackOfficeNumber: '+61255504321',
+      officeDestinationLabel: 'Main office',
+      timezone: 'Australia/Sydney',
+      weekdayStartLocal: '09:00',
+      weekdayEndLocal: '17:00',
+      updatedByUserId: userId
+    };
+
+    await database.db.insert(organisationVoiceSettings).values(values);
+    await expect(
+      database.db.insert(organisationVoiceSettings).values(values)
+    ).rejects.toMatchObject({ cause: { code: '23505' } });
+
+    const columns = await tableColumns('organisation_voice_settings');
+    expect(columns).toContain('preview_public_key');
+    expect(columns).toContain('secret_reference');
+    expect(columns).toEqual(
+      expect.arrayContaining([
+        'voipcloud_user_number',
+        'tts_voice_id',
+        'gateway_flow_version',
+        'last_gateway_tested_at',
+        'last_gateway_test_succeeded',
+        'last_controlled_flow_tested_at'
+      ])
+    );
+    expect(columns).not.toContain('secret_arn');
+    expect(columns).not.toContain('voicemail_template');
+    expect(columns).not.toContain('api_key');
+    expect(columns).not.toContain('sip_password');
+  });
+
+  it('enforces organisation idempotency and provider call uniqueness for voice requests', async () => {
+    const { organisationId, contactId } = await seedStageInstance();
+    const actorUserId = await seedUser('Voice operator');
+    const idempotencyKey = 'voice-call-idempotency';
+    await seedVoiceCall({
+      organisationId,
+      contactId,
+      actorUserId,
+      idempotencyKey,
+      providerCallId: 'voipcloud-call-1'
+    });
+
+    await expect(
+      seedVoiceCall({
+        organisationId,
+        contactId,
+        actorUserId,
+        idempotencyKey
+      })
+    ).rejects.toMatchObject({ cause: { code: '23505' } });
+    await expect(
+      seedVoiceCall({
+        organisationId,
+        contactId,
+        actorUserId,
+        providerCallId: 'voipcloud-call-1'
+      })
+    ).rejects.toMatchObject({ cause: { code: '23505' } });
+  });
+
+  it('keeps one immutable invoice snapshot per voice call and invoice', async () => {
+    const { organisationId, contactId, invoiceId } =
+      await seedStageInstance();
+    const actorUserId = await seedUser('Voice snapshot operator');
+    const voiceCallId = await seedVoiceCall({
+      organisationId,
+      contactId,
+      actorUserId
+    });
+    const snapshot = {
+      voiceCallId,
+      organisationId,
+      invoiceId,
+      xeroInvoiceId: 'xero-invoice-snapshot',
+      invoiceNumber: 'INV-SNAPSHOT',
+      amountDue: '100.0000',
+      currency: 'AUD',
+      dueDate: '2026-08-31',
+      syncVersion: 1,
+      snapshotAt: new Date('2026-10-07T00:00:00.000Z')
+    };
+
+    await database.db.insert(voiceCallInvoices).values(snapshot);
+    await expect(
+      database.db.insert(voiceCallInvoices).values(snapshot)
+    ).rejects.toMatchObject({ cause: { code: '23505' } });
+  });
+
+  it('deduplicates normalised VoIPcloud events by organisation and provider key', async () => {
+    const { organisationId, contactId } = await seedStageInstance();
+    const actorUserId = await seedUser('Voice event operator');
+    const voiceCallId = await seedVoiceCall({
+      organisationId,
+      contactId,
+      actorUserId
+    });
+    const event = {
+      organisationId,
+      voiceCallId,
+      provider: 'VOIPCLOUD' as const,
+      providerEventKey: 'call-1:call_started:1',
+      eventType: 'CALL_STARTED',
+      safeState: 'IN_PROGRESS' as const,
+      occurredAt: new Date('2026-10-07T00:01:00.000Z')
+    };
+
+    await database.db.insert(voiceCallEvents).values(event);
+    await expect(
+      database.db.insert(voiceCallEvents).values(event)
+    ).rejects.toMatchObject({ cause: { code: '23505' } });
+  });
+
+  it('keeps gateway coordination unique, tenant-bound, and free of billing facts', async () => {
+    const owner = await seedStageInstance();
+    const ownerUserId = await seedUser('Gateway session owner');
+    const firstCallId = await seedVoiceCall({
+      organisationId: owner.organisationId,
+      contactId: owner.contactId,
+      actorUserId: ownerUserId
+    });
+    const secondCallId = await seedVoiceCall({
+      organisationId: owner.organisationId,
+      contactId: owner.contactId,
+      actorUserId: ownerUserId
+    });
+    const firstSession = {
+      organisationId: owner.organisationId,
+      voiceCallId: firstCallId,
+      providerUserNumber: '1099',
+      idempotencyKey: 'gateway-session-one',
+      commandHash: 'sha256:gateway-command-one'
+    };
+
+    await database.db.insert(voiceGatewaySessions).values(firstSession);
+    await expect(
+      database.db.insert(voiceGatewaySessions).values({
+        ...firstSession,
+        providerUserNumber: '1100',
+        idempotencyKey: 'gateway-session-duplicate-call'
+      })
+    ).rejects.toMatchObject({ cause: { code: '23505' } });
+    await expect(
+      database.db.insert(voiceGatewaySessions).values({
+        ...firstSession,
+        voiceCallId: secondCallId,
+        providerUserNumber: '1100'
+      })
+    ).rejects.toMatchObject({ cause: { code: '23505' } });
+    await expect(
+      database.db.insert(voiceGatewaySessions).values({
+        ...firstSession,
+        voiceCallId: secondCallId,
+        idempotencyKey: 'gateway-session-two'
+      })
+    ).rejects.toMatchObject({ cause: { code: '23505' } });
+
+    await database.db
+      .update(voiceGatewaySessions)
+      .set({ state: 'COMPLETED' })
+      .where(eq(voiceGatewaySessions.voiceCallId, firstCallId));
+    await expect(
+      database.db.insert(voiceGatewaySessions).values({
+        ...firstSession,
+        voiceCallId: secondCallId,
+        idempotencyKey: 'gateway-session-two',
+        commandHash: 'sha256:gateway-command-two'
+      })
+    ).resolves.toBeDefined();
+
+    const outsider = await seedStageInstance();
+    await expect(
+      database.db.insert(voiceGatewaySessions).values({
+        organisationId: outsider.organisationId,
+        voiceCallId: firstCallId,
+        providerUserNumber: '1200',
+        idempotencyKey: 'gateway-session-cross-tenant',
+        commandHash: 'sha256:gateway-command-cross-tenant'
+      })
+    ).rejects.toMatchObject({ cause: { code: '23503' } });
+
+    const columns = await tableColumns('voice_gateway_sessions');
+    expect(columns).toEqual(
+      expect.arrayContaining([
+        'gateway_call_id',
+        'organisation_id',
+        'voice_call_id',
+        'provider_user_number',
+        'idempotency_key',
+        'command_hash',
+        'state',
+        'last_event_sequence',
+        'safe_failure_code'
+      ])
+    );
+    expect(columns).not.toEqual(
+      expect.arrayContaining([
+        'invoice_number',
+        'amount_due',
+        'destination_number',
+        'approved_facts',
+        'script',
+        'audio'
+      ])
+    );
+  });
+
+  it('preserves legacy Retell voice rows for audit reads', async () => {
+    const { organisationId, contactId } = await seedStageInstance();
+    const actorUserId = await seedUser('Legacy Retell audit operator');
+    const voiceCallId = await seedVoiceCall({
+      organisationId,
+      contactId,
+      actorUserId,
+      provider: 'RETELL'
+    });
+
+    const [row] = await database.db
+      .select({ provider: voiceCallRequests.provider })
+      .from(voiceCallRequests)
+      .where(eq(voiceCallRequests.id, voiceCallId));
+    expect(row).toEqual({ provider: 'RETELL' });
+  });
+
+  it('allows direct approval with pinned flow and fact hashes', async () => {
+    const { organisationId, contactId } = await seedStageInstance();
+    const actorUserId = await seedUser('Voice approval operator');
+
+    await expect(
+      seedVoiceCall({
+        organisationId,
+        contactId,
+        actorUserId,
+        state: 'APPROVED',
+        callFlowVersion: 1,
+        callFlowHash: 'sha256:flow-v1',
+        approvedFactsHash: 'sha256:facts',
+        approvedAt: new Date('2026-10-08T00:00:00.000Z')
+      })
+    ).resolves.toBeTypeOf('string');
+  });
+
+  it('requires pinned flow and fact hashes before a voice request can be approved', async () => {
+    const { organisationId, contactId } = await seedStageInstance();
+    const actorUserId = await seedUser('Voice approval guard operator');
+
+    await expect(
+      seedVoiceCall({
+        organisationId,
+        contactId,
+        actorUserId,
+        state: 'APPROVED',
+        callFlowVersion: null,
+        callFlowHash: null,
+        approvedFactsHash: null,
+        approvedAt: null
+      })
+    ).rejects.toMatchObject({ cause: { code: '23514' } });
+  });
+
+  it('round-trips VOICE channels, legacy and current voice providers, and voice review task kinds', async () => {
+    const { organisationId, contactId } = await seedStageInstance();
+    const userId = await seedUser('Voice review administrator');
+    await database.db.insert(contactChannels).values({
+      organisationId,
+      contactId,
+      kind: 'VOICE',
+      sourceValue: '0400 000 000',
+      normalisedValue: '+61400000000'
+    });
+    await database.db.insert(suppressions).values({
+      organisationId,
+      channel: 'VOICE',
+      normalisedDestination: '+61400000000',
+      source: 'WRONG_PERSON',
+      reason: 'Wrong person reported',
+      consentState: 'SUPPRESSED',
+      recordedByUserId: userId
+    });
+    await database.db.insert(webhookEvents).values({
+      organisationId,
+      provider: 'VOIPCLOUD',
+      providerEventKey: randomUUID(),
+      bodyHash: 'sha256:retell',
+      signatureValid: true,
+      providerPayload: {}
+    });
+    await database.db.insert(tasks).values([
+      {
+        organisationId,
+        contactId,
+        kind: 'VOICE_CONTACT_REVIEW',
+        summary: 'Verify the customer telephone number'
+      },
+      {
+        organisationId,
+        contactId,
+        kind: 'VOICE_OUTCOME_REVIEW',
+        summary: 'Reconcile the voice call outcome'
+      }
+    ]);
+
+    const channel = await database.pool.query<{ kind: string }>(
+      'select kind from contact_channels where organisation_id = $1 and contact_id = $2',
+      [organisationId, contactId]
+    );
+    const taskKinds = await database.pool.query<{ kind: string }>(
+      'select kind from tasks where organisation_id = $1 order by kind',
+      [organisationId]
+    );
+    expect(channel.rows.map((row) => row.kind)).toContain('VOICE');
+    expect(taskKinds.rows.map((row) => row.kind)).toEqual([
+      'VOICE_CONTACT_REVIEW',
+      'VOICE_OUTCOME_REVIEW'
+    ]);
+  });
+
+  it('disables legacy voice configuration without changing Customer Live messaging', async () => {
+    const client = await database.pool.connect();
+    const organisationId = randomUUID();
+
+    try {
+      await client.query('begin');
+      await client.query(
+        `insert into organisations
+          (id, xero_organisation_id, name, time_zone, base_currency,
+           send_mode, rollout_scope, live_send_acknowledged)
+         values ($1, $2, 'Voice migration safety', 'Australia/Sydney', 'AUD',
+                 'live', 'CUSTOMER', true)`,
+        [organisationId, randomUUID()]
+      );
+      await client.query(
+        `insert into organisation_voice_settings
+          (organisation_id, enabled, provider, secret_reference,
+           preview_public_key, agent_id, agent_version, voice_id, voice_label,
+           outbound_number, fallback_office_number, office_destination_label,
+           timezone, weekday_start_local, weekday_end_local,
+           last_connection_tested_at, last_connection_test_succeeded)
+         values ($1, true, 'RETELL', 'env:RETELL_API_KEY', 'legacy-public-key',
+                 'legacy-agent', 1, 'legacy-voice', 'Australian English',
+                 '+61255501234', '+61350324518', 'Main office',
+                 'Australia/Sydney', '09:00', '17:00', now(), true)`,
+        [organisationId]
+      );
+      const migration = await readFile(
+        new URL(
+          '../../drizzle/0010_direct_voipcloud_voice.sql',
+          import.meta.url
+        ),
+        'utf8'
+      );
+      const reset = migration
+        .split('-- direct-voipcloud-settings-reset:start')[1]
+        ?.split('-- direct-voipcloud-settings-reset:end')[0]
+        ?.trim();
+      expect(reset).toBeDefined();
+      await client.query(reset ?? 'select 1');
+
+      const settings = await client.query<{
+        enabled: boolean;
+        provider: string;
+        secret_reference: string | null;
+        agent_id: string | null;
+        last_connection_test_succeeded: boolean;
+        last_gateway_test_succeeded: boolean;
+        configuration_version: number;
+      }>(
+        `select enabled, provider, secret_reference, agent_id,
+                last_connection_test_succeeded, last_gateway_test_succeeded,
+                configuration_version
+           from organisation_voice_settings
+          where organisation_id = $1`,
+        [organisationId]
+      );
+      const organisation = await client.query<{
+        send_mode: string;
+        rollout_scope: string;
+        live_send_acknowledged: boolean;
+      }>(
+        `select send_mode, rollout_scope, live_send_acknowledged
+           from organisations
+          where id = $1`,
+        [organisationId]
+      );
+
+      expect(settings.rows[0]).toEqual({
+        enabled: false,
+        provider: 'VOIPCLOUD',
+        secret_reference: null,
+        agent_id: null,
+        last_connection_test_succeeded: false,
+        last_gateway_test_succeeded: false,
+        configuration_version: 1
+      });
+      expect(organisation.rows[0]).toEqual({
+        send_mode: 'live',
+        rollout_scope: 'CUSTOMER',
+        live_send_acknowledged: true
+      });
+    } finally {
+      await client.query('rollback');
+      client.release();
+    }
   });
 
   it('keeps an existing live organisation controlled after rollout migration', async () => {
@@ -510,6 +1205,212 @@ describe('database invariants', () => {
       source: 'MANUAL_REMINDER',
       content: 'Historical approved reminder'
     });
+  });
+
+  it('upgrades the originally applied voice schema forward without losing legacy references', async () => {
+    const client = await database.pool.connect();
+    const schemaName = `voice_upgrade_${randomUUID().replaceAll('-', '_')}`;
+    const organisationId = randomUUID();
+    const contactId = randomUUID();
+    const invoiceId = randomUUID();
+    const voiceCallId = randomUUID();
+
+    try {
+      await client.query('begin');
+      await client.query(`create schema "${schemaName}"`);
+      await client.query(`set local search_path to "${schemaName}"`);
+      await client.query(`
+        create table contacts (
+          id uuid primary key,
+          organisation_id uuid not null
+        );
+        create table invoices (
+          id uuid primary key,
+          organisation_id uuid not null
+        );
+        create table organisation_voice_settings (
+          organisation_id uuid primary key,
+          enabled boolean default false not null,
+          provider varchar(16) default 'RETELL' not null,
+          secret_arn text not null,
+          preview_public_key text not null,
+          agent_id text not null,
+          agent_version integer not null,
+          voice_id text not null,
+          voice_label text not null,
+          outbound_number text not null,
+          transfer_sip_uri text,
+          fallback_office_number text not null,
+          office_destination_label text not null,
+          timezone varchar(64) not null,
+          weekday_start_local time(0) not null,
+          weekday_end_local time(0) not null,
+          voicemail_template text not null,
+          last_connection_tested_at timestamptz,
+          last_connection_test_succeeded boolean default false not null,
+          updated_by_user_id uuid,
+          created_at timestamptz default now() not null,
+          updated_at timestamptz default now() not null
+        );
+        create table voice_call_requests (
+          id uuid primary key,
+          organisation_id uuid not null,
+          contact_id uuid not null,
+          actor_user_id uuid,
+          provider varchar(16) default 'RETELL' not null,
+          purpose varchar(16) default 'CUSTOMER' not null,
+          destination_number text not null,
+          outbound_number text not null,
+          combined_amount numeric(19, 4) not null,
+          currency char(3) not null,
+          approved_script text,
+          script_hash text,
+          script_version integer,
+          agent_id text not null,
+          agent_version integer not null,
+          voice_id text not null,
+          voice_settings_updated_at timestamptz not null,
+          transfer_target_label text not null,
+          idempotency_key text not null,
+          state varchar(24) default 'DRAFT' not null,
+          outcome varchar(32),
+          provider_call_id text,
+          previewed_at timestamptz,
+          approved_at timestamptz,
+          queued_at timestamptz,
+          provider_accepted_at timestamptz,
+          answered_at timestamptz,
+          completed_at timestamptz,
+          failure_code text,
+          failure_detail text,
+          created_at timestamptz default now() not null,
+          updated_at timestamptz default now() not null,
+          constraint voice_call_requests_state_ck check (
+            state in ('DRAFT', 'PREVIEWED', 'APPROVED', 'QUEUED', 'SUBMITTING', 'ACCEPTED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED', 'FAILED', 'UNKNOWN')
+          ),
+          constraint voice_call_requests_approved_facts_ck check (
+            state not in ('APPROVED', 'QUEUED', 'SUBMITTING', 'ACCEPTED', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'UNKNOWN')
+            or (approved_script is not null and script_hash is not null and script_version is not null and previewed_at is not null and approved_at is not null)
+          )
+        );
+        create table voice_call_invoices (
+          voice_call_id uuid not null,
+          organisation_id uuid not null,
+          invoice_id uuid not null
+        );
+        create table voice_call_events (
+          organisation_id uuid not null,
+          voice_call_id uuid not null,
+          provider varchar(16) default 'RETELL' not null,
+          provider_event_key text not null,
+          occurred_at timestamptz not null
+        );
+      `);
+      await client.query(
+        `insert into contacts (id, organisation_id) values ($1, $2)`,
+        [contactId, organisationId]
+      );
+      await client.query(
+        `insert into invoices (id, organisation_id) values ($1, $2)`,
+        [invoiceId, organisationId]
+      );
+      await client.query(
+        `insert into organisation_voice_settings (
+          organisation_id, secret_arn, preview_public_key, agent_id,
+          agent_version, voice_id, voice_label, outbound_number,
+          fallback_office_number, office_destination_label, timezone,
+          weekday_start_local, weekday_end_local, voicemail_template
+        ) values ($1, $2, 'preview-key', 'agent', 1, 'voice', 'Australian',
+                  '+61255501234', '+61350324518', 'Main office',
+                  'Australia/Sydney', '09:00', '17:00', 'Legacy voicemail')`,
+        [organisationId, 'env:RETELL_API_KEY']
+      );
+      await client.query(
+        `insert into voice_call_requests (
+          id, organisation_id, contact_id, destination_number,
+          outbound_number, combined_amount, currency, approved_script,
+          script_hash, script_version, agent_id, agent_version, voice_id,
+          voice_settings_updated_at, transfer_target_label, idempotency_key,
+          state, previewed_at, approved_at
+        ) values ($1, $2, $3, '+61400000000', '+61255501234', 100, 'AUD',
+                  'Legacy script', 'sha256:legacy-script', 1, 'agent', 1,
+                  'voice', now(), 'Main office', 'legacy-call', 'COMPLETED',
+                  now(), now())`,
+        [voiceCallId, organisationId, contactId]
+      );
+
+      const migration = await readFile(
+        new URL(
+          '../../drizzle/0009_voice_schema_forward_repair.sql',
+          import.meta.url
+        ),
+        'utf8'
+      );
+      for (const statement of migration
+        .split('--> statement-breakpoint')
+        .map((value) => value.trim())
+        .filter(Boolean)) {
+        await client.query(statement);
+      }
+
+      const settingsColumns = await client.query<{ column_name: string }>(
+        `select column_name
+           from information_schema.columns
+          where table_schema = $1 and table_name = 'organisation_voice_settings'`,
+        [schemaName]
+      );
+      const requestColumns = await client.query<{ column_name: string }>(
+        `select column_name
+           from information_schema.columns
+          where table_schema = $1 and table_name = 'voice_call_requests'`,
+        [schemaName]
+      );
+      const settings = await client.query<{
+        configuration_version: number;
+        secret_reference: string;
+      }>('select configuration_version, secret_reference from organisation_voice_settings');
+      const request = await client.query<{
+        approved_facts_hash: string;
+        call_flow_hash: string;
+        call_flow_version: number;
+      }>(
+        'select approved_facts_hash, call_flow_hash, call_flow_version from voice_call_requests'
+      );
+
+      expect(settingsColumns.rows.map((row) => row.column_name)).toEqual(
+        expect.arrayContaining(['configuration_version', 'secret_reference'])
+      );
+      expect(settingsColumns.rows.map((row) => row.column_name)).not.toEqual(
+        expect.arrayContaining(['secret_arn', 'voicemail_template'])
+      );
+      expect(requestColumns.rows.map((row) => row.column_name)).toEqual(
+        expect.arrayContaining([
+          'call_flow_version',
+          'call_flow_hash',
+          'approved_facts_hash'
+        ])
+      );
+      expect(requestColumns.rows.map((row) => row.column_name)).not.toEqual(
+        expect.arrayContaining([
+          'approved_script',
+          'script_hash',
+          'script_version',
+          'previewed_at'
+        ])
+      );
+      expect(settings.rows[0]).toEqual({
+        configuration_version: 0,
+        secret_reference: 'env:RETELL_API_KEY'
+      });
+      expect(request.rows[0]).toEqual({
+        approved_facts_hash: `legacy-unverified:${voiceCallId}`,
+        call_flow_hash: 'sha256:legacy-script',
+        call_flow_version: 1
+      });
+    } finally {
+      await client.query('rollback');
+      client.release();
+    }
   });
 
   it.each(['update', 'delete'] as const)(

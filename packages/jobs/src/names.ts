@@ -4,9 +4,13 @@ export const jobNames = {
   xeroInvoiceRefresh: 'xero.invoice-refresh',
   xeroNightlyReconcile: 'xero.nightly-reconcile',
   remindersCalculate: 'reminders.calculate',
+  voiceRemindersCalculate: 'voice-reminders.calculate',
+  voiceRemindersDispatch: 'voice-reminders.dispatch',
   reminderExecute: 'reminder.execute',
   operatorReplyExecute: 'operator-reply.execute',
   testSmsExecute: 'test-sms.execute',
+  voiceCallExecute: 'voice-call.execute',
+  voiceCallReconcile: 'voice-call.reconcile',
   providerConnectionTest: 'provider.connection-test',
   webhookProcess: 'webhook.process',
   retentionApply: 'retention.apply'

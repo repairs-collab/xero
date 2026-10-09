@@ -14,7 +14,9 @@
     "db:migrate": "drizzle-kit migrate"
   },
   "dependencies": {
+    "@bc5000/domain": "workspace:*",
     "drizzle-orm": "0.45.2",
+    "libphonenumber-js": "1.12.23",
     "pg": "^8.23.0"
   },
   "devDependencies": {

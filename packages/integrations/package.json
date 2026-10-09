@@ -5,7 +5,9 @@
   "type": "module",
   "exports": {
     "./http": "./src/http.ts",
+    "./retell": "./src/retell/index.ts",
     "./sinch": "./src/sinch/index.ts",
+    "./voipcloud": "./src/voipcloud/index.ts",
     "./xero": "./src/xero/index.ts"
   },
   "scripts": {

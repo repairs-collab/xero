@@ -1,0 +1,24 @@
+{
+  "name": "@bc5000/voice-gateway",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/contracts.ts",
+    "./call-state": "./src/call-state.ts",
+    "./signatures": "./src/signatures.ts",
+    "./speech": "./src/speech/formatter.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@bc5000/db": "workspace:*",
+    "@bc5000/integrations": "workspace:*",
+    "drizzle-orm": "0.45.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.5"
+  }
+}

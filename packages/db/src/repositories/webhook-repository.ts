@@ -7,7 +7,7 @@ import { webhookEvents } from '../schema/operations.js';
 
 export interface RecordWebhookInput {
   organisationId: string;
-  provider: 'XERO' | 'SINCH';
+  provider: 'XERO' | 'SINCH' | 'RETELL';
   providerEventId?: string;
   rawBody: string;
   signatureValid: boolean;
