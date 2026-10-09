@@ -6,6 +6,7 @@ import {
   launchScenario,
   loginAs,
   recordVoicePreviewEvidence,
+  readAutomaticVoiceEnabled,
   readVoiceEnabled,
   resetLaunchScenario,
   seedVoiceScenario,
@@ -22,6 +23,9 @@ test('keeps setup fictional, locked, and independently disabled until ready', as
   await page.goto('/settings/voice');
 
   await expect(page.getByRole('heading', { name: 'Manual voice calls are off' })).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Automatic voice reminders are off' })
+  ).toBeVisible();
   await expect(page.getByText(fixedVoiceCallCopy.opening)).toBeVisible();
   await expect(page.getByText(fixedVoiceCallCopy.voicemail)).toBeVisible();
   await expect(page.getByText('Wording cannot be edited on this page.')).toBeVisible();
@@ -60,6 +64,18 @@ test('keeps setup fictional, locked, and independently disabled until ready', as
   await page.getByRole('button', { name: 'Enable manual voice calls' }).click();
   await expect(page.getByRole('heading', { name: 'Manual voice calls are on' })).toBeVisible();
   await expect(readVoiceEnabled()).resolves.toBe(true);
+  await expect(readAutomaticVoiceEnabled()).resolves.toBe(false);
+
+  await page
+    .getByLabel('Type ENABLE AUTOMATIC VOICE CALLS to enable')
+    .fill('ENABLE AUTOMATIC VOICE CALLS');
+  await page
+    .getByRole('button', { name: 'Enable automatic voice reminders' })
+    .click();
+  await expect(
+    page.getByRole('heading', { name: 'Automatic voice reminders are on' })
+  ).toBeVisible();
+  await expect(readAutomaticVoiceEnabled()).resolves.toBe(true);
 });
 
 test('reviews one combined call, preserves SMS/email, and surfaces wrong-person suppression', async ({ page }) => {
@@ -69,7 +85,7 @@ test('reviews one combined call, preserves SMS/email, and surfaces wrong-person 
 
   await expect(page.getByRole('button', { name: 'Send SMS' }).first()).toBeVisible();
   await expect(page.getByRole('button', { name: 'Send email' }).first()).toBeVisible();
-  await page.getByRole('button', { name: 'Create voice reminder' }).click();
+  await page.getByRole('button', { name: 'Make automated call' }).click();
 
   const panel = page.getByLabel('Voice reminder review');
   await expect(panel.getByRole('heading', { name: 'Voice reminder review' })).toBeVisible();

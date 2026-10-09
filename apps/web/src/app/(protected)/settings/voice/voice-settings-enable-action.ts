@@ -1,5 +1,7 @@
 export type VoiceSettingsActionErrorCode =
   | 'VOICE_ENABLE_CONFIRMATION_REQUIRED'
+  | 'VOICE_AUTOMATIC_ENABLE_CONFIRMATION_REQUIRED'
+  | 'VOICE_AUTOMATIC_NOT_READY'
   | 'VOICE_SETTINGS_NOT_CONFIGURED'
   | 'VOICE_SETTINGS_NOT_READY';
 
@@ -27,6 +29,12 @@ interface VoiceSettingsEnabler {
   ): Promise<{ enabled: boolean }>;
 }
 
+interface AutomaticVoiceSettingsEnabler {
+  setAutomaticVoiceCalls(
+    input: SetVoiceEnabledActionInput
+  ): Promise<{ automaticEnabled: boolean }>;
+}
+
 export interface SetVoiceEnabledActionDependencies {
   settings: VoiceSettingsEnabler;
   revalidate(): void | Promise<void>;
@@ -35,6 +43,10 @@ export interface SetVoiceEnabledActionDependencies {
 const errorMessages: Record<VoiceSettingsActionErrorCode, string> = {
   VOICE_ENABLE_CONFIRMATION_REQUIRED:
     'Type ENABLE VOICE CALLS exactly to enable manual voice calls.',
+  VOICE_AUTOMATIC_ENABLE_CONFIRMATION_REQUIRED:
+    'Type ENABLE AUTOMATIC VOICE CALLS exactly to enable automatic voice reminders.',
+  VOICE_AUTOMATIC_NOT_READY:
+    'Enable the tested manual voice capability before automatic voice reminders.',
   VOICE_SETTINGS_NOT_CONFIGURED:
     'Save the voice provider settings before enabling manual voice calls.',
   VOICE_SETTINGS_NOT_READY:
@@ -70,5 +82,29 @@ export async function runSetVoiceEnabledAction(
   return {
     status: 'success',
     message: `Manual voice calls ${result.enabled ? 'enabled' : 'disabled'}.`
+  };
+}
+
+export async function runSetAutomaticVoiceCallsAction(
+  dependencies: {
+    settings: AutomaticVoiceSettingsEnabler;
+    revalidate(): void | Promise<void>;
+  },
+  input: SetVoiceEnabledActionInput
+): Promise<VoiceSettingsActionState> {
+  let result: { automaticEnabled: boolean };
+  try {
+    result = await dependencies.settings.setAutomaticVoiceCalls(input);
+  } catch (error) {
+    const code = knownErrorCode(error);
+    if (code === null) throw error;
+    return { status: 'error', code, message: errorMessages[code] };
+  }
+  await dependencies.revalidate();
+  return {
+    status: 'success',
+    message: `Automatic voice reminders ${
+      result.automaticEnabled ? 'enabled' : 'disabled'
+    }.`
   };
 }

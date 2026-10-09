@@ -19,6 +19,7 @@ import {
 } from '../../../../server/runtime.js';
 import { createVoiceSettingsService } from './voice-settings.js';
 import {
+  runSetAutomaticVoiceCallsAction,
   runSetVoiceEnabledAction,
   type VoiceSettingsActionState
 } from './voice-settings-enable-action.js';
@@ -136,6 +137,29 @@ export async function setVoiceEnabled(
     {
       settings,
       revalidate: () => revalidatePath('/settings/voice')
+    },
+    {
+      organisationId: requiredText(formData, 'organisationId'),
+      enabled: requiredText(formData, 'enabled') === 'true',
+      ...(confirmation === null ? {} : { confirmation })
+    }
+  );
+}
+
+export async function setAutomaticVoiceCalls(
+  _previousState: VoiceSettingsActionState,
+  formData: FormData
+): Promise<VoiceSettingsActionState> {
+  const { settings } = await context();
+  const confirmation = optionalText(formData, 'confirmation');
+  return runSetAutomaticVoiceCallsAction(
+    {
+      settings,
+      revalidate: () => {
+        revalidatePath('/settings/voice');
+        revalidatePath('/sequences');
+        revalidatePath('/approvals');
+      }
     },
     {
       organisationId: requiredText(formData, 'organisationId'),

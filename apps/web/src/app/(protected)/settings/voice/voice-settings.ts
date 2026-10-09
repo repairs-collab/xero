@@ -48,6 +48,12 @@ export interface SetVoiceEnabledInput {
   confirmation?: string;
 }
 
+export interface SetAutomaticVoiceCallsInput {
+  organisationId: string;
+  enabled: boolean;
+  confirmation?: string;
+}
+
 export interface TestVoiceConnectionInput {
   organisationId: string;
 }
@@ -95,6 +101,7 @@ export interface VoicePreviewSessionVerifier {
 export interface VoiceSettingsView {
   configured: boolean;
   enabled: boolean;
+  automaticEnabled: boolean;
   provider: 'RETELL' | 'VOIPCLOUD';
   secretReferenceLabel: string | null;
   previewPublicKey: string | null;
@@ -281,6 +288,7 @@ const toView = async (
     return {
       configured: false,
       enabled: false,
+      automaticEnabled: false,
       provider: 'RETELL',
       secretReferenceLabel: null,
       previewPublicKey: null,
@@ -306,6 +314,7 @@ const toView = async (
   return {
     configured: true,
     enabled: settings.enabled,
+    automaticEnabled: settings.automaticEnabled,
     provider: settings.provider,
     secretReferenceLabel: safeReferenceLabel(settings.secretReference),
     previewPublicKey: settings.previewPublicKey,
@@ -398,6 +407,7 @@ export function createVoiceSettingsService(
           ? {}
           : {
               enabled: false,
+              automaticEnabled: false,
               lastConnectionTestedAt: null,
               lastConnectionTestSucceeded: false
             })
@@ -635,10 +645,70 @@ export function createVoiceSettingsService(
     return get(input.organisationId);
   };
 
+  const setAutomaticVoiceCalls = async (
+    input: SetAutomaticVoiceCallsInput
+  ): Promise<VoiceSettingsView> => {
+    authorise(
+      dependencies.session,
+      'voice-settings.manage',
+      input.organisationId
+    );
+    if (
+      input.enabled &&
+      input.confirmation !== 'ENABLE AUTOMATIC VOICE CALLS'
+    ) {
+      throw new Error('VOICE_AUTOMATIC_ENABLE_CONFIRMATION_REQUIRED');
+    }
+    const changedAt = dependencies.clock.now();
+    await dependencies.database.transaction(async (transaction) => {
+      const settings = await loadSettings(
+        transaction,
+        input.organisationId,
+        true
+      );
+      if (settings === null) throw new Error('VOICE_SETTINGS_NOT_CONFIGURED');
+      if (input.enabled && !settings.enabled) {
+        throw new Error('VOICE_AUTOMATIC_NOT_READY');
+      }
+      if (settings.automaticEnabled === input.enabled) return;
+      await transaction
+        .update(organisationVoiceSettings)
+        .set({
+          automaticEnabled: input.enabled,
+          updatedByUserId: dependencies.session.userId,
+          updatedAt: changedAt
+        })
+        .where(
+          eq(
+            organisationVoiceSettings.organisationId,
+            input.organisationId
+          )
+        );
+      await transaction.insert(auditEvents).values({
+        organisationId: input.organisationId,
+        actorUserId: dependencies.session.userId,
+        eventType: input.enabled
+          ? 'VOICE_AUTOMATIC_CALLS_ENABLED'
+          : 'VOICE_AUTOMATIC_CALLS_DISABLED',
+        entityType: 'ORGANISATION_VOICE_SETTINGS',
+        entityId: input.organisationId,
+        afterValue: {
+          automaticEnabled: input.enabled,
+          manualVoiceEnabled: settings.enabled,
+          customerLiveMessagingUnaffected: true,
+          deploymentGateUnaffected: true
+        },
+        occurredAt: changedAt
+      });
+    });
+    return get(input.organisationId);
+  };
+
   return {
     get,
     save,
     setEnabled,
+    setAutomaticVoiceCalls,
     testConnection,
     recordGenericFlowTest
   };

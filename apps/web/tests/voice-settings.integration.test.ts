@@ -118,6 +118,83 @@ function service(
 }
 
 describe('voice settings service', () => {
+  it('requires an Administrator and exact confirmation to enable automatic voice, and audits enable and disable', async () => {
+    const seeded = await seed();
+    const adminHarness = service(seeded.session('ADMIN'));
+    await adminHarness.settings.save(saveInput(seeded.organisationId));
+    await adminHarness.settings.testConnection({
+      organisationId: seeded.organisationId
+    });
+    await adminHarness.settings.recordGenericFlowTest({
+      organisationId: seeded.organisationId,
+      previewSessionToken: 'signed-preview-token'
+    });
+    await adminHarness.settings.setEnabled({
+      organisationId: seeded.organisationId,
+      enabled: true,
+      confirmation: 'ENABLE VOICE CALLS'
+    });
+
+    await expect(
+      service(seeded.session('OPERATOR')).settings.setAutomaticVoiceCalls({
+        organisationId: seeded.organisationId,
+        enabled: true,
+        confirmation: 'ENABLE AUTOMATIC VOICE CALLS'
+      })
+    ).rejects.toThrow('FORBIDDEN');
+    await expect(
+      adminHarness.settings.setAutomaticVoiceCalls({
+        organisationId: seeded.organisationId,
+        enabled: true,
+        confirmation: 'enable it'
+      })
+    ).rejects.toThrow('VOICE_AUTOMATIC_ENABLE_CONFIRMATION_REQUIRED');
+
+    await expect(
+      adminHarness.settings.setAutomaticVoiceCalls({
+        organisationId: seeded.organisationId,
+        enabled: true,
+        confirmation: 'ENABLE AUTOMATIC VOICE CALLS'
+      })
+    ).resolves.toMatchObject({ enabled: true, automaticEnabled: true });
+    await expect(
+      adminHarness.settings.setAutomaticVoiceCalls({
+        organisationId: seeded.organisationId,
+        enabled: false
+      })
+    ).resolves.toMatchObject({ enabled: true, automaticEnabled: false });
+
+    const events = await client.db
+      .select()
+      .from(auditEvents)
+      .where(eq(auditEvents.organisationId, seeded.organisationId));
+    expect(events.map((event) => event.eventType)).toEqual(
+      expect.arrayContaining([
+        'VOICE_AUTOMATIC_CALLS_ENABLED',
+        'VOICE_AUTOMATIC_CALLS_DISABLED'
+      ])
+    );
+    const automaticEvents = events.filter((event) =>
+      event.eventType.startsWith('VOICE_AUTOMATIC_CALLS_')
+    );
+    expect(automaticEvents).toHaveLength(2);
+    expect(automaticEvents.every((event) => event.actorUserId === seeded.userId)).toBe(
+      true
+    );
+
+    const [organisation] = await client.db
+      .select({
+        sendMode: organisations.sendMode,
+        rolloutScope: organisations.rolloutScope
+      })
+      .from(organisations)
+      .where(eq(organisations.id, seeded.organisationId));
+    expect(organisation).toEqual({
+      sendMode: 'live',
+      rolloutScope: 'CUSTOMER'
+    });
+  });
+
   it('allows only Administrators to save safe settings and audits field names without credential values', async () => {
     const seeded = await seed();
     const input = saveInput(seeded.organisationId);

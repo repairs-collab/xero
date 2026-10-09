@@ -31,6 +31,7 @@ import {
 const configuredSettings: VoiceSettingsView = {
   configured: true,
   enabled: false,
+  automaticEnabled: false,
   provider: 'RETELL',
   secretReferenceLabel: 'RETELL_API_KEY',
   previewPublicKey: 'public_key_accountpulse_preview',
@@ -151,6 +152,21 @@ describe('voice settings view', () => {
     expect(html).toContain('RETELL_API_KEY');
     expect(html).not.toContain('env:RETELL_API_KEY');
     expect(html).not.toMatch(/private key|api key value|authorization:/i);
+  });
+
+  it('renders automatic voice independently off with exact activation wording', () => {
+    const html = renderToStaticMarkup(
+      createElement(VoiceSettingsForm, {
+        organisationId: 'org-1',
+        settings: { ...configuredSettings, enabled: true }
+      })
+    );
+
+    expect(html).toContain('Automatic voice reminders are off');
+    expect(html).toContain('ENABLE AUTOMATIC VOICE CALLS');
+    expect(html).toContain('Enable automatic voice reminders');
+    expect(html).toContain('Manual voice calls remain on');
+    expect(html).toContain('Customer Live SMS and email remain unchanged');
   });
 
   it('blocks enablement in the page until every voice readiness check passes', () => {

@@ -6,6 +6,7 @@ import { fixedVoiceCallCopy } from '@bc5000/domain';
 
 import {
   saveVoiceSettings,
+  setAutomaticVoiceCalls,
   setVoiceEnabled,
   testVoiceConnection
 } from './actions.js';
@@ -45,6 +46,11 @@ export function VoiceSettingsForm({
     setVoiceEnabled,
     voiceSettingsInitialActionState
   );
+  const [automaticActionState, automaticAction, automaticPending] =
+    useActionState(
+      setAutomaticVoiceCalls,
+      voiceSettingsInitialActionState
+    );
 
   return (
     <div className="page-stack">
@@ -138,6 +144,82 @@ export function VoiceSettingsForm({
               : settings.enabled
                 ? 'Disable manual voice calls'
                 : 'Enable manual voice calls'}
+          </button>
+        </form>
+      </section>
+
+      <section className="panel">
+        <div className="panel__heading">
+          <div>
+            <span className="eyebrow">Scheduled calling control</span>
+            <h2>
+              Automatic voice reminders are{' '}
+              {settings.automaticEnabled ? 'on' : 'off'}
+            </h2>
+          </div>
+          <span className="status-chip">
+            {settings.automaticEnabled ? 'Enabled' : 'Disabled'}
+          </span>
+        </div>
+        <p>
+          This switch independently authorises Automatic voice sequences.
+          Manual voice calls remain {settings.enabled ? 'on' : 'off'}, and
+          Customer Live SMS and email remain unchanged.
+        </p>
+        {!settings.enabled && !settings.automaticEnabled ? (
+          <div className="notice" role="status">
+            <strong>Manual voice capability must be ready first</strong>
+            <p>
+              Enable the tested manual voice capability before authorising
+              scheduled customer calls.
+            </p>
+          </div>
+        ) : null}
+        <form action={automaticAction} className="settings-form">
+          <input type="hidden" name="organisationId" value={organisationId} />
+          <input
+            type="hidden"
+            name="enabled"
+            value={settings.automaticEnabled ? 'false' : 'true'}
+          />
+          {!settings.automaticEnabled ? (
+            <label>
+              Type ENABLE AUTOMATIC VOICE CALLS to enable
+              <input
+                name="confirmation"
+                autoComplete="off"
+                required={settings.enabled}
+                disabled={!settings.enabled}
+              />
+            </label>
+          ) : null}
+          {automaticActionState.status !== 'idle' ? (
+            <p
+              className={
+                automaticActionState.status === 'error'
+                  ? 'form-error'
+                  : 'success-banner'
+              }
+              role={
+                automaticActionState.status === 'error' ? 'alert' : 'status'
+              }
+              aria-live="polite"
+            >
+              {automaticActionState.message}
+            </p>
+          ) : null}
+          <button
+            className="button button--primary"
+            disabled={
+              automaticPending ||
+              (!settings.automaticEnabled && !settings.enabled)
+            }
+          >
+            {automaticPending
+              ? 'Saving…'
+              : settings.automaticEnabled
+                ? 'Disable automatic voice reminders'
+                : 'Enable automatic voice reminders'}
           </button>
         </form>
       </section>

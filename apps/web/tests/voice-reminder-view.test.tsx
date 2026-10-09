@@ -91,7 +91,8 @@ describe('voice reminder customer view', () => {
       />
     );
 
-    expect(html.match(/Create voice reminder/g)).toHaveLength(1);
+    expect(html.match(/Make automated call/g)).toHaveLength(1);
+    expect(html).not.toContain('Create voice reminder');
     expect(html).toContain('name="idempotencyKey" value="voice-page-123"');
   });
 

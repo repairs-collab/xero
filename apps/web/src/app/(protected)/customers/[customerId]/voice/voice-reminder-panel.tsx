@@ -74,7 +74,7 @@ export function VoiceReminderStart({
       <input type="hidden" name="customerId" value={customerId} />
       <input type="hidden" name="idempotencyKey" value={idempotencyKey} />
       <button className="button button--primary" type="submit">
-        Create voice reminder
+        Make automated call
       </button>
     </form>
   );

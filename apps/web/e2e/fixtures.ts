@@ -98,6 +98,7 @@ export async function seedVoiceScenario(
         organisationId: launchScenario.organisationId,
         enabled: options.enabled ?? false,
         configurationVersion: 1,
+        provider: 'RETELL',
         secretReference: 'env:RETELL_API_KEY',
         previewPublicKey: 'public_key_e2e_domain_restricted',
         agentId: 'agent_accountpulse',
@@ -123,9 +124,24 @@ export async function seedVoiceScenario(
         target: organisationVoiceSettings.organisationId,
           set: {
             enabled: options.enabled ?? false,
+            automaticEnabled: false,
+            provider: 'RETELL',
+            secretReference: 'env:RETELL_API_KEY',
+            previewPublicKey: 'public_key_e2e_domain_restricted',
+            agentId: 'agent_accountpulse',
+            agentVersion: 1,
+            voiceId: 'voice_au',
+            voiceLabel: 'Australian English',
             voipcloudUserNumber: '1099',
             ttsVoiceId: 'en_GB-alba-medium',
             gatewayFlowVersion: 1,
+            outboundNumber: '+61255501234',
+            transferSipUri: 'sip:accounts@voipline.test',
+            fallbackOfficeNumber: '+61255504321',
+            officeDestinationLabel: 'Main office',
+            timezone: 'Australia/Sydney',
+            weekdayStartLocal: '00:01:00',
+            weekdayEndLocal: '23:59:00',
             lastConnectionTestedAt: options.ready ? now : null,
           lastConnectionTestSucceeded: options.ready ?? false,
           updatedAt: now
@@ -188,6 +204,24 @@ export async function readVoiceEnabled(): Promise<boolean> {
         )
       );
     return settings?.enabled ?? false;
+  } finally {
+    await client.pool.end();
+  }
+}
+
+export async function readAutomaticVoiceEnabled(): Promise<boolean> {
+  const client = createDatabase(databaseUrl);
+  try {
+    const [settings] = await client.db
+      .select({ automaticEnabled: organisationVoiceSettings.automaticEnabled })
+      .from(organisationVoiceSettings)
+      .where(
+        eq(
+          organisationVoiceSettings.organisationId,
+          launchScenario.organisationId
+        )
+      );
+    return settings?.automaticEnabled ?? false;
   } finally {
     await client.pool.end();
   }
