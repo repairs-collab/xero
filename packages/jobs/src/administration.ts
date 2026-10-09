@@ -12,6 +12,7 @@ export const operationalJobNames = [
   jobNames.xeroInvoiceRefresh,
   jobNames.xeroNightlyReconcile,
   jobNames.remindersCalculate,
+  jobNames.voiceRemindersCalculate,
   jobNames.reminderExecute,
   jobNames.operatorReplyExecute,
   jobNames.testSmsExecute
@@ -32,6 +33,7 @@ const emptyManifest = (): OperationalJobPurgeCounts => ({
   [jobNames.xeroInvoiceRefresh]: 0,
   [jobNames.xeroNightlyReconcile]: 0,
   [jobNames.remindersCalculate]: 0,
+  [jobNames.voiceRemindersCalculate]: 0,
   [jobNames.reminderExecute]: 0,
   [jobNames.operatorReplyExecute]: 0,
   [jobNames.testSmsExecute]: 0

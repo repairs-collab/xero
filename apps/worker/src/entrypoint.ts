@@ -30,6 +30,7 @@ import { applyRetention } from './handlers/retention-apply.js';
 import { executeTestSms } from './handlers/test-sms-execute.js';
 import { executeVoiceCall } from './handlers/voice-call-execute.js';
 import { reconcileVoiceCall } from './handlers/voice-call-reconcile.js';
+import { calculateVoiceReminderWork } from './handlers/voice-reminders-calculate.js';
 import { processWebhookEvent } from './handlers/webhook-process.js';
 import { runIncrementalSync } from './handlers/xero-incremental-sync.js';
 import { runInitialSync } from './handlers/xero-initial-sync.js';
@@ -326,6 +327,11 @@ async function main() {
       [jobNames.remindersCalculate]: (payload) =>
         runReminderCycle(
           { database: databaseClient.db, clock, xero, publisher: queue },
+          payload.organisationId
+        ).then(() => undefined),
+      [jobNames.voiceRemindersCalculate]: (payload) =>
+        calculateVoiceReminderWork(
+          { database: databaseClient.db, clock, holidays: { list: () => [] } },
           payload.organisationId
         ).then(() => undefined),
       [jobNames.reminderExecute]: (payload) =>

@@ -235,13 +235,18 @@ describe('durable job queue', () => {
     const ownedSchedules = schedules.filter((schedule) =>
       schedule.key.endsWith(`/${organisationId}`)
     );
-    expect(ownedSchedules).toHaveLength(4);
+    expect(ownedSchedules).toHaveLength(5);
     expect(ownedSchedules.every((schedule) => schedule.timezone === 'UTC')).toBe(
       true
     );
     expect(
       ownedSchedules.filter(
         (schedule) => schedule.name === jobNames.xeroIncrementalSync
+      )
+    ).toHaveLength(1);
+    expect(
+      ownedSchedules.filter(
+        (schedule) => schedule.name === jobNames.voiceRemindersCalculate
       )
     ).toHaveLength(1);
   });

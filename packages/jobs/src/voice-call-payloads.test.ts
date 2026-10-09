@@ -9,8 +9,19 @@ import {
 
 describe('voice call job contracts', () => {
   it('publishes stable execute and reconcile job names', () => {
+    expect(jobNames.voiceRemindersCalculate).toBe(
+      'voice-reminders.calculate'
+    );
     expect(jobNames.voiceCallExecute).toBe('voice-call.execute');
     expect(jobNames.voiceCallReconcile).toBe('voice-call.reconcile');
+  });
+
+  it('parses identifier-only voice calculation payloads', () => {
+    expect(
+      parseJobPayload(jobNames.voiceRemindersCalculate, {
+        organisationId: 'org-1'
+      })
+    ).toEqual({ organisationId: 'org-1' });
   });
 
   it('parses identifier-only execute and reconcile payloads', () => {

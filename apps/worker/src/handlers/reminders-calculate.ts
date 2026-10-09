@@ -38,7 +38,8 @@ import {
   evaluateEligibility,
   renderSms,
   selectPreferredSmsChannel,
-  type ReminderStageChannel
+  type ReminderStageChannel,
+  type StageOccurrence
 } from '@bc5000/domain';
 import type { XeroResult } from '@bc5000/integrations/xero';
 
@@ -60,6 +61,10 @@ export interface CalculationSummary {
   createdTasks: number;
   skippedOccurrences: number;
 }
+
+type MessagingOccurrence = Omit<StageOccurrence, 'channel'> & {
+  channel: Exclude<StageOccurrence['channel'], 'VOICE'>;
+};
 
 const localDate = (instant: Date, timeZone: string): string => {
   const parts = new Intl.DateTimeFormat('en-AU', {
@@ -181,6 +186,7 @@ export async function calculateReminderWork(
     .where(
       and(
         eq(reminderSequences.organisationId, organisationId),
+        eq(reminderSequences.kind, 'MESSAGING'),
         eq(reminderSequences.enabled, true)
       )
     );
@@ -456,6 +462,9 @@ export async function calculateReminderWork(
           zone: organisation.timeZone,
           holidays: []
         })
+      ).filter(
+        (occurrence): occurrence is MessagingOccurrence =>
+          occurrence.channel !== 'VOICE'
       );
       let eligibleOccurrences = occurrences.flatMap((occurrence) => {
         const configured = configuredStages.find(
