@@ -186,17 +186,17 @@ export class VoipcloudClient {
     if (response.status !== 200) throw new VoipcloudUnknownDispatchError();
 
     const payload = parseJsonRecord(response.body);
-    const data = recordValue(payload?.data);
+    const data = Array.isArray(payload?.data)
+      ? recordValue(payload.data[0])
+      : recordValue(payload?.data);
     const message = recordValue(payload?.message);
-    const status = nonEmptyString(message?.status)?.toLowerCase();
-    const responseUser = nonEmptyString(data?.user_number);
-    const responseDestination = nonEmptyString(data?.dest_number);
+    const status = (
+      nonEmptyString(payload?.status) ?? nonEmptyString(message?.status)
+    )?.toLowerCase();
     if (
-      payload?.code !== 200 ||
-      status !== 'success' ||
-      data === undefined ||
-      responseUser === undefined ||
-      responseDestination === undefined
+      payload === undefined ||
+      (payload.code !== undefined && payload.code !== 200) ||
+      (status !== undefined && status !== 'success')
     ) {
       throw new VoipcloudUnknownDispatchError(
         'VoIPcloud accepted the request but returned an unusable response'
@@ -210,7 +210,7 @@ export class VoipcloudClient {
       ...optionalProperty('callerId', input.callerId),
       ...optionalProperty(
         'providerCallId',
-        nonEmptyString(data.unique_call_id)
+        nonEmptyString(data?.unique_call_id)
       )
     };
   }

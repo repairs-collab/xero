@@ -1,6 +1,6 @@
 import type { AddressInfo } from 'node:net';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { signGatewayRequest } from '../src/signatures.js';
 import {
@@ -150,6 +150,31 @@ describe('voice gateway control server', () => {
       state: 'PENDING',
       created: false
     });
+  });
+
+  it('starts a newly persisted call once and never dispatches an idempotent retry', async () => {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error === undefined ? resolve() : reject(error)));
+    });
+    const startCall = vi.fn().mockResolvedValue(undefined);
+    server = createGatewayServer({
+      store,
+      signingSecret: secret,
+      clock: { now: () => new Date(now) },
+      supportedFlowVersion: 1,
+      startCall
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => resolve());
+    });
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    const body = JSON.stringify(command);
+    expect((await request('/v1/calls', { method: 'POST', body })).status).toBe(201);
+    expect((await request('/v1/calls', { method: 'POST', body })).status).toBe(200);
+    expect(startCall).toHaveBeenCalledTimes(1);
+    expect(startCall).toHaveBeenCalledWith(command);
   });
 
   it('rejects the same idempotency key with a changed command', async () => {

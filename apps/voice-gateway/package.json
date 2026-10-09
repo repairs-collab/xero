@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@bc5000/db": "workspace:*",
+    "@bc5000/integrations": "workspace:*",
     "drizzle-orm": "0.45.2"
   },
   "devDependencies": {

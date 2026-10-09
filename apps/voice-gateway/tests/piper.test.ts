@@ -33,10 +33,32 @@ const wav = (sampleRate: number, channels = 1): Buffer => {
   return buffer;
 };
 
+const wavWithListChunk = (sampleRate: number, channels = 1): Buffer => {
+  const buffer = Buffer.alloc(56);
+  buffer.write('RIFF', 0, 'ascii');
+  buffer.writeUInt32LE(48, 4);
+  buffer.write('WAVE', 8, 'ascii');
+  buffer.write('fmt ', 12, 'ascii');
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20);
+  buffer.writeUInt16LE(channels, 22);
+  buffer.writeUInt32LE(sampleRate, 24);
+  buffer.writeUInt32LE(sampleRate * channels * 2, 28);
+  buffer.writeUInt16LE(channels * 2, 32);
+  buffer.writeUInt16LE(16, 34);
+  buffer.write('LIST', 36, 'ascii');
+  buffer.writeUInt32LE(4, 40);
+  buffer.write('INFO', 44, 'ascii');
+  buffer.write('data', 48, 'ascii');
+  buffer.writeUInt32LE(0, 52);
+  return buffer;
+};
+
 class FakeRunner implements CommandRunner {
   readonly invocations: CommandInvocation[] = [];
   failPiper = false;
   finalChannels = 1;
+  finalListChunk = false;
 
   async run(invocation: CommandInvocation): Promise<void> {
     this.invocations.push(invocation);
@@ -47,7 +69,12 @@ class FakeRunner implements CommandRunner {
       return;
     }
     if (invocation.command === '/usr/bin/ffmpeg') {
-      await writeFile(invocation.args.at(-1)!, wav(8_000, this.finalChannels));
+      await writeFile(
+        invocation.args.at(-1)!,
+        this.finalListChunk
+          ? wavWithListChunk(8_000, this.finalChannels)
+          : wav(8_000, this.finalChannels)
+      );
       return;
     }
     throw new Error('unexpected command');
@@ -167,6 +194,19 @@ describe('PiperRenderer', () => {
       })
     ).rejects.toThrow('VOICE_MODEL_CHECKSUM_MISMATCH');
     expect(runner.invocations).toHaveLength(0);
+  });
+
+  it('accepts a standards-compliant ancillary chunk before WAV audio data', async () => {
+    const { renderer, runner } = await setup();
+    runner.finalListChunk = true;
+
+    await expect(
+      renderer.render({
+        voiceId: 'en_GB-alba-medium',
+        segments,
+        outputId: 'metadata-chunk-call'
+      })
+    ).resolves.toMatchObject({ sampleRate: 8_000, channels: 1, format: 'wav' });
   });
 
   it('purges all temporary audio when synthesis or output validation fails', async () => {

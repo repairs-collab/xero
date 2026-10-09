@@ -130,17 +130,17 @@ export class InMemoryGatewaySessionStore implements GatewaySessionStore {
     return Promise.resolve(this.sessions.get(gatewayCallId) ?? null);
   }
 
-  async applyEvent(
+  applyEvent(
     event: GatewayCallEvent,
     now: Date
   ): Promise<GatewaySessionRecord | null> {
     const current = this.sessions.get(event.gatewayCallId);
-    if (current === undefined) return null;
+    if (current === undefined) return Promise.resolve(null);
     const next = advanceGatewayCall(current, event);
-    if (next === current) return current;
+    if (next === current) return Promise.resolve(current);
     const updated = { ...current, ...next, updatedAt: now };
     this.sessions.set(event.gatewayCallId, updated);
-    return updated;
+    return Promise.resolve(updated);
   }
 }
 

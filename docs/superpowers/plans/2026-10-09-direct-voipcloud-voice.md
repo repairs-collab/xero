@@ -285,13 +285,14 @@ Commit: `feat: render private voice prompts locally`
 **Interfaces:**
 - Produces `AsteriskSessionController.start(session)` and consumes ARI channel/bridge/DTMF/playback events.
 - Uses a dedicated VoIPcloud SIP user and `VoipcloudClient.callToNumber`.
+- Pins option 2 to the approved PBX queue on Tab 1, internal extension `1003`; the public office number is retained only for spoken callback/fallback guidance.
 - Emits safe gateway events through Task 4; provider-specific SIP/ARI details do not escape this adapter.
 
-- [ ] **Step 1: Write failing simulated ARI tests**
+- [x] **Step 1: Write failing simulated ARI tests**
 
 Assert leg pairing by configured user plus single in-flight session, no prompt before bridge readiness, human/voicemail paths, DTMF 1/2/9, invalid/no input, protected-detail sequencing, successful/unanswered transfer, hangup, duplicate events, and cleanup.
 
-- [ ] **Step 2: Implement the Asterisk adapter and locked dialplan**
+- [x] **Step 2: Implement the Asterisk adapter and locked dialplan**
 
 Keep Asterisk/ARI ports private. Template SIP credentials at container start from secrets. Restrict SIP/RTP at the host firewall after confirming VoIPcloud ranges. Do not enable MixMonitor or recording modules in the call path.
 

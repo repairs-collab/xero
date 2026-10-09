@@ -45,10 +45,15 @@ const uuidPattern =
 const e164Pattern = /^\+[1-9]\d{7,14}$/;
 const decimalPattern = /^(?:0|[1-9]\d{0,15})\.\d{2}$/;
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
-const safeTextPattern = /^[^\u0000-\u001f\u007f]+$/;
 const userNumberPattern = /^\d{1,32}$/;
 const idempotencyPattern = /^[A-Za-z0-9._:-]{1,255}$/;
 const ttsVoicePattern = /^[A-Za-z0-9._-]{1,128}$/;
+
+const containsControlCharacter = (value: string): boolean =>
+  [...value].some((character) => {
+    const code = character.charCodeAt(0);
+    return code <= 31 || code === 127;
+  });
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -74,7 +79,7 @@ const boundedSafeText = (
   typeof value === 'string' &&
   value.length > 0 &&
   value.length <= maximumLength &&
-  safeTextPattern.test(value);
+  !containsControlCharacter(value);
 
 const parseCallbackUrl = (value: unknown): string | undefined => {
   if (typeof value !== 'string' || value.length > 2048) return undefined;
@@ -209,7 +214,7 @@ export const parseCreateGatewayCallCommand = (
     transfer: {
       ...(transfer.sipUri === undefined
         ? {}
-        : { sipUri: transfer.sipUri as string }),
+        : { sipUri: transfer.sipUri }),
       fallbackNumber: transfer.fallbackNumber,
       label: transfer.label
     },

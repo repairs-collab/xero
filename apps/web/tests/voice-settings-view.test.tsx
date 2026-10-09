@@ -71,9 +71,7 @@ describe('voice settings view', () => {
     const result = await runSetVoiceEnabledAction(
       {
         settings: {
-          setEnabled: async () => {
-            throw new Error(code);
-          }
+          setEnabled: () => Promise.reject(new Error(code))
         },
         revalidate: () => {
           throw new Error('revalidation must not run after a rejected change');
@@ -94,9 +92,8 @@ describe('voice settings view', () => {
       runSetVoiceEnabledAction(
         {
           settings: {
-            setEnabled: async () => {
-              throw new Error('DATABASE_CONNECTION_LOST');
-            }
+            setEnabled: () =>
+              Promise.reject(new Error('DATABASE_CONNECTION_LOST'))
           },
           revalidate: () => undefined
         },
@@ -110,7 +107,7 @@ describe('voice settings view', () => {
     const result = await runSetVoiceEnabledAction(
       {
         settings: {
-          setEnabled: async () => ({ enabled: false })
+          setEnabled: () => Promise.resolve({ enabled: false })
         },
         revalidate: () => {
           revalidated = true;

@@ -58,9 +58,23 @@ export class NodeCommandRunner implements CommandRunner {
 
 const hashFile = async (path: string): Promise<string> => {
   const hash = createHash('sha256');
-  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  for await (const chunk of createReadStream(path)) {
+    if (!Buffer.isBuffer(chunk)) throw new Error('VOICE_MODEL_READ_FAILED');
+    hash.update(chunk);
+  }
   return hash.digest('hex');
 };
+
+const containsDisallowedSpeechControl = (value: string): boolean =>
+  [...value].some((character) => {
+    const code = character.charCodeAt(0);
+    return (
+      code <= 8 ||
+      (code >= 11 && code <= 12) ||
+      (code >= 14 && code <= 31) ||
+      code === 127
+    );
+  });
 
 const validateWav = async (
   path: string,
@@ -68,20 +82,59 @@ const validateWav = async (
 ): Promise<{ sampleRate: number; channels: number }> => {
   const file = await open(path, 'r');
   try {
-    const header = Buffer.alloc(44);
-    const { bytesRead } = await file.read(header, 0, 44, 0);
-    const valid =
-      bytesRead === 44 &&
-      header.toString('ascii', 0, 4) === 'RIFF' &&
-      header.toString('ascii', 8, 12) === 'WAVE' &&
-      header.toString('ascii', 12, 16) === 'fmt ' &&
-      header.readUInt16LE(20) === 1 &&
-      header.readUInt16LE(34) === 16 &&
-      header.toString('ascii', 36, 40) === 'data';
-    const channels = header.readUInt16LE(22);
-    const sampleRate = header.readUInt32LE(24);
+    const metadata = await file.stat();
+    const riff = Buffer.alloc(12);
+    const riffRead = await file.read(riff, 0, riff.length, 0);
     if (
-      !valid ||
+      riffRead.bytesRead !== riff.length ||
+      riff.toString('ascii', 0, 4) !== 'RIFF' ||
+      riff.toString('ascii', 8, 12) !== 'WAVE' ||
+      riff.readUInt32LE(4) + 8 > metadata.size
+    ) {
+      throw new Error('VOICE_WAV_INVALID');
+    }
+
+    let offset = 12;
+    let channels: number | undefined;
+    let sampleRate: number | undefined;
+    let dataFound = false;
+    while (offset + 8 <= metadata.size) {
+      const chunkHeader = Buffer.alloc(8);
+      const chunkRead = await file.read(chunkHeader, 0, chunkHeader.length, offset);
+      if (chunkRead.bytesRead !== chunkHeader.length) {
+        throw new Error('VOICE_WAV_INVALID');
+      }
+      const chunkId = chunkHeader.toString('ascii', 0, 4);
+      const chunkSize = chunkHeader.readUInt32LE(4);
+      const chunkDataOffset = offset + 8;
+      const nextOffset = chunkDataOffset + chunkSize + (chunkSize % 2);
+      if (nextOffset <= offset || nextOffset > metadata.size) {
+        throw new Error('VOICE_WAV_INVALID');
+      }
+
+      if (chunkId === 'fmt ' && channels === undefined) {
+        if (chunkSize < 16) throw new Error('VOICE_WAV_INVALID');
+        const format = Buffer.alloc(16);
+        const formatRead = await file.read(format, 0, format.length, chunkDataOffset);
+        if (
+          formatRead.bytesRead !== format.length ||
+          format.readUInt16LE(0) !== 1 ||
+          format.readUInt16LE(14) !== 16
+        ) {
+          throw new Error('VOICE_WAV_INVALID');
+        }
+        channels = format.readUInt16LE(2);
+        sampleRate = format.readUInt32LE(4);
+      } else if (chunkId === 'data') {
+        dataFound = true;
+      }
+      offset = nextOffset;
+    }
+
+    if (
+      channels === undefined ||
+      sampleRate === undefined ||
+      !dataFound ||
       channels !== 1 ||
       sampleRate < 8000 ||
       sampleRate > 48_000 ||
@@ -125,7 +178,7 @@ export class PiperRenderer {
     if (
       text === '' ||
       text.length > 32_000 ||
-      /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)
+      containsDisallowedSpeechControl(text)
     ) {
       throw new Error('VOICE_SPEECH_INVALID');
     }

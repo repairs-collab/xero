@@ -2,13 +2,13 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 
 import {
   hashGatewayCommand,
-  parseCreateGatewayCallCommand
+  parseCreateGatewayCallCommand,
+  type CreateGatewayCallCommand
 } from './contracts.js';
 import type { GatewaySessionRecord, GatewaySessionStore } from './session-store.js';
 import {
   InMemoryReplayProtector,
-  verifyGatewayRequest,
-  type GatewayHttpMethod
+  verifyGatewayRequest
 } from './signatures.js';
 
 const maximumBodyBytes = 64 * 1024;
@@ -19,6 +19,7 @@ export interface GatewayServerDependencies {
   clock: { now(): Date };
   supportedFlowVersion: number;
   replayProtector?: InMemoryReplayProtector;
+  startCall?(command: CreateGatewayCallCommand): Promise<void>;
 }
 
 const sendJson = (
@@ -94,7 +95,7 @@ export const createGatewayServer = (dependencies: GatewayServerDependencies) => 
         signature === undefined ||
         !verifyGatewayRequest({
           secret: dependencies.signingSecret,
-          method: method as GatewayHttpMethod,
+          method,
           path: url.pathname,
           body,
           timestamp,
@@ -149,6 +150,14 @@ export const createGatewayServer = (dependencies: GatewayServerDependencies) => 
         if (result.kind === 'conflict') {
           sendJson(response, 409, { error: result.code });
           return;
+        }
+        if (result.kind === 'created' && dependencies.startCall !== undefined) {
+          try {
+            await dependencies.startCall(command);
+          } catch {
+            sendJson(response, 503, { error: 'GATEWAY_CALL_START_FAILED' });
+            return;
+          }
         }
         sendJson(response, result.kind === 'created' ? 201 : 200, {
           gatewayCallId: result.session.gatewayCallId,

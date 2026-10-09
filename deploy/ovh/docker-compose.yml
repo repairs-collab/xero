@@ -88,6 +88,61 @@ services:
       RETELL_WEBHOOK_LAG_ALARM_SECONDS: ${RETELL_WEBHOOK_LAG_ALARM_SECONDS:-300}
     networks: [private]
 
+  asterisk:
+    profiles: [voice-capability]
+    image: ${ACCOUNT_PULSE_ASTERISK_IMAGE:?ACCOUNT_PULSE_ASTERISK_IMAGE is required}
+    container_name: bc5000-asterisk
+    restart: unless-stopped
+    environment:
+      ASTERISK_ARI_USERNAME: ${ASTERISK_ARI_USERNAME:?ASTERISK_ARI_USERNAME is required}
+      ASTERISK_ARI_PASSWORD: ${ASTERISK_ARI_PASSWORD:?ASTERISK_ARI_PASSWORD is required}
+      ASTERISK_EXTERNAL_ADDRESS: ${ASTERISK_EXTERNAL_ADDRESS:?ASTERISK_EXTERNAL_ADDRESS is required}
+      VOIPCLOUD_SIP_SERVER: ${VOIPCLOUD_SIP_SERVER:-sipm2.au.voipcloud.online:7060}
+      VOIPCLOUD_SIP_DOMAIN: ${VOIPCLOUD_SIP_DOMAIN:-sipm2.au.voipcloud.online}
+      VOIPCLOUD_API_USER_NUMBER: ${VOIPCLOUD_API_USER_NUMBER:?VOIPCLOUD_API_USER_NUMBER is required}
+      VOIPCLOUD_SIP_USER_NUMBER: ${VOIPCLOUD_SIP_USER_NUMBER:?VOIPCLOUD_SIP_USER_NUMBER is required}
+      VOIPCLOUD_SIP_PASSWORD: ${VOIPCLOUD_SIP_PASSWORD:?VOIPCLOUD_SIP_PASSWORD is required}
+    ports:
+      - "${VOICE_SIP_BIND_IP:?VOICE_SIP_BIND_IP is required}:5060:5060/tcp"
+      - "${VOICE_RTP_BIND_IP:?VOICE_RTP_BIND_IP is required}:10000-10100:10000-10100/udp"
+    volumes:
+      - voice_audio:/var/lib/asterisk/sounds/accountpulse:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          asterisk -rx "module show like chan_pjsip" | grep -q "Running" &&
+          asterisk -rx "http show status" | grep -q "Enabled and Bound"
+      interval: 15s
+      timeout: 5s
+      retries: 12
+    networks: [private]
+
+  voice-gateway:
+    profiles: [voice-capability]
+    image: ${ACCOUNT_PULSE_VOICE_GATEWAY_IMAGE:?ACCOUNT_PULSE_VOICE_GATEWAY_IMAGE is required}
+    container_name: bc5000-voice-gateway
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      asterisk:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      VOICE_GATEWAY_SIGNING_SECRET: ${VOICE_GATEWAY_SIGNING_SECRET:?VOICE_GATEWAY_SIGNING_SECRET is required}
+      VOICE_GATEWAY_ACCEPT_CALLS: ${VOICE_GATEWAY_ACCEPT_CALLS:-false}
+      VOIPCLOUD_API_KEY: ${VOIPCLOUD_API_KEY:?VOIPCLOUD_API_KEY is required}
+      ASTERISK_ARI_URL: http://asterisk:8088/ari
+      ASTERISK_ARI_EVENTS_URL: ws://asterisk:8088/ari/events
+      ASTERISK_ARI_USERNAME: ${ASTERISK_ARI_USERNAME:?ASTERISK_ARI_USERNAME is required}
+      ASTERISK_ARI_PASSWORD: ${ASTERISK_ARI_PASSWORD:?ASTERISK_ARI_PASSWORD is required}
+      VOICE_OFFICE_QUEUE_EXTENSION: ${VOICE_OFFICE_QUEUE_EXTENSION:?VOICE_OFFICE_QUEUE_EXTENSION is required}
+    volumes:
+      - voice_audio:/dev/shm/accountpulse-voice
+    networks: [private]
+
   caddy:
     image: caddy:2-alpine
     container_name: bc5000-caddy
@@ -106,3 +161,12 @@ services:
 networks:
   private:
     driver: bridge
+
+volumes:
+  voice_audio:
+    name: accountpulse_voice_audio
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: uid=1000,gid=1000,mode=0700

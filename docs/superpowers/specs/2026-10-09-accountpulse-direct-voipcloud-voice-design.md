@@ -41,7 +41,7 @@ The existing voice settings page becomes VoIPcloud-specific. It collects only no
 
 - VoIPcloud PBX user number dedicated to the gateway;
 - verified outbound caller ID, initially `+61350324518`;
-- internal office transfer target and the `+61350324518` fallback;
+- the fixed PBX queue on Tab 1, internal extension `1003`, and the `+61350324518` spoken callback/fallback;
 - office destination label;
 - Piper voice identifier;
 - organisation timezone and permitted weekday window.
@@ -116,7 +116,7 @@ Play the locked account-identifying opening, substituting only the approved acco
 > Hello. This is an automated call from Mott Appliance Repairs intended for the account of [approved account name]. If you are the account holder or authorised to manage this account, press 1 to hear the invoice details. To speak with a representative, press 2. If this is the wrong number, press 9.
 
 - **1:** record identity/authority attestation, then speak the approved invoices and combined balance. Offer **2** again after the details.
-- **2:** request transfer to the configured internal office target, falling back to `+61350324518` only when the configured transfer method requires it. Do not disclose account facts first.
+- **2:** request transfer to the fixed PBX queue on Tab 1, internal extension `1003`. If the queue is unavailable or unanswered, provide the approved `+61350324518` callback guidance and end safely. Do not disclose account facts first.
 - **9:** record `WRONG_PERSON`, suppress the voice destination, create one contact-review task, and end without disclosure.
 - **No input:** repeat the menu once, then end as `IDENTITY_NOT_CONFIRMED`.
 - **Any other key:** explain the valid options once without disclosing facts.

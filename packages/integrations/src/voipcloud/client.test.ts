@@ -38,14 +38,17 @@ const callInput = {
 const acceptedBody = (overrides: Record<string, unknown> = {}) =>
   JSON.stringify({
     code: 200,
-    data: {
-      user_name: 'AccountPulse Gateway',
-      user_number: '1010',
-      caller_id: '+61350324518',
-      dest_number: '+61400000001',
-      ...overrides
-    },
-    message: { status: 'success' }
+    data: [
+      {
+        user_name: 'AccountPulse Gateway',
+        user_number: '1010',
+        caller_id: '+61350324518',
+        dest_number: '+61400000001',
+        ...overrides
+      }
+    ],
+    message: '',
+    status: 'success'
   });
 
 describe('VoipcloudClient.callToNumber', () => {
@@ -94,16 +97,59 @@ describe('VoipcloudClient.callToNumber', () => {
     );
   });
 
+  it('accepts the legacy response shape still returned by the live Australian API', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push({
+      status: 200,
+      headers: {},
+      body: JSON.stringify({
+        code: 200,
+        data: {
+          user_name: 'AccountPulse Gateway',
+          user_number: '1010',
+          caller_id: '+61350324518',
+          dest_number: '+61400000001'
+        },
+        message: { status: 'success' }
+      })
+    });
+
+    await expect(createClient(http).callToNumber(callInput)).resolves.toEqual({
+      status: 'accepted',
+      userNumber: '1010',
+      destinationNumber: '+61400000001',
+      callerId: '+61350324518'
+    });
+  });
+
+  it('accepts a terse successful response after VoIPcloud has started the call', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push({
+      status: 200,
+      headers: {},
+      body: JSON.stringify({ code: 200, message: '' })
+    });
+
+    await expect(createClient(http).callToNumber(callInput)).resolves.toEqual({
+      status: 'accepted',
+      userNumber: '1010',
+      destinationNumber: '+61400000001',
+      callerId: '+61350324518'
+    });
+  });
+
   it.each([
     [{ ...callInput, userNumber: '' }, 'user number'],
     [{ ...callInput, numberToCall: '0400 000 001' }, 'E.164'],
     [{ ...callInput, callerId: '03 5032 4518' }, 'E.164']
   ])('rejects invalid input before dispatch: %s', async (input, message) => {
     const http = new FakeHttpClient();
-    await expect(createClient(http).callToNumber(input)).rejects.toMatchObject({
-      name: 'VoipcloudPermanentError',
-      message: expect.stringContaining(message)
-    });
+    const error: unknown = await createClient(http)
+      .callToNumber(input)
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(VoipcloudPermanentError);
+    if (!(error instanceof Error)) throw new Error('Expected a provider error');
+    expect(error.message).toContain(message);
     expect(http.requests).toHaveLength(0);
   });
 
@@ -131,13 +177,17 @@ describe('VoipcloudClient.callToNumber', () => {
       body: '{}'
     });
 
-    await expect(createClient(http).callToNumber(callInput)).rejects.toMatchObject({
-      name: 'VoipcloudRateLimitedError',
-      retryAfterSeconds: 17
-    });
+    const error: unknown = await createClient(http)
+      .callToNumber(callInput)
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(VoipcloudRateLimitedError);
+    if (!(error instanceof VoipcloudRateLimitedError)) {
+      throw new Error('Expected a rate-limit error');
+    }
+    expect(error.retryAfterSeconds).toBe(17);
   });
 
-  it('treats a failed POST or malformed success as unknown dispatch', async () => {
+  it('treats a failed POST or explicit provider failure as unknown dispatch', async () => {
     const failedHttp = new FakeHttpClient();
     failedHttp.responses.push(new Error(`connection reset ${apiKey}`));
     await expect(
@@ -148,7 +198,7 @@ describe('VoipcloudClient.callToNumber', () => {
     malformedHttp.responses.push({
       status: 200,
       headers: {},
-      body: JSON.stringify({ code: 200, message: { status: 'success' } })
+      body: JSON.stringify({ code: 400, status: 'error' })
     });
     await expect(
       createClient(malformedHttp).callToNumber(callInput)
