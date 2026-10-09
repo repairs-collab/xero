@@ -127,7 +127,7 @@ export const sequenceStages = pgTable(
     stageKey: varchar('stage_key', { length: 64 }).notNull(),
     offsetDays: integer('offset_days').notNull(),
     channel: varchar('channel', { length: 24 })
-      .$type<'SMS' | 'XERO_EMAIL' | 'TASK' | 'SMS_DAILY'>()
+      .$type<'SMS' | 'XERO_EMAIL' | 'TASK' | 'SMS_DAILY' | 'VOICE'>()
       .notNull(),
     template: text('template'),
     enabled: boolean('enabled').notNull().default(true),

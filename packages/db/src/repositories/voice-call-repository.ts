@@ -19,7 +19,8 @@ import { contacts, invoices } from '../schema/receivables.js';
 import {
   voiceCallEvents,
   voiceCallInvoices,
-  voiceCallRequests
+  voiceCallRequests,
+  type VoiceCallSource
 } from '../schema/voice.js';
 
 type VoiceCallRequestRow = typeof voiceCallRequests.$inferSelect;
@@ -66,6 +67,27 @@ export interface CreateVoiceCallDraftInput {
   idempotencyKey: string;
   invoices: readonly CreateVoiceCallInvoiceSnapshotInput[];
   now: Date;
+}
+
+export type VoiceCallSourceInput =
+  | { source: 'MANUAL' }
+  | {
+      source: Exclude<VoiceCallSource, 'MANUAL'>;
+      sequenceId: string;
+      sequenceVersionId: string;
+      stageKey: string;
+      scheduledAt: Date;
+      localOccurrenceDate: string;
+    };
+
+export interface CreateVoiceCallPreparedInput
+  extends Omit<CreateVoiceCallDraftInput, 'actorUserId'> {
+  actorUserId: string | null;
+  initialState: 'DRAFT' | 'APPROVED';
+  source: VoiceCallSourceInput;
+  callFlowVersion: number | null;
+  callFlowHash: string | null;
+  approvedFactsHash: string | null;
 }
 
 export interface ApproveVoiceCallInput {
@@ -183,7 +205,10 @@ const loadAggregate = async (
 
 const assertDraftSources = async (
   transaction: DbTransaction,
-  input: CreateVoiceCallDraftInput
+  input: Pick<
+    CreateVoiceCallDraftInput,
+    'organisationId' | 'contactId' | 'accountName' | 'invoices'
+  >
 ): Promise<void> => {
   const [contact] = await transaction
     .select({ id: contacts.id, name: contacts.name })
@@ -266,6 +291,27 @@ export class PostgresVoiceCallRepository {
   async createDraft(
     input: CreateVoiceCallDraftInput
   ): Promise<VoiceCallAggregate> {
+    return this.createPrepared({
+      ...input,
+      initialState: 'DRAFT',
+      source: { source: 'MANUAL' },
+      callFlowVersion: null,
+      callFlowHash: null,
+      approvedFactsHash: null
+    });
+  }
+
+  async createPrepared(
+    input: CreateVoiceCallPreparedInput
+  ): Promise<VoiceCallAggregate> {
+    if (
+      input.initialState === 'APPROVED' &&
+      (input.callFlowVersion === null ||
+        input.callFlowHash === null ||
+        input.approvedFactsHash === null)
+    ) {
+      throw new Error('VOICE_CALL_APPROVED_FACTS_REQUIRED');
+    }
     return this.database.transaction(async (transaction) => {
       await assertDraftSources(transaction, input);
       const [created] = await transaction
@@ -276,6 +322,25 @@ export class PostgresVoiceCallRepository {
           actorUserId: input.actorUserId,
           provider: 'VOIPCLOUD',
           purpose: input.purpose ?? 'CUSTOMER',
+          source: input.source.source,
+          sequenceId:
+            input.source.source === 'MANUAL'
+              ? null
+              : input.source.sequenceId,
+          sequenceVersionId:
+            input.source.source === 'MANUAL'
+              ? null
+              : input.source.sequenceVersionId,
+          stageKey:
+            input.source.source === 'MANUAL' ? null : input.source.stageKey,
+          scheduledAt:
+            input.source.source === 'MANUAL'
+              ? null
+              : input.source.scheduledAt,
+          localOccurrenceDate:
+            input.source.source === 'MANUAL'
+              ? null
+              : input.source.localOccurrenceDate,
           accountName: input.accountName,
           destinationNumber: input.destinationNumber,
           outboundNumber: input.outboundNumber,
@@ -291,11 +356,62 @@ export class PostgresVoiceCallRepository {
           transferTargetLabel: input.transferTargetLabel,
           idempotencyKey: input.idempotencyKey,
           state: 'DRAFT',
+          callFlowVersion: null,
+          callFlowHash: null,
+          approvedFactsHash: null,
+          approvedAt: null,
           createdAt: input.now,
           updatedAt: input.now
         })
+        .onConflictDoNothing({
+          target: [
+            voiceCallRequests.organisationId,
+            voiceCallRequests.idempotencyKey
+          ]
+        })
         .returning({ id: voiceCallRequests.id });
-      if (created === undefined) throw new Error('VOICE_CALL_NOT_CREATED');
+      if (created === undefined) {
+        const [existing] = await transaction
+          .select({
+            id: voiceCallRequests.id,
+            contactId: voiceCallRequests.contactId,
+            source: voiceCallRequests.source,
+            sequenceId: voiceCallRequests.sequenceId,
+            sequenceVersionId: voiceCallRequests.sequenceVersionId,
+            stageKey: voiceCallRequests.stageKey,
+            scheduledAt: voiceCallRequests.scheduledAt,
+            localOccurrenceDate: voiceCallRequests.localOccurrenceDate
+          })
+          .from(voiceCallRequests)
+          .where(
+            and(
+              eq(voiceCallRequests.organisationId, input.organisationId),
+              eq(voiceCallRequests.idempotencyKey, input.idempotencyKey)
+            )
+          )
+          .limit(1);
+        const sourceMatches =
+          existing !== undefined &&
+          existing.contactId === input.contactId &&
+          existing.source === input.source.source &&
+          (input.source.source === 'MANUAL' ||
+            (existing.sequenceId === input.source.sequenceId &&
+              existing.sequenceVersionId === input.source.sequenceVersionId &&
+              existing.stageKey === input.source.stageKey &&
+              existing.scheduledAt?.getTime() ===
+                input.source.scheduledAt.getTime() &&
+              existing.localOccurrenceDate === input.source.localOccurrenceDate));
+        if (!sourceMatches || existing === undefined) {
+          throw new Error('VOICE_CALL_SOURCE_MISMATCH');
+        }
+        const aggregate = await loadAggregate(
+          transaction,
+          input.organisationId,
+          existing.id
+        );
+        if (aggregate === null) throw new Error('VOICE_CALL_NOT_CREATED');
+        return aggregate;
+      }
 
       await transaction.insert(voiceCallInvoices).values(
         input.invoices.map((invoice) => ({
@@ -304,6 +420,19 @@ export class PostgresVoiceCallRepository {
           ...invoice
         }))
       );
+      if (input.initialState === 'APPROVED') {
+        await transaction
+          .update(voiceCallRequests)
+          .set({
+            state: 'APPROVED',
+            callFlowVersion: input.callFlowVersion,
+            callFlowHash: input.callFlowHash,
+            approvedFactsHash: input.approvedFactsHash,
+            approvedAt: input.now,
+            updatedAt: input.now
+          })
+          .where(eq(voiceCallRequests.id, created.id));
+      }
       const aggregate = await loadAggregate(
         transaction,
         input.organisationId,
