@@ -19,6 +19,7 @@ import {
   paymentPromises,
   PostgresVoiceCallRepository,
   reminderSequences,
+  reminderSequenceVersions,
   reminderWhitelistEntries,
   suppressions,
   users,
@@ -52,6 +53,7 @@ async function seedApprovedCall(
     purpose?: 'CUSTOMER' | 'TEST';
     voiceEnabled?: boolean;
     destinationNumber?: string;
+    scheduledAutomatic?: boolean;
   } = {}
 ) {
   const organisationId = randomUUID();
@@ -59,6 +61,7 @@ async function seedApprovedCall(
   const contactId = randomUUID();
   const invoiceId = randomUUID();
   const sequenceId = randomUUID();
+  const sequenceVersionId = randomUUID();
   const voiceSettingsUpdatedAt = new Date('2026-10-07T23:30:00.000Z');
 
   await client.db.insert(organisations).values({
@@ -130,7 +133,16 @@ async function seedApprovedCall(
     id: sequenceId,
     organisationId,
     name: `Voice sequence ${sequenceId}`,
+    kind: 'VOICE',
+    mode: options.scheduledAutomatic ? 'AUTOMATIC' : 'REVIEW',
     enabled: true
+  });
+  await client.db.insert(reminderSequenceVersions).values({
+    id: sequenceVersionId,
+    organisationId,
+    sequenceId,
+    versionNumber: 1,
+    status: 'ACTIVE'
   });
   await client.db.insert(invoices).values({
     id: invoiceId,
@@ -158,10 +170,9 @@ async function seedApprovedCall(
 
   const repository = new PostgresVoiceCallRepository(client.db);
   const idempotencyKey = `voice-request-${randomUUID()}`;
-  const draft = await repository.createDraft({
+  const preparedInput = {
     organisationId,
     contactId,
-    actorUserId: userId,
     ...(options.purpose === undefined ? {} : { purpose: options.purpose }),
     accountName: 'Example Customer',
     destinationNumber: options.destinationNumber ?? '+61412345678',
@@ -190,17 +201,46 @@ async function seedApprovedCall(
       }
     ],
     now
-  });
-  await repository.approveAndQueue({
-    organisationId,
-    voiceCallId: draft.id,
-    actorUserId: userId,
-    idempotencyKey,
-    callFlowVersion: options.callFlowVersion ?? 1,
-    callFlowHash: options.callFlowHash ?? callFlowHash,
-    approvedFactsHash: 'sha256:facts-v1',
-    now
-  });
+  };
+  const draft = options.scheduledAutomatic
+    ? await repository.createPrepared({
+        ...preparedInput,
+        actorUserId: null,
+        initialState: 'APPROVED',
+        source: {
+          source: 'SEQUENCE_AUTOMATIC',
+          sequenceId,
+          sequenceVersionId,
+          stageKey: 'twenty-one-days-voice',
+          scheduledAt: now,
+          localOccurrenceDate: '2026-10-08'
+        },
+        callFlowVersion: options.callFlowVersion ?? 1,
+        callFlowHash: options.callFlowHash ?? callFlowHash,
+        approvedFactsHash: 'sha256:facts-v1'
+      })
+    : await repository.createDraft({
+        ...preparedInput,
+        actorUserId: userId
+      });
+  if (options.scheduledAutomatic) {
+    await repository.queueApprovedScheduledCall({
+      organisationId,
+      voiceCallId: draft.id,
+      now
+    });
+  } else {
+    await repository.approveAndQueue({
+      organisationId,
+      voiceCallId: draft.id,
+      actorUserId: userId,
+      idempotencyKey,
+      callFlowVersion: options.callFlowVersion ?? 1,
+      callFlowHash: options.callFlowHash ?? callFlowHash,
+      approvedFactsHash: 'sha256:facts-v1',
+      now
+    });
+  }
 
   return {
     organisationId,
@@ -311,6 +351,28 @@ async function insertAdditionalChasedInvoice(
 }
 
 describe('voice call execution', () => {
+  it('executes an automatic sequence call without an initiating user', async () => {
+    const seeded = await seedApprovedCall({ scheduledAutomatic: true });
+    const createPhoneCall = vi.fn(() =>
+      Promise.resolve({
+        callId: 'retell-automatic-call-1',
+        callStatus: 'registered'
+      })
+    );
+    const runtime = executionDependencies(seeded.repository, createPhoneCall);
+
+    await expect(
+      executeVoiceCall(runtime.dependencies, {
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId
+      })
+    ).resolves.toEqual({
+      kind: 'accepted',
+      providerCallId: 'retell-automatic-call-1'
+    });
+    expect(createPhoneCall).toHaveBeenCalledTimes(1);
+  });
+
   it('executes a TEST call while customer voice is disabled and does not require the staff number on the customer', async () => {
     const seeded = await seedApprovedCall({
       purpose: 'TEST',

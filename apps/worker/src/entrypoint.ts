@@ -31,6 +31,7 @@ import { executeTestSms } from './handlers/test-sms-execute.js';
 import { executeVoiceCall } from './handlers/voice-call-execute.js';
 import { reconcileVoiceCall } from './handlers/voice-call-reconcile.js';
 import { calculateVoiceReminderWork } from './handlers/voice-reminders-calculate.js';
+import { dispatchDueVoiceReminders } from './handlers/voice-reminders-dispatch.js';
 import { processWebhookEvent } from './handlers/webhook-process.js';
 import { runIncrementalSync } from './handlers/xero-incremental-sync.js';
 import { runInitialSync } from './handlers/xero-initial-sync.js';
@@ -332,6 +333,19 @@ async function main() {
       [jobNames.voiceRemindersCalculate]: (payload) =>
         calculateVoiceReminderWork(
           { database: databaseClient.db, clock, holidays: { list: () => [] } },
+          payload.organisationId
+        ).then(() => undefined),
+      [jobNames.voiceRemindersDispatch]: (payload) =>
+        dispatchDueVoiceReminders(
+          {
+            database: databaseClient.db,
+            repository: voiceCallRepository,
+            clock,
+            holidays: { list: () => [] },
+            publisher: queue,
+            acceptCustomerVoiceCalls:
+              process.env.VOICE_GATEWAY_ACCEPT_CALLS === 'true'
+          },
           payload.organisationId
         ).then(() => undefined),
       [jobNames.reminderExecute]: (payload) =>

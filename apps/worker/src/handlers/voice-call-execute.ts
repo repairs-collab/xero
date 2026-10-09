@@ -289,10 +289,11 @@ const revalidate = async (
     };
   }
   if (
-    call.actorUserId === null ||
-    actor === undefined ||
-    actor.membershipDisabledAt !== null ||
-    actor.userDisabledAt !== null
+    call.source !== 'SEQUENCE_AUTOMATIC' &&
+    (call.actorUserId === null ||
+      actor === undefined ||
+      actor.membershipDisabledAt !== null ||
+      actor.userDisabledAt !== null)
   ) {
     return {
       kind: 'blocked',

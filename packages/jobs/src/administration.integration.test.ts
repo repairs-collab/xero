@@ -146,6 +146,7 @@ describe('purgeOrganisationOperationalJobs', () => {
       [jobNames.xeroNightlyReconcile]: 1,
       [jobNames.remindersCalculate]: 1,
       [jobNames.voiceRemindersCalculate]: 1,
+      [jobNames.voiceRemindersDispatch]: 1,
       [jobNames.reminderExecute]: 1,
       [jobNames.operatorReplyExecute]: 1,
       [jobNames.testSmsExecute]: 1

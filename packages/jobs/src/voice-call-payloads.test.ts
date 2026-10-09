@@ -12,6 +12,9 @@ describe('voice call job contracts', () => {
     expect(jobNames.voiceRemindersCalculate).toBe(
       'voice-reminders.calculate'
     );
+    expect(jobNames.voiceRemindersDispatch).toBe(
+      'voice-reminders.dispatch'
+    );
     expect(jobNames.voiceCallExecute).toBe('voice-call.execute');
     expect(jobNames.voiceCallReconcile).toBe('voice-call.reconcile');
   });
@@ -19,6 +22,11 @@ describe('voice call job contracts', () => {
   it('parses identifier-only voice calculation payloads', () => {
     expect(
       parseJobPayload(jobNames.voiceRemindersCalculate, {
+        organisationId: 'org-1'
+      })
+    ).toEqual({ organisationId: 'org-1' });
+    expect(
+      parseJobPayload(jobNames.voiceRemindersDispatch, {
         organisationId: 'org-1'
       })
     ).toEqual({ organisationId: 'org-1' });

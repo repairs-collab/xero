@@ -30,6 +30,7 @@ export type OperationalJobPurgeCounts = Record<
   | 'xero.nightly-reconcile'
   | 'reminders.calculate'
   | 'voice-reminders.calculate'
+  | 'voice-reminders.dispatch'
   | 'reminder.execute'
   | 'operator-reply.execute'
   | 'test-sms.execute',

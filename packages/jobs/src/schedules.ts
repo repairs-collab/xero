@@ -6,6 +6,7 @@ const scheduleDefinitions = [
   { name: jobNames.xeroNightlyReconcile, cron: '0 2 * * *' },
   { name: jobNames.remindersCalculate, cron: '*/5 * * * *' },
   { name: jobNames.voiceRemindersCalculate, cron: '*/5 * * * *' },
+  { name: jobNames.voiceRemindersDispatch, cron: '* * * * *' },
   { name: jobNames.retentionApply, cron: '0 3 * * *' }
 ] as const;
 

@@ -10,6 +10,7 @@ import {
   inArray,
   isNotNull,
   lt,
+  lte,
   ne,
   sql
 } from 'drizzle-orm';
@@ -102,6 +103,12 @@ export interface ApproveVoiceCallInput {
 }
 
 export interface ClaimVoiceCallInput {
+  organisationId: string;
+  voiceCallId: string;
+  now: Date;
+}
+
+export interface QueueApprovedScheduledVoiceCallInput {
   organisationId: string;
   voiceCallId: string;
   now: Date;
@@ -510,6 +517,31 @@ export class PostgresVoiceCallRepository {
     voiceCallId: string
   ): Promise<VoiceCallExecutionAggregate | null> {
     return loadAggregate(this.database, organisationId, voiceCallId);
+  }
+
+  async queueApprovedScheduledCall(
+    input: QueueApprovedScheduledVoiceCallInput,
+    transaction?: DbTransaction
+  ): Promise<{ voiceCallId: string; queued: boolean }> {
+    const executor = transaction ?? this.database;
+    const [queued] = await executor
+      .update(voiceCallRequests)
+      .set({
+        state: 'QUEUED',
+        queuedAt: input.now,
+        updatedAt: input.now
+      })
+      .where(
+        and(
+          eq(voiceCallRequests.organisationId, input.organisationId),
+          eq(voiceCallRequests.id, input.voiceCallId),
+          eq(voiceCallRequests.state, 'APPROVED'),
+          ne(voiceCallRequests.source, 'MANUAL'),
+          lte(voiceCallRequests.scheduledAt, input.now)
+        )
+      )
+      .returning({ id: voiceCallRequests.id });
+    return { voiceCallId: input.voiceCallId, queued: queued !== undefined };
   }
 
   async claimForSubmission(

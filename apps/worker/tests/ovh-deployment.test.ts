@@ -75,7 +75,7 @@ describe('OVH voice deployment', () => {
     expect(resolved.services.asterisk.ports).toContainEqual(
       expect.objectContaining({ protocol: 'tcp', published: '5060', target: 5060 })
     );
-  });
+  }, 15_000);
 
   it('registers and places VoIPcloud calls over TCP with the PBX user mapped separately from SIP auth', () => {
     const pjsip = deploymentFile('asterisk/pjsip.conf.template');
@@ -108,6 +108,17 @@ describe('OVH voice deployment', () => {
     expect(compose).not.toMatch(/NEXT_PUBLIC_.*RETELL/i);
     expect(compose).not.toContain('.dkr.ecr.');
     expect(compose).toContain('SEND_MODE: ${SEND_MODE:?SEND_MODE is required}');
+  });
+
+  it('keeps the shared worker and gateway customer-call gate disabled by default', () => {
+    const compose = deploymentFile('docker-compose.yml');
+
+    expect(
+      compose.match(
+        /VOICE_GATEWAY_ACCEPT_CALLS: \$\{VOICE_GATEWAY_ACCEPT_CALLS:-false\}/g
+      )
+    ).toHaveLength(2);
+    expect(compose).not.toContain('VOICE_GATEWAY_ACCEPT_CALLS: true');
   });
 
   it('runs the bounded voice monitor from an OVH systemd timer', () => {

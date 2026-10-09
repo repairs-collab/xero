@@ -8,6 +8,8 @@ import {
   contacts,
   invoices,
   organisations,
+  reminderSequences,
+  reminderSequenceVersions,
   users,
   voiceCallEvents,
   voiceCallInvoices,
@@ -142,6 +144,68 @@ const approveDirectly = async (
   });
 
 describe('PostgresVoiceCallRepository', () => {
+  it('atomically queues one approved scheduled call', async () => {
+    const seeded = await seedAccount('Scheduled voice queue');
+    const input = draftInput(seeded);
+    const sequenceId = randomUUID();
+    const sequenceVersionId = randomUUID();
+    await client.db.insert(reminderSequences).values({
+      id: sequenceId,
+      organisationId: seeded.organisationId,
+      name: `Scheduled voice ${sequenceId}`,
+      kind: 'VOICE',
+      mode: 'AUTOMATIC',
+      enabled: true
+    });
+    await client.db.insert(reminderSequenceVersions).values({
+      id: sequenceVersionId,
+      organisationId: seeded.organisationId,
+      sequenceId,
+      versionNumber: 1,
+      status: 'ACTIVE'
+    });
+    const scheduled = await repository.createPrepared({
+      ...input,
+      actorUserId: null,
+      initialState: 'APPROVED',
+      source: {
+        source: 'SEQUENCE_AUTOMATIC',
+        sequenceId,
+        sequenceVersionId,
+        stageKey: 'twenty-one-days-voice',
+        scheduledAt: new Date('2026-10-07T00:01:00.000Z'),
+        localOccurrenceDate: '2026-10-07'
+      },
+      callFlowVersion: 1,
+      callFlowHash: 'sha256:flow-v1',
+      approvedFactsHash: 'sha256:facts'
+    });
+
+    const results = await Promise.all([
+      repository.queueApprovedScheduledCall({
+        organisationId: seeded.organisationId,
+        voiceCallId: scheduled.id,
+        now: new Date('2026-10-07T00:02:00.000Z')
+      }),
+      repository.queueApprovedScheduledCall({
+        organisationId: seeded.organisationId,
+        voiceCallId: scheduled.id,
+        now: new Date('2026-10-07T00:02:00.000Z')
+      })
+    ]);
+
+    expect(results.map((result) => result.queued).sort()).toEqual([
+      false,
+      true
+    ]);
+    await expect(
+      repository.loadForExecution(seeded.organisationId, scheduled.id)
+    ).resolves.toMatchObject({
+      state: 'QUEUED',
+      queuedAt: new Date('2026-10-07T00:02:00.000Z')
+    });
+  });
+
   it('pins the reviewed flow and fact hashes only in the approval transaction', async () => {
     const seeded = await seedAccount('Atomic voice approval');
     const input = draftInput(seeded);

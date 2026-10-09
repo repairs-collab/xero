@@ -24,6 +24,7 @@ export const jobPayloadSchemas = {
   [jobNames.xeroNightlyReconcile]: organisationPayload,
   [jobNames.remindersCalculate]: organisationPayload,
   [jobNames.voiceRemindersCalculate]: organisationPayload,
+  [jobNames.voiceRemindersDispatch]: organisationPayload,
   [jobNames.reminderExecute]: z.object({
     organisationId: identifier,
     stageInstanceId: identifier
