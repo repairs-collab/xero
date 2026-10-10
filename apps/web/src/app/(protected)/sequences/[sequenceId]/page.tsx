@@ -107,6 +107,28 @@ export default async function SequenceDetailPage({
         <p>Changes stay in draft until you activate a new locked version.</p>
         <Link href={`/sequences?tab=${tab}`}>← Back to {tab} sequences</Link>
       </header>
+      <nav className="segmented-control" aria-label="Sequence type">
+        <Link
+          href={
+            tab === 'messaging'
+              ? `/sequences/${sequence.id}?tab=messaging`
+              : '/sequences?tab=messaging'
+          }
+          className={tab === 'messaging' ? 'is-active' : ''}
+        >
+          SMS &amp; Email Sequences
+        </Link>
+        <Link
+          href={
+            tab === 'voice'
+              ? `/sequences/${sequence.id}?tab=voice`
+              : '/sequences?tab=voice'
+          }
+          className={tab === 'voice' ? 'is-active' : ''}
+        >
+          Voice Reminder Sequences
+        </Link>
+      </nav>
       <SequenceEditor
         organisationId={membership.organisationId}
         sequenceId={sequence.id}
