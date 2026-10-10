@@ -44,12 +44,14 @@ export function SequenceTabs({
         <Link
           href="/sequences?tab=messaging"
           className={activeTab === 'messaging' ? 'is-active' : ''}
+          aria-current={activeTab === 'messaging' ? 'page' : undefined}
         >
           SMS &amp; Email Sequences
         </Link>
         <Link
           href="/sequences?tab=voice"
           className={activeTab === 'voice' ? 'is-active' : ''}
+          aria-current={activeTab === 'voice' ? 'page' : undefined}
         >
           Voice Reminder Sequences
         </Link>

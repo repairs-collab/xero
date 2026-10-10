@@ -24,18 +24,20 @@ export default defineConfig({
     {
       command: 'node e2e/fake-retell-server.mjs',
       url: 'http://127.0.0.1:3201/health',
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 30_000
     },
     {
       command: 'pnpm dev --hostname 127.0.0.1 --port 3100',
       url: 'http://127.0.0.1:3100/health/live',
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 120_000,
       env: {
         DATABASE_URL: databaseUrl,
         SESSION_SECRET_BASE64: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
         NODE_ENV: 'test',
+        ACCOUNTPULSE_E2E: 'browser-journeys-only',
+        ACCOUNTPULSE_E2E_NOW: '2026-10-08T02:00:00.000Z',
         RETELL_API_BASE_URL: 'http://127.0.0.1:3201',
         RETELL_API_KEY: 'fake-retell-private-key',
         VOICE_PREVIEW_ALLOWED_ORIGINS:

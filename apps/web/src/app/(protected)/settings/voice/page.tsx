@@ -7,6 +7,7 @@ import Script from 'next/script';
 import { PostgresVoiceCallRepository } from '@bc5000/db/web';
 
 import { getJobQueue } from '../../../../server/job-runtime.js';
+import { createServerClock } from '../../../../server/clock.js';
 import {
   getDatabaseClient,
   getVoiceProviderTester,
@@ -39,12 +40,13 @@ export default async function VoiceSettingsPage({
     throw new Error('No active organisation membership');
   }
   const database = getDatabaseClient().db;
+  const clock = createServerClock();
   const settingsService = createVoiceSettingsService({
     database,
     session,
     tester: getVoiceProviderTester(),
     previewSessions: { verify: verifyVoicePreviewSession },
-    clock: { now: () => new Date() }
+    clock
   });
   const settings = await settingsService.get(organisationId);
   const testVoiceCallParameter = query.testVoiceCall;
@@ -56,7 +58,7 @@ export default async function VoiceSettingsPage({
     repository: new PostgresVoiceCallRepository(database),
     publisher: await getJobQueue(),
     session,
-    clock: { now: () => new Date() },
+    clock,
     holidays: { list: () => [] }
   });
   const testVoiceCallDraft =

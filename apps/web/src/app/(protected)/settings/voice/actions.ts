@@ -11,6 +11,7 @@ import {
 } from '@bc5000/db/web';
 
 import { getJobQueue } from '../../../../server/job-runtime.js';
+import { createServerClock } from '../../../../server/clock.js';
 import {
   getDatabaseClient,
   getVoiceProviderTester,
@@ -51,6 +52,7 @@ async function context() {
     new Request('http://localhost/', { headers: await headers() })
   );
   const database = getDatabaseClient().db;
+  const clock = createServerClock();
   return {
     database,
     session,
@@ -59,14 +61,14 @@ async function context() {
       session,
       tester: getVoiceProviderTester(),
       previewSessions: { verify: verifyVoicePreviewSession },
-      clock: { now: () => new Date() }
+      clock
     }),
     testCalls: createVoiceTestCallService({
       database,
       repository: new PostgresVoiceCallRepository(database),
       publisher: await getJobQueue(),
       session,
-      clock: { now: () => new Date() },
+      clock,
       holidays: { list: () => [] }
     })
   };

@@ -7,6 +7,7 @@ import { redirect } from 'next/navigation';
 import { PostgresVoiceCallRepository } from '@bc5000/db/web';
 
 import { getJobQueue } from '../../../../../server/job-runtime.js';
+import { createServerClock } from '../../../../../server/clock.js';
 import {
   getDatabaseClient,
   requireWebSession
@@ -37,7 +38,7 @@ async function context() {
     repository: new PostgresVoiceCallRepository(database),
     publisher: await getJobQueue(),
     session,
-    clock: { now: () => new Date() },
+    clock: createServerClock(),
     holidays: { list: () => [] }
   });
 }

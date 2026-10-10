@@ -24,6 +24,7 @@ import { selectPreferredSmsChannel } from '@bc5000/domain';
 
 import { CustomerTimeline } from '../../../../components/customer-timeline.js';
 import { getJobQueue } from '../../../../server/job-runtime.js';
+import { createServerClock } from '../../../../server/clock.js';
 import {
   getDatabaseClient,
   requireWebSession
@@ -97,7 +98,7 @@ export default async function CustomerPage({
           repository: new PostgresVoiceCallRepository(db),
           publisher: await getJobQueue(),
           session,
-          clock: { now: () => new Date() },
+          clock: createServerClock(),
           holidays: { list: () => [] }
         }).prepare({
           organisationId,
