@@ -28,4 +28,16 @@ describe('createServerClock', () => {
       '2026-10-11T01:00:00.000Z'
     );
   });
+
+  it('always uses wall-clock time in production', () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('ACCOUNTPULSE_E2E', 'browser-journeys-only');
+    vi.stubEnv('ACCOUNTPULSE_E2E_NOW', '2026-10-08T02:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-11T01:00:00.000Z'));
+
+    expect(createServerClock().now().toISOString()).toBe(
+      '2026-10-11T01:00:00.000Z'
+    );
+  });
 });

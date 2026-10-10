@@ -24,13 +24,13 @@ export default defineConfig({
     {
       command: 'node e2e/fake-retell-server.mjs',
       url: 'http://127.0.0.1:3201/health',
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 30_000
     },
     {
       command: 'pnpm dev --hostname 127.0.0.1 --port 3100',
       url: 'http://127.0.0.1:3100/health/live',
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 120_000,
       env: {
         DATABASE_URL: databaseUrl,

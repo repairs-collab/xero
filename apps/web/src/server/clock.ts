@@ -4,6 +4,7 @@ export interface ServerClock {
 
 export function createServerClock(): ServerClock {
   const fixedNow =
+    process.env.NODE_ENV !== 'production' &&
     process.env.ACCOUNTPULSE_E2E === 'browser-journeys-only'
       ? process.env.ACCOUNTPULSE_E2E_NOW?.trim()
       : undefined;
