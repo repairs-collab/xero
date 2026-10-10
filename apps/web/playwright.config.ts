@@ -36,6 +36,8 @@ export default defineConfig({
         DATABASE_URL: databaseUrl,
         SESSION_SECRET_BASE64: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
         NODE_ENV: 'test',
+        ACCOUNTPULSE_E2E: 'browser-journeys-only',
+        ACCOUNTPULSE_E2E_NOW: '2026-10-08T02:00:00.000Z',
         RETELL_API_BASE_URL: 'http://127.0.0.1:3201',
         RETELL_API_KEY: 'fake-retell-private-key',
         VOICE_PREVIEW_ALLOWED_ORIGINS:
