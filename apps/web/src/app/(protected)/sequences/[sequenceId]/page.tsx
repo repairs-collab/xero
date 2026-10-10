@@ -115,6 +115,7 @@ export default async function SequenceDetailPage({
               : '/sequences?tab=messaging'
           }
           className={tab === 'messaging' ? 'is-active' : ''}
+          aria-current={tab === 'messaging' ? 'page' : undefined}
         >
           SMS &amp; Email Sequences
         </Link>
@@ -125,6 +126,7 @@ export default async function SequenceDetailPage({
               : '/sequences?tab=voice'
           }
           className={tab === 'voice' ? 'is-active' : ''}
+          aria-current={tab === 'voice' ? 'page' : undefined}
         >
           Voice Reminder Sequences
         </Link>
