@@ -59,13 +59,10 @@ async function seed() {
 
 const saveInput = (organisationId: string): SaveVoiceSettingsInput => ({
   organisationId,
-  provider: 'RETELL',
-  secretReference: 'env:RETELL_API_KEY',
-  previewPublicKey: 'public_key_accountpulse_preview',
-  agentId: 'agent_accountpulse',
-  agentVersion: 7,
-  voiceId: 'voice_australian_1',
-  voiceLabel: 'Australian accounts voice',
+  provider: 'VOIPCLOUD',
+  voipcloudUserNumber: '1099',
+  ttsVoiceId: 'en_GB-alba-medium',
+  gatewayFlowVersion: 1,
   outboundNumber: '+61255501234',
   transferSipUri: 'sip:accounts@voipline.example',
   fallbackOfficeNumber: '+61255504321',
@@ -76,12 +73,12 @@ const saveInput = (organisationId: string): SaveVoiceSettingsInput => ({
 });
 
 const healthyConnection: VoiceProviderConnectionResult = {
-  authenticated: true,
-  agentVersionAvailable: true,
-  voiceAvailable: true,
-  previewKeyDomainRestricted: true,
-  recaptchaProtection: 'enabled',
-  recordingDisabled: true
+  provider: 'VOIPCLOUD',
+  endpoint: 'https://au.voipcloud.online/api/integration/v2',
+  credentialsConfigured: true,
+  gatewayReady: true,
+  gatewayFlowVersion: 1,
+  customerCallsEnabled: false
 };
 
 function service(
@@ -195,7 +192,7 @@ describe('voice settings service', () => {
     });
   });
 
-  it('allows only Administrators to save safe settings and audits field names without credential values', async () => {
+  it('allows only Administrators to save safe VoIPcloud settings without browser-managed credentials', async () => {
     const seeded = await seed();
     const input = saveInput(seeded.organisationId);
 
@@ -215,16 +212,16 @@ describe('voice settings service', () => {
     expect(view).toMatchObject({
       configured: true,
       enabled: false,
-      provider: 'RETELL',
-      secretReferenceLabel: 'RETELL_API_KEY',
-      previewPublicKey: 'public_key_accountpulse_preview',
-      agentId: 'agent_accountpulse',
-      agentVersion: 7,
-      voiceId: 'voice_australian_1',
+      provider: 'VOIPCLOUD',
+      voipcloudUserNumber: '1099',
+      ttsVoiceId: 'en_GB-alba-medium',
+      gatewayFlowVersion: 1,
       connectionReady: false,
+      gatewayReady: false,
       genericFlowReady: false
     });
     expect(view).not.toHaveProperty('secretReference');
+    expect(view).not.toHaveProperty('previewPublicKey');
 
     const events = await client.db
       .select()
@@ -237,19 +234,19 @@ describe('voice settings service', () => {
     });
     expect(events[0]?.afterValue?.changedFields).toEqual(
       expect.arrayContaining([
-        'secretReference',
-        'previewPublicKey',
-        'agentId',
-        'agentVersion',
+        'voipcloudUserNumber',
+        'ttsVoiceId',
+        'gatewayFlowVersion',
         'outboundNumber'
       ])
     );
-    expect(JSON.stringify(events)).not.toContain(input.secretReference);
-    expect(JSON.stringify(events)).not.toContain(input.previewPublicKey);
+    expect(JSON.stringify(events)).not.toContain('VOIPCLOUD_API_KEY');
   });
 
   it.each([
-    ['raw Retell private key', { secretReference: 'key_private_secret_value' }],
+    ['invalid PBX user', { voipcloudUserNumber: 'user-1099' }],
+    ['invalid local voice', { ttsVoiceId: 'voice with spaces' }],
+    ['invalid gateway flow version', { gatewayFlowVersion: 0 }],
     ['invalid outbound number', { outboundNumber: '02 5550 1234' }],
     ['invalid fallback number', { fallbackOfficeNumber: 'not-a-number' }],
     ['invalid SIP target', { transferSipUri: 'https://example.invalid' }],
@@ -283,12 +280,9 @@ describe('voice settings service', () => {
     expect(connection).toEqual({ healthy: true, ...healthyConnection });
     expect(harness.tester.test).toHaveBeenCalledWith({
       organisationId: seeded.organisationId,
-      provider: 'RETELL',
-      secretReference: 'env:RETELL_API_KEY',
-      previewPublicKey: 'public_key_accountpulse_preview',
-      agentId: 'agent_accountpulse',
-      agentVersion: 7,
-      voiceId: 'voice_australian_1'
+      provider: 'VOIPCLOUD',
+      voipcloudUserNumber: '1099',
+      gatewayFlowVersion: 1
     });
 
     const preview = await harness.settings.recordGenericFlowTest({
@@ -302,9 +296,9 @@ describe('voice settings service', () => {
         userId: seeded.userId,
         previewSessionToken: 'signed-preview-token',
         configurationVersion: 1,
-        agentId: 'agent_accountpulse',
-        agentVersion: 7,
-        voiceId: 'voice_australian_1'
+        voipcloudUserNumber: '1099',
+        gatewayFlowVersion: 1,
+        ttsVoiceId: 'en_GB-alba-medium'
       })
     );
 
@@ -324,6 +318,7 @@ describe('voice settings service', () => {
     expect(enabled).toMatchObject({
       enabled: true,
       connectionReady: true,
+      gatewayReady: true,
       genericFlowReady: true
     });
 
@@ -340,7 +335,7 @@ describe('voice settings service', () => {
     });
   });
 
-  it('marks evidence stale and disables voice when the pinned agent changes', async () => {
+  it('marks evidence stale and disables voice when the gateway flow changes', async () => {
     const seeded = await seed();
     const harness = service(seeded.session('ADMIN'));
     const input = saveInput(seeded.organisationId);
@@ -360,11 +355,12 @@ describe('voice settings service', () => {
 
     const changed = await harness.settings.save({
       ...input,
-      agentVersion: input.agentVersion + 1
+      gatewayFlowVersion: input.gatewayFlowVersion + 1
     });
     expect(changed).toMatchObject({
       enabled: false,
       connectionReady: false,
+      gatewayReady: false,
       genericFlowReady: false
     });
     await expect(
@@ -384,6 +380,7 @@ describe('voice settings service', () => {
     ).resolves.toMatchObject({
       enabled: false,
       connectionReady: true,
+      gatewayReady: true,
       genericFlowReady: false
     });
   });

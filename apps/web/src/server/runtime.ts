@@ -6,6 +6,8 @@ import {
   requireSession
 } from '@bc5000/auth';
 import { createDatabase, type DatabaseClient } from '@bc5000/db/web';
+import { FetchHttpClient } from '@bc5000/integrations/http';
+import { VoiceGatewayClient } from '@bc5000/integrations/voice-gateway';
 
 import { PostgresMembershipLoader } from './membership-loader.js';
 
@@ -17,9 +19,9 @@ interface VoicePreviewSessionClaims {
   callFlowHash: string;
   callFlowVersion: number;
   configurationVersion: number;
-  agentId: string;
-  agentVersion: number;
-  voiceId: string;
+  voipcloudUserNumber: string;
+  gatewayFlowVersion: number;
+  ttsVoiceId: string;
   sessionId: string;
   expiresAt: number;
 }
@@ -38,9 +40,9 @@ export const issueVoicePreviewSession = (input: {
   callFlowHash: string;
   callFlowVersion: number;
   configurationVersion: number;
-  agentId: string;
-  agentVersion: number;
-  voiceId: string;
+  voipcloudUserNumber: string;
+  gatewayFlowVersion: number;
+  ttsVoiceId: string;
   now?: Date;
 }): { sessionId: string; token: string } => {
   const sessionId = randomUUID();
@@ -85,9 +87,9 @@ export const verifyVoicePreviewSession = (input: {
   callFlowHash: string;
   callFlowVersion: number;
   configurationVersion: number;
-  agentId: string;
-  agentVersion: number;
-  voiceId: string;
+  voipcloudUserNumber: string;
+  gatewayFlowVersion: number;
+  ttsVoiceId: string;
 }): Promise<{ sessionId: string; passed: boolean }> => {
   const claims = parseVoicePreviewSession(input.previewSessionToken);
   if (
@@ -97,94 +99,38 @@ export const verifyVoicePreviewSession = (input: {
     claims.callFlowHash !== input.callFlowHash ||
     claims.callFlowVersion !== input.callFlowVersion ||
     claims.configurationVersion !== input.configurationVersion ||
-    claims.agentId !== input.agentId ||
-    claims.agentVersion !== input.agentVersion ||
-    claims.voiceId !== input.voiceId
+    claims.voipcloudUserNumber !== input.voipcloudUserNumber ||
+    claims.gatewayFlowVersion !== input.gatewayFlowVersion ||
+    claims.ttsVoiceId !== input.ttsVoiceId
   ) {
     throw new Error('VOICE_PREVIEW_SESSION_INVALID');
   }
   return Promise.resolve({ sessionId: claims.sessionId, passed: true });
 };
 
-const resolveManagedSecret = (reference: string): string => {
-  const environmentName = reference.replace(/^env:/, '');
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(environmentName)) {
-    throw new Error('VOICE_SECRET_REFERENCE_UNSUPPORTED');
-  }
-  const value = process.env[environmentName];
-  if (value === undefined || value.trim() === '') {
-    throw new Error('VOICE_SECRET_NOT_AVAILABLE');
-  }
-  return value;
-};
-
-const asRecord = (value: unknown): Record<string, unknown> | null =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-
 export const getVoiceProviderTester = () => ({
   test: async (input: {
-    secretReference: string;
-    previewPublicKey: string;
-    agentId: string;
-    agentVersion: number;
-    voiceId: string;
+    provider: 'VOIPCLOUD';
+    voipcloudUserNumber: string;
+    gatewayFlowVersion: number;
   }) => {
-    const apiKey = resolveManagedSecret(input.secretReference);
-    const baseUrl = (
-      process.env.RETELL_API_BASE_URL ?? 'https://api.retellai.com'
-    ).replace(/\/$/, '');
-    let response: Response;
-    try {
-      response = await fetch(
-        `${baseUrl}/get-agent/${encodeURIComponent(input.agentId)}?version=${input.agentVersion}`,
-        {
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            Accept: 'application/json'
-          },
-          signal: AbortSignal.timeout(10_000)
-        }
-      );
-    } catch {
-      return {
-        authenticated: false,
-        agentVersionAvailable: false,
-        voiceAvailable: false,
-        previewKeyDomainRestricted: false,
-        recaptchaProtection: 'disabled' as const,
-        recordingDisabled: false
-      };
+    const signingSecret = process.env.VOICE_GATEWAY_SIGNING_SECRET;
+    if (signingSecret === undefined || signingSecret.trim() === '') {
+      throw new Error('VOICE_GATEWAY_SIGNING_SECRET is required');
     }
-    const authenticated = response.status !== 401 && response.status !== 403;
-    const body = response.ok
-      ? asRecord(await response.json().catch(() => null))
-      : null;
-    const allowedOrigins = (process.env.VOICE_PREVIEW_ALLOWED_ORIGINS ?? '')
-      .split(',')
-      .map((origin) => origin.trim())
-      .filter(Boolean);
-    const previewKeyDomainRestricted =
-      input.previewPublicKey.startsWith('public_key_') &&
-      allowedOrigins.length > 0 &&
-      !allowedOrigins.includes('*');
-    const configuredRecaptcha = process.env.VOICE_PREVIEW_RECAPTCHA_MODE;
-    const recaptchaProtection =
-      configuredRecaptcha === 'unsupported'
-        ? 'unsupported' as const
-        : configuredRecaptcha === 'enabled'
-          ? 'enabled' as const
-          : 'disabled' as const;
+    const client = new VoiceGatewayClient({
+      http: new FetchHttpClient(),
+      signingSecret,
+      baseUrl: process.env.VOICE_GATEWAY_URL ?? 'http://voice-gateway:3105'
+    });
+    const health = await client.health();
     return {
-      authenticated,
-      agentVersionAvailable:
-        response.ok && body?.version === input.agentVersion,
-      voiceAvailable: response.ok && body?.voice_id === input.voiceId,
-      previewKeyDomainRestricted,
-      recaptchaProtection,
-      recordingDisabled:
-        process.env.VOICE_PREVIEW_RECORDING_DISABLED === 'true'
+      provider: input.provider,
+      endpoint: 'https://au.voipcloud.online/api/integration/v2',
+      credentialsConfigured: true,
+      gatewayReady: health.ready,
+      gatewayFlowVersion: health.version,
+      customerCallsEnabled: health.callsEnabled
     };
   }
 });

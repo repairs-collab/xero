@@ -7,6 +7,7 @@
     "./http": "./src/http.ts",
     "./retell": "./src/retell/index.ts",
     "./sinch": "./src/sinch/index.ts",
+    "./voice-gateway": "./src/voice-gateway/index.ts",
     "./voipcloud": "./src/voipcloud/index.ts",
     "./xero": "./src/xero/index.ts"
   },

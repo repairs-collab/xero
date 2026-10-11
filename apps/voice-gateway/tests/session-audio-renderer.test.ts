@@ -12,6 +12,7 @@ type RenderInput = {
 
 const command: CreateGatewayCallCommand = {
   version: 1,
+  purpose: 'TEST',
   gatewayCallId: '00000000-0000-4000-8000-000000000501',
   organisationId: '00000000-0000-4000-8000-000000000502',
   voiceCallId: '00000000-0000-4000-8000-000000000503',

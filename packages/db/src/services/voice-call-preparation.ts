@@ -58,9 +58,6 @@ export interface ApprovedVoiceFacts {
   outboundNumber: string;
   combinedAmount: string;
   currency: string;
-  agentId: string;
-  agentVersion: number;
-  voiceId: string;
   voipcloudUserNumber: string;
   ttsVoiceId: string;
   gatewayFlowVersion: number;
@@ -186,9 +183,6 @@ const snapshotFacts = (input: {
   outboundNumber: string;
   combinedAmount: string;
   currency: string;
-  agentId: string;
-  agentVersion: number;
-  voiceId: string;
   voipcloudUserNumber: string;
   ttsVoiceId: string;
   gatewayFlowVersion: number;
@@ -202,9 +196,6 @@ const snapshotFacts = (input: {
     outboundNumber: input.outboundNumber,
     combinedAmount: normaliseVoiceAmount(input.combinedAmount),
     currency: input.currency,
-    agentId: input.agentId,
-    agentVersion: input.agentVersion,
-    voiceId: input.voiceId,
     voipcloudUserNumber: input.voipcloudUserNumber,
     ttsVoiceId: input.ttsVoiceId,
     gatewayFlowVersion: input.gatewayFlowVersion,
@@ -223,9 +214,6 @@ export function approvedVoiceFactsFromStoredCall(
 ): ApprovedVoiceFacts | null {
   if (
     call.accountName === null ||
-    call.agentId === null ||
-    call.agentVersion === null ||
-    call.voiceId === null ||
     call.voipcloudUserNumber === null ||
     call.ttsVoiceId === null ||
     call.gatewayFlowVersion === null
@@ -238,9 +226,6 @@ export function approvedVoiceFactsFromStoredCall(
     outboundNumber: call.outboundNumber,
     combinedAmount: call.combinedAmount,
     currency: call.currency,
-    agentId: call.agentId,
-    agentVersion: call.agentVersion,
-    voiceId: call.voiceId,
     voipcloudUserNumber: call.voipcloudUserNumber,
     ttsVoiceId: call.ttsVoiceId,
     gatewayFlowVersion: call.gatewayFlowVersion,
@@ -580,9 +565,6 @@ export function createVoicePreparationService(
     const approvedFacts =
       destinationNumber !== null &&
       settings !== undefined &&
-      settings.agentId !== null &&
-      settings.agentVersion !== null &&
-      settings.voiceId !== null &&
       settings.voipcloudUserNumber !== null &&
       settings.ttsVoiceId !== null &&
       settings.gatewayFlowVersion !== null
@@ -592,9 +574,6 @@ export function createVoicePreparationService(
             outboundNumber: settings.outboundNumber,
             combinedAmount: invoiceDraft.combinedAmount,
             currency: invoiceDraft.currency,
-            agentId: settings.agentId,
-            agentVersion: settings.agentVersion,
-            voiceId: settings.voiceId,
             voipcloudUserNumber: settings.voipcloudUserNumber,
             ttsVoiceId: settings.ttsVoiceId,
             gatewayFlowVersion: settings.gatewayFlowVersion,
@@ -692,9 +671,6 @@ export function createVoicePreparationService(
       voipcloudUserNumber: facts.voipcloudUserNumber,
       ttsVoiceId: facts.ttsVoiceId,
       gatewayFlowVersion: facts.gatewayFlowVersion,
-      agentId: facts.agentId,
-      agentVersion: facts.agentVersion,
-      voiceId: facts.voiceId,
       voiceSettingsUpdatedAt: new Date(facts.voiceSettingsUpdatedAt),
       transferTargetLabel: facts.transferTargetLabel,
       idempotencyKey: input.idempotencyKey,

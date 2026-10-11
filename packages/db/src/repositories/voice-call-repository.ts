@@ -65,9 +65,9 @@ export interface CreateVoiceCallDraftInput {
   voipcloudUserNumber: string;
   ttsVoiceId: string;
   gatewayFlowVersion: number;
-  agentId: string;
-  agentVersion: number;
-  voiceId: string;
+  agentId?: string | null;
+  agentVersion?: number | null;
+  voiceId?: string | null;
   voiceSettingsUpdatedAt: Date;
   transferTargetLabel: string;
   idempotencyKey: string;
@@ -408,9 +408,9 @@ export class PostgresVoiceCallRepository {
           voipcloudUserNumber: input.voipcloudUserNumber,
           ttsVoiceId: input.ttsVoiceId,
           gatewayFlowVersion: input.gatewayFlowVersion,
-          agentId: input.agentId,
-          agentVersion: input.agentVersion,
-          voiceId: input.voiceId,
+          agentId: input.agentId ?? null,
+          agentVersion: input.agentVersion ?? null,
+          voiceId: input.voiceId ?? null,
           voiceSettingsUpdatedAt: input.voiceSettingsUpdatedAt,
           transferTargetLabel: input.transferTargetLabel,
           idempotencyKey: input.idempotencyKey,

@@ -39,7 +39,8 @@ export function VoiceTestCallPanel({
       </p>
       {!ready ? (
         <div className="suppression-warning" role="alert">
-          Complete the provider test and fictional flow test first.
+          Test VoIPcloud and the gateway first, then confirm the fictional
+          flow preview.
         </div>
       ) : null}
       <form action={prepareAction} className="settings-form">

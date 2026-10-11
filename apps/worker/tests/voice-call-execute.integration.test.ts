@@ -27,10 +27,10 @@ import {
   voiceCallRequests
 } from '@bc5000/db';
 import {
-  type RetellCreatePhoneCallInput,
-  RetellPermanentError,
-  RetellUnknownDispatchError
-} from '@bc5000/integrations/retell';
+  type VoiceGatewayCallCommand,
+  VoiceGatewayPermanentError,
+  VoiceGatewayUnknownDispatchError
+} from '@bc5000/integrations/voice-gateway';
 import { fixedVoiceCallCopy } from '@bc5000/domain';
 
 import { executeVoiceCall } from '../src/handlers/voice-call-execute.js';
@@ -109,13 +109,7 @@ async function seedApprovedCall(
     enabled: options.voiceEnabled ?? true,
     automaticEnabled: options.scheduledAutomatic ?? false,
     configurationVersion: 2,
-    provider: 'RETELL',
-    secretReference: 'env:RETELL_API_KEY',
-    previewPublicKey: 'public-preview-key',
-    agentId: 'agent-accountpulse',
-    agentVersion: 7,
-    voiceId: 'voice-au-1',
-    voiceLabel: 'Australian accounts voice',
+    provider: 'VOIPCLOUD',
     voipcloudUserNumber: '1099',
     ttsVoiceId: 'en_GB-alba-medium',
     gatewayFlowVersion: 1,
@@ -128,6 +122,8 @@ async function seedApprovedCall(
     weekdayEndLocal: '17:00',
     lastConnectionTestedAt: now,
     lastConnectionTestSucceeded: true,
+    lastGatewayTestedAt: now,
+    lastGatewayTestSucceeded: true,
     updatedByUserId: userId,
     updatedAt: voiceSettingsUpdatedAt
   });
@@ -192,9 +188,6 @@ async function seedApprovedCall(
     voipcloudUserNumber: '1099',
     ttsVoiceId: 'en_GB-alba-medium',
     gatewayFlowVersion: 1,
-    agentId: 'agent-accountpulse',
-    agentVersion: 7,
-    voiceId: 'voice-au-1',
     voiceSettingsUpdatedAt,
     transferTargetLabel: 'Main office accounts queue',
     idempotencyKey,
@@ -267,7 +260,7 @@ async function seedApprovedCall(
 
 const executionDependencies = (
   repository: PostgresVoiceCallRepository,
-  createPhoneCall: (input: RetellCreatePhoneCallInput) => Promise<{
+  createPhoneCall: (input: VoiceGatewayCallCommand) => Promise<{
     callId: string;
     callStatus: string;
   }>,
@@ -277,25 +270,29 @@ const executionDependencies = (
     acceptCustomerVoiceCalls?: boolean;
   } = {}
 ) => {
-  const readSecret = vi.fn(() => Promise.resolve('retell-private-key'));
-  const createProvider = vi.fn((apiKey: string) => {
-    expect(apiKey).toBe('retell-private-key');
-    return { createPhoneCall };
-  });
+  const gateway = {
+    createCall: vi.fn(async (input: VoiceGatewayCallCommand) => {
+      const result = await createPhoneCall(input);
+      return {
+        gatewayCallId: result.callId,
+        state: 'PENDING' as const,
+        created: true
+      };
+    })
+  };
   const publish = vi.fn(() => Promise.resolve(randomUUID()));
   return {
     dependencies: {
       database: client.db,
       repository,
       clock: { now: () => options.executionTime ?? now },
-      secrets: { read: readSecret },
-      providerFactory: { create: createProvider },
+      gateway,
+      gatewayCallbackUrl: 'http://web:3000/api/webhooks/voice-gateway',
       publisher: { publish },
       holidays: { list: () => options.holidays ?? [] },
       acceptCustomerVoiceCalls: options.acceptCustomerVoiceCalls ?? true
     },
-    readSecret,
-    createProvider,
+    gateway,
     publish
   };
 };
@@ -481,11 +478,14 @@ describe('voice call execution', () => {
     });
     expect(createPhoneCall).toHaveBeenCalledTimes(1);
     expect(createPhoneCall).toHaveBeenCalledWith(
-      expect.objectContaining({ toNumber: '+61400000002' })
+      expect.objectContaining({
+        purpose: 'TEST',
+        destinationNumber: '+61400000002'
+      })
     );
   });
 
-  it('revalidates approved facts and submits the minimum protected Retell call', async () => {
+  it('revalidates approved facts and submits the minimum protected VoIPcloud gateway command', async () => {
     const seeded = await seedApprovedCall();
     const createPhoneCall = vi.fn(() =>
       Promise.resolve({ callId: 'retell-call-1', callStatus: 'registered' })
@@ -500,27 +500,37 @@ describe('voice call execution', () => {
       })
     ).resolves.toEqual({ kind: 'accepted', providerCallId: 'retell-call-1' });
 
-    expect(runtime.readSecret).toHaveBeenCalledWith('env:RETELL_API_KEY');
     expect(createPhoneCall).toHaveBeenCalledTimes(1);
     expect(createPhoneCall).toHaveBeenCalledWith({
-      fromNumber: '+61255501234',
-      toNumber: '+61412345678',
+      version: 1,
+      purpose: 'CUSTOMER',
+      gatewayCallId: seeded.voiceCallId,
+      organisationId: seeded.organisationId,
+      voiceCallId: seeded.voiceCallId,
       idempotencyKey: seeded.idempotencyKey,
-      agentId: 'agent-accountpulse',
-      agentVersion: 7,
-      dynamicVariables: {
-        accountpulse_call_id: seeded.voiceCallId,
-        invoice_details_json:
-          '[{"invoiceNumber":"INV-VOICE-1","amountDue":"100.00"}]',
-        combined_amount: '100.00',
-        currency: 'AUD',
-        callback_number: '+61255504321',
-        fallback_office_number: '+61255504321',
-        transfer_sip_uri: 'sip:accounts@voipline.example'
+      provider: 'VOIPCLOUD',
+      providerUserNumber: '1099',
+      destinationNumber: '+61412345678',
+      callerId: '+61255501234',
+      flowVersion: 1,
+      ttsVoiceId: 'en_GB-alba-medium',
+      callbackUrl: 'http://web:3000/api/webhooks/voice-gateway',
+      transfer: {
+        sipUri: 'sip:accounts@voipline.example',
+        fallbackNumber: '+61255504321',
+        label: 'Main office accounts queue'
       },
-      metadata: {
-        organisation_id: seeded.organisationId,
-        voice_call_id: seeded.voiceCallId
+      approvedFacts: {
+        accountName: 'Example Customer',
+        combinedAmount: '100.00',
+        currency: 'AUD',
+        invoices: [
+          {
+            invoiceNumber: 'INV-VOICE-1',
+            amountDue: '100.00',
+            dueDate: '2026-09-10'
+          }
+        ]
       }
     });
 
@@ -750,12 +760,12 @@ describe('voice call execution', () => {
       Promise.resolve({ callId: 'not-used', callStatus: 'registered' })
     );
     const runtime = executionDependencies(seeded.repository, createPhoneCall);
-    runtime.readSecret.mockImplementation(async () => {
+    runtime.publish.mockImplementationOnce(async () => {
       await client.db
         .update(invoices)
         .set({ amountDue: '125.0000' })
         .where(eq(invoices.id, seeded.invoiceId));
-      return 'retell-private-key';
+      return randomUUID();
     });
 
     await expect(
@@ -962,7 +972,7 @@ describe('voice call execution', () => {
       mutate: async (seeded: Awaited<ReturnType<typeof seedApprovedCall>>) => {
         await client.db
           .update(organisationVoiceSettings)
-          .set({ voiceId: 'voice-au-2' })
+          .set({ ttsVoiceId: 'en_GB-alba-high' })
           .where(
             eq(
               organisationVoiceSettings.organisationId,
@@ -1095,7 +1105,7 @@ describe('voice call execution', () => {
   it('records a known provider rejection as failed without retrying', async () => {
     const seeded = await seedApprovedCall();
     const createPhoneCall = vi.fn(() =>
-      Promise.reject(new RetellPermanentError(400, 'unsafe provider detail'))
+      Promise.reject(new VoiceGatewayPermanentError(400))
     );
     const runtime = executionDependencies(seeded.repository, createPhoneCall);
 
@@ -1118,34 +1128,10 @@ describe('voice call execution', () => {
     expect(JSON.stringify(stored)).not.toContain('unsafe provider detail');
   });
 
-  it('does not claim the call when the managed provider secret is unavailable', async () => {
-    const seeded = await seedApprovedCall();
-    const createPhoneCall = vi.fn(() =>
-      Promise.resolve({ callId: 'not-used', callStatus: 'registered' })
-    );
-    const runtime = executionDependencies(seeded.repository, createPhoneCall);
-    runtime.readSecret.mockRejectedValue(
-      new Error('Managed secret is unavailable')
-    );
-
-    await expect(
-      executeVoiceCall(runtime.dependencies, {
-        organisationId: seeded.organisationId,
-        voiceCallId: seeded.voiceCallId
-      })
-    ).rejects.toThrow('Managed secret is unavailable');
-    expect(createPhoneCall).not.toHaveBeenCalled();
-    const [stored] = await client.db
-      .select()
-      .from(voiceCallRequests)
-      .where(eq(voiceCallRequests.id, seeded.voiceCallId));
-    expect(stored?.state).toBe('QUEUED');
-  });
-
   it('records an uncertain dispatch as unknown and queues reconciliation only', async () => {
     const seeded = await seedApprovedCall();
     const createPhoneCall = vi.fn(() =>
-      Promise.reject(new RetellUnknownDispatchError('unsafe network detail'))
+      Promise.reject(new VoiceGatewayUnknownDispatchError())
     );
     const runtime = executionDependencies(seeded.repository, createPhoneCall);
 

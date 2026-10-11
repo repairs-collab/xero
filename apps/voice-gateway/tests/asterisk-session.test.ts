@@ -14,6 +14,7 @@ import {
 
 const command = (overrides: Partial<CreateGatewayCallCommand> = {}): CreateGatewayCallCommand => ({
   version: 1,
+  purpose: 'TEST',
   gatewayCallId: '00000000-0000-4000-8000-000000000401',
   organisationId: '00000000-0000-4000-8000-000000000402',
   voiceCallId: '00000000-0000-4000-8000-000000000403',

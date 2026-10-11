@@ -35,9 +35,9 @@ const settingsCards: SettingsCard[] = [
     href: '/settings/integrations'
   },
   {
-    eyebrow: 'Voice',
-    title: 'Voice reminders',
-    description: 'Configure and test manual, privacy-safe customer calls',
+    eyebrow: 'Voice integration',
+    title: 'VoIPcloud voice',
+    description: 'Configure the Australian VoIPcloud gateway and test calls',
     href: '/settings/voice',
     adminOnly: true
   },

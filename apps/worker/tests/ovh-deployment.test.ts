@@ -103,13 +103,15 @@ describe('OVH voice deployment', () => {
     );
   });
 
-  it('injects the private Retell credential only into server containers', () => {
+  it('injects the private VoIPcloud gateway credential only into server containers', () => {
     const compose = deploymentFile('docker-compose.yml');
 
     expect(compose).toContain('ACCOUNT_PULSE_WEB_IMAGE');
     expect(compose).toContain('ACCOUNT_PULSE_WORKER_IMAGE');
-    expect(compose.match(/^\s+RETELL_API_KEY:/gm)).toHaveLength(3);
-    expect(compose).not.toMatch(/NEXT_PUBLIC_.*RETELL/i);
+    expect(compose.match(/^\s+VOICE_GATEWAY_SIGNING_SECRET:/gm)).toHaveLength(3);
+    expect(compose.match(/^\s+VOICE_GATEWAY_URL:/gm)).toHaveLength(2);
+    expect(compose).not.toContain('RETELL_API_KEY:');
+    expect(compose).not.toMatch(/NEXT_PUBLIC_.*VOICE_GATEWAY/i);
     expect(compose).not.toContain('.dkr.ecr.');
     expect(compose).toContain('SEND_MODE: ${SEND_MODE:?SEND_MODE is required}');
   });

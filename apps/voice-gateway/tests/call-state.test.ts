@@ -95,4 +95,18 @@ describe('advanceGatewayCall', () => {
       /invoice|amount|accountName|destinationNumber|recording|transcript/i
     );
   });
+
+  it('retains a safe terminal outcome code for AccountPulse reconciliation', () => {
+    expect(
+      advanceGatewayCall(
+        { ...initialState, state: 'IN_PROGRESS', lastEventSequence: 5 },
+        event(6, 'TRANSFERRED', 'VOICE_TRANSFERRED')
+      )
+    ).toEqual({
+      gatewayCallId,
+      state: 'COMPLETED',
+      lastEventSequence: 6,
+      safeFailureCode: 'VOICE_TRANSFERRED'
+    });
+  });
 });

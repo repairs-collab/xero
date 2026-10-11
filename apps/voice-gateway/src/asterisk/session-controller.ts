@@ -269,7 +269,13 @@ export class AsteriskSessionController {
         session.customerChannelId,
         event.channelId
       ]);
-      await this.finish(session, 'TRANSFERRED', undefined, false, false);
+      await this.finish(
+        session,
+        'TRANSFERRED',
+        'VOICE_TRANSFERRED',
+        false,
+        false
+      );
       return;
     }
 
@@ -369,11 +375,11 @@ export class AsteriskSessionController {
       this.armInputTimer(session);
     } else if (kind === 'details') {
       await this.emit(session, 'DETAILS_DELIVERED');
-      await this.finish(session, 'COMPLETED');
+      await this.finish(session, 'COMPLETED', 'VOICE_REMINDER_DELIVERED');
     } else if (kind === 'transfer-unanswered') {
       await this.completeTerminalSession(session);
     } else if (kind === 'voicemail') {
-      await this.finish(session, 'COMPLETED');
+      await this.finish(session, 'COMPLETED', 'VOICE_VOICEMAIL_LEFT');
     }
   }
 

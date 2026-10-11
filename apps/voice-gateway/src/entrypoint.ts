@@ -84,8 +84,8 @@ const server = createGatewayServer({
   signingSecret: requiredEnvironment('VOICE_GATEWAY_SIGNING_SECRET'),
   clock,
   supportedFlowVersion: 1,
+  customerCallsEnabled: voiceCallsEnabled,
   startCall: async (command) => {
-    if (!voiceCallsEnabled) throw new Error('GATEWAY_VOICE_DISABLED');
     await controller.start(command);
   }
 });

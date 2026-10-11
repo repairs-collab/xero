@@ -50,7 +50,7 @@ describe('VoiceTestCallPanel', () => {
         draft: null
       })
     );
-    expect(html).toContain('Complete the provider test and fictional flow test first');
+    expect(html).toContain('Test VoIPcloud and the gateway first');
     expect(html).toContain('disabled=""');
   });
 });

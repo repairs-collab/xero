@@ -15,6 +15,7 @@ export interface ApprovedVoiceFacts {
 
 export interface CreateGatewayCallCommand {
   version: 1;
+  purpose: 'TEST' | 'CUSTOMER';
   gatewayCallId: string;
   organisationId: string;
   voiceCallId: string;
@@ -106,6 +107,7 @@ export const parseCreateGatewayCallCommand = (
   const command = asRecord(value);
   const requiredKeys = [
     'version',
+    'purpose',
     'gatewayCallId',
     'organisationId',
     'voiceCallId',
@@ -167,6 +169,7 @@ export const parseCreateGatewayCallCommand = (
   const callbackUrl = parseCallbackUrl(command.callbackUrl);
   if (
     command.version !== 1 ||
+    !['TEST', 'CUSTOMER'].includes(String(command.purpose)) ||
     !uuidPattern.test(String(command.gatewayCallId)) ||
     !uuidPattern.test(String(command.organisationId)) ||
     !uuidPattern.test(String(command.voiceCallId)) ||
@@ -200,6 +203,7 @@ export const parseCreateGatewayCallCommand = (
 
   return {
     version: 1,
+    purpose: command.purpose as 'TEST' | 'CUSTOMER',
     gatewayCallId: command.gatewayCallId as string,
     organisationId: command.organisationId as string,
     voiceCallId: command.voiceCallId as string,

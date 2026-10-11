@@ -8,11 +8,11 @@ import {
   PostgresVoiceCallRepository
 } from '@bc5000/db';
 import { FetchHttpClient } from '@bc5000/integrations/http';
-import { RetellClient } from '@bc5000/integrations/retell';
 import {
   SinchClient,
   type SinchCredentials
 } from '@bc5000/integrations/sinch';
+import { VoiceGatewayClient } from '@bc5000/integrations/voice-gateway';
 import {
   requiredXeroScopes,
   XeroClient,
@@ -46,7 +46,6 @@ import { createOperationalResetService } from './operations/operational-reset.js
 import { evaluateVoiceMonitor } from './operations/voice-monitor.js';
 import { processInboundReply } from './services/inbound-reply-service.js';
 import {
-  createEnvironmentSecretReader,
   databaseUrlFromEnvironment,
   parseApprovedSmsRecoveryCommand,
   parseInboundReplyRecoveryCommand,
@@ -291,12 +290,17 @@ async function main() {
   const voiceCallRepository = new PostgresVoiceCallRepository(
     databaseClient.db
   );
-  const voiceSecretReader = createEnvironmentSecretReader(process.env);
+  const voiceGateway = new VoiceGatewayClient({
+    http,
+    signingSecret: required('VOICE_GATEWAY_SIGNING_SECRET'),
+    baseUrl: process.env.VOICE_GATEWAY_URL ?? 'http://voice-gateway:3105'
+  });
   const queue = new DurableJobQueue({
     databaseUrl,
     logger: console
   });
   const callbackUrl = `${required('PUBLIC_BASE_URL').replace(/\/$/, '')}/api/webhooks/sinch`;
+  const voiceGatewayCallbackUrl = `${required('PUBLIC_BASE_URL').replace(/\/$/, '')}/api/webhooks/voice-gateway`;
   const allRows = await waitForDatabaseMigrations({
     load: async () => {
       const liveRows = await databaseClient.db
@@ -378,10 +382,8 @@ async function main() {
             database: databaseClient.db,
             repository: voiceCallRepository,
             clock,
-            secrets: voiceSecretReader,
-            providerFactory: {
-              create: (apiKey) => new RetellClient({ http, apiKey })
-            },
+            gateway: voiceGateway,
+            gatewayCallbackUrl: voiceGatewayCallbackUrl,
             publisher: queue,
             holidays: { list: () => [] },
             acceptCustomerVoiceCalls:
@@ -394,10 +396,7 @@ async function main() {
           {
             database: databaseClient.db,
             clock,
-            secrets: voiceSecretReader,
-            providerFactory: {
-              create: (apiKey) => new RetellClient({ http, apiKey })
-            },
+            gateway: voiceGateway,
             publisher: queue
           },
           payload
