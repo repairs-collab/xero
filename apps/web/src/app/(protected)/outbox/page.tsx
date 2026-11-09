@@ -29,6 +29,7 @@ const sources = new Set<OutboundSource>([
   'ESCALATION_SMS',
   'INBOX_REPLY',
   'TEST_SMS',
+  'VERIFICATION_OTP',
   'XERO_EMAIL'
 ]);
 const statuses = new Set<OutboundStatus>([
