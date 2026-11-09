@@ -1,6 +1,7 @@
 export const permissions = {
   ADMIN: [
     'user.manage',
+    'billing.manage',
     'provider.configure',
     'sequence.manage',
     'sequence.set-automatic',

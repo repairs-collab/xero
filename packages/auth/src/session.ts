@@ -15,6 +15,7 @@ interface StoredSession {
 export interface MembershipSnapshot {
   userId: string;
   displayName: string;
+  active: boolean;
   memberships: SessionMembership[];
 }
 
@@ -114,7 +115,7 @@ export async function createSessionCookie(
 export const clearSessionCookie = (): string =>
   `${cookieName}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Lax`;
 
-export async function requireSession(
+export async function requireIdentitySession(
   request: Request,
   options: {
     secret: Uint8Array;
@@ -137,7 +138,7 @@ export async function requireSession(
   );
   const activeMemberships =
     snapshot?.memberships.filter((membership) => membership.active) ?? [];
-  if (snapshot === null || activeMemberships.length === 0) {
+  if (snapshot === null || !snapshot.active) {
     throw new AuthenticationFailure();
   }
   return {
@@ -147,4 +148,17 @@ export async function requireSession(
     expiresAt: stored.expiresAt,
     memberships: activeMemberships
   };
+}
+
+export async function requireSession(
+  request: Request,
+  options: {
+    secret: Uint8Array;
+    memberships: MembershipLoader;
+    now?: Date;
+  }
+): Promise<AppSession> {
+  const identity = await requireIdentitySession(request, options);
+  if (identity.memberships.length === 0) throw new AuthenticationFailure();
+  return identity;
 }

@@ -42,7 +42,12 @@ describe('Cognito authorisation-code flow', () => {
     const request = createCognitoAuthorizationRequest(config);
     const { privateKey, publicKey } = await generateKeyPair('RS256');
     const jwk = await exportJWK(publicKey);
-    const idToken = await new SignJWT({ nonce: request.transaction.nonce })
+    const idToken = await new SignJWT({
+      nonce: request.transaction.nonce,
+      email: 'Owner@Example.com',
+      email_verified: true,
+      name: 'AccountPulse Owner'
+    })
       .setProtectedHeader({ alg: 'RS256', kid: 'test-key' })
       .setIssuer(config.issuer)
       .setAudience(config.clientId)
@@ -74,7 +79,11 @@ describe('Cognito authorisation-code flow', () => {
       }
     );
 
-    expect(identity).toEqual({ subject: 'cognito-subject-1' });
+    expect(identity).toEqual({
+      subject: 'cognito-subject-1',
+      email: 'Owner@Example.com',
+      name: 'AccountPulse Owner'
+    });
     const [, init] = fetcher.mock.calls[0] ?? [];
     expect(init?.method).toBe('POST');
     expect(init?.body).toBeInstanceOf(URLSearchParams);
@@ -82,6 +91,80 @@ describe('Cognito authorisation-code flow', () => {
       throw new Error('Expected form-encoded token request');
     }
     expect(init.body.has('code_verifier')).toBe(true);
+  });
+
+  it.each([
+    { email_verified: true },
+    { email: 'owner@example.com' },
+    { email: 'owner@example.com', email_verified: false },
+    { email: 'owner@example.com', email_verified: 'true' }
+  ])('rejects missing or unverified email claims: %j', async (claims) => {
+    const request = createCognitoAuthorizationRequest(config);
+    const { privateKey, publicKey } = await generateKeyPair('RS256');
+    const jwk = await exportJWK(publicKey);
+    const idToken = await new SignJWT({
+      nonce: request.transaction.nonce,
+      ...claims
+    })
+      .setProtectedHeader({ alg: 'RS256', kid: 'test-key' })
+      .setIssuer(config.issuer)
+      .setAudience(config.clientId)
+      .setSubject('cognito-subject-1')
+      .setIssuedAt()
+      .setExpirationTime('5m')
+      .sign(privateKey);
+
+    await expect(
+      exchangeCognitoCode(
+        {
+          code: 'code-1',
+          returnedState: request.transaction.state,
+          transaction: request.transaction
+        },
+        config,
+        {
+          fetcher: () => Promise.resolve(Response.json({ id_token: idToken })),
+          jwks: createLocalJWKSet({ keys: [{ ...jwk, kid: 'test-key' }] })
+        }
+      )
+    ).rejects.toThrow(CognitoAuthenticationFailure);
+  });
+
+  it('omits an invalid optional name claim', async () => {
+    const request = createCognitoAuthorizationRequest(config);
+    const { privateKey, publicKey } = await generateKeyPair('RS256');
+    const jwk = await exportJWK(publicKey);
+    const idToken = await new SignJWT({
+      nonce: request.transaction.nonce,
+      email: 'owner@example.com',
+      email_verified: true,
+      name: 42
+    })
+      .setProtectedHeader({ alg: 'RS256', kid: 'test-key' })
+      .setIssuer(config.issuer)
+      .setAudience(config.clientId)
+      .setSubject('cognito-subject-1')
+      .setIssuedAt()
+      .setExpirationTime('5m')
+      .sign(privateKey);
+
+    await expect(
+      exchangeCognitoCode(
+        {
+          code: 'code-1',
+          returnedState: request.transaction.state,
+          transaction: request.transaction
+        },
+        config,
+        {
+          fetcher: () => Promise.resolve(Response.json({ id_token: idToken })),
+          jwks: createLocalJWKSet({ keys: [{ ...jwk, kid: 'test-key' }] })
+        }
+      )
+    ).resolves.toEqual({
+      subject: 'cognito-subject-1',
+      email: 'owner@example.com'
+    });
   });
 
   it('rejects a state mismatch before calling the token endpoint', async () => {

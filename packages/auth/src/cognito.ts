@@ -29,6 +29,12 @@ export interface CognitoAuthorizationRequest {
   transaction: CognitoLoginTransaction;
 }
 
+export interface CognitoIdentityClaims {
+  subject: string;
+  email: string;
+  name?: string;
+}
+
 export class CognitoAuthenticationFailure extends Error {
   constructor(message = 'COGNITO_AUTHENTICATION_FAILED') {
     super(message);
@@ -101,7 +107,11 @@ const randomBase64Url = (bytes = 32): string =>
 
 export function createCognitoAuthorizationRequest(
   configuration: CognitoConfiguration,
-  options: { now?: Date; returnTo?: string } = {}
+  options: {
+    now?: Date;
+    returnTo?: string;
+    screenHint?: 'signup';
+  } = {}
 ): CognitoAuthorizationRequest {
   const now = options.now ?? new Date();
   const state = randomBase64Url();
@@ -119,6 +129,9 @@ export function createCognitoAuthorizationRequest(
   url.searchParams.set('nonce', nonce);
   url.searchParams.set('code_challenge', codeChallenge);
   url.searchParams.set('code_challenge_method', 'S256');
+  if (options.screenHint !== undefined) {
+    url.searchParams.set('screen_hint', options.screenHint);
+  }
   return {
     url: url.toString(),
     transaction: {
@@ -143,7 +156,7 @@ export async function exchangeCognitoCode(
     jwks?: JWTVerifyGetKey;
     now?: Date;
   } = {}
-): Promise<{ subject: string }> {
+): Promise<CognitoIdentityClaims> {
   const now = options.now ?? new Date();
   if (
     input.returnedState !== input.transaction.state ||
@@ -193,11 +206,21 @@ export async function exchangeCognitoCode(
     });
     if (
       verified.payload.nonce !== input.transaction.nonce ||
-      typeof verified.payload.sub !== 'string'
+      typeof verified.payload.sub !== 'string' ||
+      typeof verified.payload.email !== 'string' ||
+      verified.payload.email.trim() === '' ||
+      verified.payload.email_verified !== true
     ) {
       throw new CognitoAuthenticationFailure();
     }
-    return { subject: verified.payload.sub };
+    return {
+      subject: verified.payload.sub,
+      email: verified.payload.email,
+      ...(typeof verified.payload.name === 'string' &&
+      verified.payload.name.trim() !== ''
+        ? { name: verified.payload.name }
+        : {})
+    };
   } catch (error) {
     if (error instanceof CognitoAuthenticationFailure) throw error;
     throw new CognitoAuthenticationFailure();

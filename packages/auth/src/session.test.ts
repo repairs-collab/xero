@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AuthenticationFailure,
   createSessionCookie,
+  requireIdentitySession,
   requireSession
 } from './session.js';
 
@@ -32,6 +33,7 @@ describe('encrypted application sessions', () => {
             Promise.resolve({
               userId: 'user-1',
               displayName: 'Alex',
+              active: true,
               memberships: [
                 { organisationId: 'org-1', role: 'ADMIN', active: true }
               ]
@@ -86,10 +88,76 @@ describe('encrypted application sessions', () => {
           secret,
           now: new Date('2026-09-18T01:00:00.000Z'),
           memberships: {
-            loadForSubject: () => Promise.resolve(null)
+            loadForSubject: () =>
+              Promise.resolve({
+                userId: 'user-1',
+                displayName: 'Alex',
+                active: true,
+                memberships: []
+              })
           }
         }
       )
     ).rejects.toThrow('UNAUTHENTICATED');
+  });
+
+  it('accepts an enabled identity before organisation provisioning', async () => {
+    const cookie = await createSessionCookie(
+      { cognitoSubject: 'subject-1' },
+      { secret, now: issuedAt }
+    );
+
+    await expect(
+      requireIdentitySession(
+        new Request('https://bill-chaser.test/onboarding', {
+          headers: { cookie: cookie.split(';')[0] ?? '' }
+        }),
+        {
+          secret,
+          now: new Date('2026-09-18T01:00:00.000Z'),
+          memberships: {
+            loadForSubject: () =>
+              Promise.resolve({
+                userId: 'user-1',
+                displayName: 'Alex',
+                active: true,
+                memberships: []
+              })
+          }
+        }
+      )
+    ).resolves.toMatchObject({
+      userId: 'user-1',
+      cognitoSubject: 'subject-1',
+      memberships: []
+    });
+  });
+
+  it('rejects a disabled identity before organisation provisioning', async () => {
+    const cookie = await createSessionCookie(
+      { cognitoSubject: 'subject-1' },
+      { secret, now: issuedAt }
+    );
+
+    await expect(
+      requireIdentitySession(
+        new Request('https://bill-chaser.test/onboarding', {
+          headers: { cookie: cookie.split(';')[0] ?? '' }
+        }),
+        {
+          secret,
+          now: new Date('2026-09-18T01:00:00.000Z'),
+          memberships: {
+            loadForSubject: () =>
+              Promise.resolve({
+                userId: 'user-1',
+                displayName: 'Alex',
+                active: false,
+                memberships: []
+              })
+          }
+        }
+      )
+    ).rejects.toThrow(AuthenticationFailure);
   });
 });
