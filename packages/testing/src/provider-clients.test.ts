@@ -25,7 +25,10 @@ describe('provider clients against the deterministic harness', () => {
     });
     const client = new XeroClient({
       http: new FetchHttpClient(),
-      tokenProvider: { getAccessToken: () => Promise.resolve('test-token') },
+      sessionProvider: {
+        getSession: () =>
+          Promise.resolve({ accessToken: 'test-token', tenantId: null })
+      },
       baseUrl: `${harness.baseUrl}/api.xro/2.0`
     });
 
