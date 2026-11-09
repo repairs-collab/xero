@@ -6,7 +6,10 @@
   "exports": {
     "./http": "./src/http.ts",
     "./retell": "./src/retell/index.ts",
+    "./sms": "./src/sms/index.ts",
     "./sinch": "./src/sinch/index.ts",
+    "./stripe": "./src/stripe/index.ts",
+    "./voice-gateway": "./src/voice-gateway/index.ts",
     "./voipcloud": "./src/voipcloud/index.ts",
     "./xero": "./src/xero/index.ts"
   },
@@ -15,7 +18,8 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@bc5000/domain": "workspace:*"
+    "@bc5000/domain": "workspace:*",
+    "stripe": "22.3.2"
   },
   "devDependencies": {
     "@types/node": "^24.10.0"
