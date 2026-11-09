@@ -19,6 +19,7 @@ export class PostgresMembershipLoader implements MembershipLoader {
     return {
       userId: first.user.id,
       displayName: first.user.displayName,
+      active: first.user.disabledAt === null,
       memberships: rows.flatMap((row) =>
         row.membership === null
           ? []
@@ -26,9 +27,7 @@ export class PostgresMembershipLoader implements MembershipLoader {
               {
                 organisationId: row.membership.organisationId,
                 role: row.membership.role,
-                active:
-                  first.user.disabledAt === null &&
-                  row.membership.disabledAt === null
+                active: row.membership.disabledAt === null
               }
             ]
       )

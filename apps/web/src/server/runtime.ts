@@ -1,15 +1,67 @@
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import {
+  createHmac,
+  randomInt,
+  randomUUID,
+  timingSafeEqual
+} from 'node:crypto';
+
+import { and, eq, isNull } from 'drizzle-orm';
 
 import {
   type AppSession,
   type CognitoConfiguration,
+  requireIdentitySession,
   requireSession
 } from '@bc5000/auth';
-import { createDatabase, type DatabaseClient } from '@bc5000/db/web';
+import {
+  auditEvents,
+  createDatabase,
+  memberships,
+  organisations,
+  PostgresSmsCommerceRepository,
+  PostgresXeroConnectionRepository,
+  type DatabaseClient
+} from '@bc5000/db/web';
+import { FetchHttpClient } from '@bc5000/integrations/http';
+import {
+  createStripeBillingClient,
+  type StripeRuntimeConfiguration
+} from '@bc5000/integrations/stripe';
+import { VoiceGatewayClient } from '@bc5000/integrations/voice-gateway';
+import {
+  AesGcmTokenCipher,
+  XeroClient,
+  XeroOAuthClient,
+  XeroOAuthSessionProvider,
+  type TokenCipher
+} from '@bc5000/integrations/xero';
+import { ensureRecurringSchedules, jobNames } from '@bc5000/jobs';
 
+import {
+  createOnboardingService,
+  createPostgresOnboardingRepository
+} from '../app/onboarding/onboarding-service.js';
+import {
+  createMobileVerificationService,
+  createPostgresMobileVerificationRepository
+} from '../app/onboarding/mobile-verification-service.js';
+import { getJobQueue } from './job-runtime.js';
 import { PostgresMembershipLoader } from './membership-loader.js';
+import {
+  createPostgresSoloProvisioningRepository,
+  createSoloProvisioningService
+} from './solo-provisioning-service.js';
+import { createPostgresSubscriptionRepository } from './subscription-repository.js';
+import { createSubscriptionService } from './subscription-service.js';
+import { createXeroOAuthService } from './xero-oauth-service.js';
 
 let databaseClient: DatabaseClient | undefined;
+let xeroOAuthService:
+  | ReturnType<typeof createXeroOAuthService>
+  | undefined;
+let subscriptionServicePromise:
+  | Promise<ReturnType<typeof createSubscriptionService>>
+  | undefined;
 
 interface VoicePreviewSessionClaims {
   organisationId: string;
@@ -17,9 +69,9 @@ interface VoicePreviewSessionClaims {
   callFlowHash: string;
   callFlowVersion: number;
   configurationVersion: number;
-  agentId: string;
-  agentVersion: number;
-  voiceId: string;
+  voipcloudUserNumber: string;
+  gatewayFlowVersion: number;
+  ttsVoiceId: string;
   sessionId: string;
   expiresAt: number;
 }
@@ -38,9 +90,9 @@ export const issueVoicePreviewSession = (input: {
   callFlowHash: string;
   callFlowVersion: number;
   configurationVersion: number;
-  agentId: string;
-  agentVersion: number;
-  voiceId: string;
+  voipcloudUserNumber: string;
+  gatewayFlowVersion: number;
+  ttsVoiceId: string;
   now?: Date;
 }): { sessionId: string; token: string } => {
   const sessionId = randomUUID();
@@ -85,9 +137,9 @@ export const verifyVoicePreviewSession = (input: {
   callFlowHash: string;
   callFlowVersion: number;
   configurationVersion: number;
-  agentId: string;
-  agentVersion: number;
-  voiceId: string;
+  voipcloudUserNumber: string;
+  gatewayFlowVersion: number;
+  ttsVoiceId: string;
 }): Promise<{ sessionId: string; passed: boolean }> => {
   const claims = parseVoicePreviewSession(input.previewSessionToken);
   if (
@@ -97,94 +149,38 @@ export const verifyVoicePreviewSession = (input: {
     claims.callFlowHash !== input.callFlowHash ||
     claims.callFlowVersion !== input.callFlowVersion ||
     claims.configurationVersion !== input.configurationVersion ||
-    claims.agentId !== input.agentId ||
-    claims.agentVersion !== input.agentVersion ||
-    claims.voiceId !== input.voiceId
+    claims.voipcloudUserNumber !== input.voipcloudUserNumber ||
+    claims.gatewayFlowVersion !== input.gatewayFlowVersion ||
+    claims.ttsVoiceId !== input.ttsVoiceId
   ) {
     throw new Error('VOICE_PREVIEW_SESSION_INVALID');
   }
   return Promise.resolve({ sessionId: claims.sessionId, passed: true });
 };
 
-const resolveManagedSecret = (reference: string): string => {
-  const environmentName = reference.replace(/^env:/, '');
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(environmentName)) {
-    throw new Error('VOICE_SECRET_REFERENCE_UNSUPPORTED');
-  }
-  const value = process.env[environmentName];
-  if (value === undefined || value.trim() === '') {
-    throw new Error('VOICE_SECRET_NOT_AVAILABLE');
-  }
-  return value;
-};
-
-const asRecord = (value: unknown): Record<string, unknown> | null =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-
 export const getVoiceProviderTester = () => ({
   test: async (input: {
-    secretReference: string;
-    previewPublicKey: string;
-    agentId: string;
-    agentVersion: number;
-    voiceId: string;
+    provider: 'VOIPCLOUD';
+    voipcloudUserNumber: string;
+    gatewayFlowVersion: number;
   }) => {
-    const apiKey = resolveManagedSecret(input.secretReference);
-    const baseUrl = (
-      process.env.RETELL_API_BASE_URL ?? 'https://api.retellai.com'
-    ).replace(/\/$/, '');
-    let response: Response;
-    try {
-      response = await fetch(
-        `${baseUrl}/get-agent/${encodeURIComponent(input.agentId)}?version=${input.agentVersion}`,
-        {
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            Accept: 'application/json'
-          },
-          signal: AbortSignal.timeout(10_000)
-        }
-      );
-    } catch {
-      return {
-        authenticated: false,
-        agentVersionAvailable: false,
-        voiceAvailable: false,
-        previewKeyDomainRestricted: false,
-        recaptchaProtection: 'disabled' as const,
-        recordingDisabled: false
-      };
+    const signingSecret = process.env.VOICE_GATEWAY_SIGNING_SECRET;
+    if (signingSecret === undefined || signingSecret.trim() === '') {
+      throw new Error('VOICE_GATEWAY_SIGNING_SECRET is required');
     }
-    const authenticated = response.status !== 401 && response.status !== 403;
-    const body = response.ok
-      ? asRecord(await response.json().catch(() => null))
-      : null;
-    const allowedOrigins = (process.env.VOICE_PREVIEW_ALLOWED_ORIGINS ?? '')
-      .split(',')
-      .map((origin) => origin.trim())
-      .filter(Boolean);
-    const previewKeyDomainRestricted =
-      input.previewPublicKey.startsWith('public_key_') &&
-      allowedOrigins.length > 0 &&
-      !allowedOrigins.includes('*');
-    const configuredRecaptcha = process.env.VOICE_PREVIEW_RECAPTCHA_MODE;
-    const recaptchaProtection =
-      configuredRecaptcha === 'unsupported'
-        ? 'unsupported' as const
-        : configuredRecaptcha === 'enabled'
-          ? 'enabled' as const
-          : 'disabled' as const;
+    const client = new VoiceGatewayClient({
+      http: new FetchHttpClient(),
+      signingSecret,
+      baseUrl: process.env.VOICE_GATEWAY_URL ?? 'http://voice-gateway:3105'
+    });
+    const health = await client.health();
     return {
-      authenticated,
-      agentVersionAvailable:
-        response.ok && body?.version === input.agentVersion,
-      voiceAvailable: response.ok && body?.voice_id === input.voiceId,
-      previewKeyDomainRestricted,
-      recaptchaProtection,
-      recordingDisabled:
-        process.env.VOICE_PREVIEW_RECORDING_DISABLED === 'true'
+      provider: input.provider,
+      endpoint: 'https://au.voipcloud.online/api/integration/v2',
+      credentialsConfigured: true,
+      gatewayReady: health.ready,
+      gatewayFlowVersion: health.version,
+      customerCallsEnabled: health.callsEnabled
     };
   }
 });
@@ -232,9 +228,248 @@ export const getCognitoConfiguration = (): CognitoConfiguration => {
   };
 };
 
+export interface XeroOAuthConfiguration {
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+}
+
+export const getXeroOAuthConfiguration = (): XeroOAuthConfiguration => {
+  const clientId = process.env.XERO_OAUTH_CLIENT_ID;
+  const clientSecret = process.env.XERO_OAUTH_CLIENT_SECRET;
+  const redirectUri = process.env.XERO_OAUTH_REDIRECT_URI;
+  if (
+    clientId === undefined ||
+    clientId.trim() === '' ||
+    clientSecret === undefined ||
+    clientSecret.trim() === '' ||
+    redirectUri === undefined ||
+    redirectUri.trim() === ''
+  ) {
+    throw new Error('Xero OAuth configuration is incomplete');
+  }
+  return { clientId, clientSecret, redirectUri };
+};
+
+export const getXeroTokenCipher = (): TokenCipher => {
+  const keysJson = process.env.XERO_TOKEN_ENCRYPTION_KEYS_JSON;
+  const activeKeyId = process.env.XERO_TOKEN_ACTIVE_KEY_ID;
+  if (
+    keysJson === undefined ||
+    keysJson.trim() === '' ||
+    activeKeyId === undefined ||
+    activeKeyId.trim() === ''
+  ) {
+    throw new Error('Xero token encryption configuration is incomplete');
+  }
+  return AesGcmTokenCipher.fromEnvironment({ keysJson, activeKeyId });
+};
+
+export const getStripeConfiguration = (): StripeRuntimeConfiguration => {
+  const secretKey = process.env.STRIPE_SECRET_KEY?.trim();
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET?.trim();
+  const soloPriceId = process.env.STRIPE_SOLO_PRICE_ID?.trim();
+  const portalConfigurationId =
+    process.env.STRIPE_PORTAL_CONFIGURATION_ID?.trim();
+  const publicBaseUrl = process.env.PUBLIC_BASE_URL?.trim();
+  if (
+    !secretKey ||
+    !webhookSecret ||
+    !soloPriceId ||
+    !portalConfigurationId ||
+    !publicBaseUrl
+  ) {
+    throw new Error('Stripe billing configuration is incomplete');
+  }
+  let publicUrl: URL;
+  try {
+    publicUrl = new URL(publicBaseUrl);
+  } catch {
+    throw new Error('PUBLIC_BASE_URL must be an HTTPS origin');
+  }
+  if (
+    publicUrl.protocol !== 'https:' ||
+    publicUrl.pathname !== '/' ||
+    publicUrl.search !== '' ||
+    publicUrl.hash !== '' ||
+    publicUrl.username !== '' ||
+    publicUrl.password !== ''
+  ) {
+    throw new Error('PUBLIC_BASE_URL must be an HTTPS origin');
+  }
+  return {
+    secretKey,
+    webhookSecret,
+    soloPriceId,
+    portalConfigurationId,
+    publicBaseUrl: publicUrl.origin,
+    priceCurrency: 'aud',
+    automaticTaxEnabled: true,
+    webhookToleranceSeconds: 300
+  };
+};
+
+export const getSubscriptionService = () => {
+  if (subscriptionServicePromise === undefined) {
+    const configuration = getStripeConfiguration();
+    const clock = { now: () => new Date() };
+    subscriptionServicePromise = Promise.resolve(
+      createSubscriptionService({
+        stripe: createStripeBillingClient(configuration),
+        repository: createPostgresSubscriptionRepository(
+          getDatabaseClient().db,
+          clock
+        ),
+        soloPriceId: configuration.soloPriceId,
+        clock,
+        publishLifecycle: async (input) => {
+          const queue = await getJobQueue();
+          await queue.publish(jobNames.subscriptionLifecycle, input, {
+            singletonKey: `${jobNames.subscriptionLifecycle}:${input.organisationId}:${input.status}`,
+            deduplicateWhileActive: true
+          });
+        },
+        publishNumberProvision: async (input) => {
+          const queue = await getJobQueue();
+          await queue.publish(jobNames.smsNumberProvision, input, {
+            singletonKey: `${jobNames.smsNumberProvision}:${input.organisationId}`,
+            deduplicateWhileActive: true
+          });
+        }
+      })
+    );
+  }
+  return subscriptionServicePromise;
+};
+
+export const getOnboardingService = () =>
+  createOnboardingService({
+    repository: createPostgresOnboardingRepository(getDatabaseClient().db),
+    clock: { now: () => new Date() }
+  });
+
+export const getSmsCommerceRepository = () =>
+  new PostgresSmsCommerceRepository(getDatabaseClient().db);
+
+export const getMobileVerificationService = () => {
+  const database = getDatabaseClient().db;
+  const hmacSecret = getSessionSecret();
+  return createMobileVerificationService({
+    repository: createPostgresMobileVerificationRepository(
+      database,
+      hmacSecret
+    ),
+    publish: async (organisationId, outboundMessageId) => {
+      const queue = await getJobQueue();
+      return queue.publish(
+        jobNames.testSmsExecute,
+        { organisationId, outboundMessageId },
+        {
+          singletonKey: `verification-otp:${outboundMessageId}`,
+          deduplicateWhileActive: true
+        }
+      );
+    },
+    clock: { now: () => new Date() },
+    codeGenerator: () => randomInt(0, 1_000_000).toString().padStart(6, '0'),
+    hmacSecret
+  });
+};
+
+export const getXeroOAuthService = () => {
+  if (xeroOAuthService !== undefined) return xeroOAuthService;
+  const database = getDatabaseClient().db;
+  const repository = new PostgresXeroConnectionRepository(database);
+  const tokenCipher = getXeroTokenCipher();
+  const oauth = new XeroOAuthClient({
+    http: new FetchHttpClient(),
+    ...getXeroOAuthConfiguration()
+  });
+  const soloProvisioning = createSoloProvisioningService({
+    repository: createPostgresSoloProvisioningRepository(database),
+    clock: { now: () => new Date() },
+    ensureRecurringSchedules: async (organisationId) => {
+      const queue = await getJobQueue();
+      await ensureRecurringSchedules(queue, [organisationId]);
+    },
+    publishInitialSync: async (organisationId, singletonKey) => {
+      const queue = await getJobQueue();
+      await queue.publish(
+        jobNames.xeroInitialSync,
+        { organisationId },
+        { singletonKey, deduplicateWhileActive: true }
+      );
+    }
+  });
+  xeroOAuthService = createXeroOAuthService({
+    repository,
+    tokenCipher,
+    oauth,
+    sessionForOrganisation: (organisationId) =>
+      new XeroOAuthSessionProvider({
+        organisationId,
+        store: repository,
+        tokenCipher,
+        oauthClient: oauth
+      }).getSession(),
+    organisationForTenant: async (accessToken, tenantId) => {
+      const result = await new XeroClient({
+        http: new FetchHttpClient(),
+        sessionProvider: {
+          getSession: () => Promise.resolve({ accessToken, tenantId })
+        }
+      }).getOrganisation();
+      return result.data;
+    },
+    provisionSolo: (session, input) =>
+      soloProvisioning.provision(session, input),
+    findSoloOrganisation: async (userId) => {
+      const [existing] = await database
+        .select({ organisationId: organisations.id })
+        .from(memberships)
+        .innerJoin(
+          organisations,
+          eq(organisations.id, memberships.organisationId)
+        )
+        .where(
+          and(
+            eq(memberships.userId, userId),
+            isNull(memberships.disabledAt),
+            eq(organisations.edition, 'SOLO')
+          )
+        )
+        .limit(1);
+      return existing?.organisationId ?? null;
+    },
+    audit: async (event) => {
+      await database.insert(auditEvents).values({
+        organisationId: event.organisationId,
+        actorUserId: event.actorUserId,
+        eventType: event.eventType,
+        entityType: 'XERO_CONNECTION',
+        entityId: event.entityId,
+        afterValue: event.afterValue,
+        occurredAt: event.occurredAt
+      });
+    },
+    clock: { now: () => new Date() }
+  });
+  return xeroOAuthService;
+};
+
 export async function requireWebSession(request: Request): Promise<AppSession> {
   const client = getDatabaseClient();
   return requireSession(request, {
+    secret: getSessionSecret(),
+    memberships: new PostgresMembershipLoader(client.db)
+  });
+}
+
+export async function requireWebIdentitySession(
+  request: Request
+): Promise<AppSession> {
+  const client = getDatabaseClient();
+  return requireIdentitySession(request, {
     secret: getSessionSecret(),
     memberships: new PostgresMembershipLoader(client.db)
   });
