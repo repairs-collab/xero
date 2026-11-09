@@ -1,14 +1,10 @@
 'use server';
 
-import { eq } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 
-import {
-  organisationVoiceSettings,
-  PostgresVoiceCallRepository
-} from '@bc5000/db/web';
+import { PostgresVoiceCallRepository } from '@bc5000/db/web';
 
 import { getJobQueue } from '../../../../server/job-runtime.js';
 import { createServerClock } from '../../../../server/clock.js';
@@ -75,27 +71,14 @@ async function context() {
 }
 
 export async function saveVoiceSettings(formData: FormData): Promise<void> {
-  const { database, settings } = await context();
+  const { settings } = await context();
   const organisationId = requiredText(formData, 'organisationId');
-  const submittedReference = optionalText(formData, 'secretReference');
-  const [current] = await database
-    .select({ secretReference: organisationVoiceSettings.secretReference })
-    .from(organisationVoiceSettings)
-    .where(eq(organisationVoiceSettings.organisationId, organisationId))
-    .limit(1);
-  const secretReference = submittedReference ?? current?.secretReference;
-  if (secretReference === undefined || secretReference === null) {
-    throw new Error('secretReference is required');
-  }
   await settings.save({
     organisationId,
-    provider: 'RETELL',
-    secretReference,
-    previewPublicKey: requiredText(formData, 'previewPublicKey'),
-    agentId: requiredText(formData, 'agentId'),
-    agentVersion: integer(formData, 'agentVersion'),
-    voiceId: requiredText(formData, 'voiceId'),
-    voiceLabel: requiredText(formData, 'voiceLabel'),
+    provider: 'VOIPCLOUD',
+    voipcloudUserNumber: requiredText(formData, 'voipcloudUserNumber'),
+    ttsVoiceId: requiredText(formData, 'ttsVoiceId'),
+    gatewayFlowVersion: integer(formData, 'gatewayFlowVersion'),
     outboundNumber: requiredText(formData, 'outboundNumber'),
     transferSipUri: optionalText(formData, 'transferSipUri'),
     fallbackOfficeNumber: requiredText(formData, 'fallbackOfficeNumber'),
