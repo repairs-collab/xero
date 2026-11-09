@@ -35,6 +35,7 @@ const createClient = (http: HttpClient) =>
 const submitInput = {
   content: 'Invoice reminder',
   destinationNumber: '+61400000001',
+  sourceNumber: '+61400000009',
   callbackUrl: 'https://example.invalid/api/webhooks/sinch',
   metadata: { outbound_id: 'outbound-1' }
 };
@@ -73,6 +74,7 @@ describe('SinchClient.sendSms', () => {
         {
           content: 'Invoice reminder',
           destination_number: '+61400000001',
+          source_number: '+61400000009',
           format: 'SMS',
           delivery_report: true,
           callback_url: 'https://example.invalid/api/webhooks/sinch',
@@ -88,6 +90,17 @@ describe('SinchClient.sendSms', () => {
       createClient(http).sendSms({
         ...submitInput,
         destinationNumber: '0400 000 001'
+      })
+    ).rejects.toBeInstanceOf(SinchValidationFailure);
+    expect(http.requests).toHaveLength(0);
+  });
+
+  it('rejects a non-E.164 dedicated source number before making a request', async () => {
+    const http = new FakeHttpClient();
+    await expect(
+      createClient(http).sendSms({
+        ...submitInput,
+        sourceNumber: '0400 000 009'
       })
     ).rejects.toBeInstanceOf(SinchValidationFailure);
     expect(http.requests).toHaveLength(0);

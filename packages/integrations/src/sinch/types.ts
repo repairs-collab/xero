@@ -7,18 +7,11 @@ export interface SinchClock {
   now(): Date;
 }
 
-export interface SinchSendSmsInput {
-  content: string;
-  destinationNumber: string;
-  callbackUrl: string;
-  metadata: Record<string, string>;
-}
+import type { SmsSendInput, SmsSubmitResult } from '../sms/index.js';
 
-export type SinchSubmitResult = {
-  kind: 'accepted';
-  messageId: string;
-  status: string;
-};
+export type SinchSendSmsInput = SmsSendInput;
+
+export type SinchSubmitResult = SmsSubmitResult;
 
 export interface SinchMessageStatus {
   messageId: string;
