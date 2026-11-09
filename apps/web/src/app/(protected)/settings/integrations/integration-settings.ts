@@ -5,7 +5,8 @@ import {
   auditEvents,
   type Database,
   PostgresOrganisationSafetyRepository,
-  providerConnections
+  providerConnections,
+  xeroConnections
 } from '@bc5000/db/web';
 import { jobNames, type JobPublisher } from '@bc5000/jobs';
 
@@ -92,7 +93,17 @@ export function createIntegrationSettings(dependencies: { database: Database; te
   ) => {
     authorise(session, 'provider.configure', input.organisationId);
     if (!dependencies.publisher) throw new Error('JOB_PUBLISHER_REQUIRED');
-    const [connection] = await dependencies.database
+    const [oauthConnection] = await dependencies.database
+      .select({ id: xeroConnections.id })
+      .from(xeroConnections)
+      .where(
+        and(
+          eq(xeroConnections.organisationId, input.organisationId),
+          eq(xeroConnections.status, 'CONNECTED')
+        )
+      )
+      .limit(1);
+    const [legacyConnection] = await dependencies.database
       .select({ id: providerConnections.id })
       .from(providerConnections)
       .where(
@@ -103,7 +114,9 @@ export function createIntegrationSettings(dependencies: { database: Database; te
         )
       )
       .limit(1);
-    if (!connection) throw new Error('XERO_CONNECTION_NOT_FOUND');
+    if (!oauthConnection && !legacyConnection) {
+      throw new Error('XERO_CONNECTION_NOT_FOUND');
+    }
     const now = dependencies.clock.now();
     const auditEvent = await dependencies.database.transaction(
       async (transaction) => {

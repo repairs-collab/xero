@@ -5,7 +5,8 @@ import { authorise } from '@bc5000/auth';
 import {
   auditEvents,
   providerConnections,
-  webhookEvents
+  webhookEvents,
+  xeroConnections
 } from '@bc5000/db/web';
 
 import {
@@ -13,6 +14,7 @@ import {
   requireWebSession
 } from '../../../../server/runtime.js';
 import {
+  disconnectXero,
   replaceSecretReference,
   requestXeroSync,
   rotateCallbackKeyReference,
@@ -39,6 +41,11 @@ export default async function IntegrationsPage() {
     .select()
     .from(providerConnections)
     .where(eq(providerConnections.organisationId, organisationId));
+  const [xeroOAuthConnection] = await database
+    .select()
+    .from(xeroConnections)
+    .where(eq(xeroConnections.organisationId, organisationId))
+    .limit(1);
   const [webhook] = await database
     .select()
     .from(webhookEvents)
@@ -68,8 +75,8 @@ export default async function IntegrationsPage() {
         <span className="eyebrow">Provider configuration</span>
         <h1>Integrations</h1>
         <p>
-          Only AWS secret references are shown or accepted. Credentials never
-          enter the web application.
+          Connect Xero through secure customer authorisation. Provider
+          credentials and refresh tokens are never shown in the browser.
         </p>
       </header>
       <div className="integration-grid">
@@ -96,35 +103,64 @@ export default async function IntegrationsPage() {
                 <div>
                   <h2>
                     {provider === 'XERO'
-                      ? 'Xero Custom Connection'
+                      ? 'Xero customer connection'
                       : 'Sinch Engage APAC'}
                   </h2>
-                  <p>{connection?.enabled ? 'Configured' : 'Not configured'}</p>
+                  <p>
+                    {provider === 'XERO'
+                      ? xeroOAuthConnection?.status ??
+                        (connection?.enabled
+                          ? 'Legacy Custom Connection'
+                          : 'Not connected')
+                      : connection?.enabled
+                        ? 'Configured'
+                        : 'Not configured'}
+                  </p>
                 </div>
                 <span
-                  className={`status-dot ${connection?.lastSuccessfulAuthenticationAt ? 'status-dot--ok' : ''}`}
+                  className={`status-dot ${provider === 'XERO' ? xeroOAuthConnection?.status === 'CONNECTED' || connection?.enabled ? 'status-dot--ok' : '' : connection?.lastSuccessfulAuthenticationAt ? 'status-dot--ok' : ''}`}
                 />
               </div>
               <dl>
-                <div>
-                  <dt>Secret reference</dt>
-                  <dd>{connection ? suffix(connection.secretArn) : 'Not set'}</dd>
-                </div>
-                <div>
-                  <dt>Last authentication</dt>
-                  <dd>
-                    {connection?.lastSuccessfulAuthenticationAt
-                      ? dateTime(connection.lastSuccessfulAuthenticationAt)
-                      : 'Never'}
-                  </dd>
-                </div>
                 {provider === 'XERO' ? (
-                  <div>
-                    <dt>Required scopes</dt>
-                    <dd>{scopeCount === 3 ? 'Verified' : 'Awaiting test'}</dd>
-                  </div>
+                  <>
+                    <div>
+                      <dt>Connection type</dt>
+                      <dd>
+                        {xeroOAuthConnection
+                          ? 'Customer OAuth'
+                          : connection?.enabled
+                            ? 'Legacy Custom Connection'
+                            : 'Not connected'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Required permissions</dt>
+                      <dd>
+                        {xeroOAuthConnection?.status === 'CONNECTED'
+                          ? 'Granted'
+                          : scopeCount === 3
+                            ? 'Legacy verified'
+                            : 'Awaiting connection'}
+                      </dd>
+                    </div>
+                  </>
                 ) : (
                   <>
+                    <div>
+                      <dt>Secret reference</dt>
+                      <dd>
+                        {connection ? suffix(connection.secretArn) : 'Not set'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Last authentication</dt>
+                      <dd>
+                        {connection?.lastSuccessfulAuthenticationAt
+                          ? dateTime(connection.lastSuccessfulAuthenticationAt)
+                          : 'Never'}
+                      </dd>
+                    </div>
                     <div>
                       <dt>Region</dt>
                       <dd>{connection?.region ?? 'APAC'}</dd>
@@ -144,23 +180,51 @@ export default async function IntegrationsPage() {
                   </dd>
                 </div>
               </dl>
-              <form className="settings-form" action={replaceSecretReference}>
-                <input
-                  type="hidden"
-                  name="organisationId"
-                  value={organisationId}
-                />
-                <input type="hidden" name="provider" value={provider} />
-                <label>
-                  Replace AWS Secrets Manager ARN
+              {provider === 'SINCH' ? (
+                <form className="settings-form" action={replaceSecretReference}>
                   <input
-                    name="secretArn"
-                    placeholder="arn:aws:secretsmanager:ap-southeast-2:…"
-                    required
+                    type="hidden"
+                    name="organisationId"
+                    value={organisationId}
                   />
-                </label>
-                <button className="button">Update reference</button>
-              </form>
+                  <input type="hidden" name="provider" value={provider} />
+                  <label>
+                    Replace AWS Secrets Manager ARN
+                    <input
+                      name="secretArn"
+                      placeholder="arn:aws:secretsmanager:ap-southeast-2:…"
+                      required
+                    />
+                  </label>
+                  <button className="button">Update reference</button>
+                </form>
+              ) : xeroOAuthConnection?.status === 'CONNECTED' ? (
+                <div className="settings-form">
+                  <a
+                    className="button button--primary"
+                    href={`/xero/connect?organisationId=${encodeURIComponent(organisationId)}&returnTo=%2Fsettings%2Fintegrations`}
+                  >
+                    Reconnect Xero
+                  </a>
+                  <form action={disconnectXero}>
+                    <input
+                      type="hidden"
+                      name="organisationId"
+                      value={organisationId}
+                    />
+                    <button className="button" type="submit">
+                      Disconnect Xero
+                    </button>
+                  </form>
+                </div>
+              ) : (
+                <a
+                  className="button button--primary"
+                  href={`/xero/connect?organisationId=${encodeURIComponent(organisationId)}&returnTo=%2Fsettings%2Fintegrations`}
+                >
+                  Connect Xero
+                </a>
+              )}
               {provider === 'SINCH' && (
                 <form
                   className="settings-form"
@@ -182,18 +246,22 @@ export default async function IntegrationsPage() {
                   <button className="button">Rotate key reference</button>
                 </form>
               )}
-              <form action={testConnection}>
-                <input
-                  type="hidden"
-                  name="organisationId"
-                  value={organisationId}
-                />
-                <input type="hidden" name="provider" value={provider} />
-                <button className="button button--primary">
-                  Test connection
-                </button>
-              </form>
-              {provider === 'XERO' && connection?.enabled && (
+              {provider === 'SINCH' && (
+                <form action={testConnection}>
+                  <input
+                    type="hidden"
+                    name="organisationId"
+                    value={organisationId}
+                  />
+                  <input type="hidden" name="provider" value={provider} />
+                  <button className="button button--primary">
+                    Test connection
+                  </button>
+                </form>
+              )}
+              {provider === 'XERO' &&
+                (xeroOAuthConnection?.status === 'CONNECTED' ||
+                  connection?.enabled) && (
                 <form className="settings-form" action={requestXeroSync}>
                   <input
                     type="hidden"
