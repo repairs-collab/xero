@@ -174,6 +174,6 @@ describe('Xero customer OAuth', () => {
         code: 'authorization-code',
         error: null
       })
-    ).rejects.toThrow('FORBIDDEN');
+    ).rejects.toThrow('XERO_OAUTH_STATE_INVALID');
   });
 });
