@@ -235,7 +235,7 @@ describe('durable job queue', () => {
     const ownedSchedules = schedules.filter((schedule) =>
       schedule.key.endsWith(`/${organisationId}`)
     );
-    expect(ownedSchedules).toHaveLength(6);
+    expect(ownedSchedules).toHaveLength(7);
     expect(ownedSchedules.every((schedule) => schedule.timezone === 'UTC')).toBe(
       true
     );
@@ -252,6 +252,11 @@ describe('durable job queue', () => {
     expect(
       ownedSchedules.filter(
         (schedule) => schedule.name === jobNames.voiceRemindersDispatch
+      )
+    ).toHaveLength(1);
+    expect(
+      schedules.filter(
+        (schedule) => schedule.key === jobNames.xeroOAuthCleanup
       )
     ).toHaveLength(1);
   });
