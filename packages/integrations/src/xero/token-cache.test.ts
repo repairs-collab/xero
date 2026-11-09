@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { HttpClient, HttpRequest, HttpResponse } from '../http.js';
 import {
-  requiredXeroScopes,
+  requiredLegacyXeroScopes,
   XeroAuthenticationFailure,
   XeroClientCredentialsTokenIssuer,
   XeroTokenCache,
@@ -55,7 +55,7 @@ class FakeHttpClient implements HttpClient {
 
 const issuedToken = (
   accessToken: string,
-  scopes: readonly string[] = requiredXeroScopes
+  scopes: readonly string[] = requiredLegacyXeroScopes
 ): IssuedXeroToken => ({
   accessToken,
   expiresInSeconds: 1800,
@@ -138,7 +138,7 @@ describe('XeroClientCredentialsTokenIssuer', () => {
       body: JSON.stringify({
         access_token: 'access-token',
         expires_in: 1800,
-        scope: requiredXeroScopes.join(' ')
+        scope: requiredLegacyXeroScopes.join(' ')
       })
     });
     const secrets: SecretReader = {

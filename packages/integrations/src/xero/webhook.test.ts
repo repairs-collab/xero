@@ -40,12 +40,14 @@ describe('parseVerifiedXeroWebhook', () => {
       JSON.stringify({
         events: [
           {
+            tenantId: 'tenant-1',
             resourceId: 'invoice-1',
             eventCategory: 'INVOICE',
             eventType: 'UPDATE',
             eventDateUtc: '2026-09-18T01:00:00Z'
           },
           {
+            tenantId: 'tenant-1',
             resourceId: 'contact-1',
             eventCategory: 'CONTACT',
             eventType: 'UPDATE',
@@ -60,6 +62,7 @@ describe('parseVerifiedXeroWebhook', () => {
     ).toEqual({
       accepted: [
         {
+          tenantId: 'tenant-1',
           resourceId: 'invoice-1',
           eventType: 'UPDATE',
           eventDateUtc: '2026-09-18T01:00:00Z'
@@ -69,6 +72,33 @@ describe('parseVerifiedXeroWebhook', () => {
         {
           resourceId: 'contact-1',
           reason: 'UNSUPPORTED_CATEGORY_OR_EVENT'
+        }
+      ]
+    });
+  });
+
+  it('does not accept an invoice event without a tenant ID', () => {
+    const raw = Buffer.from(
+      JSON.stringify({
+        events: [
+          {
+            resourceId: 'invoice-without-tenant',
+            eventCategory: 'INVOICE',
+            eventType: 'UPDATE',
+            eventDateUtc: '2026-09-18T01:00:00Z'
+          }
+        ]
+      })
+    );
+
+    expect(
+      parseVerifiedXeroWebhook(raw, signatureFor(raw), 'webhook-key')
+    ).toEqual({
+      accepted: [],
+      ignored: [
+        {
+          resourceId: 'invoice-without-tenant',
+          reason: 'MISSING_TENANT_ID'
         }
       ]
     });

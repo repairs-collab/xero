@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { HttpClient, HttpRequest, HttpResponse } from '../http.js';
 import { XeroClient } from './client.js';
-import type { XeroTokenProvider } from './token-cache.js';
+import type { XeroSessionProvider } from './session-provider.js';
 import {
   XeroEmailPermanentFailure,
   XeroTransientFailure
@@ -20,8 +20,9 @@ class FakeHttpClient implements HttpClient {
   }
 }
 
-const tokenProvider: XeroTokenProvider = {
-  getAccessToken: () => Promise.resolve('access-token')
+const sessionProvider: XeroSessionProvider = {
+  getSession: () =>
+    Promise.resolve({ accessToken: 'access-token', tenantId: null })
 };
 
 const rawInvoice = (index = 1) => ({
@@ -51,7 +52,7 @@ const rawContact = (index: number) => ({
 const createClient = (http: HttpClient) =>
   new XeroClient({
     http,
-    tokenProvider,
+    sessionProvider,
     baseUrl: 'https://api.xero.test/api.xro/2.0'
   });
 
@@ -71,7 +72,61 @@ describe('XeroClient request contract', () => {
       Authorization: 'Bearer access-token',
       Accept: 'application/json'
     });
-    expect(http.requests[0]?.headers).not.toHaveProperty('xero-tenant-id');
+    expect(http.requests[0]?.headers).not.toHaveProperty('Xero-Tenant-Id');
+  });
+
+  it('adds the exact Xero tenant header for a customer OAuth session', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push({
+      status: 200,
+      headers: {},
+      body: JSON.stringify({ Invoices: [rawInvoice()] })
+    });
+    const oauthSessionProvider: XeroSessionProvider = {
+      getSession: () =>
+        Promise.resolve({
+          accessToken: 'oauth-access-token',
+          tenantId: 'xero-tenant-id'
+        })
+    };
+    const client = new XeroClient({ http, sessionProvider: oauthSessionProvider });
+
+    await client.getInvoice('invoice-id');
+
+    expect(http.requests[0]?.headers).toMatchObject({
+      Authorization: 'Bearer oauth-access-token',
+      'Xero-Tenant-Id': 'xero-tenant-id'
+    });
+  });
+
+  it('does not allow request-specific headers to replace authentication or tenant routing', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push({ status: 204, headers: {}, body: '' });
+    const oauthSessionProvider: XeroSessionProvider = {
+      getSession: () =>
+        Promise.resolve({
+          accessToken: 'protected-access-token',
+          tenantId: 'protected-tenant-id'
+        })
+    };
+    const client = new XeroClient({ http, sessionProvider: oauthSessionProvider });
+    const request = client as unknown as {
+      request(
+        method: HttpRequest['method'],
+        path: string,
+        headers: Record<string, string>
+      ): Promise<HttpResponse>;
+    };
+
+    await request.request('GET', '/Organisation', {
+      Authorization: 'Bearer attacker-token',
+      'Xero-Tenant-Id': 'attacker-tenant-id'
+    });
+
+    expect(http.requests[0]?.headers).toMatchObject({
+      Authorization: 'Bearer protected-access-token',
+      'Xero-Tenant-Id': 'protected-tenant-id'
+    });
   });
 
   it('maps a 204 invoice email response to accepted', async () => {
@@ -139,7 +194,7 @@ describe('XeroClient request contract', () => {
     let now = new Date('2026-09-26T00:00:00.000Z');
     const client = new XeroClient({
       http,
-      tokenProvider,
+      sessionProvider,
       baseUrl: 'https://api.xero.test/api.xro/2.0',
       clock: { now: () => now }
     });

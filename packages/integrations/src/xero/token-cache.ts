@@ -1,7 +1,7 @@
 import type { HttpClient } from '../http.js';
 import { XeroAuthenticationFailure } from './types.js';
 
-export const requiredXeroScopes = [
+export const requiredLegacyXeroScopes = [
   'accounting.invoices',
   'accounting.contacts.read',
   'accounting.settings.read'
@@ -70,7 +70,7 @@ export class XeroTokenCache implements XeroTokenProvider {
 
   private async refreshToken(): Promise<string> {
     const issued = await this.issuer.issueToken();
-    const missingScopes = requiredXeroScopes.filter(
+    const missingScopes = requiredLegacyXeroScopes.filter(
       (scope) => !issued.scopes.includes(scope)
     );
     if (missingScopes.length > 0) {
@@ -114,7 +114,7 @@ export class XeroClientCredentialsTokenIssuer implements XeroTokenIssuer {
         'Content-Type': 'application/x-www-form-urlencoded'
       },
       body: `grant_type=client_credentials&scope=${encodeURIComponent(
-        requiredXeroScopes.join(' ')
+        requiredLegacyXeroScopes.join(' ')
       )}`
     });
 

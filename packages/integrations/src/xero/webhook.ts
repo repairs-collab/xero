@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
 export interface AcceptedXeroInvoiceEvent {
+  tenantId: string;
   resourceId: string;
   eventType: 'CREATE' | 'UPDATE';
   eventDateUtc: string;
@@ -8,7 +9,7 @@ export interface AcceptedXeroInvoiceEvent {
 
 export interface IgnoredXeroEvent {
   resourceId: string;
-  reason: 'UNSUPPORTED_CATEGORY_OR_EVENT';
+  reason: 'MISSING_TENANT_ID' | 'UNSUPPORTED_CATEGORY_OR_EVENT';
 }
 
 export interface ParsedXeroWebhook {
@@ -39,6 +40,7 @@ export function verifyXeroWebhook(
 }
 
 interface RawXeroWebhookEvent {
+  tenantId?: unknown;
   resourceId?: unknown;
   eventCategory?: unknown;
   eventType?: unknown;
@@ -78,11 +80,19 @@ export function parseVerifiedXeroWebhook(
         rawEvent.eventType === 'UPDATE') &&
       typeof rawEvent.eventDateUtc === 'string'
     ) {
-      accepted.push({
-        resourceId,
-        eventType: rawEvent.eventType,
-        eventDateUtc: rawEvent.eventDateUtc
-      });
+      if (
+        typeof rawEvent.tenantId !== 'string' ||
+        rawEvent.tenantId.length === 0
+      ) {
+        ignored.push({ resourceId, reason: 'MISSING_TENANT_ID' });
+      } else {
+        accepted.push({
+          tenantId: rawEvent.tenantId,
+          resourceId,
+          eventType: rawEvent.eventType,
+          eventDateUtc: rawEvent.eventDateUtc
+        });
+      }
     } else {
       ignored.push({
         resourceId,
