@@ -12,6 +12,10 @@ import {
   getDatabaseClient,
   getSessionSecret
 } from '../../../server/runtime.js';
+import {
+  ensureSelfServiceIdentity,
+  SelfServiceIdentityConflict
+} from '../../../server/self-service-identity.js';
 import { acceptPendingInvitations } from '../../(protected)/settings/users/user-administration.js';
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
@@ -27,6 +31,16 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     { code, returnedState, transaction },
     configuration
   );
+  try {
+    await ensureSelfServiceIdentity(getDatabaseClient().db, identity);
+  } catch (error) {
+    if (!(error instanceof SelfServiceIdentityConflict)) throw error;
+    const recovery = new URL('/account-recovery', configuration.redirectUri);
+    recovery.searchParams.set('reason', 'identity-conflict');
+    const response = NextResponse.redirect(recovery, 303);
+    response.headers.append('Set-Cookie', clearCognitoTransactionCookie());
+    return response;
+  }
   await acceptPendingInvitations(
     getDatabaseClient().db,
     identity.subject,
