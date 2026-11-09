@@ -7,8 +7,10 @@ import {
   createDatabase,
   messageAttempts,
   migrateDatabase,
+  organisationOnboarding,
   organisations,
   outboundMessages,
+  subscriptions,
   suppressions
 } from '@bc5000/db';
 import {
@@ -104,6 +106,64 @@ const waitUntilAsync = async (
 };
 
 describe('test SMS execution', () => {
+  it('permits platform verification in Solo dry-run but blocks trial tests to a debtor number', async () => {
+    const verification = await seedTestSms({ sendMode: 'dry-run' });
+    await client.db
+      .update(organisations)
+      .set({ edition: 'SOLO' })
+      .where(eq(organisations.id, verification.organisationId));
+    await client.db.insert(subscriptions).values({
+      organisationId: verification.organisationId,
+      planCode: 'SOLO_AU_2000',
+      status: 'TRIALING',
+      trialEndsAt: new Date('2026-10-12T00:00:00.000Z')
+    });
+    await client.db.insert(organisationOnboarding).values({
+      organisationId: verification.organisationId,
+      adminMobile: '+61412345678',
+      adminMobileVerifiedAt: now
+    });
+    await client.db
+      .update(outboundMessages)
+      .set({ source: 'VERIFICATION_OTP' })
+      .where(eq(outboundMessages.id, verification.outboundMessageId));
+    const sendOtp = vi.fn(() =>
+      Promise.resolve({
+        kind: 'accepted' as const,
+        messageId: 'otp-accepted',
+        status: 'ACCEPTED'
+      })
+    );
+    await expect(
+      executeTestSms(dependencies(sendOtp), verification)
+    ).resolves.toEqual({ kind: 'sent', providerMessageId: 'otp-accepted' });
+
+    const customerTest = await seedTestSms({ sendMode: 'dry-run' });
+    await client.db
+      .update(organisations)
+      .set({ edition: 'SOLO' })
+      .where(eq(organisations.id, customerTest.organisationId));
+    await client.db.insert(subscriptions).values({
+      organisationId: customerTest.organisationId,
+      planCode: 'SOLO_AU_2000',
+      status: 'TRIALING',
+      trialEndsAt: new Date('2026-10-12T00:00:00.000Z')
+    });
+    await client.db.insert(organisationOnboarding).values({
+      organisationId: customerTest.organisationId,
+      adminMobile: '+61412345678',
+      adminMobileVerifiedAt: now
+    });
+    const sendCustomer = vi.fn();
+    await expect(
+      executeTestSms(dependencies(sendCustomer), customerTest)
+    ).resolves.toEqual({
+      kind: 'cancelled',
+      reason: 'VERIFIED_ADMIN_MOBILE_REQUIRED'
+    });
+    expect(sendCustomer).not.toHaveBeenCalled();
+  });
+
   it('records a dry run when the destination is outside the technical allowlist', async () => {
     const seeded = await seedTestSms({
       allowlisted: false,

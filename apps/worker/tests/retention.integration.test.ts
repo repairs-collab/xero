@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { approvals, auditEvents, contacts, conversations, createDatabase, inboundMessages, invoiceChases, invoices, migrateDatabase, operatorReplies, organisations, reminderSequenceVersions, reminderSequences, stageInstances, users, webhookEvents } from '@bc5000/db';
+import { approvals, auditEvents, contacts, conversations, createDatabase, inboundMessages, invoiceChases, invoices, messageAttempts, migrateDatabase, operatorReplies, organisations, outboundMessages, reminderSequenceVersions, reminderSequences, retentionCases, stageInstances, users, webhookEvents } from '@bc5000/db';
 
 import { applyRetention } from '../src/handlers/retention-apply.js';
 
@@ -14,7 +14,7 @@ afterAll(async () => client.pool.end());
 
 describe('retention', () => {
   it('removes message bodies after 24 months while preserving metadata and audit', async () => {
-    const organisationId = randomUUID(); const contactId = randomUUID(); const invoiceId = randomUUID(); const sequenceId = randomUUID(); const versionId = randomUUID(); const chaseId = randomUUID(); const stageId = randomUUID(); const approvalId = randomUUID(); const conversationId = randomUUID(); const inboundId = randomUUID(); const replyId = randomUUID(); const userId = randomUUID(); const webhookId = randomUUID(); const auditId = randomUUID();
+    const organisationId = randomUUID(); const contactId = randomUUID(); const invoiceId = randomUUID(); const sequenceId = randomUUID(); const versionId = randomUUID(); const chaseId = randomUUID(); const stageId = randomUUID(); const approvalId = randomUUID(); const conversationId = randomUUID(); const inboundId = randomUUID(); const replyId = randomUUID(); const userId = randomUUID(); const webhookId = randomUUID(); const unprocessedWebhookId = randomUUID(); const outboundId = randomUUID(); const attemptId = randomUUID(); const auditId = randomUUID();
     await client.db.insert(organisations).values({ id: organisationId, xeroOrganisationId: randomUUID(), name: 'Retention test', timeZone: 'Australia/Sydney', baseCurrency: 'AUD' });
     await client.db.insert(users).values({ id: userId, cognitoSubject: randomUUID(), email: `${userId}@example.invalid`, displayName: 'Operator' });
     await client.db.insert(contacts).values({ id: contactId, organisationId, xeroContactId: randomUUID(), name: 'Old customer' });
@@ -24,19 +24,30 @@ describe('retention', () => {
     await client.db.insert(invoiceChases).values({ id: chaseId, organisationId, invoiceId, sequenceId, customerId: contactId, status: 'CLOSED' });
     await client.db.insert(stageInstances).values({ id: stageId, organisationId, invoiceChaseId: chaseId, sequenceVersionId: versionId, stageKey: 'due-date', channel: 'SMS', status: 'DELIVERED', scheduledAt: new Date('2024-02-01T00:00:00Z'), sourceVersion: 1 });
     await client.db.insert(approvals).values({ id: approvalId, organisationId, stageInstanceId: stageId, renderedPreview: 'Sensitive reminder', sourceVersion: 1, status: 'APPROVED', expiresAt: new Date('2024-02-02T00:00:00Z') });
+    await client.db.insert(outboundMessages).values({ id: outboundId, organisationId, stageInstanceId: stageId, contactId, invoiceId, actorUserId: userId, channel: 'SMS', source: 'AUTOMATED_REMINDER', recipientKey: '+61400000001', content: 'Sensitive outbound', contentHash: 'outbound-hash', status: 'DELIVERED', idempotencyKey: randomUUID(), completedAt: new Date('2024-03-01T00:00:00Z') });
+    await client.db.insert(messageAttempts).values({ id: attemptId, organisationId, outboundMessageId: outboundId, attemptNumber: 1, provider: 'SINCH', providerMessageId: randomUUID(), status: 'DELIVERED', providerPayload: { sensitive: 'raw' }, responseReceivedAt: new Date('2024-03-01T00:00:00Z') });
     await client.db.insert(conversations).values({ id: conversationId, organisationId, contactId, normalisedNumber: '+61400000001', lastMessageAt: new Date('2024-03-01T00:00:00Z') });
     await client.db.insert(inboundMessages).values({ id: inboundId, organisationId, conversationId, provider: 'SINCH', providerMessageId: randomUUID(), body: 'Sensitive inbound', bodyHash: 'inbound-hash', providerPayload: {}, receivedAt: new Date('2024-03-01T00:00:00Z') });
     await client.db.insert(operatorReplies).values({ id: replyId, organisationId, conversationId, actorUserId: userId, content: 'Sensitive reply', contentHash: 'reply-hash', status: 'DELIVERED', idempotencyKey: randomUUID(), sentAt: new Date('2024-03-01T00:00:00Z') });
     await client.db.insert(webhookEvents).values({ id: webhookId, organisationId, provider: 'SINCH', providerEventKey: randomUUID(), bodyHash: 'webhook-hash', signatureValid: true, providerPayload: { sensitive: 'raw' }, receivedAt: new Date('2026-01-01T00:00:00Z'), processedAt: new Date('2026-01-01T00:00:01Z') });
+    await client.db.insert(webhookEvents).values({ id: unprocessedWebhookId, organisationId, provider: 'SINCH', providerEventKey: randomUUID(), bodyHash: 'unprocessed-webhook-hash', signatureValid: true, providerPayload: { sensitive: 'must-stay-until-processed' }, receivedAt: new Date('2026-01-01T00:00:00Z') });
+    await client.db.insert(retentionCases).values({ organisationId, source: 'SUBSCRIPTION_CANCELLED', status: 'SCHEDULED', disconnectedAt: new Date('2026-07-01T00:00:00Z'), reviewAfter: new Date('2026-08-01T00:00:00Z') });
     await client.db.insert(auditEvents).values({ id: auditId, organisationId, eventType: 'OLD_AUDIT', entityType: 'INVOICE', entityId: invoiceId, occurredAt: new Date('2019-01-01T00:00:00Z') });
 
     const result = await applyRetention({ database: client.db, clock: { now: () => now }, batchSize: 100 }, { organisationId });
 
-    expect(result).toMatchObject({ approvalsRedacted: 1, inboundRedacted: 1, repliesRedacted: 1, webhooksDeleted: 1 });
+    expect(result).toMatchObject({ approvalsRedacted: 1, outboundRedacted: 1, attemptsRedacted: 1, inboundRedacted: 1, repliesRedacted: 1, webhooksDeleted: 1, accountReviewRequired: true });
     expect((await client.db.select().from(approvals).where(eq(approvals.id, approvalId)))[0]?.renderedPreview).toBe('[RETAINED_METADATA_ONLY]');
     expect((await client.db.select().from(inboundMessages).where(eq(inboundMessages.id, inboundId)))[0]?.body).toBe('[RETAINED_METADATA_ONLY]');
     expect((await client.db.select().from(operatorReplies).where(eq(operatorReplies.id, replyId)))[0]?.content).toBe('[RETAINED_METADATA_ONLY]');
+    expect((await client.db.select().from(outboundMessages).where(eq(outboundMessages.id, outboundId)))[0]?.content).toBe('[RETAINED_METADATA_ONLY]');
+    expect((await client.db.select().from(messageAttempts).where(eq(messageAttempts.id, attemptId)))[0]?.providerPayload).toEqual({ retainedMetadataOnly: true });
     expect(await client.db.select().from(webhookEvents).where(eq(webhookEvents.id, webhookId))).toHaveLength(0);
+    expect(await client.db.select().from(webhookEvents).where(eq(webhookEvents.id, unprocessedWebhookId))).toHaveLength(1);
+    expect((await client.db.select().from(retentionCases).where(eq(retentionCases.organisationId, organisationId)))[0]?.status).toBe('REVIEW_REQUIRED');
     expect(await client.db.select().from(auditEvents).where(eq(auditEvents.id, auditId))).toHaveLength(1);
+
+    await applyRetention({ database: client.db, clock: { now: () => now }, batchSize: 100 }, { organisationId });
+    expect((await client.db.select().from(auditEvents).where(eq(auditEvents.eventType, 'ACCOUNT_RETENTION_REVIEW_REQUIRED')))).toHaveLength(1);
   });
 });
