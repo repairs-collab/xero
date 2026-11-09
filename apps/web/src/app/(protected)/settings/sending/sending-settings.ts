@@ -22,6 +22,7 @@ import {
   operationalResetRuns,
   organisations,
   outboundMessages,
+  PostgresEntitlementRepository,
   PostgresOrganisationSafetyRepository,
   providerConnections,
   reminderSequences,
@@ -846,6 +847,12 @@ export function createSendingSettings(dependencies: {
       ) {
         throw new Error('OPERATIONAL_STATE_CONFLICT');
       }
+      const entitlements = await new PostgresEntitlementRepository(
+        dependencies.database
+      ).decide(input.organisationId, dependencies.clock.now(), transaction);
+      if (!entitlements.canCustomerSend) {
+        throw new Error(entitlements.blocker ?? 'SUBSCRIPTION_REQUIRED');
+      }
       await lockCustomerRolloutEvidence(transaction, input.organisationId);
       const readinessTime = dependencies.clock.now();
       const readiness = await calculateCustomerRolloutReadiness(transaction, {
@@ -912,6 +919,9 @@ export function createSendingSettings(dependencies: {
       );
       if (organisation.operationalStateVersion !== input.expectedVersion) {
         throw new Error('OPERATIONAL_STATE_CONFLICT');
+      }
+      if (organisation.edition !== 'INTERNAL_LEGACY') {
+        throw new Error('FORBIDDEN');
       }
       if (organisation.rolloutScope === 'CUSTOMER') {
         throw new Error('ROLLOUT_STATE_CONFLICT');

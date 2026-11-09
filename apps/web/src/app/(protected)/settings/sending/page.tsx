@@ -15,6 +15,7 @@ import {
 } from '../../../../components/rollout-gate-list.js';
 import {
   getDatabaseClient,
+  getOnboardingService,
   requireWebSession
 } from '../../../../server/runtime.js';
 import {
@@ -76,6 +77,10 @@ export default async function SendingSettingsPage({
     .where(eq(organisations.id, organisationId))
     .limit(1);
   if (!organisation) throw new Error('Organisation not found');
+  const onboarding =
+    organisation.edition === 'SOLO'
+      ? await getOnboardingService().getStatus(session, organisationId)
+      : null;
   const readiness = await getCustomerRolloutReadiness(database, {
     organisationId,
     now
@@ -116,8 +121,10 @@ export default async function SendingSettingsPage({
   const canRequestCustomerRollout =
     organisation.sendMode === 'live' &&
     organisation.rolloutScope === 'CONTROLLED' &&
-    organisation.operationalState === 'RECONCILED';
+    organisation.operationalState === 'RECONCILED' &&
+    (onboarding === null || onboarding.complete);
   const canOverrideCustomerRollout =
+    organisation.edition === 'INTERNAL_LEGACY' &&
     organisation.rolloutScope === 'CONTROLLED' &&
     organisation.maintenanceMode === false &&
     !['RESET_PREPARING', 'RESET_IN_PROGRESS', 'RESET_FAILED'].includes(
@@ -148,6 +155,19 @@ export default async function SendingSettingsPage({
           )}
         </div>
       </header>
+      {onboarding !== null && !onboarding.complete && (
+        <section className="callout callout--warning">
+          <strong>Finish Solo onboarding before Customer live</strong>
+          <p>
+            Subscription, verified reply number and every evidence-backed
+            setup step must be complete. The internal legacy override is not
+            available to customer subscriptions.
+          </p>
+          <a className="button" href="/onboarding">
+            Open onboarding
+          </a>
+        </section>
+      )}
       {feedback !== null && (
         <div
           className={`sending-feedback sending-feedback--${feedback.tone}`}
