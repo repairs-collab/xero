@@ -87,4 +87,27 @@ describe('AppShell', () => {
     expect(html).toContain('type="search"');
     expect(html).toContain('Search invoices, customers or amounts');
   });
+
+  it('shows onboarding in primary navigation only while setup is incomplete', () => {
+    const incomplete = renderToStaticMarkup(
+      createElement(AppShell, {
+        displayName: 'Solo Admin',
+        role: 'ADMIN',
+        onboardingIncomplete: true,
+        children: createElement('p', null, 'Dashboard')
+      })
+    );
+    const complete = renderToStaticMarkup(
+      createElement(AppShell, {
+        displayName: 'Solo Admin',
+        role: 'ADMIN',
+        onboardingIncomplete: false,
+        children: createElement('p', null, 'Dashboard')
+      })
+    );
+
+    expect(incomplete).toContain('href="/onboarding"');
+    expect(incomplete).toContain('Finish setup');
+    expect(complete).not.toContain('href="/onboarding"');
+  });
 });

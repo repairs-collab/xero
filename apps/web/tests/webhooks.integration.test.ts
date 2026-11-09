@@ -73,10 +73,10 @@ describe('public webhook endpoints', () => {
   it('returns 401 for an invalid Xero signature without enqueuing', async () => {
     const before = queued.length;
     const handler = createXeroWebhookHandler({
-      organisationId,
       webhookKey: 'xero-webhook-key',
       repository: new PostgresWebhookRepository(client.db),
-      queue
+      queue,
+      resolveOrganisationId: () => Promise.resolve(organisationId)
     });
     const response = await handler(
       new Request('https://bill-chaser.test/api/webhooks/xero', {
@@ -94,6 +94,7 @@ describe('public webhook endpoints', () => {
     const body = JSON.stringify({
       events: [
         {
+          tenantId: 'tenant-webhook-endpoint',
           resourceId: randomUUID(),
           eventCategory: 'INVOICE',
           eventType: 'UPDATE',
@@ -105,10 +106,13 @@ describe('public webhook endpoints', () => {
       .update(body)
       .digest('base64');
     const handler = createXeroWebhookHandler({
-      organisationId,
       webhookKey: 'xero-webhook-key',
       repository: new PostgresWebhookRepository(client.db),
-      queue
+      queue,
+      resolveOrganisationId: (tenantId) =>
+        Promise.resolve(
+          tenantId === 'tenant-webhook-endpoint' ? organisationId : null
+        )
     });
     const request = () =>
       new Request('https://bill-chaser.test/api/webhooks/xero', {
