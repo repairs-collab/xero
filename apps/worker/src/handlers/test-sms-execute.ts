@@ -1,5 +1,6 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 
+import { renderSms } from '@bc5000/domain';
 import {
   type Database,
   messageAttempts,
@@ -12,23 +13,23 @@ import {
   SinchAuthenticationFailure,
   SinchPermanentSubmissionFailure,
   SinchRateLimited,
-  type SinchSendSmsInput,
-  type SinchSubmitResult,
-  SinchTransientFailure,
   SinchUnknownSubmissionOutcome,
   SinchValidationFailure
 } from '@bc5000/integrations/sinch';
+import type { SmsProvider } from '@bc5000/integrations/sms';
 import type { JobPayloads } from '@bc5000/jobs';
 
 import {
   dispatchWithProviderSendLock,
-  markProviderSendBlocked
+  type EntitlementSendBlocker,
+  markProviderSendBlocked,
+  releaseSmsUsageReservation
 } from '../services/provider-send-policy.js';
 
 export interface TestSmsExecutionDependencies {
   database: Database;
   clock: { now(): Date };
-  sinch: { sendSms(input: SinchSendSmsInput): Promise<SinchSubmitResult> };
+  sinch: SmsProvider;
   callbackUrl: string;
 }
 
@@ -38,6 +39,7 @@ export type TestSmsOutcome =
       kind: 'cancelled';
       reason:
         | 'SUPPRESSED'
+        | EntitlementSendBlocker
         | 'OPERATIONAL_MAINTENANCE'
         | 'UNSUPPORTED_SENDING_STATE';
     }
@@ -68,7 +70,6 @@ const isKnownRejection = (error: unknown): boolean =>
   error instanceof SinchValidationFailure ||
   error instanceof SinchAuthenticationFailure ||
   error instanceof SinchPermanentSubmissionFailure ||
-  error instanceof SinchTransientFailure ||
   error instanceof SinchRateLimited;
 
 export async function executeTestSms(
@@ -91,7 +92,7 @@ export async function executeTestSms(
       and(
         eq(outboundMessages.organisationId, payload.organisationId),
         eq(outboundMessages.id, payload.outboundMessageId),
-        eq(outboundMessages.source, 'TEST_SMS'),
+        inArray(outboundMessages.source, ['TEST_SMS', 'VERIFICATION_OTP']),
         eq(outboundMessages.channel, 'SMS')
       )
     )
@@ -157,13 +158,22 @@ export async function executeTestSms(
       dependencies.database,
       {
         organisationId: payload.organisationId,
-        source: 'TEST_SMS',
+        source:
+          candidate.outbound.source === 'VERIFICATION_OTP'
+            ? 'VERIFICATION_OTP'
+            : 'TEST_SMS',
         channel: 'SMS',
-        destination: candidate.outbound.recipientKey
+        destination: candidate.outbound.recipientKey,
+        outboundMessageId: claim.outboundId,
+        smsPartCount: renderSms(content, {}, { maxSegments: 10 }).segmentCount,
+        now
       },
-      () =>
+      (_transaction, sendContext) =>
         dependencies.sinch.sendSms({
           destinationNumber: candidate.outbound.recipientKey,
+          ...(sendContext.smsSourceNumber === null
+            ? {}
+            : { sourceNumber: sendContext.smsSourceNumber }),
           content,
           callbackUrl: dependencies.callbackUrl,
           metadata: {
@@ -214,6 +224,11 @@ export async function executeTestSms(
     return { kind: 'sent', providerMessageId: accepted.messageId };
   } catch (error) {
     if (isKnownRejection(error)) {
+      await releaseSmsUsageReservation(dependencies.database, {
+        organisationId: payload.organisationId,
+        outboundMessageId: claim.outboundId,
+        now
+      });
       const reason =
         error instanceof SinchRateLimited ? 'RATE_LIMITED' : 'PROVIDER_REJECTED';
       await repository.markRejected({

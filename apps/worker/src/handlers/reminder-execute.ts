@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 
 import { and, desc, eq, inArray } from 'drizzle-orm';
 
+import { renderSms } from '@bc5000/domain';
+
 import {
   approvals,
   type Database,
@@ -13,12 +15,10 @@ import {
   SinchAuthenticationFailure,
   SinchPermanentSubmissionFailure,
   SinchRateLimited,
-  SinchTransientFailure,
   SinchUnknownSubmissionOutcome,
-  SinchValidationFailure,
-  type SinchSendSmsInput,
-  type SinchSubmitResult
+  SinchValidationFailure
 } from '@bc5000/integrations/sinch';
+import type { SmsProvider } from '@bc5000/integrations/sms';
 import {
   XeroEmailPermanentFailure,
   XeroRateLimited,
@@ -35,7 +35,9 @@ import {
 } from '../services/pre-send-revalidation.js';
 import {
   dispatchWithProviderSendLock,
-  markProviderSendBlocked
+  type EntitlementSendBlocker,
+  markProviderSendBlocked,
+  releaseSmsUsageReservation
 } from '../services/provider-send-policy.js';
 
 export interface ReminderExecutionClock {
@@ -46,10 +48,6 @@ export interface ReminderExecutionXero extends RevalidationXeroClient {
   emailInvoice(invoiceId: string): Promise<{ kind: 'accepted' }>;
 }
 
-export interface ReminderExecutionSinch {
-  sendSms(input: SinchSendSmsInput): Promise<SinchSubmitResult>;
-}
-
 export interface XeroEmailAllowance {
   hasSafeHeadroom(organisationId: string, now: Date): Promise<boolean>;
 }
@@ -58,7 +56,7 @@ export interface ReminderExecutionDependencies {
   database: Database;
   clock: ReminderExecutionClock;
   xero: ReminderExecutionXero;
-  sinch: ReminderExecutionSinch;
+  sinch: SmsProvider;
   callbackUrl: string;
   xeroEmailAllowance: XeroEmailAllowance;
 }
@@ -74,6 +72,7 @@ export type ExecutionOutcome =
       kind: 'cancelled';
       reason:
         | StopReason
+        | EntitlementSendBlocker
         | 'XERO_EMAIL_ALLOWANCE'
         | 'OPERATIONAL_MAINTENANCE'
         | 'UNSUPPORTED_SENDING_STATE';
@@ -199,7 +198,6 @@ const isKnownRejection = (error: unknown): boolean =>
   error instanceof SinchValidationFailure ||
   error instanceof SinchAuthenticationFailure ||
   error instanceof SinchPermanentSubmissionFailure ||
-  error instanceof SinchTransientFailure ||
   error instanceof XeroEmailPermanentFailure ||
   error instanceof XeroRequestFailure ||
   error instanceof XeroTransientFailure;
@@ -342,9 +340,20 @@ export async function executeReminder(
         organisationId: payload.organisationId,
         source,
         channel: reminder.channel,
-        destination: reminder.destination
+        destination: reminder.destination,
+        ...(reminder.channel === 'SMS'
+          ? {
+              outboundMessageId: claim.outboundId,
+              smsPartCount: renderSms(reminder.content, {}, { maxSegments: 10 })
+                .segmentCount
+            }
+          : {}),
+        automatic:
+          reminder.sequenceMode === 'AUTOMATIC' &&
+          reminder.stageOrigin === 'AUTOMATION',
+        now
       },
-      async (transaction) => {
+      async (transaction, sendContext) => {
         const scheduleValidation = await revalidateAutomaticReminderSchedule(
           {
             transaction,
@@ -367,6 +376,9 @@ export async function executeReminder(
         if (reminder.channel === 'SMS') {
           const accepted = await dependencies.sinch.sendSms({
             destinationNumber: reminder.destination,
+            ...(sendContext.smsSourceNumber === null
+              ? {}
+              : { sourceNumber: sendContext.smsSourceNumber }),
             content: reminder.content,
             callbackUrl: dependencies.callbackUrl,
             metadata: {
@@ -389,7 +401,8 @@ export async function executeReminder(
           providerMessageId: null,
           providerPayload: { status: 'ACCEPTED' }
         };
-      }
+      },
+      (value) => value.kind !== 'schedule-blocked'
     );
     if (sendResult.kind === 'dry-run') {
       await repository.markDryRun({
@@ -456,6 +469,13 @@ export async function executeReminder(
     const rateLimited =
       error instanceof SinchRateLimited || error instanceof XeroRateLimited;
     if (rateLimited || isKnownRejection(error)) {
+      if (reminder.channel === 'SMS') {
+        await releaseSmsUsageReservation(dependencies.database, {
+          organisationId: payload.organisationId,
+          outboundMessageId: claim.outboundId,
+          now
+        });
+      }
       const reason = rateLimited ? 'RATE_LIMITED' : 'PROVIDER_REJECTED';
       await repository.markRejected({
         outboundId: claim.outboundId,

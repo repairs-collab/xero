@@ -32,7 +32,6 @@ import {
   voiceCallRequests
 } from '@bc5000/db';
 import {
-  buildVoiceCallDetailVariables,
   evaluateVoiceContactPolicy,
   fixedVoiceCallCopy,
   normaliseVoiceAmount,
@@ -40,13 +39,14 @@ import {
   type VoicePolicyBlockCode
 } from '@bc5000/domain';
 import {
-  RetellAuthenticationError,
-  type RetellCreatePhoneCallInput,
-  RetellPermanentError,
-  RetellRateLimitedError,
-  RetellTransientError,
-  RetellUnknownDispatchError
-} from '@bc5000/integrations/retell';
+  VoiceGatewayAuthenticationError,
+  VoiceGatewayConflictError,
+  VoiceGatewayPermanentError,
+  VoiceGatewayTransientError,
+  VoiceGatewayUnknownDispatchError,
+  type VoiceGatewayCallCommand,
+  type VoiceGatewayCreateResult
+} from '@bc5000/integrations/voice-gateway';
 import {
   jobNames,
   type JobPublisher,
@@ -58,17 +58,15 @@ type VoiceCallExecuteInput = Omit<VoiceCallExecutePayload, 'provider'> & {
 };
 
 export interface VoiceCallProvider {
-  createPhoneCall(
-    input: RetellCreatePhoneCallInput
-  ): Promise<{ callId: string; callStatus: string }>;
+  createCall(input: VoiceGatewayCallCommand): Promise<VoiceGatewayCreateResult>;
 }
 
 export interface VoiceCallExecutionDependencies {
   database: Database;
   repository: PostgresVoiceCallRepository;
   clock: { now(): Date };
-  secrets: { read(reference: string): Promise<string> };
-  providerFactory: { create(apiKey: string): VoiceCallProvider };
+  gateway: VoiceCallProvider;
+  gatewayCallbackUrl: string;
   publisher: JobPublisher;
   holidays: { list(organisationId: string): readonly string[] };
   acceptCustomerVoiceCalls: boolean;
@@ -410,10 +408,11 @@ const revalidate = async (
       );
     });
   const settingsChanged =
-    settings.agentId !== call.agentId ||
-    settings.agentVersion !== call.agentVersion ||
-    settings.voiceId !== call.voiceId ||
+    settings.provider !== 'VOIPCLOUD' ||
     settings.outboundNumber !== call.outboundNumber ||
+    settings.voipcloudUserNumber !== call.voipcloudUserNumber ||
+    settings.ttsVoiceId !== call.ttsVoiceId ||
+    settings.gatewayFlowVersion !== call.gatewayFlowVersion ||
     settings.officeDestinationLabel !== call.transferTargetLabel ||
     settings.updatedAt.getTime() !== call.voiceSettingsUpdatedAt.getTime() ||
     call.callFlowVersion !== fixedVoiceCallCopy.version ||
@@ -718,10 +717,10 @@ const revalidate = async (
 };
 
 const knownProviderFailure = (error: unknown): boolean =>
-  error instanceof RetellPermanentError ||
-  error instanceof RetellAuthenticationError ||
-  error instanceof RetellRateLimitedError ||
-  error instanceof RetellTransientError;
+  error instanceof VoiceGatewayPermanentError ||
+  error instanceof VoiceGatewayAuthenticationError ||
+  error instanceof VoiceGatewayConflictError ||
+  error instanceof VoiceGatewayTransientError;
 
 const queueReconciliation = async (
   dependencies: VoiceCallExecutionDependencies,
@@ -773,14 +772,14 @@ export async function executeVoiceCall(
 
   let { call, settings } = validation.value;
   if (
-    settings.secretReference === null ||
-    call.agentId === null ||
-    call.agentVersion === null
+    settings.provider !== 'VOIPCLOUD' ||
+    call.accountName === null ||
+    call.voipcloudUserNumber === null ||
+    call.ttsVoiceId === null ||
+    call.gatewayFlowVersion === null
   ) {
     throw new Error('VOICE_SETTINGS_NOT_CONFIGURED');
   }
-  const apiKey = await dependencies.secrets.read(settings.secretReference);
-  const provider = dependencies.providerFactory.create(apiKey);
   await queueReconciliation(
     dependencies,
     payload,
@@ -829,47 +828,51 @@ export async function executeVoiceCall(
     );
   }
   ({ call, settings } = finalValidation.value);
-  if (call.agentId === null || call.agentVersion === null) {
+  if (
+    call.accountName === null ||
+    call.voipcloudUserNumber === null ||
+    call.ttsVoiceId === null ||
+    call.gatewayFlowVersion === null
+  ) {
     throw new Error('VOICE_SETTINGS_NOT_CONFIGURED');
   }
-
-  const detailVariables = buildVoiceCallDetailVariables({
-    callbackNumber: settings.fallbackOfficeNumber,
-    combinedAmount: call.combinedAmount,
-    currency: call.currency,
-    invoices: call.invoices.map((invoice) => ({
-      invoiceNumber: invoice.invoiceNumber,
-      amountDue: invoice.amountDue,
-      dueDate: invoice.dueDate
-    }))
-  });
   try {
-    const result = await provider.createPhoneCall({
-      fromNumber: call.outboundNumber,
-      toNumber: call.destinationNumber,
+    const result = await dependencies.gateway.createCall({
+      version: 1,
+      purpose: call.purpose,
+      gatewayCallId: call.id,
+      organisationId: payload.organisationId,
+      voiceCallId: call.id,
       idempotencyKey: call.idempotencyKey,
-      agentId: call.agentId,
-      agentVersion: call.agentVersion,
-      dynamicVariables: {
-        accountpulse_call_id: call.id,
-        invoice_details_json: JSON.stringify(detailVariables.invoices),
-        combined_amount: normaliseVoiceAmount(detailVariables.combinedAmount),
-        currency: detailVariables.currency,
-        callback_number: detailVariables.callbackNumber,
-        fallback_office_number: settings.fallbackOfficeNumber,
+      provider: 'VOIPCLOUD',
+      providerUserNumber: call.voipcloudUserNumber,
+      destinationNumber: call.destinationNumber,
+      callerId: call.outboundNumber,
+      flowVersion: call.gatewayFlowVersion,
+      ttsVoiceId: call.ttsVoiceId,
+      callbackUrl: dependencies.gatewayCallbackUrl,
+      transfer: {
         ...(settings.transferSipUri === null
           ? {}
-          : { transfer_sip_uri: settings.transferSipUri })
+          : { sipUri: settings.transferSipUri }),
+        fallbackNumber: settings.fallbackOfficeNumber,
+        label: call.transferTargetLabel
       },
-      metadata: {
-        organisation_id: payload.organisationId,
-        voice_call_id: call.id
+      approvedFacts: {
+        accountName: call.accountName,
+        combinedAmount: normaliseVoiceAmount(call.combinedAmount),
+        currency: call.currency,
+        invoices: call.invoices.map((invoice) => ({
+          invoiceNumber: invoice.invoiceNumber,
+          amountDue: normaliseVoiceAmount(invoice.amountDue),
+          dueDate: invoice.dueDate
+        }))
       }
     });
     await dependencies.repository.recordProviderAccepted({
       organisationId: payload.organisationId,
       voiceCallId: call.id,
-      providerCallId: result.callId,
+      providerCallId: result.gatewayCallId,
       now: submissionNow
     });
     await audit(dependencies.database, {
@@ -883,9 +886,9 @@ export async function executeVoiceCall(
       state: 'ACCEPTED',
       occurredAt: submissionNow
     });
-    return { kind: 'accepted', providerCallId: result.callId };
+    return { kind: 'accepted', providerCallId: result.gatewayCallId };
   } catch (error) {
-    if (error instanceof RetellUnknownDispatchError) {
+    if (error instanceof VoiceGatewayUnknownDispatchError) {
       await dependencies.database
         .update(voiceCallRequests)
         .set({

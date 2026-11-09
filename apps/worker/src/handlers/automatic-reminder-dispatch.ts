@@ -5,6 +5,7 @@ import {
   type Database,
   invoiceChases,
   organisations,
+  PostgresEntitlementRepository,
   PostgresOrganisationSafetyRepository,
   reminderSequences,
   reminderSequenceVersions,
@@ -77,6 +78,13 @@ export async function dispatchAutomaticReminderWork(
     .where(eq(organisations.id, organisationId))
     .limit(1);
   if (organisation === undefined) throw new Error('Organisation was not found');
+
+  const entitlements = await new PostgresEntitlementRepository(
+    dependencies.database
+  ).decide(organisationId, now);
+  if (!entitlements.canAutomaticDispatch) {
+    return { candidateCount: 0, queuedCount: 0, publishedCount: 0 };
+  }
 
   const interval = localDateInterval(
     localDate(now, organisation.timeZone),
