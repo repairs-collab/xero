@@ -1,0 +1,6 @@
+# AccountPulse commercial hostname. This block is appended to the existing
+# Caddyfile; the billchaser.motts.com.au block remains authoritative and intact.
+ap.motts.com.au {
+	encode zstd gzip
+	reverse_proxy web:3000
+}
