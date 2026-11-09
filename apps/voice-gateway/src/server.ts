@@ -18,6 +18,7 @@ export interface GatewayServerDependencies {
   signingSecret: string;
   clock: { now(): Date };
   supportedFlowVersion: number;
+  customerCallsEnabled?: boolean;
   replayProtector?: InMemoryReplayProtector;
   startCall?(command: CreateGatewayCallCommand): Promise<void>;
 }
@@ -115,7 +116,9 @@ export const createGatewayServer = (dependencies: GatewayServerDependencies) => 
       if (method === 'GET' && url.pathname === '/health/ready') {
         sendJson(response, 200, {
           ready: true,
-          version: dependencies.supportedFlowVersion
+          version: dependencies.supportedFlowVersion,
+          provider: 'VOIPCLOUD',
+          callsEnabled: dependencies.customerCallsEnabled ?? false
         });
         return;
       }
@@ -136,6 +139,15 @@ export const createGatewayServer = (dependencies: GatewayServerDependencies) => 
           );
         } catch {
           sendJson(response, 400, { error: 'GATEWAY_COMMAND_INVALID' });
+          return;
+        }
+        if (
+          command.purpose === 'CUSTOMER' &&
+          !(dependencies.customerCallsEnabled ?? false)
+        ) {
+          sendJson(response, 503, {
+            error: 'GATEWAY_CUSTOMER_CALLS_DISABLED'
+          });
           return;
         }
         const result = await dependencies.store.createOrGet({
