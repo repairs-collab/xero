@@ -68,7 +68,13 @@ const safeErrorMessages: Record<string, string> = {
   RetellRateLimitedError: 'Retell rate limit exceeded',
   RetellPermanentError: 'Retell request failed',
   RetellTransientError: 'Retell temporarily unavailable',
-  RetellUnknownDispatchError: 'Retell submission outcome is unknown'
+  RetellUnknownDispatchError: 'Retell submission outcome is unknown',
+  VoiceGatewayAuthenticationError: 'Voice gateway authentication failed',
+  VoiceGatewayConflictError: 'Voice gateway rejected a conflicting request',
+  VoiceGatewayPermanentError: 'Voice gateway rejected the request',
+  VoiceGatewayTransientError: 'Voice gateway temporarily unavailable',
+  VoiceGatewayUnknownDispatchError:
+    'Voice gateway submission outcome is unknown'
 };
 
 const safeErrorMessage = (error: unknown): string =>

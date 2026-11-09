@@ -1,22 +1,30 @@
 import { and, desc, eq } from 'drizzle-orm';
 
 import {
+  auditEvents,
   createDatabase,
   migrateDatabase,
   operationalResetRuns,
   organisations,
-  PostgresVoiceCallRepository
+  PostgresSmsCommerceRepository,
+  PostgresXeroConnectionRepository,
+  providerConnections,
+  PostgresVoiceCallRepository,
+  retentionCases,
+  subscriptions
 } from '@bc5000/db';
 import { FetchHttpClient } from '@bc5000/integrations/http';
-import { RetellClient } from '@bc5000/integrations/retell';
 import {
   SinchClient,
   type SinchCredentials
 } from '@bc5000/integrations/sinch';
+import { VoiceGatewayClient } from '@bc5000/integrations/voice-gateway';
 import {
-  requiredXeroScopes,
-  XeroClient,
+  AesGcmTokenCipher,
+  requiredLegacyXeroScopes,
   XeroClientCredentialsTokenIssuer,
+  XeroOAuthClient,
+  XeroOAuthSessionProvider,
   XeroTokenCache
 } from '@bc5000/integrations/xero';
 import { DurableJobQueue, jobNames } from '@bc5000/jobs';
@@ -28,6 +36,9 @@ import { executeReminder } from './handlers/reminder-execute.js';
 import { runReminderCycle } from './handlers/automatic-reminder-dispatch.js';
 import { applyRetention } from './handlers/retention-apply.js';
 import { executeTestSms } from './handlers/test-sms-execute.js';
+import { provisionPaidSmsNumber } from './handlers/sms-number-provision.js';
+import { processSubscriptionLifecycle } from './handlers/subscription-lifecycle.js';
+import { processTrialExpiry } from './handlers/trial-expiry.js';
 import { executeVoiceCall } from './handlers/voice-call-execute.js';
 import { reconcileVoiceCall } from './handlers/voice-call-reconcile.js';
 import { calculateVoiceReminderWork } from './handlers/voice-reminders-calculate.js';
@@ -36,6 +47,7 @@ import { processWebhookEvent } from './handlers/webhook-process.js';
 import { runIncrementalSync } from './handlers/xero-incremental-sync.js';
 import { runInitialSync } from './handlers/xero-initial-sync.js';
 import { runInvoiceRefresh } from './handlers/xero-invoice-refresh.js';
+import { cleanupExpiredXeroOAuthState } from './handlers/xero-oauth-cleanup.js';
 import { startWorker } from './main.js';
 import { createApprovedSmsRecoveryService } from './operations/approved-sms-recovery.js';
 import {
@@ -44,20 +56,38 @@ import {
 } from './operations/inbound-reply-recovery.js';
 import { createOperationalResetService } from './operations/operational-reset.js';
 import { evaluateVoiceMonitor } from './operations/voice-monitor.js';
+import {
+  createDatabaseXeroOAuthReadinessLoader,
+  createXeroOAuthReadinessService,
+  parseXeroOAuthReadinessCommand
+} from './operations/xero-oauth-readiness.js';
 import { processInboundReply } from './services/inbound-reply-service.js';
 import {
-  createEnvironmentSecretReader,
   databaseUrlFromEnvironment,
   parseApprovedSmsRecoveryCommand,
   parseInboundReplyRecoveryCommand,
   parseOperationalResetCommand,
-  parseProviderCredentials
+  parseProviderCredentials,
+  parseSinchCredentials
 } from './runtime-config.js';
 import { waitForDatabaseMigrations } from './startup.js';
+import { OrganisationXeroClientFactory } from './xero-client-factory.js';
 
 const required = (name: string): string => {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
+  return value;
+};
+
+const requiredPositiveInteger = (name: string): number => {
+  const raw = required(name);
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`${name} must be a positive whole number`);
+  }
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive whole number`);
+  }
   return value;
 };
 
@@ -72,11 +102,16 @@ async function main() {
     process.argv[2] === 'recover-inbound-replies'
       ? parseInboundReplyRecoveryCommand(process.argv.slice(2))
       : null;
+  const xeroOAuthReadinessCommand =
+    process.argv[2] === 'xero-oauth-readiness'
+      ? parseXeroOAuthReadinessCommand(process.argv.slice(2))
+      : null;
   const operationalResetCommand =
     process.argv[2] === 'migrate' ||
     voiceMonitorCommand ||
     approvedSmsRecoveryCommand !== null ||
-    inboundReplyRecoveryCommand !== null
+    inboundReplyRecoveryCommand !== null ||
+    xeroOAuthReadinessCommand !== null
       ? null
       : parseOperationalResetCommand(process.argv.slice(2));
   const databaseClient = createDatabase(databaseUrl);
@@ -86,6 +121,24 @@ async function main() {
       process.env.MIGRATIONS_DIR
     );
     await databaseClient.pool.end();
+    return;
+  }
+
+  if (xeroOAuthReadinessCommand !== null) {
+    try {
+      const readiness = createXeroOAuthReadinessService(
+        createDatabaseXeroOAuthReadinessLoader(databaseClient.db)
+      );
+      const report = await readiness.run(
+        xeroOAuthReadinessCommand.organisationId
+      );
+      console.info(
+        'AccountPulse Xero OAuth readiness\n' +
+          JSON.stringify(report, null, 2)
+      );
+    } finally {
+      await databaseClient.pool.end();
+    }
     return;
   }
 
@@ -152,10 +205,10 @@ async function main() {
         }
         recoveryOrganisationId = organisationRows[0].id;
       }
-      const credentials = parseProviderCredentials(process.env);
+      const sinchCredentials = parseSinchCredentials(process.env);
       const sinch = new SinchClient({
         http: new FetchHttpClient(),
-        credentials: credentials.sinch satisfies SinchCredentials,
+        credentials: sinchCredentials satisfies SinchCredentials,
         clock: { now: () => new Date() }
       });
       const [latestCompletedReset] = await databaseClient.db
@@ -274,12 +327,47 @@ async function main() {
 
   const credentials = parseProviderCredentials(process.env);
   const http = new FetchHttpClient();
-  const tokenIssuer = new XeroClientCredentialsTokenIssuer(http, {
-    readXeroClientCredentials: () => Promise.resolve(credentials.xero)
-  });
-  const xero = new XeroClient({
+  const xeroOAuthClient = new XeroOAuthClient({
     http,
-    tokenProvider: new XeroTokenCache(tokenIssuer)
+    ...credentials.xeroOAuth
+  });
+  const xeroTokenCipher = AesGcmTokenCipher.fromEnvironment({
+    keysJson: credentials.xeroTokenEncryption.keysJson,
+    activeKeyId: credentials.xeroTokenEncryption.activeKeyId
+  });
+  const xeroConnections = new PostgresXeroConnectionRepository(
+    databaseClient.db
+  );
+  const legacyCredentials = credentials.xero;
+  const legacyTokenProvider =
+    legacyCredentials === null
+      ? undefined
+      : new XeroTokenCache(
+          new XeroClientCredentialsTokenIssuer(http, {
+            readXeroClientCredentials: () =>
+              Promise.resolve(legacyCredentials)
+          })
+        );
+  const xeroFactory = new OrganisationXeroClientFactory({
+    http,
+    connectionStore: xeroConnections,
+    tokenCipher: xeroTokenCipher,
+    oauthClient: xeroOAuthClient,
+    legacyConnectionEnabled: async (organisationId) => {
+      const [connection] = await databaseClient.db
+        .select({ id: providerConnections.id })
+        .from(providerConnections)
+        .where(
+          and(
+            eq(providerConnections.organisationId, organisationId),
+            eq(providerConnections.provider, 'XERO'),
+            eq(providerConnections.enabled, true)
+          )
+        )
+        .limit(1);
+      return connection !== undefined;
+    },
+    ...(legacyTokenProvider === undefined ? {} : { legacyTokenProvider })
   });
   const sinch = new SinchClient({
     http,
@@ -287,16 +375,23 @@ async function main() {
     clock: { now: () => new Date() }
   });
   const clock = { now: () => new Date() };
-  const syncDependencies = { database: databaseClient.db, xero, clock };
   const voiceCallRepository = new PostgresVoiceCallRepository(
     databaseClient.db
   );
-  const voiceSecretReader = createEnvironmentSecretReader(process.env);
+  const smsCommerceRepository = new PostgresSmsCommerceRepository(
+    databaseClient.db
+  );
+  const voiceGateway = new VoiceGatewayClient({
+    http,
+    signingSecret: required('VOICE_GATEWAY_SIGNING_SECRET'),
+    baseUrl: process.env.VOICE_GATEWAY_URL ?? 'http://voice-gateway:3105'
+  });
   const queue = new DurableJobQueue({
     databaseUrl,
     logger: console
   });
   const callbackUrl = `${required('PUBLIC_BASE_URL').replace(/\/$/, '')}/api/webhooks/sinch`;
+  const voiceGatewayCallbackUrl = `${required('PUBLIC_BASE_URL').replace(/\/$/, '')}/api/webhooks/voice-gateway`;
   const allRows = await waitForDatabaseMigrations({
     load: async () => {
       const liveRows = await databaseClient.db
@@ -317,17 +412,50 @@ async function main() {
     organisationIds: allRows.map((row) => row.id),
     logger: console,
     handlers: {
-      [jobNames.xeroInitialSync]: (payload) =>
-        runInitialSync(syncDependencies, payload),
-      [jobNames.xeroIncrementalSync]: (payload) =>
-        runIncrementalSync(syncDependencies, payload),
-      [jobNames.xeroInvoiceRefresh]: (payload) =>
-        runInvoiceRefresh(syncDependencies, payload),
-      [jobNames.xeroNightlyReconcile]: (payload) =>
-        reconcileNightly(syncDependencies, payload).then(() => undefined),
-      [jobNames.remindersCalculate]: (payload) =>
+      [jobNames.xeroInitialSync]: async (payload) =>
+        runInitialSync(
+          {
+            database: databaseClient.db,
+            xero: await xeroFactory.forOrganisation(payload.organisationId),
+            clock
+          },
+          payload
+        ),
+      [jobNames.xeroIncrementalSync]: async (payload) =>
+        runIncrementalSync(
+          {
+            database: databaseClient.db,
+            xero: await xeroFactory.forOrganisation(payload.organisationId),
+            clock
+          },
+          payload
+        ),
+      [jobNames.xeroInvoiceRefresh]: async (payload) =>
+        runInvoiceRefresh(
+          {
+            database: databaseClient.db,
+            xero: await xeroFactory.forOrganisation(payload.organisationId),
+            clock
+          },
+          payload
+        ),
+      [jobNames.xeroNightlyReconcile]: async (payload) =>
+        reconcileNightly(
+          {
+            database: databaseClient.db,
+            xero: await xeroFactory.forOrganisation(payload.organisationId),
+            clock
+          },
+          payload
+        ).then(() => undefined),
+      [jobNames.remindersCalculate]: async (payload) =>
         runReminderCycle(
-          { database: databaseClient.db, clock, xero, publisher: queue },
+          {
+            database: databaseClient.db,
+            clock,
+            xero: await xeroFactory.forOrganisation(payload.organisationId),
+            publisher: queue
+          },
           payload.organisationId
         ).then(() => undefined),
       [jobNames.voiceRemindersCalculate]: (payload) =>
@@ -348,12 +476,12 @@ async function main() {
           },
           payload.organisationId
         ).then(() => undefined),
-      [jobNames.reminderExecute]: (payload) =>
+      [jobNames.reminderExecute]: async (payload) =>
         executeReminder(
           {
             database: databaseClient.db,
             clock,
-            xero,
+            xero: await xeroFactory.forOrganisation(payload.organisationId),
             sinch,
             callbackUrl,
             xeroEmailAllowance: {
@@ -372,16 +500,19 @@ async function main() {
           { database: databaseClient.db, clock, sinch, callbackUrl },
           payload
         ).then(() => undefined),
+      [jobNames.smsNumberProvision]: (payload) =>
+        provisionPaidSmsNumber(
+          { repository: smsCommerceRepository, clock },
+          payload
+        ).then(() => undefined),
       [jobNames.voiceCallExecute]: (payload) =>
         executeVoiceCall(
           {
             database: databaseClient.db,
             repository: voiceCallRepository,
             clock,
-            secrets: voiceSecretReader,
-            providerFactory: {
-              create: (apiKey) => new RetellClient({ http, apiKey })
-            },
+            gateway: voiceGateway,
+            gatewayCallbackUrl: voiceGatewayCallbackUrl,
             publisher: queue,
             holidays: { list: () => [] },
             acceptCustomerVoiceCalls:
@@ -394,10 +525,7 @@ async function main() {
           {
             database: databaseClient.db,
             clock,
-            secrets: voiceSecretReader,
-            providerFactory: {
-              create: (apiKey) => new RetellClient({ http, apiKey })
-            },
+            gateway: voiceGateway,
             publisher: queue
           },
           payload
@@ -407,22 +535,200 @@ async function main() {
           { database: databaseClient.db, publisher: queue },
           payload
         ),
+      [jobNames.xeroOAuthCleanup]: () =>
+        cleanupExpiredXeroOAuthState({
+          database: databaseClient.db,
+          clock
+        }).then(() => undefined),
       [jobNames.retentionApply]: (payload) =>
         applyRetention({ database: databaseClient.db, clock }, payload).then(
           () => undefined
         ),
+      [jobNames.subscriptionLifecycle]: (payload) =>
+        processSubscriptionLifecycle(
+          {
+            load: async (organisationId) => {
+              const [subscription] = await databaseClient.db
+                .select({ status: subscriptions.status })
+                .from(subscriptions)
+                .where(eq(subscriptions.organisationId, organisationId))
+                .limit(1);
+              if (subscription === undefined) return null;
+              const [retentionCase] = await databaseClient.db
+                .select({ organisationId: retentionCases.organisationId })
+                .from(retentionCases)
+                .where(eq(retentionCases.organisationId, organisationId))
+                .limit(1);
+              return {
+                status: subscription.status,
+                retentionDeadlineRecorded: retentionCase !== undefined
+              };
+            },
+            disconnectXero: async (organisationId) => {
+              const connection =
+                await xeroConnections.findByOrganisationId(organisationId);
+              if (connection === null || connection.status === 'DISCONNECTED') {
+                return;
+              }
+              const session = await new XeroOAuthSessionProvider({
+                organisationId,
+                store: xeroConnections,
+                tokenCipher: xeroTokenCipher,
+                oauthClient: xeroOAuthClient
+              }).getSession();
+              await xeroOAuthClient.deleteConnection(
+                session.accessToken,
+                connection.connectionId
+              );
+              await xeroConnections.disconnect(organisationId, clock.now());
+            },
+            quarantineSmsNumber: async (organisationId, now) => {
+              const quarantineDays = requiredPositiveInteger(
+                'SMS_NUMBER_QUARANTINE_DAYS'
+              );
+              await smsCommerceRepository.quarantineNumber(
+                organisationId,
+                new Date(
+                  now.getTime() + quarantineDays * 24 * 60 * 60 * 1000
+                ),
+                now
+              );
+            },
+            recordRetentionDeadline: async (input) => {
+              await databaseClient.db.transaction(async (transaction) => {
+                const inserted = await transaction
+                  .insert(retentionCases)
+                  .values({
+                    organisationId: input.organisationId,
+                    source: 'SUBSCRIPTION_CANCELLED',
+                    status: 'SCHEDULED',
+                    disconnectedAt: input.disconnectedAt,
+                    reviewAfter: input.retentionDeadline,
+                    updatedAt: input.disconnectedAt
+                  })
+                  .onConflictDoNothing({
+                    target: retentionCases.organisationId
+                  })
+                  .returning({ organisationId: retentionCases.organisationId });
+                if (inserted.length === 0) return;
+                await transaction.insert(auditEvents).values({
+                  organisationId: input.organisationId,
+                  eventType: 'SUBSCRIPTION_RETENTION_SCHEDULED',
+                  entityType: 'SUBSCRIPTION',
+                  entityId: input.organisationId,
+                  afterValue: {
+                    disconnectedAt: input.disconnectedAt.toISOString(),
+                    retentionDeadline: input.retentionDeadline.toISOString()
+                  },
+                  occurredAt: input.disconnectedAt
+                });
+              });
+            },
+            clock
+          },
+          payload
+        ).then(() => undefined),
+      [jobNames.subscriptionTrialExpiry]: (payload) =>
+        processTrialExpiry(
+          {
+            load: async (organisationId) => {
+              const [subscription] = await databaseClient.db
+                .select({
+                  status: subscriptions.status,
+                  trialEndsAt: subscriptions.trialEndsAt
+                })
+                .from(subscriptions)
+                .where(eq(subscriptions.organisationId, organisationId))
+                .limit(1);
+              if (subscription === undefined) return null;
+              const [retentionCase] = await databaseClient.db
+                .select({ organisationId: retentionCases.organisationId })
+                .from(retentionCases)
+                .where(eq(retentionCases.organisationId, organisationId))
+                .limit(1);
+              return {
+                ...subscription,
+                retentionDeadlineRecorded: retentionCase !== undefined
+              };
+            },
+            pauseScheduledWork: async (organisationId, now) => {
+              await databaseClient.db
+                .update(organisations)
+                .set({
+                  sendMode: 'dry-run',
+                  rolloutScope: 'CONTROLLED',
+                  liveSendAcknowledged: false,
+                  updatedAt: now
+                })
+                .where(eq(organisations.id, organisationId));
+            },
+            disconnectXero: async (organisationId) => {
+              const connection =
+                await xeroConnections.findByOrganisationId(organisationId);
+              if (connection === null || connection.status === 'DISCONNECTED') {
+                return;
+              }
+              const session = await new XeroOAuthSessionProvider({
+                organisationId,
+                store: xeroConnections,
+                tokenCipher: xeroTokenCipher,
+                oauthClient: xeroOAuthClient
+              }).getSession();
+              await xeroOAuthClient.deleteConnection(
+                session.accessToken,
+                connection.connectionId
+              );
+              await xeroConnections.disconnect(organisationId, clock.now());
+            },
+            recordRetentionDeadline: async (input) => {
+              await databaseClient.db.transaction(async (transaction) => {
+                const inserted = await transaction
+                  .insert(retentionCases)
+                  .values({
+                    organisationId: input.organisationId,
+                    source: 'TRIAL_EXPIRED',
+                    status: 'SCHEDULED',
+                    disconnectedAt: input.disconnectedAt,
+                    reviewAfter: input.retentionDeadline,
+                    updatedAt: input.disconnectedAt
+                  })
+                  .onConflictDoNothing({
+                    target: retentionCases.organisationId
+                  })
+                  .returning({ organisationId: retentionCases.organisationId });
+                if (inserted.length === 0) return;
+                await transaction.insert(auditEvents).values({
+                  organisationId: input.organisationId,
+                  eventType: 'TRIAL_RETENTION_SCHEDULED',
+                  entityType: 'SUBSCRIPTION',
+                  entityId: input.organisationId,
+                  afterValue: {
+                    disconnectedAt: input.disconnectedAt.toISOString(),
+                    retentionDeadline: input.retentionDeadline.toISOString()
+                  },
+                  occurredAt: input.disconnectedAt
+                });
+              });
+            },
+            clock
+          },
+          payload
+        ).then(() => undefined),
       [jobNames.providerConnectionTest]: (payload) =>
         testProviderConnection(
           {
             database: databaseClient.db,
             clock,
             probe: {
-              test: async ({ provider }) => {
+              test: async ({ organisationId, provider }) => {
                 if (provider === 'XERO') {
+                  const xero = await xeroFactory.forOrganisation(
+                    organisationId
+                  );
                   const result = await xero.getOrganisation();
                   return {
                     healthy: true,
-                    requiredScopes: [...requiredXeroScopes],
+                    requiredScopes: [...requiredLegacyXeroScopes],
                     details: { organisationName: result.data.name }
                   };
                 }

@@ -112,24 +112,54 @@ export function databaseUrlFromEnvironment(environment: Environment): string {
   return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${name}`;
 }
 
-export function parseProviderCredentials(environment: Environment) {
-  const xero = parseObject(
-    required(environment, 'XERO_API_CREDENTIALS'),
-    'XERO_API_CREDENTIALS'
-  );
+export function parseXeroWorkerConfiguration(environment: Environment) {
+  const legacySource = environment.XERO_API_CREDENTIALS?.trim();
+  const legacy =
+    legacySource === undefined || legacySource === ''
+      ? null
+      : parseObject(legacySource, 'XERO_API_CREDENTIALS');
+  return {
+    oauth: {
+      clientId: required(environment, 'XERO_OAUTH_CLIENT_ID'),
+      clientSecret: required(environment, 'XERO_OAUTH_CLIENT_SECRET'),
+      redirectUri: required(environment, 'XERO_OAUTH_REDIRECT_URI')
+    },
+    tokenEncryption: {
+      keysJson: required(environment, 'XERO_TOKEN_ENCRYPTION_KEYS_JSON'),
+      activeKeyId: required(environment, 'XERO_TOKEN_ACTIVE_KEY_ID')
+    },
+    legacyCredentials:
+      legacy === null
+        ? null
+        : {
+            clientId: field(legacy, 'clientId', 'XERO_API_CREDENTIALS'),
+            clientSecret: field(
+              legacy,
+              'clientSecret',
+              'XERO_API_CREDENTIALS'
+            )
+          }
+  };
+}
+
+export function parseSinchCredentials(environment: Environment) {
   const sinch = parseObject(
     required(environment, 'SINCH_API_CREDENTIALS'),
     'SINCH_API_CREDENTIALS'
   );
   return {
-    xero: {
-      clientId: field(xero, 'clientId', 'XERO_API_CREDENTIALS'),
-      clientSecret: field(xero, 'clientSecret', 'XERO_API_CREDENTIALS')
-    },
-    sinch: {
-      apiKey: field(sinch, 'apiKey', 'SINCH_API_CREDENTIALS'),
-      apiSecret: field(sinch, 'apiSecret', 'SINCH_API_CREDENTIALS')
-    }
+    apiKey: field(sinch, 'apiKey', 'SINCH_API_CREDENTIALS'),
+    apiSecret: field(sinch, 'apiSecret', 'SINCH_API_CREDENTIALS')
+  };
+}
+
+export function parseProviderCredentials(environment: Environment) {
+  const xero = parseXeroWorkerConfiguration(environment);
+  return {
+    xero: xero.legacyCredentials,
+    xeroOAuth: xero.oauth,
+    xeroTokenEncryption: xero.tokenEncryption,
+    sinch: parseSinchCredentials(environment)
   };
 }
 

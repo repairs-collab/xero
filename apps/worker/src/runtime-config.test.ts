@@ -6,7 +6,8 @@ import {
   parseApprovedSmsRecoveryCommand,
   parseInboundReplyRecoveryCommand,
   parseOperationalResetCommand,
-  parseProviderCredentials
+  parseProviderCredentials,
+  parseXeroWorkerConfiguration
 } from './runtime-config.js';
 
 describe('worker runtime configuration', () => {
@@ -51,25 +52,64 @@ describe('worker runtime configuration', () => {
     );
   });
 
-  it('requires the exact provider credential fields', () => {
+  it('requires customer OAuth and token-encryption configuration while leaving legacy Xero optional', () => {
     expect(
       parseProviderCredentials({
-        XERO_API_CREDENTIALS: JSON.stringify({
-          clientId: 'xero-id',
-          clientSecret: 'xero-secret'
+        XERO_OAUTH_CLIENT_ID: 'customer-oauth-id',
+        XERO_OAUTH_CLIENT_SECRET: 'customer-oauth-secret',
+        XERO_OAUTH_REDIRECT_URI: 'https://ap.motts.com.au/xero/callback',
+        XERO_TOKEN_ENCRYPTION_KEYS_JSON: JSON.stringify({
+          primary: Buffer.alloc(32, 7).toString('base64')
         }),
+        XERO_TOKEN_ACTIVE_KEY_ID: 'primary',
         SINCH_API_CREDENTIALS: JSON.stringify({
           apiKey: 'sinch-key',
           apiSecret: 'sinch-secret'
         })
       })
     ).toEqual({
-      xero: { clientId: 'xero-id', clientSecret: 'xero-secret' },
+      xero: null,
+      xeroOAuth: {
+        clientId: 'customer-oauth-id',
+        clientSecret: 'customer-oauth-secret',
+        redirectUri: 'https://ap.motts.com.au/xero/callback'
+      },
+      xeroTokenEncryption: {
+        keysJson: JSON.stringify({
+          primary: Buffer.alloc(32, 7).toString('base64')
+        }),
+        activeKeyId: 'primary'
+      },
       sinch: {
         apiKey: 'sinch-key',
         apiSecret: 'sinch-secret'
       }
     });
+    expect(() => parseXeroWorkerConfiguration({})).toThrow(
+      'XERO_OAUTH_CLIENT_ID is required'
+    );
+  });
+
+  it('parses legacy Custom Connection credentials only when supplied', () => {
+    const base = {
+      XERO_OAUTH_CLIENT_ID: 'customer-oauth-id',
+      XERO_OAUTH_CLIENT_SECRET: 'customer-oauth-secret',
+      XERO_OAUTH_REDIRECT_URI: 'https://ap.motts.com.au/xero/callback',
+      XERO_TOKEN_ENCRYPTION_KEYS_JSON: JSON.stringify({
+        primary: Buffer.alloc(32, 9).toString('base64')
+      }),
+      XERO_TOKEN_ACTIVE_KEY_ID: 'primary'
+    };
+    expect(parseXeroWorkerConfiguration(base).legacyCredentials).toBeNull();
+    expect(
+      parseXeroWorkerConfiguration({
+        ...base,
+        XERO_API_CREDENTIALS: JSON.stringify({
+          clientId: 'legacy-id',
+          clientSecret: 'legacy-secret'
+        })
+      }).legacyCredentials
+    ).toEqual({ clientId: 'legacy-id', clientSecret: 'legacy-secret' });
   });
 
   it('parses fixed operational-reset commands without provider credentials', () => {
