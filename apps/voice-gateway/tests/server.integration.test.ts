@@ -14,6 +14,7 @@ const now = new Date('2026-10-09T00:00:00.000Z');
 
 const command = {
   version: 1 as const,
+  purpose: 'TEST' as const,
   gatewayCallId: '11111111-1111-4111-8111-111111111111',
   organisationId: '22222222-2222-4222-8222-222222222222',
   voiceCallId: '33333333-3333-4333-8333-333333333333',
@@ -111,7 +112,12 @@ describe('voice gateway control server', () => {
 
     const response = await request('/health/ready');
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ready: true, version: 1 });
+    await expect(response.json()).resolves.toEqual({
+      ready: true,
+      version: 1,
+      provider: 'VOIPCLOUD',
+      callsEnabled: false
+    });
   });
 
   it('creates a minimal session and returns it without protected facts', async () => {
@@ -175,6 +181,51 @@ describe('voice gateway control server', () => {
     expect((await request('/v1/calls', { method: 'POST', body })).status).toBe(200);
     expect(startCall).toHaveBeenCalledTimes(1);
     expect(startCall).toHaveBeenCalledWith(command);
+  });
+
+  it('allows staff test calls while rejecting customer calls when the customer gate is off', async () => {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error === undefined ? resolve() : reject(error)));
+    });
+    const startCall = vi.fn().mockResolvedValue(undefined);
+    server = createGatewayServer({
+      store,
+      signingSecret: secret,
+      clock: { now: () => new Date(now) },
+      supportedFlowVersion: 1,
+      customerCallsEnabled: false,
+      startCall
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => resolve());
+    });
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    const testResponse = await request('/v1/calls', {
+      method: 'POST',
+      body: JSON.stringify(command)
+    });
+    expect(testResponse.status).toBe(201);
+    expect(startCall).toHaveBeenCalledTimes(1);
+
+    const customer = {
+      ...command,
+      purpose: 'CUSTOMER' as const,
+      gatewayCallId: '44444444-4444-4444-8444-444444444444',
+      voiceCallId: '55555555-5555-4555-8555-555555555555',
+      idempotencyKey: 'customer-call-1',
+      providerUserNumber: '1011'
+    };
+    const customerResponse = await request('/v1/calls', {
+      method: 'POST',
+      body: JSON.stringify(customer)
+    });
+    expect(customerResponse.status).toBe(503);
+    await expect(customerResponse.json()).resolves.toEqual({
+      error: 'GATEWAY_CUSTOMER_CALLS_DISABLED'
+    });
+    expect(startCall).toHaveBeenCalledTimes(1);
   });
 
   it('rejects the same idempotency key with a changed command', async () => {
