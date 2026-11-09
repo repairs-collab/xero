@@ -12,6 +12,7 @@ import {
   organisations,
   outboundMessages,
   pauses,
+  PostgresSmsCommerceRepository,
   stageInstances,
   suppressions
 } from '@bc5000/db';
@@ -49,6 +50,23 @@ export async function processInboundReply(
   event: SinchReplyEvent,
   providerPayload: Record<string, unknown>
 ): Promise<void> {
+  const [account] = await database
+    .select({ edition: organisations.edition })
+    .from(organisations)
+    .where(eq(organisations.id, organisationId))
+    .limit(1);
+  if (account === undefined) throw new Error('ORGANISATION_NOT_FOUND');
+  if (account.edition === 'SOLO') {
+    const routedOrganisationId =
+      event.to === undefined
+        ? null
+        : await new PostgresSmsCommerceRepository(
+            database
+          ).findOrganisationIdByDestinationNumber(event.to);
+    if (routedOrganisationId !== organisationId) {
+      throw new Error('INBOUND_SMS_DESTINATION_MISMATCH');
+    }
+  }
   const contactId = await findContactByNumber(
     database,
     organisationId,
@@ -156,6 +174,20 @@ export async function processOptOut(
   organisationId: string,
   event: SinchOptOutEvent
 ): Promise<void> {
+  const [account] = await database
+    .select({ edition: organisations.edition })
+    .from(organisations)
+    .where(eq(organisations.id, organisationId))
+    .limit(1);
+  if (account === undefined) throw new Error('ORGANISATION_NOT_FOUND');
+  if (account.edition === 'SOLO') {
+    const routedOrganisationId = await new PostgresSmsCommerceRepository(
+      database
+    ).findOrganisationIdByDestinationNumber(event.to);
+    if (routedOrganisationId !== organisationId) {
+      throw new Error('INBOUND_SMS_DESTINATION_MISMATCH');
+    }
+  }
   const recordedAt = new Date(event.receivedAt);
   const contactId = await findContactByNumber(
     database,
