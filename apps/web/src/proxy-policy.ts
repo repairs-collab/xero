@@ -1,11 +1,14 @@
 const publicExactPaths = new Set([
+  '/account-recovery',
   '/api/webhooks/xero',
   '/api/webhooks/sinch',
+  '/api/webhooks/stripe',
   '/auth/callback',
   '/auth/login',
   '/auth/logout',
   '/health/live',
   '/health/ready',
+  '/start',
   '/favicon.ico'
 ]);
 
