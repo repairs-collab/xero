@@ -25,6 +25,9 @@ export type OperationalState =
   | 'RECONCILED'
   | 'RESET_FAILED';
 
+export const organisationEditions = ['INTERNAL_LEGACY', 'SOLO'] as const;
+export type OrganisationEdition = (typeof organisationEditions)[number];
+
 export const organisations = pgTable(
   'organisations',
   {
@@ -35,6 +38,10 @@ export const organisations = pgTable(
     name: text('name').notNull(),
     timeZone: varchar('time_zone', { length: 64 }).notNull(),
     baseCurrency: char('base_currency', { length: 3 }).notNull(),
+    edition: varchar('edition', { length: 24 })
+      .$type<OrganisationEdition>()
+      .notNull()
+      .default('INTERNAL_LEGACY'),
     sendMode: varchar('send_mode', { length: 16 })
       .$type<'dry-run' | 'live'>()
       .notNull()
@@ -73,6 +80,10 @@ export const organisations = pgTable(
       .defaultNow()
   },
   (table) => [
+    check(
+      'organisations_edition_ck',
+      sql`${table.edition} in ('INTERNAL_LEGACY', 'SOLO')`
+    ),
     check(
       'organisations_rollout_scope_ck',
       sql`${table.rolloutScope} in ('CONTROLLED', 'CUSTOMER')`

@@ -13,12 +13,15 @@ import {
   invoiceChases,
   invoices,
   organisationVoiceSettings,
+  organisationOnboarding,
   organisations,
   outboundMessages,
   reminderSequenceVersions,
   reminderSequences,
   stageInstances,
   suppressions,
+  subscriptionEvents,
+  subscriptions,
   tasks,
   voiceCallEvents,
   voiceGatewaySessions,
@@ -154,6 +157,18 @@ const seedUser = async (label: string): Promise<string> => {
     cognitoSubject: randomUUID(),
     email: id + '@example.invalid',
     displayName: label
+  });
+  return id;
+};
+
+const seedOAuthOrganisation = async (label: string): Promise<string> => {
+  const id = randomUUID();
+  await database.db.insert(organisations).values({
+    id,
+    name: label,
+    xeroOrganisationId: randomUUID(),
+    timeZone: 'Australia/Sydney',
+    baseCurrency: 'AUD'
   });
   return id;
 };
@@ -440,6 +455,161 @@ describe('database invariants', () => {
   it('exports reset manifests and rollout reconciliations', () => {
     expect(schema).toHaveProperty('operationalResetRuns');
     expect(schema).toHaveProperty('rolloutReconciliations');
+  });
+
+  it('exports the tenant-aware Xero OAuth tables without token leakage columns', async () => {
+    expect(schema).toHaveProperty('xeroOAuthTransactions');
+    expect(schema).toHaveProperty('xeroPendingAuthorisations');
+    expect(schema).toHaveProperty('xeroConnections');
+
+    await expect(tableExists('xero_oauth_transactions')).resolves.toBe(true);
+    await expect(tableExists('xero_pending_authorisations')).resolves.toBe(true);
+    await expect(tableExists('xero_connections')).resolves.toBe(true);
+
+    expect(await tableColumns('xero_oauth_transactions')).toEqual(
+      expect.arrayContaining([
+        'state_hash',
+        'user_id',
+        'existing_organisation_id',
+        'flow_purpose',
+        'return_path',
+        'expires_at',
+        'consumed_at'
+      ])
+    );
+    expect(await tableColumns('xero_oauth_transactions')).not.toEqual(
+      expect.arrayContaining(['raw_state', 'authorization_code', 'access_token'])
+    );
+    expect(await tableColumns('xero_pending_authorisations')).toEqual(
+      expect.arrayContaining([
+        'encrypted_refresh_token',
+        'candidate_tenants',
+        'granted_scopes',
+        'user_id',
+        'existing_organisation_id',
+        'flow_purpose',
+        'expires_at'
+      ])
+    );
+    expect(await tableColumns('xero_pending_authorisations')).not.toContain('access_token');
+    expect(await tableColumns('xero_connections')).toEqual(
+      expect.arrayContaining([
+        'organisation_id',
+        'connection_id',
+        'tenant_id',
+        'status',
+        'encrypted_refresh_token',
+        'granted_scopes',
+        'refresh_token_version',
+        'refresh_lease_id',
+        'refresh_lease_expires_at'
+      ])
+    );
+    expect(await tableColumns('xero_connections')).not.toContain('access_token');
+  });
+
+  it('keeps one Xero tenant per organisation and one organisation per tenant', async () => {
+    const firstOrganisationId = await seedOAuthOrganisation('First OAuth owner');
+    const secondOrganisationId = await seedOAuthOrganisation('Second OAuth owner');
+    const envelope = {
+      version: 1,
+      keyId: 'primary',
+      iv: 'base64-iv',
+      ciphertext: 'base64-ciphertext',
+      tag: 'base64-tag'
+    };
+    const insertConnection = (organisationId: string, tenantId: string) =>
+      database.pool.query(
+        `insert into xero_connections
+          (id, organisation_id, connection_id, tenant_id, status, encrypted_refresh_token,
+           granted_scopes)
+         values ($1, $2, $3, $4, 'CONNECTED', $5, $6)`,
+        [
+          randomUUID(),
+          organisationId,
+          randomUUID(),
+          tenantId,
+          envelope,
+          ['openid', 'offline_access', 'accounting.invoices']
+        ]
+      );
+
+    await insertConnection(firstOrganisationId, 'tenant-one');
+    await expect(
+      insertConnection(firstOrganisationId, 'tenant-two')
+    ).rejects.toMatchObject({ code: '23505' });
+    await expect(
+      insertConnection(secondOrganisationId, 'tenant-one')
+    ).rejects.toMatchObject({ code: '23505' });
+  });
+
+  it('requires valid Xero connection status, encrypted token material and paired leases', async () => {
+    const organisationId = await seedOAuthOrganisation('OAuth constraints');
+    const validEnvelope = {
+      version: 1,
+      keyId: 'primary',
+      iv: 'base64-iv',
+      ciphertext: 'base64-ciphertext',
+      tag: 'base64-tag'
+    };
+    const insert = (overrides: {
+      status?: string;
+      encryptedRefreshToken?: object | null;
+      grantedScopes?: string[];
+      refreshLeaseId?: string | null;
+      refreshLeaseExpiresAt?: Date | null;
+    }) =>
+      database.pool.query(
+        `insert into xero_connections
+          (id, organisation_id, connection_id, tenant_id, status, encrypted_refresh_token,
+           granted_scopes, refresh_lease_id, refresh_lease_expires_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [
+          randomUUID(),
+          organisationId,
+          randomUUID(),
+          randomUUID(),
+          overrides.status ?? 'CONNECTED',
+          overrides.encryptedRefreshToken === undefined
+            ? validEnvelope
+            : overrides.encryptedRefreshToken,
+          overrides.grantedScopes ?? ['openid', 'offline_access'],
+          overrides.refreshLeaseId ?? null,
+          overrides.refreshLeaseExpiresAt ?? null
+        ]
+      );
+
+    await expect(insert({ status: 'UNKNOWN' })).rejects.toMatchObject({ code: '23514' });
+    await expect(insert({ encryptedRefreshToken: null })).rejects.toMatchObject({ code: '23514' });
+    await expect(insert({ grantedScopes: [] })).rejects.toMatchObject({ code: '23514' });
+    await expect(insert({ refreshLeaseId: randomUUID() })).rejects.toMatchObject({ code: '23514' });
+  });
+
+  it('stores only hashed one-time OAuth state and encrypted pending authorisations', async () => {
+    const userId = await seedUser('OAuth transaction owner');
+    await expect(
+      database.pool.query(
+        `insert into xero_oauth_transactions
+          (id, state_hash, user_id, flow_purpose, return_path, expires_at)
+         values ($1, $2, $3, 'INVALID', '/onboarding', $4)`,
+        [randomUUID(), 'a'.repeat(64), userId, new Date(Date.now() + 300_000)]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+    await expect(
+      database.pool.query(
+        `insert into xero_pending_authorisations
+          (id, user_id, flow_purpose, encrypted_refresh_token,
+           candidate_tenants, granted_scopes, expires_at)
+         values ($1, $2, 'NEW_SOLO', null, $3, $4, $5)`,
+        [
+          randomUUID(),
+          userId,
+          [{ connectionId: 'connection-one', tenantId: 'tenant-one', tenantName: 'Example' }],
+          ['openid', 'offline_access'],
+          new Date(Date.now() + 300_000)
+        ]
+      )
+    ).rejects.toMatchObject({ code: '23502' });
   });
 
   it('keeps one voice settings row per organisation without secret material columns', async () => {
@@ -1406,6 +1576,137 @@ describe('database invariants', () => {
         approved_facts_hash: `legacy-unverified:${voiceCallId}`,
         call_flow_hash: 'sha256:legacy-script',
         call_flow_version: 1
+      });
+    } finally {
+      await client.query('rollback');
+      client.release();
+    }
+  });
+
+  it('enforces Solo subscriptions, idempotent events and onboarding versions', async () => {
+    const organisationId = randomUUID();
+    await database.db.insert(organisations).values({
+      id: organisationId,
+      edition: 'SOLO',
+      name: 'Solo schema test',
+      xeroOrganisationId: randomUUID(),
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await database.db.insert(subscriptions).values({
+      organisationId,
+      planCode: 'SOLO_AU_2000',
+      status: 'TRIALING',
+      stripeCustomerId: `cus_${randomUUID()}`,
+      stripeSubscriptionId: `sub_${randomUUID()}`,
+      trialEndsAt: new Date('2026-11-23T00:00:00.000Z'),
+      lastStripeEventCreatedAt: new Date('2026-11-09T00:00:00.000Z')
+    });
+    const stripeEventId = `evt_${randomUUID()}`;
+    await database.db.insert(subscriptionEvents).values({
+      organisationId,
+      stripeEventId,
+      eventType: 'customer.subscription.created',
+      stripeEventCreatedAt: new Date('2026-11-09T00:00:00.000Z'),
+      payloadHash: 'a'.repeat(64),
+      outcome: 'APPLIED'
+    });
+    await expect(
+      database.db.insert(subscriptionEvents).values({
+        organisationId,
+        stripeEventId,
+        eventType: 'customer.subscription.updated',
+        stripeEventCreatedAt: new Date('2026-11-09T00:01:00.000Z'),
+        payloadHash: 'b'.repeat(64),
+        outcome: 'APPLIED'
+      })
+    ).rejects.toThrow();
+    await database.db.insert(organisationOnboarding).values({
+      organisationId,
+      version: 1,
+      xeroConnectedAt: new Date('2026-11-09T00:00:00.000Z')
+    });
+
+    const [subscription] = await database.db
+      .select()
+      .from(subscriptions)
+      .where(eq(subscriptions.organisationId, organisationId));
+    const [onboarding] = await database.db
+      .select()
+      .from(organisationOnboarding)
+      .where(eq(organisationOnboarding.organisationId, organisationId));
+    expect(subscription).toMatchObject({
+      planCode: 'SOLO_AU_2000',
+      status: 'TRIALING'
+    });
+    expect(onboarding).toMatchObject({ version: 1, completedVersion: null });
+
+    const invalidOrganisationId = randomUUID();
+    await database.db.insert(organisations).values({
+      id: invalidOrganisationId,
+      edition: 'SOLO',
+      name: 'Invalid subscription state test',
+      xeroOrganisationId: randomUUID(),
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await expect(
+      database.pool.query(
+        `insert into subscriptions (organisation_id, plan_code, status)
+         values ($1, 'SOLO_AU_2000', 'UNKNOWN')`,
+        [invalidOrganisationId]
+      )
+    ).rejects.toThrow();
+  });
+
+  it('preserves every live control while classifying a legacy organisation', async () => {
+    const client = await database.pool.connect();
+    const schemaName = `solo_upgrade_${randomUUID().replaceAll('-', '_')}`;
+    const organisationId = randomUUID();
+    try {
+      await client.query('begin');
+      await client.query(`create schema "${schemaName}"`);
+      await client.query(`set local search_path to "${schemaName}"`);
+      await client.query(`
+        create table organisations (
+          id uuid primary key,
+          send_mode varchar(16) not null,
+          rollout_scope varchar(16) not null,
+          live_send_acknowledged boolean not null,
+          maintenance_mode boolean not null,
+          operational_state varchar(32) not null
+        )
+      `);
+      await client.query(
+        `insert into organisations values ($1, 'live', 'CUSTOMER', true, false, 'RECONCILED')`,
+        [organisationId]
+      );
+      const migration = await readFile(
+        new URL(
+          '../../drizzle/0014_accountpulse_solo_commerce.sql',
+          import.meta.url
+        ),
+        'utf8'
+      );
+      for (const statement of migration
+        .split('--> statement-breakpoint')
+        .map((value) => value.trim())
+        .filter(Boolean)) {
+        await client.query(statement);
+      }
+      const result = await client.query(
+        `select edition, send_mode, rollout_scope, live_send_acknowledged,
+                maintenance_mode, operational_state
+           from organisations where id = $1`,
+        [organisationId]
+      );
+      expect(result.rows[0]).toEqual({
+        edition: 'INTERNAL_LEGACY',
+        send_mode: 'live',
+        rollout_scope: 'CUSTOMER',
+        live_send_acknowledged: true,
+        maintenance_mode: false,
+        operational_state: 'RECONCILED'
       });
     } finally {
       await client.query('rollback');
