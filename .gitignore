@@ -6,6 +6,7 @@ outputs/
 .env*
 !.env.example
 .next/
+.next-stale*/
 dist/
 coverage/
 cdk.out/
