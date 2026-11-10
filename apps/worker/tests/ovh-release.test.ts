@@ -83,6 +83,24 @@ describe('OVH release pipeline', () => {
     expect(installer).toContain('umask 077');
     expect(installer).toContain('install -m 0600');
     expect(installer).toContain('current-images.env');
+    expect(installer).toContain(
+      'capture_optional_container_environment bc5000-asterisk'
+    );
+    expect(installer).toContain(
+      'capture_optional_container_environment bc5000-voice-gateway'
+    );
+    expect(installer).toContain(
+      'capture_optional_container_image bc5000-asterisk ACCOUNT_PULSE_ASTERISK_IMAGE'
+    );
+    expect(installer).toContain(
+      'capture_optional_container_image bc5000-voice-gateway ACCOUNT_PULSE_VOICE_GATEWAY_IMAGE'
+    );
+    expect(installer).toContain(
+      'capture_optional_container_port_bind_ip bc5000-asterisk 5060/tcp VOICE_SIP_BIND_IP'
+    );
+    expect(installer).toContain(
+      'capture_optional_container_port_bind_ip bc5000-asterisk 10000/udp VOICE_RTP_BIND_IP'
+    );
     expect(installer).toContain('XERO_TOKEN_ENCRYPTION_KEYS_JSON');
     expect(installer).not.toContain('set -x');
   });
@@ -97,6 +115,7 @@ describe('OVH release pipeline', () => {
     expect(release).toContain('accountpulse-worker:${RELEASE_SHA}');
     expect(release).toContain('worker.mjs migrate');
     expect(release).toContain('/health/ready');
+    expect(release).toContain('--retry-all-errors');
     expect(release).toContain('rollback_images');
     expect(release).toContain('previous-images.env');
     expect(release).toContain('release-metadata.json');
