@@ -135,6 +135,7 @@ describe('OVH release pipeline', () => {
   it('adds the commercial hostname without replacing the existing Motts site', () => {
     const installer = repositoryFile('deploy/ovh/install-public-hostname.sh');
     const site = repositoryFile('deploy/ovh/accountpulse-site.caddy');
+    const compose = repositoryFile('deploy/ovh/docker-compose.yml');
 
     expect(site).toContain('ap.motts.com.au');
     expect(site).toContain('reverse_proxy web:3000');
@@ -152,5 +153,6 @@ describe('OVH release pipeline', () => {
     );
     expect(installer).toContain('already serves valid HTTPS');
     expect(installer).not.toMatch(/^\s*rm\s+.*Caddyfile/m);
+    expect(compose).toContain('name: mott-marketing-proxy');
   });
 });

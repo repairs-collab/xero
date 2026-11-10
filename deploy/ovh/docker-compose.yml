@@ -174,11 +174,14 @@ services:
       - /opt/bc5000/Caddyfile:/etc/caddy/Caddyfile:ro
       - /srv/data/caddy/data:/data
       - /srv/data/caddy/config:/config
-    networks: [private]
+    networks: [private, marketing-proxy]
 
 networks:
   private:
     driver: bridge
+  marketing-proxy:
+    external: true
+    name: mott-marketing-proxy
 
 volumes:
   voice_audio:
