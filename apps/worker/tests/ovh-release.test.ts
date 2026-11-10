@@ -125,6 +125,7 @@ describe('OVH release pipeline', () => {
     expect(installer).toContain('ERR trap');
     expect(installer).toContain('openssl s_client');
     expect(installer).toContain('curl --fail');
+    expect(installer).toContain('--retry-all-errors');
     expect(installer).toContain('already serves valid HTTPS');
     expect(installer).not.toMatch(/^\s*rm\s+.*Caddyfile/m);
   });
