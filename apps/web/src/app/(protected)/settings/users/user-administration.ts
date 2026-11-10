@@ -42,7 +42,13 @@ export interface UserAdministrationDependencies {
   database: Database;
   cognito: CognitoUserAdministration;
   clock: { now(): Date };
+  authorizer?: UserManageAuthorizer;
 }
+
+export type UserManageAuthorizer = (
+  session: AppSession,
+  organisationId: string
+) => void | Promise<void>;
 
 export async function acceptPendingInvitations(
   database: Database,
@@ -78,6 +84,11 @@ export async function acceptPendingInvitations(
 export function createUserAdministration(
   dependencies: UserAdministrationDependencies
 ) {
+  const authorize: UserManageAuthorizer =
+    dependencies.authorizer ??
+    ((session, organisationId) => {
+      authorise(session, 'user.manage', organisationId);
+    });
   const inviteMember = async (
     session: AppSession,
     input: {
@@ -87,7 +98,7 @@ export function createUserAdministration(
       role: Role;
     }
   ): Promise<{ invitationId: string; userId: string }> => {
-    authorise(session, 'user.manage', input.organisationId);
+    await authorize(session, input.organisationId);
     const email = input.email.trim().toLowerCase();
     if (email.length === 0) throw new Error('Email is required');
     const [existingUser] = await dependencies.database
@@ -143,7 +154,7 @@ export function createUserAdministration(
     session: AppSession,
     input: { organisationId: string }
   ): Promise<UserAdministrationMember[]> => {
-    authorise(session, 'user.manage', input.organisationId);
+    await authorize(session, input.organisationId);
     const memberRows = await dependencies.database
       .select({ membership: memberships, user: users })
       .from(memberships)
@@ -181,7 +192,7 @@ export function createUserAdministration(
     session: AppSession,
     input: { organisationId: string; invitationId: string }
   ): Promise<void> => {
-    authorise(session, 'user.manage', input.organisationId);
+    await authorize(session, input.organisationId);
     const [invitation] = await dependencies.database
       .select()
       .from(invitations)
@@ -216,7 +227,7 @@ export function createUserAdministration(
     session: AppSession,
     input: { organisationId: string; userId: string; role: Role }
   ): Promise<void> => {
-    authorise(session, 'user.manage', input.organisationId);
+    await authorize(session, input.organisationId);
     const now = dependencies.clock.now();
     await dependencies.database.transaction(async (transaction) => {
       await transaction
@@ -288,7 +299,7 @@ export function createUserAdministration(
     session: AppSession,
     input: { organisationId: string; userId: string }
   ): Promise<void> => {
-    authorise(session, 'user.manage', input.organisationId);
+    await authorize(session, input.organisationId);
     const now = dependencies.clock.now();
     const disabledIdentity = await dependencies.database.transaction(async (transaction) => {
       await transaction
