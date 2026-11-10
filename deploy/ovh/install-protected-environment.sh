@@ -109,11 +109,58 @@ capture_container_environment() {
   rm -f "$snapshot"
 }
 
+capture_optional_container_environment() {
+  local container=$1
+  if docker inspect "$container" >/dev/null 2>&1; then
+    capture_container_environment "$container"
+  fi
+}
+
+capture_optional_container_image() {
+  local container=$1
+  local setting=$2
+  local image
+  if ! docker inspect "$container" >/dev/null 2>&1; then
+    return 0
+  fi
+  image=$(docker inspect --format '{{.Config.Image}}' "$container")
+  [[ -n "$image" ]] || {
+    echo "Could not identify the running image for $container." >&2
+    exit 65
+  }
+  configuration["$setting"]=$image
+}
+
+capture_optional_container_port_bind_ip() {
+  local container=$1
+  local port=$2
+  local setting=$3
+  local binding bind_ip
+  local -a bindings=()
+  if ! docker inspect "$container" >/dev/null 2>&1; then
+    return 0
+  fi
+  mapfile -t bindings < <(docker port "$container" "$port")
+  binding=${bindings[0]:-}
+  bind_ip=${binding%:*}
+  [[ -n "$binding" && -n "$bind_ip" ]] || {
+    echo "Could not identify the bind address for $container port $port." >&2
+    exit 65
+  }
+  configuration["$setting"]=$bind_ip
+}
+
 # Read the live containers instead of a template so customer-live, Sinch,
 # Cognito, database, voice and operational settings are preserved exactly.
 capture_container_environment bc5000-postgres
 capture_container_environment bc5000-worker
 capture_container_environment bc5000-web
+capture_optional_container_environment bc5000-asterisk
+capture_optional_container_environment bc5000-voice-gateway
+capture_optional_container_image bc5000-asterisk ACCOUNT_PULSE_ASTERISK_IMAGE
+capture_optional_container_image bc5000-voice-gateway ACCOUNT_PULSE_VOICE_GATEWAY_IMAGE
+capture_optional_container_port_bind_ip bc5000-asterisk 5060/tcp VOICE_SIP_BIND_IP
+capture_optional_container_port_bind_ip bc5000-asterisk 10000/udp VOICE_RTP_BIND_IP
 
 # A failed release can leave the protected file newer than the still-running
 # containers. Preserve generated Xero keys from that file so retries never

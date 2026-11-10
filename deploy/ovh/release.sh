@@ -111,7 +111,7 @@ rollback_armed=true
 active_compose=(docker compose --env-file "$BASE_ENV" --env-file "$CURRENT_MANIFEST" -f "$COMPOSE_FILE")
 "${active_compose[@]}" up -d
 
-curl --fail --show-error --silent --retry 12 --retry-delay 5 \
+curl --fail --show-error --silent --retry 18 --retry-delay 5 --retry-all-errors --connect-timeout 10 \
   "https://${PUBLIC_HOSTNAME}/health/ready" >/dev/null
 
 PREVIOUS_SHA=$(sed -n 's/^ACCOUNT_PULSE_WEB_IMAGE=.*://p' "$PREVIOUS_MANIFEST" | head -n 1)
