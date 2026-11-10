@@ -38,8 +38,8 @@ export default defineConfig({
         NODE_ENV: 'test',
         ACCOUNTPULSE_E2E: 'browser-journeys-only',
         ACCOUNTPULSE_E2E_NOW: '2026-10-08T02:00:00.000Z',
-        RETELL_API_BASE_URL: 'http://127.0.0.1:3201',
-        RETELL_API_KEY: 'fake-retell-private-key',
+        VOICE_GATEWAY_URL: 'http://127.0.0.1:3201',
+        VOICE_GATEWAY_SIGNING_SECRET: 'fake-voice-gateway-signing-secret',
         VOICE_PREVIEW_ALLOWED_ORIGINS:
           'https://billchaser.motts.com.au,https://staging.billchaser.motts.com.au',
         VOICE_PREVIEW_RECAPTCHA_MODE: 'unsupported',
