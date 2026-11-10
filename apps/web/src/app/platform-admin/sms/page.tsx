@@ -1,0 +1,67 @@
+import { headers } from 'next/headers';
+
+import type { SmsNumberStatus } from '@bc5000/db/web';
+
+import { PlatformSmsAdministration } from '../../../components/platform-admin/sms-administration.js';
+import { getPlatformAdminService } from '../../../server/platform-admin-service.js';
+import { requirePlatformOwner } from '../../../server/platform-authorization.js';
+import {
+  assignSmsNumberAction,
+  markSmsNumberReadyAction,
+  quarantineSmsNumberAction,
+  registerSmsNumberAction,
+  releaseSmsNumberAction,
+  returnSmsNumberToPoolAction
+} from './actions.js';
+
+type SearchParams = Promise<Record<string, string | string[] | undefined>>;
+const first = (value: string | string[] | undefined): string | undefined =>
+  Array.isArray(value) ? value[0] : value;
+
+export default async function PlatformSmsPage({
+  searchParams
+}: {
+  searchParams: SearchParams;
+}) {
+  const [query, session] = await Promise.all([
+    searchParams,
+    requirePlatformOwner(
+      new Request('http://localhost/platform-admin/sms', {
+        headers: await headers()
+      })
+    )
+  ]);
+  const search = first(query.search) ?? '';
+  const statusValue = first(query.status) ?? '';
+  const status = ['AVAILABLE', 'RESERVED', 'READY', 'QUARANTINED', 'RELEASED'].includes(statusValue)
+    ? (statusValue as SmsNumberStatus)
+    : undefined;
+  const service = getPlatformAdminService();
+  const [page, organisations] = await Promise.all([
+    service.listNumbers(session.userId, {
+      search,
+      ...(status ? { status } : {}),
+      pageSize: 100
+    }),
+    service.listOrganisations(session.userId, {
+      sort: 'name',
+      direction: 'asc',
+      pageSize: 100
+    })
+  ]);
+  return (
+    <PlatformSmsAdministration
+      page={page}
+      organisations={organisations.items.map(({ id, name }) => ({ id, name }))}
+      filters={{ search, status: status ?? '' }}
+      actions={{
+        register: registerSmsNumberAction,
+        assign: assignSmsNumberAction,
+        ready: markSmsNumberReadyAction,
+        quarantine: quarantineSmsNumberAction,
+        release: releaseSmsNumberAction,
+        returnToPool: returnSmsNumberToPoolAction
+      }}
+    />
+  );
+}
