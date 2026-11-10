@@ -2,14 +2,14 @@ import {
   createSinchWebhookHandler
 } from '../../../../server/webhook-handlers.js';
 import {
-  getCommonWebhookDependencies,
+  getSinchWebhookDependencies,
   getSinchPublicKeys,
   getSinchWebhookToken
 } from '../../../../server/webhook-runtime.js';
 
 export async function POST(request: Request): Promise<Response> {
   const handler = createSinchWebhookHandler({
-    ...(await getCommonWebhookDependencies()),
+    ...(await getSinchWebhookDependencies()),
     publicKeys: getSinchPublicKeys(),
     sharedToken: getSinchWebhookToken()
   });

@@ -5,10 +5,6 @@ import { describe, expect, it } from 'vitest';
 import { fixedVoiceCallCopy } from '@bc5000/domain';
 
 import {
-  createGenericFlowPreviewConfiguration,
-  GenericFlowPreview
-} from '../src/app/(protected)/settings/voice/generic-flow-preview.js';
-import {
   createFreeVoicePlaybackGuard,
   describeFreePreviewVoice,
   freeVoicePreviewScripts,
@@ -32,13 +28,10 @@ const configuredSettings: VoiceSettingsView = {
   configured: true,
   enabled: false,
   automaticEnabled: false,
-  provider: 'RETELL',
-  secretReferenceLabel: 'RETELL_API_KEY',
-  previewPublicKey: 'public_key_accountpulse_preview',
-  agentId: 'agent_accountpulse',
-  agentVersion: 7,
-  voiceId: 'voice_australian_1',
-  voiceLabel: 'Australian accounts voice',
+  provider: 'VOIPCLOUD',
+  voipcloudUserNumber: '1099',
+  ttsVoiceId: 'en_GB-alba-medium',
+  gatewayFlowVersion: 1,
   outboundNumber: '+61255501234',
   transferSipUri: 'sip:accounts@voipline.example',
   fallbackOfficeNumber: '+61255504321',
@@ -50,8 +43,10 @@ const configuredSettings: VoiceSettingsView = {
   callFlowVersion: fixedVoiceCallCopy.version,
   callFlowHash: 'sha256:fixed-flow',
   connectionReady: true,
+  gatewayReady: true,
   genericFlowReady: false,
-  lastConnectionTestedAt: new Date('2026-10-08T02:00:00.000Z')
+  lastConnectionTestedAt: new Date('2026-10-08T02:00:00.000Z'),
+  lastGatewayTestedAt: new Date('2026-10-08T02:00:00.000Z')
 };
 
 describe('voice settings view', () => {
@@ -143,14 +138,16 @@ describe('voice settings view', () => {
     );
 
     expect(html).toContain('Manual voice calls are off');
-    expect(html).toContain('Provider readiness');
+    expect(html).toContain('VoIPcloud readiness');
+    expect(html).toContain('OVH voice gateway');
     expect(html).toContain('Connection ready');
     expect(html).toContain('Generic flow test required');
     expect(html).toContain('manual, one-at-a-time voice calls');
     expect(html).toContain('Customer Live SMS and email remain unchanged');
     expect(html).toContain('ENABLE VOICE CALLS');
-    expect(html).toContain('RETELL_API_KEY');
-    expect(html).not.toContain('env:RETELL_API_KEY');
+    expect(html).toContain('VoIPcloud integration');
+    expect(html).toContain('Credentials secured on OVH');
+    expect(html).not.toMatch(/RETELL_API_KEY|env:RETELL_API_KEY/i);
     expect(html).not.toMatch(/private key|api key value|authorization:/i);
   });
 
@@ -191,6 +188,7 @@ describe('voice settings view', () => {
           ...configuredSettings,
           configured: false,
           connectionReady: false,
+          gatewayReady: false,
           genericFlowReady: false
         }
       })
@@ -199,7 +197,7 @@ describe('voice settings view', () => {
       'Save the voice provider settings before enabling manual voice calls.'
     );
     expect(unconfiguredHtml).toContain(
-      'Run a successful provider connection test before enabling manual voice calls.'
+      'Run a successful VoIPcloud connection test before enabling manual voice calls.'
     );
   });
 
@@ -219,61 +217,6 @@ describe('voice settings view', () => {
     expect(html).not.toContain(`name="voicemail"`);
   });
 
-  it('builds a fictional web-audio preview with transcript, outbound calling, and transfer disabled', () => {
-    const configuration = createGenericFlowPreviewConfiguration({
-      agentId: 'agent_accountpulse',
-      agentVersion: 7,
-      previewSessionId: 'preview-session-123',
-      recaptchaToken: 'fresh-recaptcha-token'
-    });
-
-    expect(configuration).toEqual({
-      agent_id: 'agent_accountpulse',
-      agent_version: 7,
-      transcript: false,
-      recaptchaToken: 'fresh-recaptcha-token',
-      metadata: {
-        accountpulse_preview_session_id: 'preview-session-123'
-      },
-      retell_llm_dynamic_variables: {
-        accountpulse_call_id: 'preview-preview-session-123',
-        preview_mode: 'true',
-        disable_outbound_call: 'true',
-        disable_transfer: 'true',
-        invoice_details_json:
-          '[{"invoiceNumber":"DEMO-1001","amountDue":"120.50"},{"invoiceNumber":"DEMO-1002","amountDue":"80.05"}]',
-        combined_amount: '200.55',
-        currency: 'AUD',
-        callback_number: '+61200000000',
-        fallback_office_number: '+61200000000'
-      }
-    });
-    const serialised = JSON.stringify(configuration);
-    expect(serialised).not.toMatch(
-      /customer[_ ]?id|customer[_ ]?name|to_number|destination|transfer_sip|recording|audio|onTranscript/i
-    );
-  });
-
-  it('labels the browser preview as fictional and does not ask for a customer or telephone number', () => {
-    const html = renderToStaticMarkup(
-      createElement(GenericFlowPreview, {
-        organisationId: 'org-1',
-        previewPublicKey: 'public_key_accountpulse_preview',
-        agentId: 'agent_accountpulse',
-        agentVersion: 7,
-        previewSessionId: 'preview-session-123',
-        previewSessionToken: 'signed-preview-session-token',
-        recaptchaSiteKey: 'recaptcha-site-key'
-      })
-    );
-
-    expect(html).toContain('Fictional setup preview');
-    expect(html).toContain('DEMO-1001');
-    expect(html).toContain('No customer will be called');
-    expect(html).toContain('No transcript or recording is kept');
-    expect(html).not.toMatch(/name="customer|name="phone|name="destination/i);
-  });
-
   it('accepts only an untampered server-issued preview session for the pinned flow', async () => {
     const previousSecret = process.env.SESSION_SECRET_BASE64;
     process.env.SESSION_SECRET_BASE64 = Buffer.alloc(32, 7).toString('base64');
@@ -284,9 +227,9 @@ describe('voice settings view', () => {
         callFlowHash: 'sha256:fixed-flow',
         callFlowVersion: 1,
         configurationVersion: 3,
-        agentId: 'agent_accountpulse',
-        agentVersion: 7,
-        voiceId: 'voice_australian_1'
+        voipcloudUserNumber: '1099',
+        gatewayFlowVersion: 1,
+        ttsVoiceId: 'en_GB-alba-medium'
       };
       const issued = issueVoicePreviewSession(expected);
 

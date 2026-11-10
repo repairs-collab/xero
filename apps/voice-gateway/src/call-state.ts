@@ -115,8 +115,6 @@ export const advanceGatewayCall = (
     state: candidate,
     lastEventSequence: event.sequence,
     safeFailureCode:
-      candidate === 'FAILED' || candidate === 'UNKNOWN'
-        ? (event.safeCode ?? null)
-        : null
+      terminalStates.has(candidate) ? (event.safeCode ?? null) : null
   };
 };

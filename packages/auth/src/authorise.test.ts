@@ -33,6 +33,8 @@ describe('authorise', () => {
     ['OPERATOR', 'reminder.approve', true],
     ['OPERATOR', 'provider.configure', false],
     ['ADMIN', 'user.manage', true],
+    ['ADMIN', 'billing.manage', true],
+    ['OPERATOR', 'billing.manage', false],
     ['OPERATOR', 'chase.operate', true],
     ['ADMIN', 'outbox.read', true],
     ['OPERATOR', 'outbox.read', true],
@@ -85,5 +87,6 @@ describe('authorise', () => {
     expect(permissions.OPERATOR).toContain('voice-contact.override');
     expect(permissions.OPERATOR).not.toContain('voice-suppression.clear');
     expect(permissions.OPERATOR).not.toContain('voice-settings.manage');
+    expect(permissions.OPERATOR).not.toContain('billing.manage');
   });
 });

@@ -1,0 +1,109 @@
+export type AccountRetentionStatus =
+  | 'SCHEDULED'
+  | 'REVIEW_REQUIRED'
+  | 'LEGAL_HOLD'
+  | 'COMPLETED';
+
+export type RetentionRecordCategory =
+  | 'XERO_REFRESH_TOKEN'
+  | 'OAUTH_TRANSIENT_TOKEN'
+  | 'UNRESOLVED_RECEIVABLE'
+  | 'OUTBOUND_MESSAGE_CONTENT'
+  | 'INBOUND_MESSAGE_CONTENT'
+  | 'PROCESSED_WEBHOOK_PAYLOAD'
+  | 'AUDIT_METADATA'
+  | 'BILLING_RECORD'
+  | 'DATABASE_BACKUP';
+
+export interface RetentionMatrixRow {
+  category: RetentionRecordCategory;
+  trigger: string;
+  duration: string | null;
+  action: string;
+  implementation: 'ENFORCED' | 'REQUIRES_POLICY_APPROVAL' | 'HOSTING_EVIDENCE_REQUIRED';
+}
+
+/**
+ * Product defaults that are already implemented or explicitly approved in the
+ * AccountPulse design. A null duration is deliberate: it prevents product code
+ * or public wording from inventing a legal or hosting retention promise.
+ */
+export const accountPulseRetentionMatrix: readonly RetentionMatrixRow[] = [
+  {
+    category: 'XERO_REFRESH_TOKEN',
+    trigger: 'Xero disconnect, expired trial or effective subscription cancellation',
+    duration: 'Immediate',
+    action: 'Revoke the remote connection and remove the encrypted local refresh token.',
+    implementation: 'ENFORCED'
+  },
+  {
+    category: 'OAUTH_TRANSIENT_TOKEN',
+    trigger: 'OAuth transaction consumed or expired',
+    duration: 'At expiry',
+    action: 'Delete the transient authorisation and encrypted pending token.',
+    implementation: 'ENFORCED'
+  },
+  {
+    category: 'UNRESOLVED_RECEIVABLE',
+    trigger: 'Account retention deadline reached while an invoice remains unresolved',
+    duration: 'Until reviewed',
+    action: 'Hold automatic deletion and require an authorised retention review.',
+    implementation: 'ENFORCED'
+  },
+  {
+    category: 'OUTBOUND_MESSAGE_CONTENT',
+    trigger: 'Related invoice resolved',
+    duration: '24 months',
+    action: 'Redact content while preserving delivery, hash and audit metadata.',
+    implementation: 'ENFORCED'
+  },
+  {
+    category: 'INBOUND_MESSAGE_CONTENT',
+    trigger: 'All invoices for the contact resolved',
+    duration: '24 months',
+    action: 'Redact inbound and operator-reply bodies while preserving metadata.',
+    implementation: 'ENFORCED'
+  },
+  {
+    category: 'PROCESSED_WEBHOOK_PAYLOAD',
+    trigger: 'Webhook processed successfully',
+    duration: '90 days',
+    action: 'Delete the raw projection; never delete an unprocessed event by age alone.',
+    implementation: 'ENFORCED'
+  },
+  {
+    category: 'AUDIT_METADATA',
+    trigger: 'Account cancellation or deletion',
+    duration: null,
+    action: 'Preserve until an Australian legal retention period is approved.',
+    implementation: 'REQUIRES_POLICY_APPROVAL'
+  },
+  {
+    category: 'BILLING_RECORD',
+    trigger: 'Subscription or payment event',
+    duration: null,
+    action: 'Preserve until finance and Australian legal retention periods are approved.',
+    implementation: 'REQUIRES_POLICY_APPROVAL'
+  },
+  {
+    category: 'DATABASE_BACKUP',
+    trigger: 'Backup created or source record deleted',
+    duration: null,
+    action: 'Publish only the verified OVH backup expiry and restore controls.',
+    implementation: 'HOSTING_EVIDENCE_REQUIRED'
+  }
+] as const;
+
+export const accountRetentionTransition = (input: {
+  currentStatus: AccountRetentionStatus;
+  deadline: Date;
+  now: Date;
+}): AccountRetentionStatus => {
+  if (
+    input.currentStatus === 'SCHEDULED' &&
+    input.now.getTime() >= input.deadline.getTime()
+  ) {
+    return 'REVIEW_REQUIRED';
+  }
+  return input.currentStatus;
+};

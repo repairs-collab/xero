@@ -4,6 +4,7 @@ export type ProviderSendSource =
   | 'ESCALATION_SMS'
   | 'INBOX_REPLY'
   | 'TEST_SMS'
+  | 'VERIFICATION_OTP'
   | 'XERO_EMAIL';
 
 export type ProviderSendChannel = 'SMS' | 'XERO_EMAIL';
@@ -40,6 +41,7 @@ const sources = new Set<ProviderSendSource>([
   'ESCALATION_SMS',
   'INBOX_REPLY',
   'TEST_SMS',
+  'VERIFICATION_OTP',
   'XERO_EMAIL'
 ]);
 

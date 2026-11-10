@@ -96,14 +96,9 @@ async function seed() {
   });
   await client.db.insert(organisationVoiceSettings).values({
     organisationId,
+    provider: 'VOIPCLOUD',
     enabled: false,
     configurationVersion: 3,
-    secretReference: 'env:RETELL_API_KEY',
-    previewPublicKey: 'public_key_test_restricted',
-    agentId: 'agent_accountpulse',
-    agentVersion: 7,
-    voiceId: 'voice_au',
-    voiceLabel: 'Australian English',
     voipcloudUserNumber: '1099',
     ttsVoiceId: 'en_GB-alba-medium',
     gatewayFlowVersion: 1,
@@ -116,6 +111,8 @@ async function seed() {
     weekdayEndLocal: '17:00:00',
     lastConnectionTestedAt: now,
     lastConnectionTestSucceeded: true,
+    lastGatewayTestedAt: now,
+    lastGatewayTestSucceeded: true,
     updatedByUserId: adminUserId,
     updatedAt: now
   });
@@ -130,9 +127,9 @@ async function seed() {
       configurationVersion: 3,
       callFlowHash: voiceCallFlowHash,
       callFlowVersion: fixedVoiceCallCopy.version,
-      agentId: 'agent_accountpulse',
-      agentVersion: 7,
-      voiceId: 'voice_au'
+      voipcloudUserNumber: '1099',
+      gatewayFlowVersion: 1,
+      ttsVoiceId: 'en_GB-alba-medium'
     },
     occurredAt: now
   });

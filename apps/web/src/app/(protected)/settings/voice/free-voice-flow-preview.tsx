@@ -9,6 +9,7 @@ import {
   playFreeVoicePreviewScript,
   selectFreePreviewVoice
 } from './free-voice-flow.js';
+import { recordGenericFlowTest } from './actions.js';
 
 type PreviewStep =
   | 'READY'
@@ -27,13 +28,20 @@ const stepLabel: Record<PreviewStep, string> = {
   ENDED: 'Preview ended'
 };
 
-export function FreeVoiceFlowPreview() {
+export function FreeVoiceFlowPreview({
+  organisationId,
+  previewSessionToken
+}: {
+  organisationId?: string;
+  previewSessionToken?: string;
+} = {}) {
   const playbackGuard = useRef(createFreeVoicePlaybackGuard());
   const [supported, setSupported] = useState<boolean | null>(null);
   const [voiceLabel, setVoiceLabel] = useState(
     'Checking this device for an Australian voice'
   );
   const [step, setStep] = useState<PreviewStep>('READY');
+  const [completed, setCompleted] = useState(false);
   const [status, setStatus] = useState('Ready — no call will be placed');
 
   useEffect(() => {
@@ -77,6 +85,7 @@ export function FreeVoiceFlowPreview() {
     }
 
     setStep(nextStep);
+    setCompleted(false);
     setStatus(stepLabel[nextStep]);
     const speech = window.speechSynthesis;
     const isCurrentPlayback = playbackGuard.current.begin();
@@ -119,6 +128,7 @@ export function FreeVoiceFlowPreview() {
       window.speechSynthesis.cancel();
     }
     setStep('ENDED');
+    setCompleted(inCall);
     setStatus(stepLabel.ENDED);
   };
 
@@ -215,6 +225,19 @@ export function FreeVoiceFlowPreview() {
           End preview
         </button>
       </div>
+      {organisationId !== undefined && previewSessionToken !== undefined ? (
+        <form action={recordGenericFlowTest} className="settings-form">
+          <input type="hidden" name="organisationId" value={organisationId} />
+          <input
+            type="hidden"
+            name="previewSessionToken"
+            value={previewSessionToken}
+          />
+          <button className="button" disabled={!completed}>
+            Confirm the fictional flow worked
+          </button>
+        </form>
+      ) : null}
     </section>
   );
 }

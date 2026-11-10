@@ -1,8 +1,11 @@
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 
 import {
   organisations,
   organisationVoiceSettings,
+  messageAttempts,
+  PostgresSmsCommerceRepository,
+  PostgresXeroConnectionRepository,
   PostgresWebhookRepository
 } from '@bc5000/db/web';
 import { getDatabaseClient } from './runtime.js';
@@ -27,6 +30,65 @@ export async function getCommonWebhookDependencies() {
     organisationId,
     repository: new PostgresWebhookRepository(database),
     queue: await getJobQueue()
+  };
+}
+
+export async function getXeroWebhookDependencies() {
+  const database = getDatabaseClient().db;
+  const xeroConnections = new PostgresXeroConnectionRepository(database);
+  return {
+    repository: new PostgresWebhookRepository(database),
+    queue: await getJobQueue(),
+    resolveOrganisationId: (tenantId: string) =>
+      xeroConnections.findOrganisationIdByTenantId(tenantId)
+  };
+}
+
+export async function getSinchWebhookDependencies() {
+  const database = getDatabaseClient().db;
+  const numbers = new PostgresSmsCommerceRepository(database);
+  const legacyOrganisationId =
+    process.env.WEBHOOK_ORGANISATION_ID?.trim() || undefined;
+  return {
+    ...(legacyOrganisationId === undefined
+      ? {}
+      : { organisationId: legacyOrganisationId }),
+    repository: new PostgresWebhookRepository(database),
+    queue: await getJobQueue(),
+    resolveOrganisationId: (destinationNumber: string) =>
+      numbers.findOrganisationIdByDestinationNumber(destinationNumber),
+    resolveDeliveryOrganisationId: async (messageId: string) => {
+      const [attempt] = await database
+        .select({ organisationId: messageAttempts.organisationId })
+        .from(messageAttempts)
+        .where(
+          and(
+            eq(messageAttempts.provider, 'SINCH'),
+            eq(messageAttempts.providerMessageId, messageId)
+          )
+        )
+        .limit(1);
+      return attempt?.organisationId ?? null;
+    },
+    resolveLegacyOrganisationId: async (candidateId: string) => {
+      if (
+        legacyOrganisationId !== undefined &&
+        candidateId !== legacyOrganisationId
+      ) {
+        return null;
+      }
+      const [organisation] = await database
+        .select({ id: organisations.id })
+        .from(organisations)
+        .where(
+          and(
+            eq(organisations.id, candidateId),
+            eq(organisations.edition, 'INTERNAL_LEGACY')
+          )
+        )
+        .limit(1);
+      return organisation?.id ?? null;
+    }
   };
 }
 

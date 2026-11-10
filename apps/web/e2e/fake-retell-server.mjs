@@ -8,12 +8,16 @@ const server = createServer((request, response) => {
     response.end('{"status":"ok"}');
     return;
   }
-  if (
-    request.url === '/get-agent/agent_accountpulse?version=1' &&
-    request.headers.authorization === 'Bearer fake-retell-private-key'
-  ) {
+  if (request.url === '/health/ready') {
     response.writeHead(200, { 'content-type': 'application/json' });
-    response.end(JSON.stringify({ version: 1, voice_id: 'voice_au' }));
+    response.end(
+      JSON.stringify({
+        ready: true,
+        version: 1,
+        provider: 'VOIPCLOUD',
+        callsEnabled: false
+      })
+    );
     return;
   }
   response.writeHead(404, { 'content-type': 'application/json' });

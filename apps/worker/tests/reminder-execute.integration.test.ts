@@ -14,6 +14,7 @@ import {
   messageAttempts,
   migrateDatabase,
   organisations,
+  organisationOnboarding,
   outboundMessages,
   pauses,
   paymentPromises,
@@ -24,6 +25,7 @@ import {
   sequenceStages,
   stageInstances,
   suppressions,
+  subscriptions,
   tasks
 } from '@bc5000/db';
 import {
@@ -327,6 +329,34 @@ const waitUntilAsync = async (
 };
 
 describe('executeReminder', () => {
+  it('retains stale queued work when a Solo subscription cannot send', async () => {
+    const seeded = await seedApprovedReminder();
+    await client.db
+      .update(organisations)
+      .set({ edition: 'SOLO' })
+      .where(eq(organisations.id, seeded.organisationId));
+    await client.db.insert(subscriptions).values({
+      organisationId: seeded.organisationId,
+      planCode: 'SOLO_AU_2000',
+      status: 'TRIALING',
+      trialEndsAt: new Date('2026-09-17T00:00:00.000Z')
+    });
+    await client.db.insert(organisationOnboarding).values({
+      organisationId: seeded.organisationId
+    });
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    const sinch = new FakeSinch();
+
+    await expect(
+      executeReminder(dependencies(xero, sinch), {
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId
+      })
+    ).resolves.toEqual({ kind: 'cancelled', reason: 'TRIAL_EXPIRED' });
+    expect(sinch.sendCalls).toEqual([]);
+  });
+
   it('sends an automatic reminder on its scheduled local day inside the social window', async () => {
     const seeded = await seedApprovedReminder({
       sequenceMode: 'AUTOMATIC',

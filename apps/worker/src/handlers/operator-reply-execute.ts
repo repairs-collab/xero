@@ -1,5 +1,7 @@
 import { and, eq } from 'drizzle-orm';
 
+import { renderSms } from '@bc5000/domain';
+
 import {
   auditEvents,
   conversations,
@@ -8,21 +10,26 @@ import {
   PostgresMessageRepository,
   suppressions
 } from '@bc5000/db';
-import type {
-  SinchSendSmsInput,
-  SinchSubmitResult
+import type { SmsProvider } from '@bc5000/integrations/sms';
+import {
+  SinchAuthenticationFailure,
+  SinchPermanentSubmissionFailure,
+  SinchRateLimited,
+  SinchValidationFailure
 } from '@bc5000/integrations/sinch';
 import type { JobPayloads } from '@bc5000/jobs';
 
 import {
   dispatchWithProviderSendLock,
-  markProviderSendBlocked
+  type EntitlementSendBlocker,
+  markProviderSendBlocked,
+  releaseSmsUsageReservation
 } from '../services/provider-send-policy.js';
 
 export interface OperatorReplyDependencies {
   database: Database;
   clock: { now(): Date };
-  sinch: { sendSms(input: SinchSendSmsInput): Promise<SinchSubmitResult> };
+  sinch: SmsProvider;
   callbackUrl: string;
 }
 
@@ -32,6 +39,7 @@ export type OperatorReplyOutcome =
       kind: 'cancelled';
       reason:
         | 'SUPPRESSED'
+        | EntitlementSendBlocker
         | 'OPERATIONAL_MAINTENANCE'
         | 'UNSUPPORTED_SENDING_STATE';
     }
@@ -152,11 +160,18 @@ export async function executeOperatorReply(
         organisationId: payload.organisationId,
         source: 'INBOX_REPLY',
         channel: 'SMS',
-        destination: row.conversation.normalisedNumber
+        destination: row.conversation.normalisedNumber,
+        outboundMessageId: claim.outboundId,
+        smsPartCount: renderSms(row.reply.content, {}, { maxSegments: 10 })
+          .segmentCount,
+        now
       },
-      () =>
+      (_transaction, sendContext) =>
         dependencies.sinch.sendSms({
           destinationNumber: row.conversation.normalisedNumber,
+          ...(sendContext.smsSourceNumber === null
+            ? {}
+            : { sourceNumber: sendContext.smsSourceNumber }),
           content: row.reply.content,
           callbackUrl: dependencies.callbackUrl,
           metadata: {
@@ -257,7 +272,19 @@ export async function executeOperatorReply(
       });
     });
     return { kind: 'sent', providerMessageId: accepted.messageId };
-  } catch {
+  } catch (error) {
+    const knownRejection =
+      error instanceof SinchValidationFailure ||
+      error instanceof SinchAuthenticationFailure ||
+      error instanceof SinchPermanentSubmissionFailure ||
+      error instanceof SinchRateLimited;
+    if (knownRejection) {
+      await releaseSmsUsageReservation(dependencies.database, {
+        organisationId: payload.organisationId,
+        outboundMessageId: claim.outboundId,
+        now
+      });
+    }
     await messages.markUnknown({
       outboundId: claim.outboundId,
       attemptId: claim.attemptId,

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { contacts, conversations, createDatabase, messageAttempts, migrateDatabase, operatorReplies, organisations, outboundMessages, users } from '@bc5000/db';
+import { contacts, conversations, createDatabase, messageAttempts, migrateDatabase, operatorReplies, organisationOnboarding, organisations, outboundMessages, subscriptions, users } from '@bc5000/db';
 
 import { executeOperatorReply } from '../src/handlers/operator-reply-execute.js';
 import { processDeliveryEvent } from '../src/services/delivery-service.js';
@@ -48,6 +48,36 @@ const waitUntilAsync = async (
 };
 
 describe('operator reply execution', () => {
+  it('blocks a forged Solo Inbox reply after entitlement is lost', async () => {
+    const seeded = await seedReply({ sendMode: 'live' });
+    await client.db
+      .update(organisations)
+      .set({ edition: 'SOLO' })
+      .where(eq(organisations.id, seeded.organisationId));
+    await client.db.insert(subscriptions).values({
+      organisationId: seeded.organisationId,
+      planCode: 'SOLO_AU_2000',
+      status: 'PAST_DUE'
+    });
+    await client.db.insert(organisationOnboarding).values({
+      organisationId: seeded.organisationId
+    });
+    const sendSms = vi.fn();
+
+    await expect(
+      executeOperatorReply(
+        {
+          database: client.db,
+          clock: { now: () => now },
+          sinch: { sendSms },
+          callbackUrl: 'https://example.invalid/sinch'
+        },
+        seeded
+      )
+    ).resolves.toEqual({ kind: 'cancelled', reason: 'PAYMENT_PAST_DUE' });
+    expect(sendSms).not.toHaveBeenCalled();
+  });
+
   it('honours dry-run safety without calling Sinch', async () => {
     const seeded = await seedReply({ sendMode: 'dry-run' }); const sendSms = vi.fn();
     const outcome = await executeOperatorReply({ database: client.db, clock: { now: () => now }, sinch: { sendSms }, callbackUrl: 'https://example.invalid/sinch' }, seeded);

@@ -76,6 +76,12 @@ export class SinchClient {
         'Sinch destination number must be E.164'
       );
     }
+    if (
+      input.sourceNumber !== undefined &&
+      !e164Pattern.test(input.sourceNumber)
+    ) {
+      throw new SinchValidationFailure('Sinch source number must be E.164');
+    }
 
     const path = '/v1/messages';
     const body = JSON.stringify({
@@ -83,6 +89,9 @@ export class SinchClient {
         {
           content: input.content,
           destination_number: input.destinationNumber,
+          ...(input.sourceNumber === undefined
+            ? {}
+            : { source_number: input.sourceNumber }),
           format: 'SMS',
           delivery_report: true,
           callback_url: input.callbackUrl,

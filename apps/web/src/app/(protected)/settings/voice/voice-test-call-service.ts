@@ -49,9 +49,6 @@ const factsHash = (call: {
   outboundNumber: string;
   combinedAmount: string;
   currency: string;
-  agentId: string;
-  agentVersion: number;
-  voiceId: string;
   voipcloudUserNumber: string;
   ttsVoiceId: string;
   gatewayFlowVersion: number;
@@ -76,9 +73,6 @@ const factsHash = (call: {
         outboundNumber: call.outboundNumber,
         combinedAmount: normaliseVoiceAmount(call.combinedAmount),
         currency: call.currency,
-        agentId: call.agentId,
-        agentVersion: call.agentVersion,
-        voiceId: call.voiceId,
         voipcloudUserNumber: call.voipcloudUserNumber,
         ttsVoiceId: call.ttsVoiceId,
         gatewayFlowVersion: call.gatewayFlowVersion,
@@ -195,13 +189,11 @@ export function createVoiceTestCallService(
     if (
       settings === undefined ||
       organisation === undefined ||
-      settings.agentId === null ||
-      settings.agentVersion === null ||
-      settings.voiceId === null ||
       settings.voipcloudUserNumber === null ||
       settings.ttsVoiceId === null ||
       settings.gatewayFlowVersion === null ||
       !view.connectionReady ||
+      !view.gatewayReady ||
       !view.genericFlowReady
     ) {
       throw new Error('VOICE_TEST_PROVIDER_NOT_READY');
@@ -244,9 +236,6 @@ export function createVoiceTestCallService(
     }
     return {
       ...settings,
-      agentId: settings.agentId,
-      agentVersion: settings.agentVersion,
-      voiceId: settings.voiceId,
       voipcloudUserNumber: settings.voipcloudUserNumber,
       ttsVoiceId: settings.ttsVoiceId,
       gatewayFlowVersion: settings.gatewayFlowVersion
@@ -341,9 +330,6 @@ export function createVoiceTestCallService(
       voipcloudUserNumber: settings.voipcloudUserNumber,
       ttsVoiceId: settings.ttsVoiceId,
       gatewayFlowVersion: settings.gatewayFlowVersion,
-      agentId: settings.agentId,
-      agentVersion: settings.agentVersion,
-      voiceId: settings.voiceId,
       voiceSettingsUpdatedAt: settings.updatedAt,
       transferTargetLabel: settings.officeDestinationLabel,
       idempotencyKey: input.idempotencyKey,
@@ -421,16 +407,13 @@ export function createVoiceTestCallService(
       source.invoice.dueDate !== snapshot.dueDate ||
       call.accountName === null ||
       call.accountName !== source.contact.name ||
-      call.agentId === null ||
-      call.agentVersion === null ||
-      call.voiceId === null ||
       call.voipcloudUserNumber === null ||
       call.ttsVoiceId === null ||
       call.gatewayFlowVersion === null ||
-      settings.agentId !== call.agentId ||
-      settings.agentVersion !== call.agentVersion ||
-      settings.voiceId !== call.voiceId ||
       settings.outboundNumber !== call.outboundNumber ||
+      settings.voipcloudUserNumber !== call.voipcloudUserNumber ||
+      settings.ttsVoiceId !== call.ttsVoiceId ||
+      settings.gatewayFlowVersion !== call.gatewayFlowVersion ||
       settings.updatedAt.getTime() !== call.voiceSettingsUpdatedAt.getTime()
     ) {
       throw new Error('STALE_ACCOUNT_DATA');
@@ -438,9 +421,6 @@ export function createVoiceTestCallService(
     const approvedFactsHash = factsHash({
       ...call,
       accountName: call.accountName,
-      agentId: call.agentId,
-      agentVersion: call.agentVersion,
-      voiceId: call.voiceId,
       voipcloudUserNumber: call.voipcloudUserNumber,
       ttsVoiceId: call.ttsVoiceId,
       gatewayFlowVersion: call.gatewayFlowVersion

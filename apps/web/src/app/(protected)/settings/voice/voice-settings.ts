@@ -17,8 +17,9 @@ type VoiceSettingsRow = typeof organisationVoiceSettings.$inferSelect;
 const connectionEvidenceLifetimeMs = 24 * 60 * 60 * 1000;
 const e164Pattern = /^\+[1-9]\d{7,14}$/;
 const localTimePattern = /^([01]\d|2[0-3]):([0-5]\d)$/;
-const secretReferencePattern = /^(?:env:)?[A-Za-z_][A-Za-z0-9_.:/-]{2,127}$/;
 const sipPattern = /^sips?:[^\s@]+@[^\s@]+$/i;
+const providerUserPattern = /^\d{1,32}$/;
+const ttsVoicePattern = /^[A-Za-z0-9._-]{1,128}$/;
 
 export const voiceCallFlowHash = `sha256:${createHash('sha256')
   .update(JSON.stringify(fixedVoiceCallCopy))
@@ -26,13 +27,10 @@ export const voiceCallFlowHash = `sha256:${createHash('sha256')
 
 export interface SaveVoiceSettingsInput {
   organisationId: string;
-  provider: 'RETELL';
-  secretReference: string;
-  previewPublicKey: string;
-  agentId: string;
-  agentVersion: number;
-  voiceId: string;
-  voiceLabel: string;
+  provider: 'VOIPCLOUD';
+  voipcloudUserNumber: string;
+  ttsVoiceId: string;
+  gatewayFlowVersion: number;
   outboundNumber: string;
   transferSipUri: string | null;
   fallbackOfficeNumber: string;
@@ -64,23 +62,20 @@ export interface RecordGenericFlowTestInput {
 }
 
 export interface VoiceProviderConnectionResult {
-  authenticated: boolean;
-  agentVersionAvailable: boolean;
-  voiceAvailable: boolean;
-  previewKeyDomainRestricted: boolean;
-  recaptchaProtection: 'enabled' | 'unsupported' | 'disabled';
-  recordingDisabled: boolean;
+  provider: 'VOIPCLOUD';
+  endpoint: string;
+  credentialsConfigured: boolean;
+  gatewayReady: boolean;
+  gatewayFlowVersion: number;
+  customerCallsEnabled: boolean;
 }
 
 export interface VoiceProviderTester {
   test(input: {
     organisationId: string;
-    provider: 'RETELL';
-    secretReference: string;
-    previewPublicKey: string;
-    agentId: string;
-    agentVersion: number;
-    voiceId: string;
+    provider: 'VOIPCLOUD';
+    voipcloudUserNumber: string;
+    gatewayFlowVersion: number;
   }): Promise<VoiceProviderConnectionResult>;
 }
 
@@ -92,9 +87,9 @@ export interface VoicePreviewSessionVerifier {
     callFlowHash: string;
     callFlowVersion: number;
     configurationVersion: number;
-    agentId: string;
-    agentVersion: number;
-    voiceId: string;
+    voipcloudUserNumber: string;
+    gatewayFlowVersion: number;
+    ttsVoiceId: string;
   }): Promise<{ sessionId: string; passed: boolean }>;
 }
 
@@ -103,12 +98,9 @@ export interface VoiceSettingsView {
   enabled: boolean;
   automaticEnabled: boolean;
   provider: 'RETELL' | 'VOIPCLOUD';
-  secretReferenceLabel: string | null;
-  previewPublicKey: string | null;
-  agentId: string | null;
-  agentVersion: number | null;
-  voiceId: string | null;
-  voiceLabel: string | null;
+  voipcloudUserNumber: string | null;
+  ttsVoiceId: string | null;
+  gatewayFlowVersion: number | null;
   outboundNumber: string | null;
   transferSipUri: string | null;
   fallbackOfficeNumber: string | null;
@@ -120,8 +112,10 @@ export interface VoiceSettingsView {
   callFlowVersion: number;
   callFlowHash: string;
   connectionReady: boolean;
+  gatewayReady: boolean;
   genericFlowReady: boolean;
   lastConnectionTestedAt: Date | null;
+  lastGatewayTestedAt: Date | null;
 }
 
 export interface VoiceConnectionTestResult
@@ -179,15 +173,11 @@ const validate = (input: SaveVoiceSettingsInput): void => {
   const end = minutes(input.weekdayEndLocal);
   const transferSipUri = input.transferSipUri?.trim() || null;
   if (
-    input.provider !== 'RETELL' ||
-    !secretReferencePattern.test(input.secretReference) ||
-    /^key_/i.test(input.secretReference) ||
-    !/^public_key_[A-Za-z0-9_-]{6,}$/.test(input.previewPublicKey) ||
-    input.agentId.trim() === '' ||
-    !Number.isInteger(input.agentVersion) ||
-    input.agentVersion < 0 ||
-    input.voiceId.trim() === '' ||
-    input.voiceLabel.trim() === '' ||
+    input.provider !== 'VOIPCLOUD' ||
+    !providerUserPattern.test(input.voipcloudUserNumber) ||
+    !ttsVoicePattern.test(input.ttsVoiceId) ||
+    !Number.isInteger(input.gatewayFlowVersion) ||
+    input.gatewayFlowVersion < 1 ||
     !e164Pattern.test(input.outboundNumber) ||
     (transferSipUri !== null && !sipPattern.test(transferSipUri)) ||
     !e164Pattern.test(input.fallbackOfficeNumber) ||
@@ -201,20 +191,11 @@ const validate = (input: SaveVoiceSettingsInput): void => {
   }
 };
 
-const safeReferenceLabel = (reference: string | null): string | null => {
-  if (reference === null) return null;
-  const withoutScheme = reference.replace(/^env:/, '');
-  return withoutScheme.split(/[/:]/).at(-1) ?? withoutScheme;
-};
-
 const persistedFields = [
   'provider',
-  'secretReference',
-  'previewPublicKey',
-  'agentId',
-  'agentVersion',
-  'voiceId',
-  'voiceLabel',
+  'voipcloudUserNumber',
+  'ttsVoiceId',
+  'gatewayFlowVersion',
   'outboundNumber',
   'transferSipUri',
   'fallbackOfficeNumber',
@@ -242,6 +223,15 @@ const connectionReady = (
   settings.lastConnectionTestSucceeded &&
   settings.lastConnectionTestedAt !== null &&
   now.getTime() - settings.lastConnectionTestedAt.getTime() <=
+    connectionEvidenceLifetimeMs;
+
+const gatewayReady = (
+  settings: VoiceSettingsRow,
+  now: Date
+): boolean =>
+  settings.lastGatewayTestSucceeded &&
+  settings.lastGatewayTestedAt !== null &&
+  now.getTime() - settings.lastGatewayTestedAt.getTime() <=
     connectionEvidenceLifetimeMs;
 
 const latestGenericFlowEvidence = async (
@@ -272,9 +262,9 @@ const latestGenericFlowEvidence = async (
     evidence?.passed === true &&
     evidence.callFlowHash === voiceCallFlowHash &&
     evidence.callFlowVersion === fixedVoiceCallCopy.version &&
-    evidence.agentId === settings.agentId &&
-    evidence.agentVersion === settings.agentVersion &&
-    evidence.voiceId === settings.voiceId
+    evidence.voipcloudUserNumber === settings.voipcloudUserNumber &&
+    evidence.gatewayFlowVersion === settings.gatewayFlowVersion &&
+    evidence.ttsVoiceId === settings.ttsVoiceId
   );
 };
 
@@ -289,13 +279,10 @@ const toView = async (
       configured: false,
       enabled: false,
       automaticEnabled: false,
-      provider: 'RETELL',
-      secretReferenceLabel: null,
-      previewPublicKey: null,
-      agentId: null,
-      agentVersion: null,
-      voiceId: null,
-      voiceLabel: null,
+      provider: 'VOIPCLOUD',
+      voipcloudUserNumber: null,
+      ttsVoiceId: 'en_GB-alba-medium',
+      gatewayFlowVersion: 1,
       outboundNumber: null,
       transferSipUri: null,
       fallbackOfficeNumber: null,
@@ -307,21 +294,24 @@ const toView = async (
       callFlowVersion: fixedVoiceCallCopy.version,
       callFlowHash: voiceCallFlowHash,
       connectionReady: false,
+      gatewayReady: false,
       genericFlowReady: false,
-      lastConnectionTestedAt: null
+      lastConnectionTestedAt: null,
+      lastGatewayTestedAt: null
     };
   }
   return {
-    configured: true,
+    configured:
+      settings.provider === 'VOIPCLOUD' &&
+      settings.voipcloudUserNumber !== null &&
+      settings.ttsVoiceId !== null &&
+      settings.gatewayFlowVersion !== null,
     enabled: settings.enabled,
     automaticEnabled: settings.automaticEnabled,
     provider: settings.provider,
-    secretReferenceLabel: safeReferenceLabel(settings.secretReference),
-    previewPublicKey: settings.previewPublicKey,
-    agentId: settings.agentId,
-    agentVersion: settings.agentVersion,
-    voiceId: settings.voiceId,
-    voiceLabel: settings.voiceLabel,
+    voipcloudUserNumber: settings.voipcloudUserNumber,
+    ttsVoiceId: settings.ttsVoiceId,
+    gatewayFlowVersion: settings.gatewayFlowVersion,
     outboundNumber: settings.outboundNumber,
     transferSipUri: settings.transferSipUri,
     fallbackOfficeNumber: settings.fallbackOfficeNumber,
@@ -333,8 +323,10 @@ const toView = async (
     callFlowVersion: fixedVoiceCallCopy.version,
     callFlowHash: voiceCallFlowHash,
     connectionReady: connectionReady(settings, now),
+    gatewayReady: gatewayReady(settings, now),
     genericFlowReady: await latestGenericFlowEvidence(executor, settings),
-    lastConnectionTestedAt: settings.lastConnectionTestedAt
+    lastConnectionTestedAt: settings.lastConnectionTestedAt,
+    lastGatewayTestedAt: settings.lastGatewayTestedAt
   };
 };
 
@@ -384,12 +376,15 @@ export function createVoiceSettingsService(
       const values = {
         organisationId: input.organisationId,
         provider: input.provider,
-        secretReference: input.secretReference,
-        previewPublicKey: input.previewPublicKey,
-        agentId: input.agentId.trim(),
-        agentVersion: input.agentVersion,
-        voiceId: input.voiceId.trim(),
-        voiceLabel: input.voiceLabel.trim(),
+        secretReference: null,
+        previewPublicKey: null,
+        agentId: null,
+        agentVersion: null,
+        voiceId: null,
+        voiceLabel: null,
+        voipcloudUserNumber: input.voipcloudUserNumber,
+        ttsVoiceId: input.ttsVoiceId,
+        gatewayFlowVersion: input.gatewayFlowVersion,
         outboundNumber: input.outboundNumber,
         transferSipUri: input.transferSipUri?.trim() || null,
         fallbackOfficeNumber: input.fallbackOfficeNumber,
@@ -409,7 +404,9 @@ export function createVoiceSettingsService(
               enabled: false,
               automaticEnabled: false,
               lastConnectionTestedAt: null,
-              lastConnectionTestSucceeded: false
+              lastConnectionTestSucceeded: false,
+              lastGatewayTestedAt: null,
+              lastGatewayTestSucceeded: false
             })
       };
       await transaction
@@ -452,31 +449,23 @@ export function createVoiceSettingsService(
     );
     if (
       settings === null ||
-      settings.provider !== 'RETELL' ||
-      settings.secretReference === null ||
-      settings.previewPublicKey === null ||
-      settings.agentId === null ||
-      settings.agentVersion === null ||
-      settings.voiceId === null
+      settings.provider !== 'VOIPCLOUD' ||
+      settings.voipcloudUserNumber === null ||
+      settings.gatewayFlowVersion === null
     ) {
       throw new Error('VOICE_SETTINGS_NOT_CONFIGURED');
     }
     const result = await dependencies.tester.test({
       organisationId: input.organisationId,
       provider: settings.provider,
-      secretReference: settings.secretReference,
-      previewPublicKey: settings.previewPublicKey,
-      agentId: settings.agentId,
-      agentVersion: settings.agentVersion,
-      voiceId: settings.voiceId
+      voipcloudUserNumber: settings.voipcloudUserNumber,
+      gatewayFlowVersion: settings.gatewayFlowVersion
     });
     const healthy =
-      result.authenticated &&
-      result.agentVersionAvailable &&
-      result.voiceAvailable &&
-      result.previewKeyDomainRestricted &&
-      result.recaptchaProtection !== 'disabled' &&
-      result.recordingDisabled;
+      result.provider === 'VOIPCLOUD' &&
+      result.credentialsConfigured &&
+      result.gatewayReady &&
+      result.gatewayFlowVersion === settings.gatewayFlowVersion;
     const testedAt = dependencies.clock.now();
     await dependencies.database.transaction(async (transaction) => {
       const updated = await transaction
@@ -484,6 +473,8 @@ export function createVoiceSettingsService(
         .set({
           lastConnectionTestedAt: testedAt,
           lastConnectionTestSucceeded: healthy,
+          lastGatewayTestedAt: testedAt,
+          lastGatewayTestSucceeded: result.gatewayReady,
           updatedAt: testedAt
         })
         .where(
@@ -526,9 +517,9 @@ export function createVoiceSettingsService(
     );
     if (
       settings === null ||
-      settings.agentId === null ||
-      settings.agentVersion === null ||
-      settings.voiceId === null
+      settings.voipcloudUserNumber === null ||
+      settings.gatewayFlowVersion === null ||
+      settings.ttsVoiceId === null
     ) {
       throw new Error('VOICE_SETTINGS_NOT_CONFIGURED');
     }
@@ -539,9 +530,9 @@ export function createVoiceSettingsService(
       callFlowHash: voiceCallFlowHash,
       callFlowVersion: fixedVoiceCallCopy.version,
       configurationVersion: settings.configurationVersion,
-      agentId: settings.agentId,
-      agentVersion: settings.agentVersion,
-      voiceId: settings.voiceId
+      voipcloudUserNumber: settings.voipcloudUserNumber,
+      gatewayFlowVersion: settings.gatewayFlowVersion,
+      ttsVoiceId: settings.ttsVoiceId
     });
     if (!verified.passed) throw new Error('VOICE_PREVIEW_NOT_VERIFIED');
     const recordedAt = dependencies.clock.now();
@@ -570,9 +561,9 @@ export function createVoiceSettingsService(
           configurationVersion: settings.configurationVersion,
           callFlowHash: voiceCallFlowHash,
           callFlowVersion: fixedVoiceCallCopy.version,
-          agentId: settings.agentId,
-          agentVersion: settings.agentVersion,
-          voiceId: settings.voiceId,
+          voipcloudUserNumber: settings.voipcloudUserNumber,
+          gatewayFlowVersion: settings.gatewayFlowVersion,
+          ttsVoiceId: settings.ttsVoiceId,
           fictionalDataOnly: true,
           previewMode: true
         },
@@ -609,6 +600,7 @@ export function createVoiceSettingsService(
       if (
         input.enabled &&
         (!connectionReady(settings, changedAt) ||
+          !gatewayReady(settings, changedAt) ||
           !(await latestGenericFlowEvidence(transaction, settings)))
       ) {
         throw new Error('VOICE_SETTINGS_NOT_READY');

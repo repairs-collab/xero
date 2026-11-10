@@ -21,6 +21,7 @@ export const jobPayloadSchemas = {
     invoiceId: identifier,
     webhookEventId: identifier.optional()
   }),
+  [jobNames.xeroOAuthCleanup]: z.object({}).strict(),
   [jobNames.xeroNightlyReconcile]: organisationPayload,
   [jobNames.remindersCalculate]: organisationPayload,
   [jobNames.voiceRemindersCalculate]: organisationPayload,
@@ -37,6 +38,7 @@ export const jobPayloadSchemas = {
     organisationId: identifier,
     outboundMessageId: identifier
   }),
+  [jobNames.smsNumberProvision]: organisationPayload,
   [jobNames.voiceCallExecute]: voiceCallPayload,
   [jobNames.voiceCallReconcile]: voiceCallPayload,
   [jobNames.providerConnectionTest]: z.object({
@@ -48,7 +50,14 @@ export const jobPayloadSchemas = {
     webhookEventId: identifier,
     provider: z.enum(['XERO', 'SINCH', 'RETELL', 'VOIPCLOUD'])
   }),
-  [jobNames.retentionApply]: organisationPayload
+  [jobNames.retentionApply]: organisationPayload,
+  [jobNames.subscriptionLifecycle]: z
+    .object({
+      organisationId: identifier,
+      status: z.literal('CANCELLED')
+    })
+    .strict(),
+  [jobNames.subscriptionTrialExpiry]: organisationPayload
 } satisfies Record<JobName, z.ZodType>;
 
 export type JobPayloads = {

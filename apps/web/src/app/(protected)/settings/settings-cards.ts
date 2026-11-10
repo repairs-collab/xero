@@ -10,6 +10,13 @@ export interface SettingsCard {
 
 const settingsCards: SettingsCard[] = [
   {
+    eyebrow: 'Subscription',
+    title: 'Plan and billing',
+    description: 'AccountPulse Solo status, included SMS, and Stripe billing',
+    href: '/settings/billing',
+    adminOnly: true
+  },
+  {
     eyebrow: 'Safety',
     title: 'Sending controls',
     description: 'Dry-run, controlled allowlist, and live-mode gates',
@@ -35,9 +42,9 @@ const settingsCards: SettingsCard[] = [
     href: '/settings/integrations'
   },
   {
-    eyebrow: 'Voice',
-    title: 'Voice reminders',
-    description: 'Configure and test manual, privacy-safe customer calls',
+    eyebrow: 'Voice integration',
+    title: 'VoIPcloud voice',
+    description: 'Configure the Australian VoIPcloud gateway and test calls',
     href: '/settings/voice',
     adminOnly: true
   },

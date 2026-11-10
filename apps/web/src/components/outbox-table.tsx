@@ -8,6 +8,7 @@ const sourceLabels: Record<OutboxRow['source'], string> = {
   ESCALATION_SMS: 'Escalation SMS',
   INBOX_REPLY: 'Inbox reply',
   TEST_SMS: 'Test SMS',
+  VERIFICATION_OTP: 'Mobile verification',
   XERO_EMAIL: 'Xero email'
 };
 
@@ -31,6 +32,13 @@ const formatDate = (value: Date): string =>
   }).format(value);
 
 const contentFor = (row: OutboxRow) => {
+  if (row.source === 'VERIFICATION_OTP') {
+    return (
+      <p className="outbox-content outbox-content--muted">
+        Verification code sent. The code is hidden for security.
+      </p>
+    );
+  }
   if (row.content === null) {
     return (
       <p className="outbox-content outbox-content--muted">

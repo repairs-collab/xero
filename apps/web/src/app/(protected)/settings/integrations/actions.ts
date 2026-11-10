@@ -11,6 +11,7 @@ import { jobNames } from '@bc5000/jobs';
 import { getJobQueue } from '../../../../server/job-runtime.js';
 import {
   getDatabaseClient,
+  getXeroOAuthService,
   requireWebSession
 } from '../../../../server/runtime.js';
 import { createIntegrationSettings } from './integration-settings.js';
@@ -116,4 +117,13 @@ export async function requestXeroSync(formData: FormData): Promise<void> {
   revalidatePath('/');
   revalidatePath('/settings/integrations');
   revalidatePath('/settings/sending');
+}
+
+export async function disconnectXero(formData: FormData): Promise<void> {
+  const { session } = await context();
+  await getXeroOAuthService().disconnect(
+    session,
+    text(formData, 'organisationId')
+  );
+  revalidatePath('/settings/integrations');
 }

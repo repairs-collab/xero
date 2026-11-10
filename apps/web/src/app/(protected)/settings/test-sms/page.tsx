@@ -9,7 +9,11 @@ import { authorise } from '@bc5000/auth';
 import { organisations } from '@bc5000/db/web';
 
 import { TestSmsForm } from '../../../../components/test-sms-form.js';
-import { getDatabaseClient, requireWebSession } from '../../../../server/runtime.js';
+import {
+  getDatabaseClient,
+  getOnboardingService,
+  requireWebSession
+} from '../../../../server/runtime.js';
 
 type SearchParameters = Promise<
   Record<string, string | string[] | undefined>
@@ -29,11 +33,18 @@ export default async function TestSmsPage({
   }
   authorise(session, 'message.test-sms', organisationId);
   const [organisation] = await getDatabaseClient()
-    .db.select({ sendMode: organisations.sendMode })
+    .db.select({
+      sendMode: organisations.sendMode,
+      edition: organisations.edition
+    })
     .from(organisations)
     .where(eq(organisations.id, organisationId))
     .limit(1);
   if (organisation === undefined) throw new Error('Organisation not found');
+  const onboarding =
+    organisation.edition === 'SOLO'
+      ? await getOnboardingService().getStatus(session, organisationId)
+      : null;
   const parameters = await searchParams;
   const queued = parameters.queued === 'yes';
 
@@ -50,6 +61,19 @@ export default async function TestSmsPage({
           AccountPulse reminders.
         </p>
       </header>
+
+      {onboarding !== null && onboarding.trial.testSmsPartLimit > 0 && (
+        <section className="callout">
+          <strong>Solo trial test allowance</strong>
+          <p>
+            The trial includes up to {onboarding.trial.testSmsPartLimit} SMS
+            parts sent only to the verified Administrator mobile.
+            {onboarding.trial.testSmsDestination === null
+              ? ' Mobile verification is required before a provider test can be sent.'
+              : ` Verified destination: ${onboarding.trial.testSmsDestination}.`}
+          </p>
+        </section>
+      )}
 
       {queued && (
         <div className="test-sms-result" role="status">
@@ -81,6 +105,10 @@ export default async function TestSmsPage({
           organisationId={organisationId}
           requestId={randomUUID()}
           sendMode={organisation.sendMode}
+          verifiedDestination={onboarding?.trial.testSmsDestination ?? null}
+          trialTest={
+            onboarding !== null && onboarding.trial.testSmsPartLimit > 0
+          }
         />
       </section>
     </div>

@@ -8,6 +8,7 @@ import {
   auditEvents,
   type Database,
   outboundMessages,
+  PostgresEntitlementRepository,
   PostgresOrganisationSafetyRepository
 } from '@bc5000/db/web';
 import { renderSms } from '@bc5000/domain';
@@ -64,6 +65,30 @@ export function createTestSmsService(
     const now = dependencies.clock.now();
     const idempotencyKey = `test-sms:${input.requestId.trim()}`;
     const stored = await dependencies.database.transaction(async (transaction) => {
+      const entitlements = await new PostgresEntitlementRepository(
+        dependencies.database
+      ).decide(input.organisationId, now, transaction);
+      if (!entitlements.canCustomerSend) {
+        if (
+          !entitlements.canVerifiedAdminTest ||
+          entitlements.verifiedAdminMobile === null
+        ) {
+          throw new Error(
+            entitlements.remainingTrialTestSmsParts === 0
+              ? 'TRIAL_TEST_LIMIT_REACHED'
+              : (entitlements.blocker ?? 'VERIFIED_ADMIN_MOBILE_REQUIRED')
+          );
+        }
+        if (destination !== entitlements.verifiedAdminMobile) {
+          throw new Error('VERIFIED_ADMIN_MOBILE_REQUIRED');
+        }
+        if (
+          entitlements.remainingTrialTestSmsParts !== null &&
+          rendered.segmentCount > entitlements.remainingTrialTestSmsParts
+        ) {
+          throw new Error('TRIAL_TEST_LIMIT_REACHED');
+        }
+      }
       await safety.assertOperationalMutationAllowed(
         transaction,
         input.organisationId

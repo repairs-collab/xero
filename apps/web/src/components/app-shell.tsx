@@ -38,12 +38,14 @@ export function AppShell({
   children,
   displayName,
   role,
-  organisationName = 'Mott Appliance Repairs'
+  organisationName = 'Mott Appliance Repairs',
+  onboardingIncomplete = false
 }: {
   children: ReactNode;
   displayName: string;
   role: 'ADMIN' | 'OPERATOR';
   organisationName?: string;
+  onboardingIncomplete?: boolean;
 }) {
   const pathname = usePathname();
   const initials = displayName.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase();
@@ -85,6 +87,15 @@ export function AppShell({
 
       <nav className="app-nav" aria-label="Primary navigation">
         <div className="app-nav__inner">
+          {onboardingIncomplete && (
+            <Link
+              href="/onboarding"
+              className={`nav-item ${isActivePath(pathname, '/onboarding') ? 'nav-item--active' : ''}`}
+            >
+              <CheckCircleIcon aria-hidden="true" />
+              <span>Finish setup</span>
+            </Link>
+          )}
           {navigation.map(([label, href, Icon]) => (
             <Link href={href} key={label} className={`nav-item ${isActivePath(pathname, href) ? 'nav-item--active' : ''}`}>
               <Icon aria-hidden="true" />

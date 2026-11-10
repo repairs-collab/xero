@@ -31,6 +31,7 @@ export type OutboundSource =
   | 'ESCALATION_SMS'
   | 'INBOX_REPLY'
   | 'TEST_SMS'
+  | 'VERIFICATION_OTP'
   | 'XERO_EMAIL';
 
 export const outboundMessages = pgTable(

@@ -28,6 +28,7 @@ export function VoiceSettingsForm({
   const enableReady =
     settings.configured &&
     settings.connectionReady &&
+    settings.gatewayReady &&
     settings.genericFlowReady;
   const enablementRequirements = [
     ...(settings.configured
@@ -36,8 +37,11 @@ export function VoiceSettingsForm({
     ...(settings.connectionReady
       ? []
       : [
-          'Run a successful provider connection test before enabling manual voice calls.'
+          'Run a successful VoIPcloud connection test before enabling manual voice calls.'
         ]),
+    ...(settings.gatewayReady
+      ? []
+      : ['Confirm the private OVH voice gateway is ready.']),
     ...(settings.genericFlowReady
       ? []
       : ['Complete the generic flow test before enabling manual voice calls.'])
@@ -72,12 +76,22 @@ export function VoiceSettingsForm({
         </p>
         <div className="readiness-grid">
           <article>
-            <strong>Provider readiness</strong>
+            <strong>VoIPcloud readiness</strong>
             <p>
               {readinessLabel(
                 settings.connectionReady,
                 'Connection ready',
                 'Connection test required'
+              )}
+            </p>
+          </article>
+          <article>
+            <strong>OVH voice gateway</strong>
+            <p>
+              {readinessLabel(
+                settings.gatewayReady,
+                'Gateway ready',
+                'Gateway check required'
               )}
             </p>
           </article>
@@ -227,62 +241,51 @@ export function VoiceSettingsForm({
       <section className="panel">
         <div className="panel__heading">
           <div>
-            <span className="eyebrow">Provider configuration</span>
-            <h2>Retell voice settings</h2>
+            <span className="eyebrow">Provider integration</span>
+            <h2>VoIPcloud integration</h2>
           </div>
           <span className="status-chip">
             {settings.configured ? 'Configured' : 'Not configured'}
           </span>
         </div>
+        <div className="notice" role="status">
+          <strong>Australian VoIPcloud API</strong>
+          <p>
+            Credentials secured on OVH. AccountPulse only stores safe routing
+            settings; API and SIP secrets are never shown in the browser.
+          </p>
+        </div>
         <form action={saveVoiceSettings} className="settings-form">
           <input type="hidden" name="organisationId" value={organisationId} />
-          <input type="hidden" name="provider" value="RETELL" />
           <label>
-            Managed secret reference
+            VoIPcloud PBX gateway user
             <input
-              name="secretReference"
-              placeholder={
-                settings.secretReferenceLabel ?? 'env:RETELL_API_KEY'
-              }
+              name="voipcloudUserNumber"
+              inputMode="numeric"
+              defaultValue={settings.voipcloudUserNumber ?? ''}
+              placeholder="1099"
+              required
             />
             <small>
-              {settings.secretReferenceLabel
-                ? `Current reference: ${settings.secretReferenceLabel}. Leave blank to keep it.`
-                : 'Enter a managed-secret reference, never the key itself.'}
+              Dedicated VoIPcloud user registered to the private OVH gateway.
             </small>
           </label>
           <label>
-            Domain-restricted public preview key
+            Local Piper voice
             <input
-              name="previewPublicKey"
-              defaultValue={settings.previewPublicKey ?? ''}
+              name="ttsVoiceId"
+              defaultValue={settings.ttsVoiceId ?? 'en_GB-alba-medium'}
               required
             />
           </label>
           <label>
-            Agent ID
-            <input name="agentId" defaultValue={settings.agentId ?? ''} required />
-          </label>
-          <label>
-            Pinned agent version
+            Gateway flow version
             <input
-              name="agentVersion"
+              name="gatewayFlowVersion"
               type="number"
-              min="0"
+              min="1"
               step="1"
-              defaultValue={settings.agentVersion ?? 0}
-              required
-            />
-          </label>
-          <label>
-            Voice ID
-            <input name="voiceId" defaultValue={settings.voiceId ?? ''} required />
-          </label>
-          <label>
-            Voice label
-            <input
-              name="voiceLabel"
-              defaultValue={settings.voiceLabel ?? ''}
+              defaultValue={settings.gatewayFlowVersion ?? 1}
               required
             />
           </label>
@@ -296,7 +299,7 @@ export function VoiceSettingsForm({
             />
           </label>
           <label>
-            VoIPline SIP transfer target (optional)
+            Office queue SIP target (optional)
             <input
               name="transferSipUri"
               defaultValue={settings.transferSipUri ?? ''}
@@ -342,11 +345,13 @@ export function VoiceSettingsForm({
               required
             />
           </label>
-          <button className="button">Save and disable until retested</button>
+          <button className="button">Save VoIPcloud integration</button>
         </form>
         <form action={testVoiceConnection}>
           <input type="hidden" name="organisationId" value={organisationId} />
-          <button className="button button--primary">Test provider setup</button>
+          <button className="button button--primary">
+            Test VoIPcloud and gateway
+          </button>
         </form>
       </section>
 

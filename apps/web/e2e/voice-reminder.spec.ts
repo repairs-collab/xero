@@ -37,7 +37,9 @@ test('keeps setup fictional, locked, and independently disabled until ready', as
     )
   ).toBeVisible();
 
-  await page.getByRole('button', { name: 'Test provider setup' }).click();
+  await page
+    .getByRole('button', { name: 'Test VoIPcloud and gateway' })
+    .click();
   await recordVoicePreviewEvidence();
   await page.reload();
   await expect(page.getByText('Connection ready')).toBeVisible();

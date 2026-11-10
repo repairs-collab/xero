@@ -1,0 +1,2 @@
+ALTER TABLE "organisation_onboarding" ADD COLUMN "admin_mobile" varchar(16);--> statement-breakpoint
+ALTER TABLE "organisation_onboarding" ADD CONSTRAINT "organisation_onboarding_mobile_verification_ck" CHECK (("organisation_onboarding"."admin_mobile" is null and "organisation_onboarding"."admin_mobile_verified_at" is null) or ("organisation_onboarding"."admin_mobile" ~ '^\+614[0-9]{8}$' and "organisation_onboarding"."admin_mobile_verified_at" is not null));

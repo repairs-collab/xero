@@ -6,53 +6,71 @@ import { describe, expect, it } from 'vitest';
 const deploymentFile = (name: string): string =>
   readFileSync(resolve(process.cwd(), 'deploy', 'ovh', name), 'utf8');
 
+const composeEnvironment = {
+  ...process.env,
+  ACCOUNT_PULSE_WEB_IMAGE: 'accountpulse-web:test',
+  ACCOUNT_PULSE_WORKER_IMAGE: 'accountpulse-worker:test',
+  ACCOUNT_PULSE_ASTERISK_IMAGE: 'accountpulse-asterisk:test',
+  ACCOUNT_PULSE_VOICE_GATEWAY_IMAGE: 'accountpulse-voice-gateway:test',
+  AWS_REGION: 'ap-southeast-2',
+  DATABASE_NAME: 'accountpulse',
+  DATABASE_USER: 'accountpulse',
+  DATABASE_PASSWORD: 'test-password',
+  DATABASE_URL: 'postgresql://accountpulse:test-password@postgres:5432/accountpulse',
+  SEND_MODE: 'customer_live',
+  NODE_ENV: 'production',
+  PUBLIC_BASE_URL: 'https://accountpulse.example.test',
+  ACCOUNT_PULSE_LEGAL_ENTITY: 'Swan Hill Appliance Repairs Pty Ltd',
+  ACCOUNT_PULSE_SUPPORT_EMAIL: 'repairs@motts.com.au',
+  COGNITO_DOMAIN: 'https://auth.example.test',
+  COGNITO_REDIRECT_URI: 'https://accountpulse.example.test/auth/callback',
+  COGNITO_ISSUER: 'https://cognito-idp.ap-southeast-2.amazonaws.com/example',
+  COGNITO_CLIENT_ID: 'test-client',
+  COGNITO_USER_POOL_ID: 'test-pool',
+  SESSION_SECRET_BASE64: 'dGVzdC1zZXNzaW9uLXNlY3JldA==',
+  XERO_WEBHOOK_KEY: 'test-xero-webhook-key',
+  XERO_OAUTH_CLIENT_ID: 'test-xero-oauth-client',
+  XERO_OAUTH_CLIENT_SECRET: 'test-xero-oauth-secret',
+  XERO_OAUTH_REDIRECT_URI: 'https://accountpulse.example.test/xero/callback',
+  XERO_TOKEN_ENCRYPTION_KEYS_JSON: '{"primary":"dGVzdC14ZXJvLWtleQ=="}',
+  XERO_TOKEN_ACTIVE_KEY_ID: 'primary',
+  XERO_API_CREDENTIALS: '{}',
+  STRIPE_SECRET_KEY: 'sk_test_example',
+  STRIPE_WEBHOOK_SECRET: 'whsec_test_example',
+  STRIPE_SOLO_PRICE_ID: 'price_test_solo',
+  STRIPE_PORTAL_CONFIGURATION_ID: 'bpc_test_solo',
+  SINCH_CALLBACK_PUBLIC_KEYS_JSON: '{}',
+  SINCH_WEBHOOK_TOKEN: 'test-sinch-token',
+  SINCH_API_CREDENTIALS: '{}',
+  SMS_NUMBER_QUARANTINE_DAYS: '1',
+  ASTERISK_ARI_USERNAME: 'accountpulse',
+  ASTERISK_ARI_PASSWORD: 'test-ari-password',
+  ASTERISK_EXTERNAL_ADDRESS: '203.0.113.10',
+  VOIPCLOUD_API_USER_NUMBER: '1011',
+  VOIPCLOUD_SIP_USER_NUMBER: '61350324518',
+  VOIPCLOUD_SIP_PASSWORD: 'test-sip-password',
+  VOICE_SIP_BIND_IP: '203.0.113.10',
+  VOICE_RTP_BIND_IP: '203.0.113.10',
+  VOICE_GATEWAY_SIGNING_SECRET: 'test-signing-secret',
+  VOIPCLOUD_API_KEY: 'test-api-key',
+  VOICE_OFFICE_QUEUE_EXTENSION: '1003'
+};
+
+const resolveCompose = () => {
+  const composePath = resolve(process.cwd(), 'deploy', 'ovh', 'docker-compose.yml');
+  return spawnSync(
+    'docker',
+    ['compose', '--profile', 'voice-capability', '-f', composePath, 'config', '--format', 'json'],
+    {
+      encoding: 'utf8',
+      env: composeEnvironment
+    }
+  );
+};
+
 describe('OVH voice deployment', () => {
   it('resolves the Australian VoIPcloud TCP registration endpoint on port 7060', () => {
-    const composePath = resolve(process.cwd(), 'deploy', 'ovh', 'docker-compose.yml');
-    const result = spawnSync(
-      'docker',
-      ['compose', '--profile', 'voice-capability', '-f', composePath, 'config', '--format', 'json'],
-      {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          ACCOUNT_PULSE_WEB_IMAGE: 'accountpulse-web:test',
-          ACCOUNT_PULSE_WORKER_IMAGE: 'accountpulse-worker:test',
-          ACCOUNT_PULSE_ASTERISK_IMAGE: 'accountpulse-asterisk:test',
-          ACCOUNT_PULSE_VOICE_GATEWAY_IMAGE: 'accountpulse-voice-gateway:test',
-          AWS_REGION: 'ap-southeast-2',
-          DATABASE_NAME: 'accountpulse',
-          DATABASE_USER: 'accountpulse',
-          DATABASE_PASSWORD: 'test-password',
-          DATABASE_URL: 'postgresql://accountpulse:test-password@postgres:5432/accountpulse',
-          SEND_MODE: 'customer_live',
-          NODE_ENV: 'production',
-          PUBLIC_BASE_URL: 'https://billchaser.motts.com.au',
-          COGNITO_DOMAIN: 'https://auth.example.test',
-          COGNITO_REDIRECT_URI: 'https://billchaser.motts.com.au/auth/callback',
-          COGNITO_ISSUER: 'https://cognito-idp.ap-southeast-2.amazonaws.com/example',
-          COGNITO_CLIENT_ID: 'test-client',
-          COGNITO_USER_POOL_ID: 'test-pool',
-          SESSION_SECRET_BASE64: 'dGVzdC1zZXNzaW9uLXNlY3JldA==',
-          XERO_WEBHOOK_KEY: 'test-xero-webhook-key',
-          XERO_API_CREDENTIALS: '{}',
-          SINCH_CALLBACK_PUBLIC_KEYS_JSON: '{}',
-          SINCH_WEBHOOK_TOKEN: 'test-sinch-token',
-          SINCH_API_CREDENTIALS: '{}',
-          ASTERISK_ARI_USERNAME: 'accountpulse',
-          ASTERISK_ARI_PASSWORD: 'test-ari-password',
-          ASTERISK_EXTERNAL_ADDRESS: '203.0.113.10',
-          VOIPCLOUD_API_USER_NUMBER: '1011',
-          VOIPCLOUD_SIP_USER_NUMBER: '61350324518',
-          VOIPCLOUD_SIP_PASSWORD: 'test-sip-password',
-          VOICE_SIP_BIND_IP: '203.0.113.10',
-          VOICE_RTP_BIND_IP: '203.0.113.10',
-          VOICE_GATEWAY_SIGNING_SECRET: 'test-signing-secret',
-          VOIPCLOUD_API_KEY: 'test-api-key',
-          VOICE_OFFICE_QUEUE_EXTENSION: '1003'
-        }
-      }
-    );
+    const result = resolveCompose();
 
     expect(result.status, result.stderr).toBe(0);
     const resolved = JSON.parse(result.stdout) as {
@@ -81,6 +99,109 @@ describe('OVH voice deployment', () => {
     );
   }, 15_000);
 
+  it('keeps application credentials hosting-neutral on OVH', () => {
+    const result = resolveCompose();
+
+    expect(result.status, result.stderr).toBe(0);
+    const resolved = JSON.parse(result.stdout) as {
+      services: Record<string, { environment?: Record<string, string>; image?: string }>;
+    };
+    const forbiddenEnvironmentKeys = [
+      'AWS_ACCESS_KEY_ID',
+      'AWS_SECRET_ACCESS_KEY',
+      'XERO_SECRET_ARN',
+      'SINCH_SECRET_ARN'
+    ];
+
+    for (const serviceName of ['web', 'worker']) {
+      const service = resolved.services[serviceName];
+      expect(service).toBeDefined();
+      for (const key of forbiddenEnvironmentKeys) {
+        expect(service?.environment).not.toHaveProperty(key);
+      }
+      expect(service?.image).not.toMatch(/(?:\.dkr\.ecr\.|amazonaws\.com)/i);
+    }
+
+    expect(deploymentFile('docker-compose.yml')).not.toMatch(/XERO_SECRET_ARN|SINCH_SECRET_ARN/);
+    expect(readFileSync(resolve(process.cwd(), '.env.example'), 'utf8')).not.toMatch(
+      /XERO_SECRET_ARN|SINCH_SECRET_ARN|arn:aws:secretsmanager/i
+    );
+  }, 15_000);
+
+  it('injects OAuth into both runtimes while isolating web and delivery-only secrets', () => {
+    const result = resolveCompose();
+
+    expect(result.status, result.stderr).toBe(0);
+    const resolved = JSON.parse(result.stdout) as {
+      services: Record<string, { environment: Record<string, string> }>;
+    };
+    const sharedXeroEnvironment = {
+      XERO_OAUTH_CLIENT_ID: composeEnvironment.XERO_OAUTH_CLIENT_ID,
+      XERO_OAUTH_CLIENT_SECRET: composeEnvironment.XERO_OAUTH_CLIENT_SECRET,
+      XERO_OAUTH_REDIRECT_URI: composeEnvironment.XERO_OAUTH_REDIRECT_URI,
+      XERO_TOKEN_ENCRYPTION_KEYS_JSON: composeEnvironment.XERO_TOKEN_ENCRYPTION_KEYS_JSON,
+      XERO_TOKEN_ACTIVE_KEY_ID: composeEnvironment.XERO_TOKEN_ACTIVE_KEY_ID
+    };
+
+    expect(resolved.services.web?.environment).toEqual(
+      expect.objectContaining({
+        ...sharedXeroEnvironment,
+        ACCOUNT_PULSE_LEGAL_ENTITY: composeEnvironment.ACCOUNT_PULSE_LEGAL_ENTITY,
+        ACCOUNT_PULSE_SUPPORT_EMAIL: composeEnvironment.ACCOUNT_PULSE_SUPPORT_EMAIL,
+        COGNITO_DOMAIN: composeEnvironment.COGNITO_DOMAIN,
+        COGNITO_REDIRECT_URI: composeEnvironment.COGNITO_REDIRECT_URI,
+        COGNITO_ISSUER: composeEnvironment.COGNITO_ISSUER,
+        COGNITO_CLIENT_ID: composeEnvironment.COGNITO_CLIENT_ID,
+        COGNITO_USER_POOL_ID: composeEnvironment.COGNITO_USER_POOL_ID,
+        STRIPE_SECRET_KEY: composeEnvironment.STRIPE_SECRET_KEY,
+        STRIPE_WEBHOOK_SECRET: composeEnvironment.STRIPE_WEBHOOK_SECRET,
+        STRIPE_SOLO_PRICE_ID: composeEnvironment.STRIPE_SOLO_PRICE_ID,
+        STRIPE_PORTAL_CONFIGURATION_ID: composeEnvironment.STRIPE_PORTAL_CONFIGURATION_ID
+      })
+    );
+    expect(resolved.services.worker?.environment).toEqual(
+      expect.objectContaining({
+        ...sharedXeroEnvironment,
+        SINCH_API_CREDENTIALS: composeEnvironment.SINCH_API_CREDENTIALS
+      })
+    );
+    expect(resolved.services.worker?.environment).not.toHaveProperty('STRIPE_SECRET_KEY');
+    expect(resolved.services.worker?.environment).not.toHaveProperty('STRIPE_WEBHOOK_SECRET');
+    expect(resolved.services.worker?.environment).not.toHaveProperty('COGNITO_DOMAIN');
+    expect(resolved.services.worker?.environment).not.toHaveProperty('COGNITO_CLIENT_ID');
+    expect(resolved.services.worker?.environment).not.toHaveProperty('XERO_WEBHOOK_KEY');
+    expect(resolved.services.worker?.environment).not.toHaveProperty(
+      'SINCH_CALLBACK_PUBLIC_KEYS_JSON'
+    );
+    expect(resolved.services.worker?.environment).not.toHaveProperty('SINCH_WEBHOOK_TOKEN');
+  }, 15_000);
+
+  it('starts the customer OAuth worker without legacy Custom Connection credentials', () => {
+    const environment: NodeJS.ProcessEnv = {
+      ...composeEnvironment,
+      XERO_API_CREDENTIALS: undefined
+    };
+    const composePath = resolve(
+      process.cwd(),
+      'deploy',
+      'ovh',
+      'docker-compose.yml'
+    );
+    const result = spawnSync(
+      'docker',
+      ['compose', '-f', composePath, 'config', '--format', 'json'],
+      { encoding: 'utf8', env: environment }
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    const resolved = JSON.parse(result.stdout) as {
+      services: { worker: { environment: Record<string, string> } };
+    };
+    expect(resolved.services.worker.environment.XERO_API_CREDENTIALS ?? '').toBe(
+      ''
+    );
+  }, 15_000);
+
   it('registers and places VoIPcloud calls over TCP with the PBX user mapped separately from SIP auth', () => {
     const pjsip = deploymentFile('asterisk/pjsip.conf.template');
     const extensions = deploymentFile('asterisk/extensions.conf');
@@ -103,13 +224,15 @@ describe('OVH voice deployment', () => {
     );
   });
 
-  it('injects the private Retell credential only into server containers', () => {
+  it('injects the private VoIPcloud gateway credential only into server containers', () => {
     const compose = deploymentFile('docker-compose.yml');
 
     expect(compose).toContain('ACCOUNT_PULSE_WEB_IMAGE');
     expect(compose).toContain('ACCOUNT_PULSE_WORKER_IMAGE');
-    expect(compose.match(/^\s+RETELL_API_KEY:/gm)).toHaveLength(3);
-    expect(compose).not.toMatch(/NEXT_PUBLIC_.*RETELL/i);
+    expect(compose.match(/^\s+VOICE_GATEWAY_SIGNING_SECRET:/gm)).toHaveLength(3);
+    expect(compose.match(/^\s+VOICE_GATEWAY_URL:/gm)).toHaveLength(2);
+    expect(compose).not.toContain('RETELL_API_KEY:');
+    expect(compose).not.toMatch(/NEXT_PUBLIC_.*VOICE_GATEWAY/i);
     expect(compose).not.toContain('.dkr.ecr.');
     expect(compose).toContain('SEND_MODE: ${SEND_MODE:?SEND_MODE is required}');
   });

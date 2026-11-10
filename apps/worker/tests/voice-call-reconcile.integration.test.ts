@@ -15,7 +15,7 @@ import {
   voiceCallEvents,
   voiceCallRequests
 } from '@bc5000/db';
-import type { RetellCallStatus } from '@bc5000/integrations/retell';
+import type { VoiceGatewayCallStatus } from '@bc5000/integrations/voice-gateway';
 
 import { reconcileVoiceCall } from '../src/handlers/voice-call-reconcile.js';
 
@@ -41,7 +41,7 @@ async function seedCall(
   const voiceCallId = randomUUID();
   const providerCallId =
     options.providerCallId === undefined
-      ? `retell-${randomUUID()}`
+      ? voiceCallId
       : options.providerCallId;
   await client.db.insert(organisations).values({
     id: organisationId,
@@ -67,13 +67,7 @@ async function seedCall(
     organisationId,
     enabled: true,
     configurationVersion: 2,
-    provider: 'RETELL',
-    secretReference: 'env:RETELL_API_KEY',
-    previewPublicKey: 'public-preview-key',
-    agentId: 'agent-accountpulse',
-    agentVersion: 7,
-    voiceId: 'voice-au-1',
-    voiceLabel: 'Australian accounts voice',
+    provider: 'VOIPCLOUD',
     voipcloudUserNumber: '1099',
     ttsVoiceId: 'en_GB-alba-medium',
     gatewayFlowVersion: 1,
@@ -103,9 +97,6 @@ async function seedCall(
     voipcloudUserNumber: '1099',
     ttsVoiceId: 'en_GB-alba-medium',
     gatewayFlowVersion: 1,
-    agentId: 'agent-accountpulse',
-    agentVersion: 7,
-    voiceId: 'voice-au-1',
     voiceSettingsUpdatedAt: new Date('2026-10-08T00:00:00.000Z'),
     transferTargetLabel: 'Main office accounts queue',
     idempotencyKey: `voice-${randomUUID()}`,
@@ -122,27 +113,21 @@ async function seedCall(
 }
 
 const runtimeFor = (
-  getCall: (callId: string) => Promise<RetellCallStatus>
+  getCall: (callId: string) => Promise<VoiceGatewayCallStatus>
 ) => {
-  const read = vi.fn(() => Promise.resolve('retell-private-key'));
-  const createPhoneCall = vi.fn(() =>
-    Promise.resolve({ callId: 'must-not-be-created', callStatus: 'registered' })
-  );
-  const provider = { getCall: vi.fn(getCall), createPhoneCall };
-  const create = vi.fn(() => provider);
+  const createCall = vi.fn();
+  const gateway = { getCall: vi.fn(getCall), createCall };
   const publish = vi.fn(() => Promise.resolve(`job-${randomUUID()}`));
   return {
     dependencies: {
       database: client.db,
       clock: { now: () => now },
-      secrets: { read },
-      providerFactory: { create },
+      gateway,
       publisher: { publish }
     },
-    read,
-    provider,
+    gateway,
     publish,
-    createPhoneCall
+    createCall
   };
 };
 
@@ -151,17 +136,15 @@ describe('voice call reconciliation', () => {
     const seeded = await seedCall('UNKNOWN');
     const runtime = runtimeFor((callId) =>
       Promise.resolve({
-        callId,
-        callStatus: 'ended',
-        startTimestamp: Date.parse('2026-10-08T00:01:00.000Z'),
-        endTimestamp: Date.parse('2026-10-08T00:03:00.000Z'),
-        analysis: {
-          callSuccessful: true,
-          structuredOutcome: {
-            identityResult: 'confirmed',
-            finalResult: 'details_delivered'
-          }
-        }
+        gatewayCallId: callId,
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId,
+        providerUserNumber: '1099',
+        state: 'COMPLETED',
+        lastEventSequence: 8,
+        safeFailureCode: 'VOICE_REMINDER_DELIVERED',
+        createdAt: '2026-10-08T00:00:30.000Z',
+        updatedAt: '2026-10-08T00:03:00.000Z'
       })
     );
 
@@ -176,11 +159,10 @@ describe('voice call reconciliation', () => {
       state: 'COMPLETED',
       outcome: 'REMINDER_DELIVERED'
     });
-    expect(runtime.read).toHaveBeenCalledWith('env:RETELL_API_KEY');
-    expect(runtime.provider.getCall).toHaveBeenCalledWith(
+    expect(runtime.gateway.getCall).toHaveBeenCalledWith(
       seeded.providerCallId
     );
-    expect(runtime.createPhoneCall).not.toHaveBeenCalled();
+    expect(runtime.createCall).not.toHaveBeenCalled();
     const [stored] = await client.db
       .select()
       .from(voiceCallRequests)
@@ -198,7 +180,7 @@ describe('voice call reconciliation', () => {
       'VOICE_CALL_RECONCILED'
     );
     expect(JSON.stringify(events)).not.toMatch(
-      /private-retell-key|\+61412345678/
+      /private-voipcloud-key|\+61412345678/
     );
   });
 
@@ -206,9 +188,15 @@ describe('voice call reconciliation', () => {
     const seeded = await seedCall('ACCEPTED');
     const runtime = runtimeFor((callId) =>
       Promise.resolve({
-        callId,
-        callStatus: 'ongoing',
-        startTimestamp: Date.parse('2026-10-08T00:01:00.000Z')
+        gatewayCallId: callId,
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId,
+        providerUserNumber: '1099',
+        state: 'IN_PROGRESS',
+        lastEventSequence: 5,
+        safeFailureCode: null,
+        createdAt: '2026-10-08T00:00:30.000Z',
+        updatedAt: '2026-10-08T00:01:00.000Z'
       })
     );
 
@@ -218,7 +206,7 @@ describe('voice call reconciliation', () => {
         voiceCallId: seeded.voiceCallId
       })
     ).resolves.toEqual({ kind: 'pending', state: 'IN_PROGRESS' });
-    expect(runtime.createPhoneCall).not.toHaveBeenCalled();
+    expect(runtime.createCall).not.toHaveBeenCalled();
     const [stored] = await client.db
       .select()
       .from(voiceCallRequests)
@@ -245,9 +233,15 @@ describe('voice call reconciliation', () => {
     const seeded = await seedCall('ACCEPTED');
     const runtime = runtimeFor((callId) =>
       Promise.resolve({
-        callId,
-        callStatus: 'ongoing',
-        startTimestamp: Date.parse('2026-10-08T00:01:00.000Z')
+        gatewayCallId: callId,
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId,
+        providerUserNumber: '1099',
+        state: 'IN_PROGRESS',
+        lastEventSequence: 5,
+        safeFailureCode: null,
+        createdAt: '2026-10-08T00:00:30.000Z',
+        updatedAt: '2026-10-08T00:01:00.000Z'
       })
     );
 
@@ -283,15 +277,15 @@ describe('voice call reconciliation', () => {
     const seeded = await seedCall('UNKNOWN');
     const runtime = runtimeFor((callId) =>
       Promise.resolve({
-        callId,
-        callStatus: 'ended',
-        analysis: {
-          callSuccessful: true,
-          structuredOutcome: {
-            wrongPerson: true,
-            finalResult: 'wrong_person'
-          }
-        }
+        gatewayCallId: callId,
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId,
+        providerUserNumber: '1099',
+        state: 'COMPLETED',
+        lastEventSequence: 7,
+        safeFailureCode: 'VOICE_WRONG_NUMBER',
+        createdAt: '2026-10-08T00:00:30.000Z',
+        updatedAt: '2026-10-08T00:02:00.000Z'
       })
     );
     const payload = {
@@ -331,15 +325,15 @@ describe('voice call reconciliation', () => {
     const seeded = await seedCall('UNKNOWN', { purpose: 'TEST' });
     const runtime = runtimeFor((callId) =>
       Promise.resolve({
-        callId,
-        callStatus: 'ended',
-        analysis: {
-          callSuccessful: true,
-          structuredOutcome: {
-            wrongPerson: true,
-            finalResult: 'wrong_person'
-          }
-        }
+        gatewayCallId: callId,
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId,
+        providerUserNumber: '1099',
+        state: 'COMPLETED',
+        lastEventSequence: 7,
+        safeFailureCode: 'VOICE_WRONG_NUMBER',
+        createdAt: '2026-10-08T00:00:30.000Z',
+        updatedAt: '2026-10-08T00:02:00.000Z'
       })
     );
 
@@ -370,7 +364,17 @@ describe('voice call reconciliation', () => {
   it('requires manual review when an unknown call has no provider ID', async () => {
     const seeded = await seedCall('UNKNOWN', { providerCallId: null });
     const runtime = runtimeFor((callId) =>
-      Promise.resolve({ callId, callStatus: 'ended' })
+      Promise.resolve({
+        gatewayCallId: callId,
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId,
+        providerUserNumber: '1099',
+        state: 'COMPLETED',
+        lastEventSequence: 1,
+        safeFailureCode: 'VOICE_REMINDER_DELIVERED',
+        createdAt: '2026-10-08T00:00:30.000Z',
+        updatedAt: '2026-10-08T00:02:00.000Z'
+      })
     );
 
     await expect(
@@ -382,8 +386,8 @@ describe('voice call reconciliation', () => {
       kind: 'manual-review',
       reason: 'PROVIDER_CALL_ID_MISSING'
     });
-    expect(runtime.provider.getCall).not.toHaveBeenCalled();
-    expect(runtime.createPhoneCall).not.toHaveBeenCalled();
+    expect(runtime.gateway.getCall).not.toHaveBeenCalled();
+    expect(runtime.createCall).not.toHaveBeenCalled();
     const reviewTasks = await client.db
       .select()
       .from(tasks)

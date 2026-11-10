@@ -4,7 +4,7 @@ import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { AppSession } from '@bc5000/auth';
-import { auditEvents, createDatabase, migrateDatabase, organisations, providerConnections, users } from '@bc5000/db';
+import { auditEvents, createDatabase, migrateDatabase, organisations, providerConnections, users, xeroConnections } from '@bc5000/db';
 import { jobNames } from '@bc5000/jobs';
 
 import { createIntegrationSettings } from '../src/app/(protected)/settings/integrations/integration-settings.js';
@@ -143,6 +143,48 @@ describe('integration settings',()=>{
     });
   });
   it('records the audit request before queueing an authorised Xero sync',async()=>{const seeded=await seed();const jobId=randomUUID();let auditBeforePublish:Record<string,unknown>|null=null;const publish=vi.fn(async()=>{const [event]=await client.db.select().from(auditEvents).where(and(eq(auditEvents.organisationId,seeded.organisationId),eq(auditEvents.eventType,'XERO_SYNC_REQUESTED')));auditBeforePublish=event?.afterValue??null;return jobId;});const service=createIntegrationSettings({database:client.db,tester:{test:vi.fn()},clock:{now:()=>now},publisher:{publish}});const result=await service.requestXeroSync(seeded.session('ADMIN'),{organisationId:seeded.organisationId});expect(result.jobId).toBe(jobId);expect(auditBeforePublish).toMatchObject({jobName:jobNames.xeroIncrementalSync,state:'REQUESTED'});expect(publish).toHaveBeenCalledWith(jobNames.xeroIncrementalSync,{organisationId:seeded.organisationId},{singletonKey:`${jobNames.xeroIncrementalSync}:${seeded.organisationId}`,deduplicateWhileActive:true});const events=await client.db.select().from(auditEvents).where(eq(auditEvents.organisationId,seeded.organisationId));expect(events.map((event)=>event.eventType)).toEqual(expect.arrayContaining(['XERO_SYNC_REQUESTED','XERO_SYNC_QUEUED']));const requested=events.find((event)=>event.eventType==='XERO_SYNC_REQUESTED');const queued=events.find((event)=>event.eventType==='XERO_SYNC_QUEUED');expect(queued?.afterValue).toMatchObject({requestAuditId:requested?.id,jobId,jobName:jobNames.xeroIncrementalSync,state:'QUEUED'});});
+  it('queues a sync for a connected customer OAuth organisation without a legacy secret reference', async () => {
+    const seeded = await seed();
+    await client.db
+      .delete(providerConnections)
+      .where(
+        and(
+          eq(providerConnections.organisationId, seeded.organisationId),
+          eq(providerConnections.provider, 'XERO')
+        )
+      );
+    await client.db.insert(xeroConnections).values({
+      organisationId: seeded.organisationId,
+      connectionId: randomUUID(),
+      tenantId: randomUUID(),
+      status: 'CONNECTED',
+      encryptedRefreshToken: {
+        version: 1,
+        keyId: 'test',
+        iv: Buffer.alloc(12).toString('base64'),
+        ciphertext: Buffer.from('refresh').toString('base64'),
+        tag: Buffer.alloc(16).toString('base64')
+      },
+      grantedScopes: ['offline_access'],
+      connectedAt: now,
+      updatedAt: now
+    });
+    const jobId = randomUUID();
+    const publish = vi.fn(() => Promise.resolve(jobId));
+    const service = createIntegrationSettings({
+      database: client.db,
+      tester: { test: vi.fn() },
+      clock: { now: () => now },
+      publisher: { publish }
+    });
+
+    await expect(
+      service.requestXeroSync(seeded.session('ADMIN'), {
+        organisationId: seeded.organisationId
+      })
+    ).resolves.toEqual({ jobId });
+    expect(publish).toHaveBeenCalledOnce();
+  });
   it('records a failed Xero sync queue attempt',async()=>{const seeded=await seed();const publish=vi.fn(()=>Promise.reject(new Error('queue unavailable')));const service=createIntegrationSettings({database:client.db,tester:{test:vi.fn()},clock:{now:()=>now},publisher:{publish}});await expect(service.requestXeroSync(seeded.session('ADMIN'),{organisationId:seeded.organisationId})).rejects.toThrow('queue unavailable');const events=await client.db.select().from(auditEvents).where(eq(auditEvents.organisationId,seeded.organisationId));expect(events.map((event)=>event.eventType)).toEqual(expect.arrayContaining(['XERO_SYNC_REQUESTED','XERO_SYNC_QUEUE_FAILED']));const requested=events.find((event)=>event.eventType==='XERO_SYNC_REQUESTED');const failed=events.find((event)=>event.eventType==='XERO_SYNC_QUEUE_FAILED');expect(failed?.afterValue).toMatchObject({requestAuditId:requested?.id,jobName:jobNames.xeroIncrementalSync,state:'FAILED'});});
   it('rejects an operator request to synchronise Xero',async()=>{const seeded=await seed();const service=createIntegrationSettings({database:client.db,tester:{test:vi.fn()},clock:{now:()=>now},publisher:{publish:vi.fn(()=>Promise.resolve(randomUUID()))}});await expect(service.requestXeroSync(seeded.session('OPERATOR'),{organisationId:seeded.organisationId})).rejects.toThrow('FORBIDDEN');});
   it('blocks sync queueing during maintenance while keeping provider health tests available', async () => {

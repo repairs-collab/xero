@@ -38,12 +38,13 @@ const byteBody = async (request: Request): Promise<Uint8Array> =>
 
 const enqueueRecorded = async (
   dependencies: CommonDependencies,
+  organisationId: string,
   provider: 'XERO' | 'SINCH' | 'RETELL',
   eventId: string,
   rawBody: Uint8Array
 ): Promise<void> => {
   const recorded = await dependencies.repository.recordOnceWithId({
-    organisationId: dependencies.organisationId,
+    organisationId,
     provider,
     providerEventId: eventId,
     rawBody: Buffer.from(rawBody).toString('utf8'),
@@ -52,16 +53,20 @@ const enqueueRecorded = async (
   await dependencies.queue.enqueueUnique(
     jobNames.webhookProcess,
     {
-      organisationId: dependencies.organisationId,
+      organisationId,
       webhookEventId: recorded.id,
       provider
     },
-    `webhook:${provider}:${dependencies.organisationId}:${eventId}`
+    `webhook:${provider}:${organisationId}:${eventId}`
   );
 };
 
 export function createXeroWebhookHandler(
-  dependencies: CommonDependencies & { webhookKey: string }
+  dependencies: Omit<CommonDependencies, 'organisationId'> & {
+    webhookKey: string;
+    resolveOrganisationId(tenantId: string): Promise<string | null>;
+    recordUnknownTenant?(tenantId: string): void;
+  }
 ): (request: Request) => Promise<Response> {
   return async (request) => {
     const rawBody = await byteBody(request);
@@ -79,16 +84,39 @@ export function createXeroWebhookHandler(
     } catch {
       return new Response('', { status: 400 });
     }
+    let ignoredTenants = 0;
     for (const event of parsed.accepted) {
+      const organisationId = await dependencies.resolveOrganisationId(
+        event.tenantId
+      );
+      if (organisationId === null) {
+        ignoredTenants += 1;
+        dependencies.recordUnknownTenant?.(event.tenantId);
+        continue;
+      }
       const eventId = `${event.resourceId}:${event.eventType}:${event.eventDateUtc}`;
-      await enqueueRecorded(dependencies, 'XERO', eventId, rawBody);
+      await enqueueRecorded(
+        { ...dependencies, organisationId },
+        organisationId,
+        'XERO',
+        eventId,
+        rawBody
+      );
     }
-    return new Response('', { status: 200 });
+    if (ignoredTenants === 0) return new Response('', { status: 200 });
+    return new Response('', {
+      status: 200,
+      headers: { 'x-accountpulse-ignored-tenants': String(ignoredTenants) }
+    });
   };
 }
 
 export function createSinchWebhookHandler(
-  dependencies: CommonDependencies & {
+  dependencies: Omit<CommonDependencies, 'organisationId'> & {
+    organisationId?: string;
+    resolveOrganisationId?(destinationNumber: string): Promise<string | null>;
+    resolveDeliveryOrganisationId?(messageId: string): Promise<string | null>;
+    resolveLegacyOrganisationId?(candidateId: string): Promise<string | null>;
     publicKeys: ReadonlyMap<string, string | Buffer>;
     sharedToken: string;
   }
@@ -135,7 +163,54 @@ export function createSinchWebhookHandler(
         : event.kind === 'reply'
           ? event.replyId
           : event.notificationId;
-    await enqueueRecorded(dependencies, 'SINCH', eventId, rawBody);
+    const destinationNumber =
+      event.kind === 'reply' || event.kind === 'opt-out' ? event.to : null;
+    let resolvedOrganisationId: string | null = null;
+    if (
+      typeof destinationNumber === 'string' &&
+      dependencies.resolveOrganisationId !== undefined
+    ) {
+      resolvedOrganisationId =
+        await dependencies.resolveOrganisationId(destinationNumber);
+    }
+    if (
+      resolvedOrganisationId === null &&
+      typeof event.messageId === 'string' &&
+      dependencies.resolveDeliveryOrganisationId !== undefined
+    ) {
+      resolvedOrganisationId =
+        await dependencies.resolveDeliveryOrganisationId(event.messageId);
+    }
+    if (
+      resolvedOrganisationId === null &&
+      event.kind === 'reply' &&
+      dependencies.resolveLegacyOrganisationId !== undefined &&
+      typeof event.metadata.organisationId === 'string'
+    ) {
+      resolvedOrganisationId = await dependencies.resolveLegacyOrganisationId(
+        event.metadata.organisationId
+      );
+    }
+    if (
+      resolvedOrganisationId === null &&
+      dependencies.resolveOrganisationId === undefined &&
+      dependencies.resolveDeliveryOrganisationId === undefined
+    ) {
+      resolvedOrganisationId = dependencies.organisationId ?? null;
+    }
+    if (resolvedOrganisationId === null) {
+      return new Response('', {
+        status: 202,
+        headers: { 'x-accountpulse-ignored-destination': 'true' }
+      });
+    }
+    await enqueueRecorded(
+      { ...dependencies, organisationId: resolvedOrganisationId },
+      resolvedOrganisationId,
+      'SINCH',
+      eventId,
+      rawBody
+    );
     return new Response('', { status: 202 });
   };
 }
@@ -180,6 +255,7 @@ export function createRetellWebhookHandler(
     }
     await enqueueRecorded(
       dependencies,
+      dependencies.organisationId,
       'RETELL',
       event.eventKey,
       rawBody

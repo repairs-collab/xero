@@ -2,6 +2,7 @@ export const jobNames = {
   xeroInitialSync: 'xero.initial-sync',
   xeroIncrementalSync: 'xero.incremental-sync',
   xeroInvoiceRefresh: 'xero.invoice-refresh',
+  xeroOAuthCleanup: 'xero.oauth-cleanup',
   xeroNightlyReconcile: 'xero.nightly-reconcile',
   remindersCalculate: 'reminders.calculate',
   voiceRemindersCalculate: 'voice-reminders.calculate',
@@ -9,11 +10,14 @@ export const jobNames = {
   reminderExecute: 'reminder.execute',
   operatorReplyExecute: 'operator-reply.execute',
   testSmsExecute: 'test-sms.execute',
+  smsNumberProvision: 'sms-number.provision',
   voiceCallExecute: 'voice-call.execute',
   voiceCallReconcile: 'voice-call.reconcile',
   providerConnectionTest: 'provider.connection-test',
   webhookProcess: 'webhook.process',
-  retentionApply: 'retention.apply'
+  retentionApply: 'retention.apply',
+  subscriptionLifecycle: 'subscription.lifecycle',
+  subscriptionTrialExpiry: 'subscription.trial-expiry'
 } as const;
 
 export type JobName = (typeof jobNames)[keyof typeof jobNames];

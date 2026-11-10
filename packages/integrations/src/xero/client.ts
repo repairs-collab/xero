@@ -7,7 +7,7 @@ import {
   type RawXeroInvoice,
   type RawXeroOrganisation
 } from './mappers.js';
-import type { XeroTokenProvider } from './token-cache.js';
+import type { XeroSessionProvider } from './session-provider.js';
 import {
   XeroAuthenticationFailure,
   XeroEmailPermanentFailure,
@@ -23,7 +23,7 @@ import {
 
 export interface XeroClientOptions {
   http: HttpClient;
-  tokenProvider: XeroTokenProvider;
+  sessionProvider: XeroSessionProvider;
   baseUrl?: string;
   clock?: { now(): Date };
 }
@@ -316,14 +316,24 @@ export class XeroClient {
       }
       this.rateLimitBlock = undefined;
     }
-    const accessToken = await this.options.tokenProvider.getAccessToken();
+    const session = await this.options.sessionProvider.getSession();
+    const callerHeaders = Object.fromEntries(
+      Object.entries(headers).filter(
+        ([name]) =>
+          name.toLowerCase() !== 'authorization' &&
+          name.toLowerCase() !== 'xero-tenant-id'
+      )
+    );
     const response = await this.options.http.request({
       method,
       url: `${this.baseUrl}${path}`,
       headers: {
-        Authorization: `Bearer ${accessToken}`,
         Accept: 'application/json',
-        ...headers
+        ...callerHeaders,
+        Authorization: `Bearer ${session.accessToken}`,
+        ...(session.tenantId === null
+          ? {}
+          : { 'Xero-Tenant-Id': session.tenantId })
       }
     });
     if (response.status === 429) {

@@ -3,7 +3,6 @@ import { and, eq, sql } from 'drizzle-orm';
 import {
   type Database,
   type DbTransaction,
-  organisationVoiceSettings,
   suppressions,
   tasks,
   voiceCallEvents,
@@ -16,10 +15,7 @@ import {
   type VoiceCallOutcome,
   type VoiceCallState
 } from '@bc5000/domain';
-import type {
-  RetellCallStatus,
-  RetellStructuredOutcome
-} from '@bc5000/integrations/retell';
+import type { VoiceGatewayCallStatus } from '@bc5000/integrations/voice-gateway';
 import {
   jobNames,
   type JobPublisher,
@@ -31,14 +27,13 @@ type VoiceCallReconcileInput = Omit<VoiceCallReconcilePayload, 'provider'> & {
 };
 
 export interface VoiceCallStatusProvider {
-  getCall(callId: string): Promise<RetellCallStatus>;
+  getCall(callId: string): Promise<VoiceGatewayCallStatus>;
 }
 
 export interface VoiceCallReconcileDependencies {
   database: Database;
   clock: { now(): Date };
-  secrets: { read(reference: string): Promise<string> };
-  providerFactory: { create(apiKey: string): VoiceCallStatusProvider };
+  gateway: VoiceCallStatusProvider;
   publisher: JobPublisher;
 }
 
@@ -58,43 +53,24 @@ const terminalStates = new Set<VoiceCallOperationalState>([
   'CANCELLED'
 ]);
 
-const safeOutcome = (
-  outcome: RetellStructuredOutcome | undefined
-): VoiceCallOutcome | null => {
-  if (outcome === undefined) return null;
-  if (outcome.wrongPerson === true || outcome.finalResult === 'wrong_person') {
-    return 'WRONG_PERSON';
-  }
-  if (
-    outcome.voicemailLeft === true ||
-    outcome.finalResult === 'voicemail_left'
-  ) {
-    return 'VOICEMAIL_LEFT';
-  }
-  if (outcome.identityResult === 'not_confirmed') {
-    return 'IDENTITY_NOT_CONFIRMED';
-  }
-  switch (outcome.finalResult) {
-    case 'details_delivered':
-      return outcome.identityResult === 'confirmed'
-        ? 'REMINDER_DELIVERED'
-        : null;
-    case 'transferred':
-      return 'TRANSFERRED';
-    case 'transfer_unanswered':
-      return 'TRANSFER_UNANSWERED';
-    case 'no_answer':
-      return 'NO_ANSWER';
-    case 'busy':
-      return 'BUSY';
-    case 'invalid_destination':
-      return 'INVALID_DESTINATION';
-    case 'provider_rejected':
-      return 'PROVIDER_REJECTED';
-    default:
-      return null;
-  }
+const outcomeByGatewayCode: Readonly<Record<string, VoiceCallOutcome>> = {
+  VOICE_REMINDER_DELIVERED: 'REMINDER_DELIVERED',
+  VOICE_VOICEMAIL_LEFT: 'VOICEMAIL_LEFT',
+  VOICE_TRANSFERRED: 'TRANSFERRED',
+  VOICE_TRANSFER_UNANSWERED: 'TRANSFER_UNANSWERED',
+  VOICE_TRANSFER_FAILED: 'TRANSFER_UNANSWERED',
+  VOICE_WRONG_NUMBER: 'WRONG_PERSON',
+  VOICE_IDENTITY_NOT_CONFIRMED: 'IDENTITY_NOT_CONFIRMED',
+  VOICE_NO_ANSWER: 'NO_ANSWER',
+  VOICE_BUSY: 'BUSY',
+  VOICE_INVALID_DESTINATION: 'INVALID_DESTINATION',
+  VOICE_PROVIDER_REJECTED: 'PROVIDER_REJECTED'
 };
+
+const safeOutcome = (status: VoiceGatewayCallStatus): VoiceCallOutcome | null =>
+  status.safeFailureCode === null
+    ? null
+    : (outcomeByGatewayCode[status.safeFailureCode] ?? null);
 
 const terminalEventFor = (outcome: VoiceCallOutcome): VoiceCallEvent => {
   switch (outcome) {
@@ -135,12 +111,10 @@ const impliesAnswered = (outcome: VoiceCallOutcome): boolean =>
   ].includes(outcome);
 
 const providerTime = (
-  status: RetellCallStatus,
+  status: VoiceGatewayCallStatus,
   fallback: Date
 ): Date => {
-  const source = status.endTimestamp ?? status.startTimestamp;
-  if (source === undefined) return fallback;
-  const value = new Date(source);
+  const value = new Date(status.updatedAt);
   return Number.isFinite(value.getTime()) ? value : fallback;
 };
 
@@ -322,26 +296,18 @@ export async function reconcileVoiceCall(
     };
   }
 
-  const [settings] = await dependencies.database
-    .select({ secretReference: organisationVoiceSettings.secretReference })
-    .from(organisationVoiceSettings)
-    .where(
-      eq(organisationVoiceSettings.organisationId, payload.organisationId)
-    )
-    .limit(1);
-  if (settings === undefined) throw new Error('VOICE_SETTINGS_NOT_FOUND');
-  if (settings.secretReference === null) {
-    throw new Error('VOICE_SETTINGS_NOT_CONFIGURED');
-  }
-  const apiKey = await dependencies.secrets.read(settings.secretReference);
-  const provider = dependencies.providerFactory.create(apiKey);
-  const status = await provider.getCall(call.providerCallId);
-  if (status.callId !== call.providerCallId) {
-    throw new Error('RETELL_CALL_ID_MISMATCH');
+  const status = await dependencies.gateway.getCall(call.providerCallId);
+  if (
+    status.gatewayCallId !== call.providerCallId ||
+    status.organisationId !== call.organisationId ||
+    status.voiceCallId !== call.id ||
+    status.providerUserNumber !== call.voipcloudUserNumber
+  ) {
+    throw new Error('VOICE_GATEWAY_CALL_MISMATCH');
   }
   const occurredAt = providerTime(status, now);
 
-  if (['ongoing', 'in_progress'].includes(status.callStatus.toLowerCase())) {
+  if (status.state === 'CUSTOMER_ANSWERED' || status.state === 'IN_PROGRESS') {
     if (call.state === 'ACCEPTED') {
       const transition = transitionVoiceCallState(
         { state: call.state, outcome: call.outcome },
@@ -395,8 +361,29 @@ export async function reconcileVoiceCall(
       : { kind: 'pending', state: call.state };
   }
 
-  const outcome = safeOutcome(status.analysis?.structuredOutcome);
-  if (status.callStatus.toLowerCase() !== 'ended' || outcome === null) {
+  if (
+    ['PENDING', 'PROVIDER_REQUESTED', 'GATEWAY_LEG_ANSWERED', 'CUSTOMER_RINGING'].includes(
+      status.state
+    )
+  ) {
+    const pending = await schedulePendingReconciliation(dependencies, {
+      organisationId: payload.organisationId,
+      voiceCallId: call.id,
+      contactId: call.contactId,
+      createCustomerReview: call.purpose === 'CUSTOMER',
+      state: call.state,
+      now,
+      ...(payload.correlationId === undefined
+        ? {}
+        : { correlationId: payload.correlationId })
+    });
+    return pending === 'exhausted'
+      ? { kind: 'manual-review', reason: 'OUTCOME_INCOMPLETE' }
+      : { kind: 'pending', state: call.state };
+  }
+
+  const outcome = safeOutcome(status);
+  if (!['COMPLETED', 'FAILED'].includes(status.state) || outcome === null) {
     if (call.purpose === 'CUSTOMER') {
       await ensureVoiceReview(dependencies.database, {
         organisationId: payload.organisationId,
@@ -498,7 +485,7 @@ export async function reconcileVoiceCall(
           organisationId: payload.organisationId,
           channel: 'VOICE',
           normalisedDestination: call.destinationNumber,
-          source: 'RETELL_RECONCILIATION',
+          source: 'VOIPCLOUD_GATEWAY_RECONCILIATION',
           reason: 'Wrong-person voice outcome',
           consentState: 'SUPPRESSED',
           recordedAt: occurredAt
@@ -510,7 +497,7 @@ export async function reconcileVoiceCall(
             suppressions.normalisedDestination
           ],
           set: {
-            source: 'RETELL_RECONCILIATION',
+            source: 'VOIPCLOUD_GATEWAY_RECONCILIATION',
             reason: 'Wrong-person voice outcome',
             consentState: 'SUPPRESSED',
             recordedAt: occurredAt

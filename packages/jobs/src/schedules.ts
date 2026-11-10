@@ -7,7 +7,12 @@ const scheduleDefinitions = [
   { name: jobNames.remindersCalculate, cron: '*/5 * * * *' },
   { name: jobNames.voiceRemindersCalculate, cron: '*/5 * * * *' },
   { name: jobNames.voiceRemindersDispatch, cron: '* * * * *' },
-  { name: jobNames.retentionApply, cron: '0 3 * * *' }
+  { name: jobNames.retentionApply, cron: '0 3 * * *' },
+  { name: jobNames.subscriptionTrialExpiry, cron: '5 * * * *' }
+] as const;
+
+const globalScheduleDefinitions = [
+  { name: jobNames.xeroOAuthCleanup, cron: '*/15 * * * *' }
 ] as const;
 
 export async function ensureRecurringSchedules(
@@ -28,5 +33,18 @@ export async function ensureRecurringSchedules(
         }
       );
     }
+  }
+  for (const definition of globalScheduleDefinitions) {
+    await queue.schedule(
+      definition.name,
+      definition.cron,
+      {},
+      {
+        key: definition.name,
+        tz: 'UTC',
+        missed: 'once',
+        singletonKey: definition.name
+      }
+    );
   }
 }
