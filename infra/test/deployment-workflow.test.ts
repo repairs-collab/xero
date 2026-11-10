@@ -29,6 +29,23 @@ describe('AccountPulse OVH deployment workflow', () => {
     );
   });
 
+  it('passes commercial credentials only through the protected environment', () => {
+    for (const name of [
+      'XERO_OAUTH_CLIENT_ID',
+      'XERO_OAUTH_CLIENT_SECRET',
+      'STRIPE_SECRET_KEY',
+      'STRIPE_WEBHOOK_SECRET',
+      'STRIPE_SOLO_PRICE_ID',
+      'STRIPE_PORTAL_CONFIGURATION_ID'
+    ]) {
+      expect(workflow).toContain(`secrets.${name}`);
+    }
+    expect(workflow).toContain('Install protected production environment');
+    expect(workflow.indexOf('Install protected production environment')).toBeLessThan(
+      workflow.indexOf('Run migration and health-checked release')
+    );
+  });
+
   it('cannot invoke reset or customer activation from a normal deployment', () => {
     expect(workflow).not.toContain('operational-reset');
     expect(workflow).not.toContain('CUSTOMER_ROLLOUT');

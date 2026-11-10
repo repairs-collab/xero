@@ -24,8 +24,12 @@ grep -Fq 'billchaser.motts.com.au' "$CADDYFILE" || {
   exit 65
 }
 if grep -Fq "$PUBLIC_HOSTNAME" "$CADDYFILE"; then
-  echo "$PUBLIC_HOSTNAME already exists in the live Caddyfile; review it instead of appending a duplicate." >&2
-  exit 65
+  curl --fail --show-error --silent --retry 12 --retry-delay 5 "https://${PUBLIC_HOSTNAME}/health/ready" >/dev/null
+  curl --fail --show-error --silent https://billchaser.motts.com.au/health/ready >/dev/null
+  openssl s_client -connect "${PUBLIC_HOSTNAME}:443" -servername "$PUBLIC_HOSTNAME" </dev/null 2>/dev/null |
+    openssl x509 -noout -subject -issuer -dates -ext subjectAltName
+  echo "$PUBLIC_HOSTNAME already serves valid HTTPS and the existing Motts health check still passes."
+  exit 0
 fi
 
 curl --fail --show-error --silent https://billchaser.motts.com.au/health/ready >/dev/null
