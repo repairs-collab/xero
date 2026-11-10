@@ -1,8 +1,8 @@
-import { asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray, or, sql } from 'drizzle-orm';
 
 import { summariseSmsUsage } from '@bc5000/domain';
 
-import type { Database } from '../connection.js';
+import type { Database, DbTransaction } from '../connection.js';
 import {
   invitations,
   memberships,
@@ -198,6 +198,17 @@ export interface PlatformStatusMutationInput {
   now: Date;
 }
 
+export interface PlatformNumberMutationInput {
+  actorUserId: string;
+  numberId: string;
+  reason: string;
+  now: Date;
+}
+
+export interface PlatformSmsAllowanceView extends PlatformSmsUsageSummary {
+  organisationId: string;
+}
+
 export interface PlatformAdminRepository extends PlatformAdminReadRepository {
   extendTrial(
     input: PlatformTrialMutationInput & { newEnd: Date }
@@ -211,6 +222,49 @@ export interface PlatformAdminRepository extends PlatformAdminReadRepository {
   reactivateOrganisation(
     input: PlatformStatusMutationInput
   ): Promise<PlatformMutationResult<PlatformOrganisationDetail>>;
+  registerSmsNumber(input: {
+    actorUserId: string;
+    e164Number: string;
+    provider: 'SINCH';
+    providerNumberId: string | null;
+    reason: string;
+    now: Date;
+  }): Promise<PlatformMutationResult<PlatformNumberSummary>>;
+  assignSmsNumber(
+    input: PlatformNumberMutationInput & {
+      organisationId: string;
+      expectedStatus: 'AVAILABLE' | 'RELEASED';
+    }
+  ): Promise<PlatformMutationResult<PlatformNumberSummary>>;
+  markSmsNumberReady(
+    input: PlatformNumberMutationInput & {
+      organisationId: string;
+      expectedStatus: 'RESERVED';
+      providerNumberId: string;
+    }
+  ): Promise<PlatformMutationResult<PlatformNumberSummary>>;
+  quarantineSmsNumber(
+    input: PlatformNumberMutationInput & {
+      expectedStatus: 'RESERVED' | 'READY';
+      quarantineUntil: Date;
+    }
+  ): Promise<PlatformMutationResult<PlatformNumberSummary>>;
+  releaseSmsNumber(
+    input: PlatformNumberMutationInput & {
+      expectedStatus: 'RESERVED' | 'READY';
+    }
+  ): Promise<PlatformMutationResult<PlatformNumberSummary>>;
+  returnSmsNumberToPool(
+    input: PlatformNumberMutationInput & { expectedStatus: 'QUARANTINED' }
+  ): Promise<PlatformMutationResult<PlatformNumberSummary>>;
+  updateSmsAllowance(input: {
+    actorUserId: string;
+    organisationId: string;
+    includedParts: number;
+    warningPercent: number;
+    reason: string;
+    now: Date;
+  }): Promise<PlatformMutationResult<PlatformSmsAllowanceView>>;
 }
 
 const pageValues = (page?: number, pageSize?: number) => ({
@@ -721,5 +775,511 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
       targetStatus: 'ACTIVE',
       eventType: 'ORGANISATION_REACTIVATED'
     });
+  }
+
+  private validReason(reason: string): string | null {
+    const value = reason.trim();
+    return value.length > 0 && value.length <= 500 ? value : null;
+  }
+
+  private async numberSummary(
+    numberId: string
+  ): Promise<PlatformNumberSummary | null> {
+    const [number] = await this.database
+      .select()
+      .from(smsNumberPool)
+      .where(eq(smsNumberPool.id, numberId))
+      .limit(1);
+    if (!number) return null;
+    const [organisation] = number.organisationId
+      ? await this.database
+          .select({ name: organisations.name })
+          .from(organisations)
+          .where(eq(organisations.id, number.organisationId))
+          .limit(1)
+      : [];
+    return {
+      ...number,
+      organisationName: organisation?.name ?? null
+    };
+  }
+
+  private async numberResult(
+    numberId: string
+  ): Promise<PlatformMutationResult<PlatformNumberSummary>> {
+    const value = await this.numberSummary(numberId);
+    return value ? { ok: true, value } : { ok: false, code: 'INVALID_STATE' };
+  }
+
+  async registerSmsNumber(input: {
+    actorUserId: string;
+    e164Number: string;
+    provider: 'SINCH';
+    providerNumberId: string | null;
+    reason: string;
+    now: Date;
+  }): Promise<PlatformMutationResult<PlatformNumberSummary>> {
+    const reason = this.validReason(input.reason);
+    const providerNumberId = input.providerNumberId?.trim() || null;
+    if (
+      !reason ||
+      input.provider !== 'SINCH' ||
+      !/^\+61\d{9}$/.test(input.e164Number) ||
+      (providerNumberId?.length ?? 0) > 128
+    ) {
+      return { ok: false, code: 'VALIDATION' };
+    }
+    let numberId: string | null = null;
+    try {
+      const result = await this.database.transaction(async (transaction) => {
+        await transaction.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`platform-number:${input.e164Number}:${providerNumberId ?? ''}`}, 0))`
+        );
+        const [existing] = await transaction
+          .select({ id: smsNumberPool.id })
+          .from(smsNumberPool)
+          .where(
+            or(
+              eq(smsNumberPool.e164Number, input.e164Number),
+              providerNumberId
+                ? and(
+                    eq(smsNumberPool.provider, input.provider),
+                    eq(smsNumberPool.providerNumberId, providerNumberId)
+                  )
+                : sql`false`
+            )
+          )
+          .limit(1);
+        if (existing) return { ok: false, code: 'CONFLICT' } as const;
+        const [created] = await transaction
+          .insert(smsNumberPool)
+          .values({
+            e164Number: input.e164Number,
+            provider: input.provider,
+            providerNumberId,
+            status: 'AVAILABLE',
+            createdAt: input.now,
+            updatedAt: input.now
+          })
+          .returning({ id: smsNumberPool.id });
+        if (!created) return { ok: false, code: 'INVALID_STATE' } as const;
+        await transaction.insert(platformAdminAuditEvents).values({
+          actorUserId: input.actorUserId,
+          eventType: 'SMS_NUMBER_REGISTERED',
+          entityType: 'SMS_NUMBER',
+          entityId: created.id,
+          reason,
+          afterValue: {
+            e164Number: input.e164Number,
+            provider: input.provider,
+            providerNumberIdPresent: providerNumberId !== null,
+            status: 'AVAILABLE'
+          },
+          occurredAt: input.now
+        });
+        numberId = created.id;
+        return { ok: true } as const;
+      });
+      if (!result.ok) return result;
+    } catch (error) {
+      if ((error as { code?: string }).code === '23505') {
+        return { ok: false, code: 'CONFLICT' };
+      }
+      throw error;
+    }
+    return this.numberResult(numberId!);
+  }
+
+  async assignSmsNumber(
+    input: PlatformNumberMutationInput & {
+      organisationId: string;
+      expectedStatus: 'AVAILABLE' | 'RELEASED';
+    }
+  ): Promise<PlatformMutationResult<PlatformNumberSummary>> {
+    const reason = this.validReason(input.reason);
+    if (!reason || !['AVAILABLE', 'RELEASED'].includes(input.expectedStatus)) {
+      return { ok: false, code: 'VALIDATION' };
+    }
+    const result = await this.database.transaction(async (transaction) => {
+      await transaction.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`platform-org-number:${input.organisationId}`}, 0))`
+      );
+      const [number] = await transaction
+        .select()
+        .from(smsNumberPool)
+        .where(eq(smsNumberPool.id, input.numberId))
+        .for('update')
+        .limit(1);
+      if (!number || number.status !== input.expectedStatus) {
+        return { ok: false, code: 'CONFLICT' } as const;
+      }
+      const [organisation] = await transaction
+        .select({ id: organisations.id })
+        .from(organisations)
+        .where(eq(organisations.id, input.organisationId))
+        .limit(1);
+      if (!organisation) return { ok: false, code: 'INVALID_STATE' } as const;
+      const [active] = await transaction
+        .select({ id: smsNumberPool.id })
+        .from(smsNumberPool)
+        .where(
+          and(
+            eq(smsNumberPool.organisationId, input.organisationId),
+            inArray(smsNumberPool.status, ['RESERVED', 'READY', 'QUARANTINED'])
+          )
+        )
+        .limit(1);
+      if (active) return { ok: false, code: 'INVALID_STATE' } as const;
+      await transaction
+        .update(smsNumberPool)
+        .set({
+          status: 'RESERVED',
+          organisationId: input.organisationId,
+          reservedAt: input.now,
+          readyAt: null,
+          releasedAt: null,
+          quarantineUntil: null,
+          updatedAt: input.now
+        })
+        .where(eq(smsNumberPool.id, input.numberId));
+      await transaction.insert(platformAdminAuditEvents).values({
+        actorUserId: input.actorUserId,
+        targetOrganisationId: input.organisationId,
+        eventType: 'SMS_NUMBER_ASSIGNED',
+        entityType: 'SMS_NUMBER',
+        entityId: input.numberId,
+        reason,
+        beforeValue: { status: number.status, organisationId: null },
+        afterValue: { status: 'RESERVED', organisationId: input.organisationId },
+        occurredAt: input.now
+      });
+      return { ok: true } as const;
+    });
+    return result.ok ? this.numberResult(input.numberId) : result;
+  }
+
+  async markSmsNumberReady(
+    input: PlatformNumberMutationInput & {
+      organisationId: string;
+      expectedStatus: 'RESERVED';
+      providerNumberId: string;
+    }
+  ): Promise<PlatformMutationResult<PlatformNumberSummary>> {
+    const reason = this.validReason(input.reason);
+    const providerNumberId = input.providerNumberId.trim();
+    if (!reason || providerNumberId.length === 0 || providerNumberId.length > 128) {
+      return { ok: false, code: 'VALIDATION' };
+    }
+    try {
+      const result = await this.database.transaction(async (transaction) => {
+        const [number] = await transaction
+          .select()
+          .from(smsNumberPool)
+          .where(eq(smsNumberPool.id, input.numberId))
+          .for('update')
+          .limit(1);
+        if (
+          !number ||
+          number.status !== input.expectedStatus ||
+          number.organisationId !== input.organisationId
+        ) {
+          return { ok: false, code: 'CONFLICT' } as const;
+        }
+        const [duplicate] = await transaction
+          .select({ id: smsNumberPool.id })
+          .from(smsNumberPool)
+          .where(
+            and(
+              eq(smsNumberPool.provider, number.provider),
+              eq(smsNumberPool.providerNumberId, providerNumberId)
+            )
+          )
+          .limit(1);
+        if (duplicate && duplicate.id !== input.numberId) {
+          return { ok: false, code: 'CONFLICT' } as const;
+        }
+        await transaction
+          .update(smsNumberPool)
+          .set({
+            providerNumberId,
+            status: 'READY',
+            readyAt: input.now,
+            updatedAt: input.now
+          })
+          .where(eq(smsNumberPool.id, input.numberId));
+        await transaction
+          .insert(organisationOnboarding)
+          .values({
+            organisationId: input.organisationId,
+            replyNumberReadyAt: input.now,
+            updatedAt: input.now
+          })
+          .onConflictDoUpdate({
+            target: organisationOnboarding.organisationId,
+            set: { replyNumberReadyAt: input.now, updatedAt: input.now }
+          });
+        await transaction.insert(platformAdminAuditEvents).values({
+          actorUserId: input.actorUserId,
+          targetOrganisationId: input.organisationId,
+          eventType: 'SMS_NUMBER_READY',
+          entityType: 'SMS_NUMBER',
+          entityId: input.numberId,
+          reason,
+          beforeValue: { status: number.status },
+          afterValue: {
+            status: 'READY',
+            providerNumberIdPresent: true,
+            verifiedAt: input.now.toISOString()
+          },
+          occurredAt: input.now
+        });
+        return { ok: true } as const;
+      });
+      return result.ok ? this.numberResult(input.numberId) : result;
+    } catch (error) {
+      if ((error as { code?: string }).code === '23505') {
+        return { ok: false, code: 'CONFLICT' };
+      }
+      throw error;
+    }
+  }
+
+  private async placeNumberInQuarantine(input: PlatformNumberMutationInput & {
+    expectedStatus: 'RESERVED' | 'READY';
+    quarantineUntil: Date;
+    eventType: 'SMS_NUMBER_QUARANTINED' | 'SMS_NUMBER_RELEASED';
+  }): Promise<PlatformMutationResult<PlatformNumberSummary>> {
+    const reason = this.validReason(input.reason);
+    if (
+      !reason ||
+      !Number.isFinite(input.quarantineUntil.getTime()) ||
+      input.quarantineUntil.getTime() <= input.now.getTime()
+    ) {
+      return { ok: false, code: 'VALIDATION' };
+    }
+    const result = await this.database.transaction(async (transaction) => {
+      const [number] = await transaction
+        .select()
+        .from(smsNumberPool)
+        .where(eq(smsNumberPool.id, input.numberId))
+        .for('update')
+        .limit(1);
+      if (!number || number.status !== input.expectedStatus || !number.organisationId) {
+        return { ok: false, code: 'CONFLICT' } as const;
+      }
+      await transaction
+        .update(smsNumberPool)
+        .set({
+          status: 'QUARANTINED',
+          quarantineUntil: input.quarantineUntil,
+          releasedAt: input.eventType === 'SMS_NUMBER_RELEASED' ? input.now : number.releasedAt,
+          updatedAt: input.now
+        })
+        .where(eq(smsNumberPool.id, input.numberId));
+      await transaction
+        .update(organisationOnboarding)
+        .set({ replyNumberReadyAt: null, updatedAt: input.now })
+        .where(eq(organisationOnboarding.organisationId, number.organisationId));
+      await transaction.insert(platformAdminAuditEvents).values({
+        actorUserId: input.actorUserId,
+        targetOrganisationId: number.organisationId,
+        eventType: input.eventType,
+        entityType: 'SMS_NUMBER',
+        entityId: input.numberId,
+        reason,
+        beforeValue: { status: number.status },
+        afterValue: {
+          status: 'QUARANTINED',
+          quarantineUntil: input.quarantineUntil.toISOString()
+        },
+        occurredAt: input.now
+      });
+      return { ok: true } as const;
+    });
+    return result.ok ? this.numberResult(input.numberId) : result;
+  }
+
+  quarantineSmsNumber(
+    input: PlatformNumberMutationInput & {
+      expectedStatus: 'RESERVED' | 'READY';
+      quarantineUntil: Date;
+    }
+  ): Promise<PlatformMutationResult<PlatformNumberSummary>> {
+    return this.placeNumberInQuarantine({
+      ...input,
+      eventType: 'SMS_NUMBER_QUARANTINED'
+    });
+  }
+
+  releaseSmsNumber(
+    input: PlatformNumberMutationInput & { expectedStatus: 'RESERVED' | 'READY' }
+  ): Promise<PlatformMutationResult<PlatformNumberSummary>> {
+    return this.placeNumberInQuarantine({
+      ...input,
+      quarantineUntil: new Date(input.now.getTime() + 30 * 24 * 60 * 60 * 1000),
+      eventType: 'SMS_NUMBER_RELEASED'
+    });
+  }
+
+  async returnSmsNumberToPool(
+    input: PlatformNumberMutationInput & { expectedStatus: 'QUARANTINED' }
+  ): Promise<PlatformMutationResult<PlatformNumberSummary>> {
+    const reason = this.validReason(input.reason);
+    if (!reason) return { ok: false, code: 'VALIDATION' };
+    const result = await this.database.transaction(async (transaction) => {
+      const [number] = await transaction
+        .select()
+        .from(smsNumberPool)
+        .where(eq(smsNumberPool.id, input.numberId))
+        .for('update')
+        .limit(1);
+      if (!number || number.status !== input.expectedStatus) {
+        return { ok: false, code: 'CONFLICT' } as const;
+      }
+      if (
+        !number.organisationId ||
+        !number.quarantineUntil ||
+        number.quarantineUntil.getTime() > input.now.getTime()
+      ) {
+        return { ok: false, code: 'INVALID_STATE' } as const;
+      }
+      const formerOrganisationId = number.organisationId;
+      await transaction
+        .update(smsNumberPool)
+        .set({
+          status: 'AVAILABLE',
+          organisationId: null,
+          reservedAt: null,
+          readyAt: null,
+          quarantineUntil: null,
+          updatedAt: input.now
+        })
+        .where(eq(smsNumberPool.id, input.numberId));
+      await transaction.insert(platformAdminAuditEvents).values({
+        actorUserId: input.actorUserId,
+        targetOrganisationId: formerOrganisationId,
+        eventType: 'SMS_NUMBER_RETURNED_TO_POOL',
+        entityType: 'SMS_NUMBER',
+        entityId: input.numberId,
+        reason,
+        beforeValue: {
+          status: number.status,
+          organisationId: formerOrganisationId,
+          quarantineUntil: number.quarantineUntil.toISOString()
+        },
+        afterValue: { status: 'AVAILABLE', organisationId: null },
+        occurredAt: input.now
+      });
+      return { ok: true } as const;
+    });
+    return result.ok ? this.numberResult(input.numberId) : result;
+  }
+
+  async updateSmsAllowance(input: {
+    actorUserId: string;
+    organisationId: string;
+    includedParts: number;
+    warningPercent: number;
+    reason: string;
+    now: Date;
+  }): Promise<PlatformMutationResult<PlatformSmsAllowanceView>> {
+    const reason = this.validReason(input.reason);
+    if (
+      !reason ||
+      !Number.isSafeInteger(input.includedParts) ||
+      input.includedParts < 1 ||
+      input.includedParts > 1_000_000 ||
+      !Number.isSafeInteger(input.warningPercent) ||
+      input.warningPercent < 1 ||
+      input.warningPercent > 100
+    ) {
+      return { ok: false, code: 'VALIDATION' };
+    }
+    const value = await this.database.transaction(async (transaction) => {
+      const [organisation] = await transaction
+        .select({ id: organisations.id })
+        .from(organisations)
+        .where(eq(organisations.id, input.organisationId))
+        .for('update')
+        .limit(1);
+      if (!organisation) return null;
+      const [before] = await transaction
+        .select()
+        .from(smsAllowanceSettings)
+        .where(eq(smsAllowanceSettings.organisationId, input.organisationId))
+        .for('update')
+        .limit(1);
+      await transaction
+        .insert(smsAllowanceSettings)
+        .values({
+          organisationId: input.organisationId,
+          includedParts: input.includedParts,
+          warningPercent: input.warningPercent,
+          updatedAt: input.now
+        })
+        .onConflictDoUpdate({
+          target: smsAllowanceSettings.organisationId,
+          set: {
+            includedParts: input.includedParts,
+            warningPercent: input.warningPercent,
+            updatedAt: input.now
+          }
+        });
+      const [subscription] = await transaction
+        .select({
+          currentPeriodStart: subscriptions.currentPeriodStart,
+          currentPeriodEnd: subscriptions.currentPeriodEnd
+        })
+        .from(subscriptions)
+        .where(eq(subscriptions.organisationId, input.organisationId))
+        .limit(1);
+      const entries = subscription?.currentPeriodStart && subscription.currentPeriodEnd
+        ? await transaction
+            .select({
+              entryType: smsUsageLedger.entryType,
+              partDelta: smsUsageLedger.partDelta
+            })
+            .from(smsUsageLedger)
+            .where(
+              and(
+                eq(smsUsageLedger.organisationId, input.organisationId),
+                eq(smsUsageLedger.billingPeriodStart, subscription.currentPeriodStart),
+                eq(smsUsageLedger.billingPeriodEnd, subscription.currentPeriodEnd)
+              )
+            )
+        : [];
+      const usage = summariseSmsUsage(entries);
+      await transaction.insert(platformAdminAuditEvents).values({
+        actorUserId: input.actorUserId,
+        targetOrganisationId: input.organisationId,
+        eventType: 'SMS_ALLOWANCE_UPDATED',
+        entityType: 'SMS_ALLOWANCE',
+        entityId: input.organisationId,
+        reason,
+        beforeValue: before
+          ? {
+              includedParts: before.includedParts,
+              warningPercent: before.warningPercent
+            }
+          : null,
+        afterValue: {
+          includedParts: input.includedParts,
+          warningPercent: input.warningPercent
+        },
+        occurredAt: input.now
+      });
+      return {
+        organisationId: input.organisationId,
+        billingPeriodStart: subscription?.currentPeriodStart ?? null,
+        billingPeriodEnd: subscription?.currentPeriodEnd ?? null,
+        includedParts: input.includedParts,
+        warningPercent: input.warningPercent,
+        committedParts: usage.committedParts,
+        reservedParts: usage.reservedParts
+      };
+    });
+    return value
+      ? { ok: true, value }
+      : { ok: false, code: 'INVALID_STATE' };
   }
 }

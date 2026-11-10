@@ -159,6 +159,157 @@ export const createPlatformAdminService = (
       actorUserId,
       now: now()
     });
+  },
+
+  async registerSmsNumber(
+    actorUserId: string,
+    input: { e164Number: string; providerNumberId: string | null; reason: string }
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    if (!validReason(input.reason) || !/^\+61\d{9}$/.test(input.e164Number)) {
+      return { ok: false, code: 'VALIDATION' } as const;
+    }
+    return dependencies.repository.registerSmsNumber({
+      actorUserId,
+      e164Number: input.e164Number,
+      provider: 'SINCH',
+      providerNumberId: input.providerNumberId?.trim() || null,
+      reason: input.reason.trim(),
+      now: now()
+    });
+  },
+
+  async assignSmsNumber(
+    actorUserId: string,
+    input: {
+      numberId: string;
+      organisationId: string;
+      expectedStatus: 'AVAILABLE' | 'RELEASED';
+      reason: string;
+    }
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    if (!validReason(input.reason)) return { ok: false, code: 'VALIDATION' } as const;
+    return dependencies.repository.assignSmsNumber({
+      ...input,
+      actorUserId,
+      reason: input.reason.trim(),
+      now: now()
+    });
+  },
+
+  async markSmsNumberReady(
+    actorUserId: string,
+    input: {
+      numberId: string;
+      organisationId: string;
+      expectedStatus: 'RESERVED';
+      providerNumberId: string;
+      reason: string;
+    }
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    if (!validReason(input.reason) || input.providerNumberId.trim() === '') {
+      return { ok: false, code: 'VALIDATION' } as const;
+    }
+    return dependencies.repository.markSmsNumberReady({
+      ...input,
+      actorUserId,
+      providerNumberId: input.providerNumberId.trim(),
+      reason: input.reason.trim(),
+      now: now()
+    });
+  },
+
+  async quarantineSmsNumber(
+    actorUserId: string,
+    input: {
+      numberId: string;
+      expectedStatus: 'RESERVED' | 'READY';
+      quarantineUntil: Date;
+      reason: string;
+    }
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    const actionNow = now();
+    if (
+      !validReason(input.reason) ||
+      !Number.isFinite(input.quarantineUntil.getTime()) ||
+      input.quarantineUntil <= actionNow
+    ) {
+      return { ok: false, code: 'VALIDATION' } as const;
+    }
+    return dependencies.repository.quarantineSmsNumber({
+      ...input,
+      actorUserId,
+      reason: input.reason.trim(),
+      now: actionNow
+    });
+  },
+
+  async releaseSmsNumber(
+    actorUserId: string,
+    input: {
+      numberId: string;
+      expectedStatus: 'RESERVED' | 'READY';
+      reason: string;
+    }
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    if (!validReason(input.reason)) return { ok: false, code: 'VALIDATION' } as const;
+    return dependencies.repository.releaseSmsNumber({
+      ...input,
+      actorUserId,
+      reason: input.reason.trim(),
+      now: now()
+    });
+  },
+
+  async returnSmsNumberToPool(
+    actorUserId: string,
+    input: {
+      numberId: string;
+      expectedStatus: 'QUARANTINED';
+      reason: string;
+    }
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    if (!validReason(input.reason)) return { ok: false, code: 'VALIDATION' } as const;
+    return dependencies.repository.returnSmsNumberToPool({
+      ...input,
+      actorUserId,
+      reason: input.reason.trim(),
+      now: now()
+    });
+  },
+
+  async updateSmsAllowance(
+    actorUserId: string,
+    input: {
+      organisationId: string;
+      includedParts: number;
+      warningPercent: number;
+      reason: string;
+    }
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    if (
+      !validReason(input.reason) ||
+      !Number.isSafeInteger(input.includedParts) ||
+      input.includedParts < 1 ||
+      input.includedParts > 1_000_000 ||
+      !Number.isSafeInteger(input.warningPercent) ||
+      input.warningPercent < 1 ||
+      input.warningPercent > 100
+    ) {
+      return { ok: false, code: 'VALIDATION' } as const;
+    }
+    return dependencies.repository.updateSmsAllowance({
+      ...input,
+      actorUserId,
+      reason: input.reason.trim(),
+      now: now()
+    });
   }
   };
 };

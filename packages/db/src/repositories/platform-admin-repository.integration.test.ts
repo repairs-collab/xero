@@ -423,4 +423,302 @@ describe('PostgresPlatformAdminRepository mutations', () => {
     expect(stale).toEqual({ ok: false, code: 'CONFLICT' });
     expect(reactivated).toMatchObject({ ok: true, value: { platformStatus: 'ACTIVE', platformStatusVersion: 2 } });
   });
+
+  it('registers only unique Australian Sinch numbers and provider identifiers', async () => {
+    const now = new Date('2026-11-11T06:00:00.000Z');
+    await expect(repository.registerSmsNumber({
+      actorUserId: ids.owner,
+      e164Number: '0400000222',
+      provider: 'SINCH',
+      providerNumberId: 'sinch-bad-format',
+      reason: 'Add purchased number',
+      now
+    })).resolves.toEqual({ ok: false, code: 'VALIDATION' });
+
+    const created = await repository.registerSmsNumber({
+      actorUserId: ids.owner,
+      e164Number: '+61400000222',
+      provider: 'SINCH',
+      providerNumberId: 'sinch-platform-222',
+      reason: 'Add purchased number',
+      now
+    });
+    const duplicateNumber = await repository.registerSmsNumber({
+      actorUserId: ids.owner,
+      e164Number: '+61400000222',
+      provider: 'SINCH',
+      providerNumberId: 'sinch-platform-other',
+      reason: 'Duplicate check',
+      now
+    });
+    const duplicateProviderId = await repository.registerSmsNumber({
+      actorUserId: ids.owner,
+      e164Number: '+61400000333',
+      provider: 'SINCH',
+      providerNumberId: 'sinch-platform-222',
+      reason: 'Duplicate provider check',
+      now
+    });
+
+    expect(created).toMatchObject({
+      ok: true,
+      value: { e164Number: '+61400000222', status: 'AVAILABLE' }
+    });
+    expect(duplicateNumber).toEqual({ ok: false, code: 'CONFLICT' });
+    expect(duplicateProviderId).toEqual({ ok: false, code: 'CONFLICT' });
+  });
+
+  it('serializes assignment and permits only one active number per organisation', async () => {
+    const now = new Date('2026-11-11T06:10:00.000Z');
+    const firstOrganisationId = randomUUID();
+    const secondOrganisationId = randomUUID();
+    await client.db.insert(organisations).values([
+      {
+        id: firstOrganisationId,
+        xeroOrganisationId: `number-first-${firstOrganisationId}`,
+        name: 'Number First',
+        timeZone: 'Australia/Sydney',
+        baseCurrency: 'AUD'
+      },
+      {
+        id: secondOrganisationId,
+        xeroOrganisationId: `number-second-${secondOrganisationId}`,
+        name: 'Number Second',
+        timeZone: 'Australia/Sydney',
+        baseCurrency: 'AUD'
+      }
+    ]);
+    const registered = await repository.registerSmsNumber({
+      actorUserId: ids.owner,
+      e164Number: '+61400000444',
+      provider: 'SINCH',
+      providerNumberId: null,
+      reason: 'Concurrent assignment test',
+      now
+    });
+    if (!registered.ok) throw new Error('NUMBER_SETUP_FAILED');
+
+    const results = await Promise.all([
+      repository.assignSmsNumber({
+        actorUserId: ids.owner,
+        numberId: registered.value.id,
+        organisationId: firstOrganisationId,
+        expectedStatus: 'AVAILABLE',
+        reason: 'Assign first customer',
+        now
+      }),
+      repository.assignSmsNumber({
+        actorUserId: ids.owner,
+        numberId: registered.value.id,
+        organisationId: secondOrganisationId,
+        expectedStatus: 'AVAILABLE',
+        reason: 'Assign second customer',
+        now
+      })
+    ]);
+
+    expect(results.filter((result) => result.ok)).toHaveLength(1);
+    expect(results.filter((result) => !result.ok)).toEqual([
+      { ok: false, code: 'CONFLICT' }
+    ]);
+
+    const winner = results.find((result) => result.ok);
+    if (!winner?.ok || winner.value.organisationId === null) {
+      throw new Error('ASSIGNMENT_WINNER_MISSING');
+    }
+    const secondNumber = await repository.registerSmsNumber({
+      actorUserId: ids.owner,
+      e164Number: '+61400000555',
+      provider: 'SINCH',
+      providerNumberId: null,
+      reason: 'Second assignment test',
+      now
+    });
+    if (!secondNumber.ok) throw new Error('SECOND_NUMBER_SETUP_FAILED');
+    await expect(repository.assignSmsNumber({
+      actorUserId: ids.owner,
+      numberId: secondNumber.value.id,
+      organisationId: winner.value.organisationId,
+      expectedStatus: 'AVAILABLE',
+      reason: 'Must reject a second active number',
+      now
+    })).resolves.toEqual({ ok: false, code: 'INVALID_STATE' });
+  });
+
+  it('requires verified provider evidence and retains inbound ownership through cooling', async () => {
+    const organisationId = randomUUID();
+    const now = new Date('2026-11-11T07:00:00.000Z');
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: `number-lifecycle-${organisationId}`,
+      name: 'Number Lifecycle',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    const registered = await repository.registerSmsNumber({
+      actorUserId: ids.owner,
+      e164Number: '+61400000666',
+      provider: 'SINCH',
+      providerNumberId: null,
+      reason: 'Lifecycle test',
+      now
+    });
+    if (!registered.ok) throw new Error('NUMBER_SETUP_FAILED');
+    const assigned = await repository.assignSmsNumber({
+      actorUserId: ids.owner,
+      numberId: registered.value.id,
+      organisationId,
+      expectedStatus: 'AVAILABLE',
+      reason: 'Allocate customer number',
+      now
+    });
+    if (!assigned.ok) throw new Error('NUMBER_ASSIGNMENT_FAILED');
+
+    await expect(repository.markSmsNumberReady({
+      actorUserId: ids.owner,
+      numberId: registered.value.id,
+      organisationId,
+      expectedStatus: 'RESERVED',
+      providerNumberId: '',
+      reason: 'Verified in Sinch',
+      now
+    })).resolves.toEqual({ ok: false, code: 'VALIDATION' });
+    await expect(repository.markSmsNumberReady({
+      actorUserId: ids.owner,
+      numberId: registered.value.id,
+      organisationId,
+      expectedStatus: 'RESERVED',
+      providerNumberId: 'sinch-platform-666',
+      reason: 'Verified in Sinch',
+      now
+    })).resolves.toMatchObject({ ok: true, value: { status: 'READY' } });
+
+    const released = await repository.releaseSmsNumber({
+      actorUserId: ids.owner,
+      numberId: registered.value.id,
+      expectedStatus: 'READY',
+      reason: 'Customer subscription ended',
+      now
+    });
+    expect(released).toMatchObject({
+      ok: true,
+      value: {
+        status: 'QUARANTINED',
+        organisationId,
+        quarantineUntil: new Date('2026-12-11T07:00:00.000Z')
+      }
+    });
+    await expect(repository.returnSmsNumberToPool({
+      actorUserId: ids.owner,
+      numberId: registered.value.id,
+      expectedStatus: 'QUARANTINED',
+      reason: 'Attempt early return',
+      now: new Date('2026-12-10T07:00:00.000Z')
+    })).resolves.toEqual({ ok: false, code: 'INVALID_STATE' });
+    await expect(repository.returnSmsNumberToPool({
+      actorUserId: ids.owner,
+      numberId: registered.value.id,
+      expectedStatus: 'QUARANTINED',
+      reason: 'Cooling period complete',
+      now: new Date('2026-12-11T07:00:00.000Z')
+    })).resolves.toMatchObject({
+      ok: true,
+      value: { status: 'AVAILABLE', organisationId: null }
+    });
+  });
+
+  it('updates allowance limits without rewriting usage or overage settings', async () => {
+    const organisationId = randomUUID();
+    const now = new Date('2026-11-11T08:00:00.000Z');
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: `allowance-${organisationId}`,
+      name: 'Allowance Customer',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await client.db.insert(subscriptions).values({
+      organisationId,
+      planCode: 'SOLO_AU_2000',
+      status: 'ACTIVE',
+      currentPeriodStart: periodStart,
+      currentPeriodEnd: periodEnd,
+      lastStripeEventCreatedAt: now
+    });
+    await client.db.insert(smsAllowanceSettings).values({
+      organisationId,
+      includedParts: 2_000,
+      warningPercent: 80,
+      overageEnabled: true,
+      overageCapCents: 5_000,
+      overageCentsPerPart: 7
+    });
+    await client.db.insert(smsUsageLedger).values([
+      {
+        organisationId,
+        billingPeriodStart: periodStart,
+        billingPeriodEnd: periodEnd,
+        source: 'REMINDER',
+        entryType: 'RESERVE',
+        partDelta: 23,
+        idempotencyKey: `allowance-reserve-${organisationId}`
+      },
+      {
+        organisationId,
+        billingPeriodStart: periodStart,
+        billingPeriodEnd: periodEnd,
+        source: 'REMINDER',
+        entryType: 'COMMIT',
+        partDelta: 23,
+        idempotencyKey: `allowance-commit-${organisationId}`
+      }
+    ]);
+
+    await expect(repository.updateSmsAllowance({
+      actorUserId: ids.owner,
+      organisationId,
+      includedParts: 0,
+      warningPercent: 101,
+      reason: 'Invalid limits',
+      now
+    })).resolves.toEqual({ ok: false, code: 'VALIDATION' });
+    const updated = await repository.updateSmsAllowance({
+      actorUserId: ids.owner,
+      organisationId,
+      includedParts: 3_000,
+      warningPercent: 90,
+      reason: 'Approved higher allowance',
+      now
+    });
+    const setting = await client.db.query.smsAllowanceSettings.findFirst({
+      where: (table, { eq }) => eq(table.organisationId, organisationId)
+    });
+    const ledger = await client.db
+      .select()
+      .from(smsUsageLedger)
+      .where(eq(smsUsageLedger.organisationId, organisationId));
+    const audit = await repository.listAuditEvents({
+      organisationId,
+      eventType: 'SMS_ALLOWANCE_UPDATED'
+    });
+
+    expect(updated).toMatchObject({
+      ok: true,
+      value: {
+        includedParts: 3_000,
+        warningPercent: 90,
+        committedParts: 23,
+        reservedParts: 0
+      }
+    });
+    expect(setting).toMatchObject({
+      includedParts: 3_000,
+      warningPercent: 90,
+      overageEnabled: true,
+      overageCapCents: 5_000,
+      overageCentsPerPart: 7
+    });
+    expect(ledger).toHaveLength(2);
+    expect(audit.items).toHaveLength(1);
+  });
 });
