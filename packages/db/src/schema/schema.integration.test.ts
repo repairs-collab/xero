@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 
 import { eq, inArray } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -232,6 +232,123 @@ const seedVoiceCall = async (
 };
 
 describe('database invariants', () => {
+  it('persists platform ownership and suspended-account metadata with safe defaults', async () => {
+    expect(Object.keys(schema.users)).toContain('platformRole');
+    expect(Object.keys(schema.organisations)).toEqual(
+      expect.arrayContaining([
+        'platformStatus',
+        'suspendedAt',
+        'suspensionReason',
+        'platformStatusVersion'
+      ])
+    );
+    expect('platformAdminAuditEvents' in schema).toBe(true);
+
+    expect(await tableColumns('users')).toContain('platform_role');
+    expect(await tableColumns('organisations')).toEqual(
+      expect.arrayContaining([
+        'platform_status',
+        'suspended_at',
+        'suspension_reason',
+        'platform_status_version'
+      ])
+    );
+    expect(await tableColumns('platform_admin_audit_events')).toEqual(
+      expect.arrayContaining([
+        'id',
+        'actor_user_id',
+        'target_organisation_id',
+        'event_type',
+        'entity_type',
+        'entity_id',
+        'reason',
+        'before_value',
+        'after_value',
+        'correlation_id',
+        'occurred_at'
+      ])
+    );
+
+    const organisationId = randomUUID();
+    await database.db.insert(organisations).values({
+      id: organisationId,
+      name: 'Platform defaults test',
+      xeroOrganisationId: randomUUID(),
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    const status = await database.pool.query<{
+      platform_status: string;
+      platform_status_version: number;
+      suspended_at: Date | null;
+      suspension_reason: string | null;
+    }>(
+      `select platform_status, platform_status_version, suspended_at,
+              suspension_reason
+         from organisations where id = $1`,
+      [organisationId]
+    );
+    expect(status.rows[0]).toEqual({
+      platform_status: 'ACTIVE',
+      platform_status_version: 0,
+      suspended_at: null,
+      suspension_reason: null
+    });
+  });
+
+  it('seeds only the active normalized owner email in the platform migration', async () => {
+    const migrationsDirectory = new URL('../../drizzle/', import.meta.url);
+    const migrationNames = (await readdir(migrationsDirectory)).filter((name) =>
+      name.endsWith('.sql')
+    );
+    const migrationContents = await Promise.all(
+      migrationNames.map((name) =>
+        readFile(new URL(name, migrationsDirectory), 'utf8')
+      )
+    );
+    const platformMigration = migrationContents.find((content) =>
+      content.includes('platform_admin_audit_events')
+    );
+
+    expect(platformMigration).toBeDefined();
+    expect(platformMigration).toContain("lower(\"email\") = 'repairs@motts.com.au'");
+    expect(platformMigration).toContain('"disabled_at" is null');
+    expect(
+      platformMigration?.match(/"platform_role" = 'OWNER'/g)
+    ).toHaveLength(1);
+  });
+
+  it.each(['update', 'delete'] as const)(
+    'prevents %s operations on platform administration audit events',
+    async (operation) => {
+      const actorUserId = await seedUser(`Platform audit ${operation}`);
+      const inserted = await database.pool.query<{ id: string }>(
+        `insert into platform_admin_audit_events (
+           actor_user_id, event_type, entity_type, entity_id, reason
+         ) values ($1, 'PLATFORM_TEST', 'test', 'test-1', 'Schema invariant')
+         returning id`,
+        [actorUserId]
+      );
+      const auditId = inserted.rows[0]?.id;
+      expect(auditId).toBeDefined();
+
+      const query =
+        operation === 'update'
+          ? database.pool.query(
+              'update platform_admin_audit_events set reason = $1 where id = $2',
+              ['Changed', auditId]
+            )
+          : database.pool.query(
+              'delete from platform_admin_audit_events where id = $1',
+              [auditId]
+            );
+
+      await expect(query).rejects.toThrow(
+        'platform_admin_audit_events is append-only'
+      );
+    }
+  );
+
   it('defaults existing-compatible records to messaging, manual and automatic voice off', async () => {
     const { organisationId, contactId, sequenceId } =
       await seedStageInstance();

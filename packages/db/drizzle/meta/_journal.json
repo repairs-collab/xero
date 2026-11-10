@@ -134,6 +134,13 @@
       "when": 1794263358147,
       "tag": "0018_keen_shadow_king",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1794350596711,
+      "tag": "0019_panoramic_talon",
+      "breakpoints": true
     }
   ]
 }

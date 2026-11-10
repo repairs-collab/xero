@@ -3,6 +3,7 @@ export * from './messaging.js';
 export * from './onboarding.js';
 export * from './operations.js';
 export * from './organisation.js';
+export * from './platform-administration.js';
 export * from './receivables.js';
 export * from './reminder-whitelist.js';
 export * from './reminders.js';
