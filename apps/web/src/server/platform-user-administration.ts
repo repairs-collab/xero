@@ -73,7 +73,12 @@ export const createPlatformUserAdministration = (
     ) {
       await assertOwner(session);
       const reason = reasonText(input.reason);
-      const { reason: _reason, ...sharedInput } = input;
+      const sharedInput = {
+        organisationId: input.organisationId,
+        email: input.email,
+        displayName: input.displayName,
+        role: input.role
+      };
       const result = await dependencies.shared.inviteMember(session, sharedInput);
       await audit({
         session,

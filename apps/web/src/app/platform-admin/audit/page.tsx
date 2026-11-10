@@ -1,8 +1,6 @@
-import { headers } from 'next/headers';
-
 import { PlatformAuditList } from '../../../components/platform-admin/audit-list.js';
 import { getPlatformAdminService } from '../../../server/platform-admin-service.js';
-import { requirePlatformOwner } from '../../../server/platform-authorization.js';
+import { requirePlatformOwnerPage } from '../../../server/platform-page-authorization.js';
 
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
 const first = (value: string | string[] | undefined): string | undefined =>
@@ -21,11 +19,7 @@ export default async function PlatformAuditPage({
 }) {
   const [query, session] = await Promise.all([
     searchParams,
-    requirePlatformOwner(
-      new Request('http://localhost/platform-admin/audit', {
-        headers: await headers()
-      })
-    )
+    requirePlatformOwnerPage('/platform-admin/audit')
   ]);
   const organisationId = first(query.organisationId) ?? '';
   const actorUserId = first(query.actorUserId) ?? '';

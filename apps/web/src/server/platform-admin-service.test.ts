@@ -11,7 +11,7 @@ describe('platform administration read service', () => {
       pageSize: 100
     });
     const service = createPlatformAdminService({
-      verifyOwner: async (userId) => userId === 'owner-user',
+      verifyOwner: (userId) => Promise.resolve(userId === 'owner-user'),
       repository: {
         listOrganisations,
         getOrganisationDetail: vi.fn(),
@@ -50,7 +50,7 @@ describe('platform administration read service', () => {
 
   it('denies reads when the actor is not a current platform owner', async () => {
     const service = createPlatformAdminService({
-      verifyOwner: async () => false,
+      verifyOwner: () => Promise.resolve(false),
       repository: {
         listOrganisations: vi.fn(),
         getOrganisationDetail: vi.fn(),
@@ -78,7 +78,7 @@ describe('platform administration read service', () => {
   it('validates trial extensions before calling the repository', async () => {
     const extendTrial = vi.fn();
     const service = createPlatformAdminService({
-      verifyOwner: async () => true,
+      verifyOwner: () => Promise.resolve(true),
       repository: {
         listOrganisations: vi.fn(),
         getOrganisationDetail: vi.fn(),
@@ -118,7 +118,7 @@ describe('platform administration read service', () => {
       updateSmsAllowance
     } as never;
     const service = createPlatformAdminService({
-      verifyOwner: async () => true,
+      verifyOwner: () => Promise.resolve(true),
       repository,
       clock: { now: () => new Date('2026-11-11T00:00:00.000Z') }
     });

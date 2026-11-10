@@ -9,7 +9,7 @@ describe('platform SMS administration actions', () => {
       value: { includedParts: 2_000, warningPercent: 80 }
     });
     const actions = createSmsAdminActions({
-      getOwnerSession: async () => ({
+      getOwnerSession: () => Promise.resolve({
         userId: 'verified-owner',
         cognitoSubject: 'owner-subject',
         displayName: 'Owner',

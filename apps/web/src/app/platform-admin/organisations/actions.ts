@@ -1,5 +1,3 @@
-'use server';
-
 import { revalidatePath } from 'next/cache';
 import { headers } from 'next/headers';
 
@@ -122,7 +120,19 @@ const actions = createOrganisationAdminActions({
   revalidate: revalidatePath
 });
 
-export const extendTrialAction = actions.extendTrialAction;
-export const endTrialAction = actions.endTrialAction;
-export const suspendOrganisationAction = actions.suspendOrganisationAction;
-export const reactivateOrganisationAction = actions.reactivateOrganisationAction;
+export async function extendTrialAction(formData: FormData) {
+  'use server';
+  return actions.extendTrialAction(formData);
+}
+export async function endTrialAction(formData: FormData) {
+  'use server';
+  return actions.endTrialAction(formData);
+}
+export async function suspendOrganisationAction(formData: FormData) {
+  'use server';
+  return actions.suspendOrganisationAction(formData);
+}
+export async function reactivateOrganisationAction(formData: FormData) {
+  'use server';
+  return actions.reactivateOrganisationAction(formData);
+}

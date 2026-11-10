@@ -15,8 +15,8 @@ const session = (memberships: AppSession['memberships'] = []): AppSession => ({
 describe('platform authorization', () => {
   it('allows an active database owner without an organisation membership', async () => {
     const authorizer = createPlatformAuthorizer({
-      requireIdentitySession: async () => session(),
-      loadActivePlatformRole: async () => 'OWNER'
+      requireIdentitySession: () => Promise.resolve(session()),
+      loadActivePlatformRole: () => Promise.resolve('OWNER')
     });
 
     await expect(
@@ -26,9 +26,9 @@ describe('platform authorization', () => {
 
   it('does not grant platform access to an ordinary customer administrator', async () => {
     const authorizer = createPlatformAuthorizer({
-      requireIdentitySession: async () =>
-        session([{ organisationId: 'customer-1', role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }]),
-      loadActivePlatformRole: async () => null
+      requireIdentitySession: () =>
+        Promise.resolve(session([{ organisationId: 'customer-1', role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }])),
+      loadActivePlatformRole: () => Promise.resolve(null)
     });
 
     await expect(
@@ -38,8 +38,8 @@ describe('platform authorization', () => {
 
   it('denies a disabled owner when the active-role lookup returns no role', async () => {
     const authorizer = createPlatformAuthorizer({
-      requireIdentitySession: async () => session(),
-      loadActivePlatformRole: async () => null
+      requireIdentitySession: () => Promise.resolve(session()),
+      loadActivePlatformRole: () => Promise.resolve(null)
     });
 
     await expect(authorizer.isPlatformOwner('owner-user')).resolves.toBe(false);
@@ -55,8 +55,8 @@ describe('platform authorization', () => {
       }
     ]);
     const authorizer = createPlatformAuthorizer({
-      requireIdentitySession: async () => ownerSession,
-      loadActivePlatformRole: async () => 'OWNER'
+      requireIdentitySession: () => Promise.resolve(ownerSession),
+      loadActivePlatformRole: () => Promise.resolve('OWNER')
     });
 
     await expect(
@@ -67,8 +67,8 @@ describe('platform authorization', () => {
   it('observes role revocation on the next request instead of trusting the session', async () => {
     let role: 'OWNER' | null = 'OWNER';
     const authorizer = createPlatformAuthorizer({
-      requireIdentitySession: async () => session(),
-      loadActivePlatformRole: async () => role
+      requireIdentitySession: () => Promise.resolve(session()),
+      loadActivePlatformRole: () => Promise.resolve(role)
     });
     const request = new Request('https://ap.motts.com.au/platform-admin');
 

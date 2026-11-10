@@ -1,10 +1,8 @@
-import { headers } from 'next/headers';
-
 import type { SmsNumberStatus } from '@bc5000/db/web';
 
 import { PlatformSmsAdministration } from '../../../components/platform-admin/sms-administration.js';
 import { getPlatformAdminService } from '../../../server/platform-admin-service.js';
-import { requirePlatformOwner } from '../../../server/platform-authorization.js';
+import { requirePlatformOwnerPage } from '../../../server/platform-page-authorization.js';
 import {
   assignSmsNumberAction,
   markSmsNumberReadyAction,
@@ -25,11 +23,7 @@ export default async function PlatformSmsPage({
 }) {
   const [query, session] = await Promise.all([
     searchParams,
-    requirePlatformOwner(
-      new Request('http://localhost/platform-admin/sms', {
-        headers: await headers()
-      })
-    )
+    requirePlatformOwnerPage('/platform-admin/sms')
   ]);
   const search = first(query.search) ?? '';
   const statusValue = first(query.status) ?? '';

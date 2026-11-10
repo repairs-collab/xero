@@ -6,7 +6,7 @@ describe('platform customer-user actions', () => {
   it('requires a reason and uses the verified owner identity', async () => {
     const disableMember = vi.fn().mockResolvedValue(undefined);
     const actions = createPlatformUserActions({
-      getOwnerSession: async () => ({
+      getOwnerSession: () => Promise.resolve({
         userId: 'verified-owner',
         cognitoSubject: 'owner-subject',
         displayName: 'Owner',

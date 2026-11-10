@@ -1,5 +1,3 @@
-'use server';
-
 import { revalidatePath } from 'next/cache';
 import { headers } from 'next/headers';
 
@@ -150,7 +148,19 @@ const actions = createPlatformUserActions({
   revalidate: revalidatePath
 });
 
-export const inviteMemberAction = actions.inviteMemberAction;
-export const resendInvitationAction = actions.resendInvitationAction;
-export const changeMemberRoleAction = actions.changeMemberRoleAction;
-export const disableMemberAction = actions.disableMemberAction;
+export async function inviteMemberAction(formData: FormData) {
+  'use server';
+  return actions.inviteMemberAction(formData);
+}
+export async function resendInvitationAction(formData: FormData) {
+  'use server';
+  return actions.resendInvitationAction(formData);
+}
+export async function changeMemberRoleAction(formData: FormData) {
+  'use server';
+  return actions.changeMemberRoleAction(formData);
+}
+export async function disableMemberAction(formData: FormData) {
+  'use server';
+  return actions.disableMemberAction(formData);
+}

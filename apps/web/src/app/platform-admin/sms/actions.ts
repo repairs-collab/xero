@@ -1,5 +1,3 @@
-'use server';
-
 import { revalidatePath } from 'next/cache';
 import { headers } from 'next/headers';
 
@@ -171,10 +169,31 @@ const actions = createSmsAdminActions({
   revalidate: revalidatePath
 });
 
-export const registerSmsNumberAction = actions.registerSmsNumberAction;
-export const assignSmsNumberAction = actions.assignSmsNumberAction;
-export const markSmsNumberReadyAction = actions.markSmsNumberReadyAction;
-export const quarantineSmsNumberAction = actions.quarantineSmsNumberAction;
-export const releaseSmsNumberAction = actions.releaseSmsNumberAction;
-export const returnSmsNumberToPoolAction = actions.returnSmsNumberToPoolAction;
-export const updateSmsAllowanceAction = actions.updateSmsAllowanceAction;
+export async function registerSmsNumberAction(formData: FormData) {
+  'use server';
+  return actions.registerSmsNumberAction(formData);
+}
+export async function assignSmsNumberAction(formData: FormData) {
+  'use server';
+  return actions.assignSmsNumberAction(formData);
+}
+export async function markSmsNumberReadyAction(formData: FormData) {
+  'use server';
+  return actions.markSmsNumberReadyAction(formData);
+}
+export async function quarantineSmsNumberAction(formData: FormData) {
+  'use server';
+  return actions.quarantineSmsNumberAction(formData);
+}
+export async function releaseSmsNumberAction(formData: FormData) {
+  'use server';
+  return actions.releaseSmsNumberAction(formData);
+}
+export async function returnSmsNumberToPoolAction(formData: FormData) {
+  'use server';
+  return actions.returnSmsNumberToPoolAction(formData);
+}
+export async function updateSmsAllowanceAction(formData: FormData) {
+  'use server';
+  return actions.updateSmsAllowanceAction(formData);
+}

@@ -9,7 +9,7 @@ describe('platform organisation actions', () => {
       value: { id: 'organisation-1' }
     });
     const actions = createOrganisationAdminActions({
-      getOwnerSession: async () => ({
+      getOwnerSession: () => Promise.resolve({
         userId: 'verified-owner',
         cognitoSubject: 'owner-subject',
         displayName: 'Owner',

@@ -2,7 +2,7 @@ import { and, asc, eq, inArray, or, sql } from 'drizzle-orm';
 
 import { summariseSmsUsage } from '@bc5000/domain';
 
-import type { Database, DbTransaction } from '../connection.js';
+import type { Database } from '../connection.js';
 import {
   invitations,
   memberships,
@@ -553,7 +553,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
     ]);
     const actors = new Map(userRows.map((row) => [row.id, row]));
     const names = new Map(organisationRows.map((row) => [row.id, row.name]));
-    let rows = events.filter(
+    const rows = events.filter(
       (row) =>
         (!input.organisationId || row.targetOrganisationId === input.organisationId) &&
         (!input.actorUserId || row.actorUserId === input.actorUserId) &&

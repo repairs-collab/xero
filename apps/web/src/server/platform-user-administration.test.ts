@@ -37,7 +37,7 @@ const setup = (owner = true) => {
     auditValues,
     service: createPlatformUserAdministration({
       verifyOwner: vi.fn().mockResolvedValue(owner),
-      shared: shared as never,
+      shared,
       database: database as never,
       clock: { now: () => new Date('2026-11-11T00:00:00.000Z') }
     })

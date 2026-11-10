@@ -28,3 +28,8 @@ test('keeps the session active until the user chooses to sign out', async ({ pag
     )
     .toBe(true);
 });
+
+test('does not advertise the private owner console to a customer administrator', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByRole('link', { name: 'Platform admin' })).toHaveCount(0);
+});

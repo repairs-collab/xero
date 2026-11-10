@@ -20,6 +20,18 @@ const safeKeys = new Set([
   'quarantineUntil'
 ]);
 
+const safeValue = (value: unknown): string => {
+  if (value === undefined || value === null) return '—';
+  if (
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  ) {
+    return String(value);
+  }
+  return '—';
+};
+
 const safeChanges = (
   before: Record<string, unknown> | null,
   after: Record<string, unknown> | null
@@ -34,8 +46,8 @@ const safeChanges = (
       const oldValue = before?.[key];
       const newValue = after?.[key];
       if (oldValue === newValue || (oldValue === undefined && newValue === undefined)) return [];
-      const left = oldValue === undefined || oldValue === null ? '—' : String(oldValue);
-      const right = newValue === undefined || newValue === null ? '—' : String(newValue);
+      const left = safeValue(oldValue);
+      const right = safeValue(newValue);
       return [`${label(key)}: ${left} → ${right}`];
     });
 };
