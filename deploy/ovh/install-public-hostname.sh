@@ -24,7 +24,7 @@ grep -Fq 'billchaser.motts.com.au' "$CADDYFILE" || {
   exit 65
 }
 if grep -Fq "$PUBLIC_HOSTNAME" "$CADDYFILE"; then
-  curl --fail --show-error --silent --retry 12 --retry-delay 5 "https://${PUBLIC_HOSTNAME}/health/ready" >/dev/null
+  curl --fail --show-error --silent --retry 18 --retry-delay 5 --retry-all-errors --connect-timeout 10 "https://${PUBLIC_HOSTNAME}/health/ready" >/dev/null
   curl --fail --show-error --silent https://billchaser.motts.com.au/health/ready >/dev/null
   openssl s_client -connect "${PUBLIC_HOSTNAME}:443" -servername "$PUBLIC_HOSTNAME" </dev/null 2>/dev/null |
     openssl x509 -noout -subject -issuer -dates -ext subjectAltName
@@ -71,7 +71,7 @@ install -m 0644 "$candidate" "$CADDYFILE"
 installed=true
 docker exec "$CADDY_CONTAINER" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
 
-curl --fail --show-error --silent --retry 12 --retry-delay 5 "https://${PUBLIC_HOSTNAME}/health/ready" >/dev/null
+curl --fail --show-error --silent --retry 18 --retry-delay 5 --retry-all-errors --connect-timeout 10 "https://${PUBLIC_HOSTNAME}/health/ready" >/dev/null
 curl --fail --show-error --silent https://billchaser.motts.com.au/health/ready >/dev/null
 
 openssl s_client -connect "${PUBLIC_HOSTNAME}:443" -servername "$PUBLIC_HOSTNAME" </dev/null 2>/dev/null |
