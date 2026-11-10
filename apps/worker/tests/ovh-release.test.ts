@@ -8,6 +8,12 @@ const repositoryFile = (path: string): string => {
 };
 
 describe('OVH release pipeline', () => {
+  it('keeps Linux deployment scripts executable across Windows checkouts', () => {
+    const attributes = repositoryFile('.gitattributes');
+
+    expect(attributes).toContain('*.sh text eol=lf');
+  });
+
   it('builds once and deploys immutable artifacts through protected OVH production', () => {
     const workflow = repositoryFile('.github/workflows/deploy.yml');
 
@@ -44,6 +50,33 @@ describe('OVH release pipeline', () => {
     expect(workflow).not.toContain('AWS_DEPLOY_ROLE_ARN');
     expect(workflow).not.toContain('AWS_ACCOUNT_ID');
     expect(workflow).not.toContain('CERTIFICATE_ARN');
+  });
+
+  it('installs commercial credentials through protected production secrets', () => {
+    const workflow = repositoryFile('.github/workflows/deploy.yml');
+    const installer = repositoryFile(
+      'deploy/ovh/install-protected-environment.sh'
+    );
+
+    for (const name of [
+      'XERO_OAUTH_CLIENT_ID',
+      'XERO_OAUTH_CLIENT_SECRET',
+      'STRIPE_SECRET_KEY',
+      'STRIPE_WEBHOOK_SECRET',
+      'STRIPE_SOLO_PRICE_ID',
+      'STRIPE_PORTAL_CONFIGURATION_ID'
+    ]) {
+      expect(workflow).toContain(`secrets.${name}`);
+      expect(installer).toContain(name);
+    }
+    expect(workflow).toContain('install-protected-environment.sh');
+    expect(workflow).toContain('Install protected production environment');
+    expect(installer).toContain('docker inspect');
+    expect(installer).toContain('umask 077');
+    expect(installer).toContain('install -m 0600');
+    expect(installer).toContain('current-images.env');
+    expect(installer).toContain('XERO_TOKEN_ENCRYPTION_KEYS_JSON');
+    expect(installer).not.toContain('set -x');
   });
 
   it('locks, backs up, migrates, checks health and restores images on failure', () => {
@@ -84,6 +117,7 @@ describe('OVH release pipeline', () => {
     expect(installer).toContain('ERR trap');
     expect(installer).toContain('openssl s_client');
     expect(installer).toContain('curl --fail');
+    expect(installer).toContain('already serves valid HTTPS');
     expect(installer).not.toMatch(/^\s*rm\s+.*Caddyfile/m);
   });
 });
