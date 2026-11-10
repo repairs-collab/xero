@@ -1,6 +1,7 @@
 export * from './connection.js';
 export * from './repositories/webhook-repository.js';
 export * from './repositories/dashboard-repository.js';
+export * from './repositories/platform-admin-repository.js';
 export * from './repositories/entitlement-repository.js';
 export * from './repositories/entitlement-repository.js';
 export * from './repositories/conversation-repository.js';
