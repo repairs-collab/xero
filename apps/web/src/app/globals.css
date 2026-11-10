@@ -207,6 +207,7 @@ h1 { font-family:inherit; color:var(--navy); font-size:44px; line-height:1.06; f
 .rollout-override-panel { border:2px solid #d8a3a6; background:#fffafa; }
 .rollout-override-panel h2 { color:#7d252b; }
 .sending-banner { background:var(--teal-soft); border-color:#bfe8ed; }
+.account-suspended-banner{display:flex;align-items:center;gap:14px;margin:0 0 18px;padding:14px 18px;border:1px solid #efc3bd;border-radius:12px;background:#fff0ed;color:#7a2f29}.account-suspended-banner strong{font-size:12px}.account-suspended-banner span{flex:1;font-size:10px}.account-suspended-banner a{color:#7a2f29;font-size:10px;font-weight:850}
 .provider-logo--xero { background:#13b5d1; }
 
 @media (max-width:1120px) {

@@ -27,6 +27,7 @@ export class PostgresEntitlementRepository {
     const [account] = await executor
       .select({
         edition: organisations.edition,
+        platformStatus: organisations.platformStatus,
         subscriptionStatus: subscriptions.status,
         trialEndsAt: subscriptions.trialEndsAt,
         onboardingVersion: organisationOnboarding.version,
@@ -51,6 +52,7 @@ export class PostgresEntitlementRepository {
     if (account.edition === 'INTERNAL_LEGACY') {
       return decideAccountEntitlements({
         edition: account.edition,
+        platformStatus: account.platformStatus,
         subscriptionStatus: null,
         trialEndsAt: null,
         onboardingCompletedVersion: null,
@@ -95,6 +97,7 @@ export class PostgresEntitlementRepository {
 
     return decideAccountEntitlements({
       edition: account.edition,
+      platformStatus: account.platformStatus,
       subscriptionStatus: account.subscriptionStatus,
       trialEndsAt: account.trialEndsAt,
       onboardingCompletedVersion: account.onboardingCompletedVersion,

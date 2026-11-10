@@ -131,7 +131,7 @@ const seed = async () => {
     cognitoSubject: randomUUID(),
     displayName: 'Billing Admin',
     expiresAt: '2026-11-10T00:00:00.000Z',
-    memberships: [{ organisationId, role: 'ADMIN', active: true }]
+    memberships: [{ organisationId, role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }]
   };
   return { organisationId, session };
 };

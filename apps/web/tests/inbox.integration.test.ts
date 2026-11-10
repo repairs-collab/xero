@@ -23,7 +23,7 @@ async function seedConversation(suppressed = false) {
   await client.db.insert(conversations).values({ id: conversationId, organisationId, contactId, normalisedNumber: number, unreadCount: 1, lastMessageAt: now });
   await client.db.insert(pauses).values({ organisationId, kind: 'REPLY', scope: 'customer', contactId, active: true, reason: 'Customer replied', startedAt: now });
   if (suppressed) await client.db.insert(suppressions).values({ organisationId, channel: 'SMS', normalisedDestination: number, source: 'SINCH_OPT_OUT', reason: 'STOP reply', consentState: 'SUPPRESSED', recordedAt: now });
-  const session: AppSession = { userId, cognitoSubject: randomUUID(), displayName: 'Operator', expiresAt: '2026-09-18T10:00:00Z', memberships: [{ organisationId, role: 'OPERATOR', active: true }] };
+  const session: AppSession = { userId, cognitoSubject: randomUUID(), displayName: 'Operator', expiresAt: '2026-09-18T10:00:00Z', memberships: [{ organisationId, role: 'OPERATOR', active: true, organisationStatus: 'ACTIVE' }] };
   return { organisationId, userId, contactId, conversationId, session };
 }
 

@@ -53,7 +53,7 @@ async function seed() {
     cognitoSubject: randomUUID(),
     displayName: 'SMS Administrator',
     expiresAt: '2026-09-29T00:00:00.000Z',
-    memberships: [{ organisationId, role, active: true }]
+    memberships: [{ organisationId, role, active: true, organisationStatus: 'ACTIVE' }]
   });
   return { organisationId, userId, session };
 }

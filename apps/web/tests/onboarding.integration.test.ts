@@ -112,7 +112,7 @@ const seedReadySolo = async (): Promise<{
       cognitoSubject,
       displayName: 'Ready Administrator',
       expiresAt: '2026-11-11T00:00:00.000Z',
-      memberships: [{ organisationId, role: 'ADMIN', active: true }]
+      memberships: [{ organisationId, role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }]
     }
   };
 };
@@ -157,7 +157,7 @@ describe('guided Solo onboarding persistence', () => {
     const foreignSession: AppSession = {
       ...seeded.session,
       memberships: [
-        { organisationId: randomUUID(), role: 'ADMIN', active: true }
+        { organisationId: randomUUID(), role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }
       ]
     };
 

@@ -41,7 +41,7 @@ describe('self-service onboarding entry', () => {
       displayName: 'Existing Owner',
       expiresAt: '2026-11-11T00:00:00.000Z',
       memberships: [
-        { organisationId: 'org_existing', role: 'ADMIN', active: true }
+        { organisationId: 'org_existing', role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }
       ]
     });
     getStatus.mockResolvedValueOnce({

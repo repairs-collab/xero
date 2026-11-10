@@ -108,4 +108,31 @@ describe('final outbound entitlement decision', () => {
       )
     ).toEqual({ kind: 'platform-verification' });
   });
+
+  it.each([
+    ['MANUAL_REMINDER', false],
+    ['AUTOMATED_REMINDER', true],
+    ['TEST_SMS', false],
+    ['VERIFICATION_OTP', false]
+  ] as const)('blocks %s while the account is suspended', (source, automatic) => {
+    expect(
+      decideOutboundEntitlement(
+        entitlement({
+          canRead: true,
+          canPreview: false,
+          canVerifiedAdminTest: false,
+          canCustomerSend: false,
+          canAutomaticDispatch: false,
+          verifiedAdminMobile: null,
+          remainingTrialTestSmsParts: 0,
+          blocker: 'ACCOUNT_SUSPENDED'
+        }),
+        {
+          source,
+          destination: '+61412345678',
+          automatic
+        }
+      )
+    ).toEqual({ kind: 'blocked', reason: 'ACCOUNT_SUSPENDED' });
+  });
 });

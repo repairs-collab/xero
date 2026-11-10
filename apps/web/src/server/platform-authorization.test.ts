@@ -27,7 +27,7 @@ describe('platform authorization', () => {
   it('does not grant platform access to an ordinary customer administrator', async () => {
     const authorizer = createPlatformAuthorizer({
       requireIdentitySession: async () =>
-        session([{ organisationId: 'customer-1', role: 'ADMIN', active: true }]),
+        session([{ organisationId: 'customer-1', role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }]),
       loadActivePlatformRole: async () => null
     });
 
@@ -47,7 +47,12 @@ describe('platform authorization', () => {
 
   it('allows an owner even when their only customer membership is inactive', async () => {
     const ownerSession = session([
-      { organisationId: 'suspended-customer', role: 'ADMIN', active: false }
+      {
+        organisationId: 'suspended-customer',
+        role: 'ADMIN',
+        active: false,
+        organisationStatus: 'ACTIVE'
+      }
     ]);
     const authorizer = createPlatformAuthorizer({
       requireIdentitySession: async () => ownerSession,

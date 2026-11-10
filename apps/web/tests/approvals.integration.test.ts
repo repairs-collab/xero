@@ -60,7 +60,7 @@ async function seedApproval(sourceVersion = 4) {
   await client.db.insert(invoiceChases).values({ id: chaseId, organisationId, invoiceId, sequenceId, customerId: contactId, status: 'ACTIVE' });
   await client.db.insert(stageInstances).values({ id: stageId, organisationId, invoiceChaseId: chaseId, sequenceVersionId: versionId, stageKey: 'seven-days', channel: 'SMS', status: 'PENDING_APPROVAL', scheduledAt: now, sourceVersion });
   await client.db.insert(approvals).values({ id: approvalId, organisationId, stageInstanceId: stageId, renderedPreview: 'Reminder preview', sourceVersion, status: 'PENDING', expiresAt: new Date('2026-09-19T02:00:00.000Z') });
-  const session: AppSession = { userId, cognitoSubject: randomUUID(), displayName: 'Operator', expiresAt: '2026-09-18T10:00:00.000Z', memberships: [{ organisationId, role: 'OPERATOR', active: true }] };
+  const session: AppSession = { userId, cognitoSubject: randomUUID(), displayName: 'Operator', expiresAt: '2026-09-18T10:00:00.000Z', memberships: [{ organisationId, role: 'OPERATOR', active: true, organisationStatus: 'ACTIVE' }] };
   return { organisationId, invoiceId, stageId, approvalId, session };
 }
 
@@ -229,7 +229,7 @@ async function seedVoiceApprovals() {
     cognitoSubject: randomUUID(),
     displayName: 'Voice approval operator',
     expiresAt: '2026-09-18T10:00:00.000Z',
-    memberships: [{ organisationId, role: 'OPERATOR', active: true }]
+    memberships: [{ organisationId, role: 'OPERATOR', active: true, organisationStatus: 'ACTIVE' }]
   };
   return {
     organisationId,

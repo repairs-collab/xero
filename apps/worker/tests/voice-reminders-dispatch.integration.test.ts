@@ -225,6 +225,32 @@ const run = (
   );
 
 describe('dispatchDueVoiceReminders', () => {
+  it('does not queue or publish voice reminders for a suspended organisation', async () => {
+    const seeded = await seedDispatch();
+    const call = await seeded.addCall({
+      scheduledAt: new Date('2026-10-09T00:00:00.000Z')
+    });
+    await client.db
+      .update(organisations)
+      .set({
+        platformStatus: 'SUSPENDED',
+        suspendedAt: new Date('2026-10-09T00:10:00.000Z'),
+        suspensionReason: 'Owner review'
+      })
+      .where(eq(organisations.id, seeded.organisationId));
+    const jobs = publisher();
+
+    await expect(
+      run(seeded, new Date('2026-10-09T00:30:00.000Z'), jobs)
+    ).resolves.toEqual({ status: 'IDLE' });
+    expect(jobs.publish).not.toHaveBeenCalled();
+    const [storedCall] = await client.db
+      .select({ state: voiceCallRequests.state })
+      .from(voiceCallRequests)
+      .where(eq(voiceCallRequests.id, call.call.id));
+    expect(storedCall).toEqual({ state: 'APPROVED' });
+  });
+
   it('queues and publishes only the oldest due call without changing Messaging or Customer-live state', async () => {
     const seeded = await seedDispatch();
     const now = new Date('2026-10-09T00:30:00.000Z');

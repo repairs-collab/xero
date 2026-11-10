@@ -26,6 +26,9 @@ export const decideOutboundEntitlement = (
     smsPartCount?: number;
   }
 ): OutboundEntitlementDecision => {
+  if (entitlements.blocker === 'ACCOUNT_SUSPENDED') {
+    return { kind: 'blocked', reason: 'ACCOUNT_SUSPENDED' };
+  }
   if (input.source === 'VERIFICATION_OTP') {
     return { kind: 'platform-verification' };
   }

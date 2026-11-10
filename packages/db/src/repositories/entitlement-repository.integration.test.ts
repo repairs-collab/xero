@@ -27,6 +27,7 @@ const seedOrganisation = async (input: {
   trialEndsAt?: Date | null;
   completed?: boolean;
   numberReady?: boolean;
+  platformStatus?: 'ACTIVE' | 'SUSPENDED';
 }) => {
   const organisationId = randomUUID();
   await client.db.insert(organisations).values({
@@ -35,7 +36,11 @@ const seedOrganisation = async (input: {
     name: `Entitlement ${organisationId}`,
     timeZone: 'Australia/Sydney',
     baseCurrency: 'AUD',
-    edition: input.edition
+    edition: input.edition,
+    platformStatus: input.platformStatus ?? 'ACTIVE',
+    suspendedAt: input.platformStatus === 'SUSPENDED' ? now : null,
+    suspensionReason:
+      input.platformStatus === 'SUSPENDED' ? 'Owner review' : null
   });
   if (input.edition === 'SOLO') {
     await client.db.insert(subscriptions).values({
@@ -58,6 +63,22 @@ const seedOrganisation = async (input: {
 };
 
 describe('PostgresEntitlementRepository', () => {
+  it('blocks all sending capabilities for a suspended account', async () => {
+    const organisationId = await seedOrganisation({
+      edition: 'INTERNAL_LEGACY',
+      platformStatus: 'SUSPENDED'
+    });
+
+    await expect(repository.decide(organisationId, now)).resolves.toMatchObject({
+      canRead: true,
+      canPreview: false,
+      canVerifiedAdminTest: false,
+      canCustomerSend: false,
+      canAutomaticDispatch: false,
+      blocker: 'ACCOUNT_SUSPENDED'
+    });
+  });
+
   it('preserves legacy behaviour and gates paid Solo on evidence', async () => {
     const legacyId = await seedOrganisation({ edition: 'INTERNAL_LEGACY' });
     const incompleteSoloId = await seedOrganisation({

@@ -132,7 +132,7 @@ const seedInvoice = async (options: {
     cognitoSubject: randomUUID(),
     displayName: 'SMS Operator',
     expiresAt: '2026-10-01T12:00:00.000Z',
-    memberships: [{ organisationId, role: 'OPERATOR', active: true }]
+    memberships: [{ organisationId, role: 'OPERATOR', active: true, organisationStatus: 'ACTIVE' }]
   };
   return { organisationId, contactId, invoiceId, session };
 };

@@ -39,6 +39,7 @@ export interface SessionMembership {
   organisationId: string;
   role: Role;
   active: boolean;
+  organisationStatus: 'ACTIVE' | 'SUSPENDED';
 }
 
 export interface AppSession {
@@ -58,6 +59,12 @@ export class AuthorizationFailure extends Error {
   }
 }
 
+const suspendedAccountActions = new Set<Action>([
+  'audit.read',
+  'outbox.read',
+  'billing.manage'
+]);
+
 export function authorise(
   session: AppSession,
   action: Action,
@@ -69,6 +76,8 @@ export function authorise(
   );
   if (
     membership === undefined ||
+    (membership.organisationStatus === 'SUSPENDED' &&
+      !suspendedAccountActions.has(action)) ||
     !(permissions[membership.role] as readonly Action[]).includes(action)
   ) {
     throw new AuthorizationFailure();

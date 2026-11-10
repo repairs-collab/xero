@@ -11,6 +11,7 @@ const solo = (
   overrides: Partial<AccountEntitlementInput> = {}
 ): AccountEntitlementInput => ({
   edition: 'SOLO',
+  platformStatus: 'ACTIVE',
   subscriptionStatus: 'ACTIVE',
   trialEndsAt: null,
   onboardingCompletedVersion: 1,
@@ -23,6 +24,27 @@ const solo = (
 });
 
 describe('AccountPulse account entitlements', () => {
+  it('makes every suspended account read-only before other entitlement rules', () => {
+    expect(
+      decideAccountEntitlements(
+        solo({
+          edition: 'INTERNAL_LEGACY',
+          platformStatus: 'SUSPENDED',
+          subscriptionStatus: null
+        })
+      )
+    ).toEqual({
+      canRead: true,
+      canPreview: false,
+      canVerifiedAdminTest: false,
+      canCustomerSend: false,
+      canAutomaticDispatch: false,
+      verifiedAdminMobile: null,
+      remainingTrialTestSmsParts: 0,
+      blocker: 'ACCOUNT_SUSPENDED'
+    });
+  });
+
   it('preserves every existing INTERNAL_LEGACY capability', () => {
     expect(
       decideAccountEntitlements({

@@ -96,7 +96,12 @@ describe('guided onboarding actions', () => {
     displayName: role,
     expiresAt: '2026-11-11T00:00:00.000Z',
     memberships: [
-      { organisationId: 'org_solo', role, active: true as const }
+      {
+        organisationId: 'org_solo',
+        role,
+        active: true as const,
+        organisationStatus: 'ACTIVE' as const
+      }
     ]
   });
 

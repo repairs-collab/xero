@@ -230,7 +230,7 @@ async function seedScenario() {
     cognitoSubject: randomUUID(),
     displayName: role,
     expiresAt: '2026-09-29T00:00:00Z',
-    memberships: [{ organisationId, role, active: true }]
+    memberships: [{ organisationId, role, active: true, organisationStatus: 'ACTIVE' }]
   });
   return {
     organisationId,
@@ -449,7 +449,7 @@ describe('Reminder Whitelist lifecycle', () => {
         {
           organisationId: seeded.otherOrganisationId,
           role: 'ADMIN',
-          active: true
+          active: true, organisationStatus: 'ACTIVE'
         }
       ]
     };

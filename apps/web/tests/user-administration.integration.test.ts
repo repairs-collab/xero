@@ -61,7 +61,7 @@ const seedAdmin = async () => {
     cognitoSubject,
     displayName: 'Admin User',
     expiresAt: '2026-09-18T08:00:00.000Z',
-    memberships: [{ organisationId, role: 'ADMIN', active: true }]
+    memberships: [{ organisationId, role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }]
   };
   return { organisationId, userId, cognitoSubject, session };
 };
@@ -198,7 +198,7 @@ describe('user administration', () => {
         {
           organisationId: seeded.organisationId,
           role: 'OPERATOR',
-          active: true
+          active: true, organisationStatus: 'ACTIVE'
         }
       ]
     };
@@ -331,7 +331,7 @@ describe('user administration', () => {
       displayName: 'Second Admin',
       expiresAt: first.session.expiresAt,
       memberships: [
-        { organisationId: first.organisationId, role: 'ADMIN', active: true }
+        { organisationId: first.organisationId, role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }
       ]
     };
     const service = createUserAdministration({
@@ -392,7 +392,7 @@ describe('user administration', () => {
       displayName: 'Second Disable Admin',
       expiresAt: first.session.expiresAt,
       memberships: [
-        { organisationId: first.organisationId, role: 'ADMIN', active: true }
+        { organisationId: first.organisationId, role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }
       ]
     };
     const service = createUserAdministration({

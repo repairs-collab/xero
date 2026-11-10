@@ -11,6 +11,7 @@ import {
   requireWebSession
 } from '../../server/runtime.js';
 import { AppShell } from '../../components/app-shell.js';
+import { AccountSuspendedBanner } from '../../components/account-suspended-banner.js';
 import { isPlatformOwner } from '../../server/platform-authorization.js';
 
 export default async function ProtectedLayout({
@@ -28,6 +29,7 @@ export default async function ProtectedLayout({
       .db.select({
         name: organisations.name,
         edition: organisations.edition,
+        platformStatus: organisations.platformStatus,
         completedVersion: organisationOnboarding.completedVersion
       })
       .from(organisations)
@@ -49,6 +51,9 @@ export default async function ProtectedLayout({
         }
         platformOwner={platformOwner}
       >
+        {workspace.platformStatus === 'SUSPENDED' ? (
+          <AccountSuspendedBanner />
+        ) : null}
         {children}
       </AppShell>
     );
