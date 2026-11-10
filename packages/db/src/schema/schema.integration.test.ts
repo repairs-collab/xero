@@ -604,7 +604,7 @@ describe('database invariants', () => {
         [
           randomUUID(),
           userId,
-          [{ connectionId: 'connection-one', tenantId: 'tenant-one', tenantName: 'Example' }],
+JSON.stringify([{ connectionId: 'connection-one', tenantId: 'tenant-one', tenantName: 'Example' }]),
           ['openid', 'offline_access'],
           new Date(Date.now() + 300_000)
         ]
