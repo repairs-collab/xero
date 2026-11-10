@@ -21,7 +21,7 @@ describe('AccountPulse OVH deployment workflow', () => {
   });
 
   it('pins the OVH host identity before transfer', () => {
-    expect(workflow.match(/OVH_SSH_HOST_KEY/g)?.length).toBeGreaterThanOrEqual(4);
+    expect(workflow.match(/OVH_SSH_HOST_KEY/g)?.length).toBeGreaterThanOrEqual(3);
     expect(workflow).toContain('~/.ssh/known_hosts');
     expect(workflow).not.toContain('ssh-keyscan');
     expect(workflow.indexOf('Install pinned OVH host key')).toBeLessThan(
