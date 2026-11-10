@@ -59,59 +59,8 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  deploy-staging:
-    needs: verify-and-build
-    runs-on: ubuntu-latest
-    environment: staging
-    env:
-      OVH_HOST: ${{ vars.OVH_HOST }}
-      OVH_PORT: ${{ vars.OVH_PORT }}
-      OVH_USER: ${{ vars.OVH_USER }}
-      OVH_DEPLOY_PATH: ${{ vars.OVH_DEPLOY_PATH }}
-      HOSTNAME: ${{ vars.HOSTNAME }}
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
-        with:
-          name: accountpulse-images-${{ github.sha }}
-      - name: Install pinned OVH host key
-        env:
-          OVH_SSH_PRIVATE_KEY: ${{ secrets.OVH_SSH_PRIVATE_KEY }}
-          OVH_SSH_HOST_KEY: ${{ secrets.OVH_SSH_HOST_KEY }}
-        run: |
-          set -Eeuo pipefail
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$OVH_SSH_PRIVATE_KEY" > ~/.ssh/id_accountpulse
-          chmod 600 ~/.ssh/id_accountpulse
-          printf '%s\n' "$OVH_SSH_HOST_KEY" > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-      - name: Transfer immutable release bundle
-        run: |
-          set -Eeuo pipefail
-          SSH=(ssh -i ~/.ssh/id_accountpulse -p "$OVH_PORT" "$OVH_USER@$OVH_HOST")
-          SCP=(scp -i ~/.ssh/id_accountpulse -P "$OVH_PORT")
-          "${SSH[@]}" "mkdir -p '$OVH_DEPLOY_PATH/artifacts/$IMAGE_TAG'"
-          "${SCP[@]}" deploy/ovh/docker-compose.yml deploy/ovh/release.sh deploy/ovh/rollback.sh deploy/ovh/install-public-hostname.sh deploy/ovh/accountpulse-site.caddy "$OVH_USER@$OVH_HOST:$OVH_DEPLOY_PATH/"
-          "${SCP[@]}" accountpulse-web.tar.zst accountpulse-worker.tar.zst "$OVH_USER@$OVH_HOST:$OVH_DEPLOY_PATH/artifacts/$IMAGE_TAG/"
-      - name: Run migration and health-checked release
-        run: |
-          set -Eeuo pipefail
-          ssh -i ~/.ssh/id_accountpulse -p "$OVH_PORT" "$OVH_USER@$OVH_HOST" \
-            "cd '$OVH_DEPLOY_PATH' && chmod 700 release.sh rollback.sh && ./release.sh '$IMAGE_TAG' '$HOSTNAME'"
-      - name: Record rollback metadata
-        run: |
-          set -Eeuo pipefail
-          ssh -i ~/.ssh/id_accountpulse -p "$OVH_PORT" "$OVH_USER@$OVH_HOST" \
-            "cat '$OVH_DEPLOY_PATH/releases/$IMAGE_TAG/release-metadata.json'" \
-            > release-metadata-staging.json
-      - uses: actions/upload-artifact@v4
-        with:
-          name: accountpulse-release-staging-${{ github.sha }}
-          path: release-metadata-staging.json
-          retention-days: 30
-
   deploy-production:
-    needs: deploy-staging
+    needs: verify-and-build
     runs-on: ubuntu-latest
     environment: production
     env:
