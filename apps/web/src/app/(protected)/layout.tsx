@@ -11,6 +11,7 @@ import {
   requireWebSession
 } from '../../server/runtime.js';
 import { AppShell } from '../../components/app-shell.js';
+import { isPlatformOwner } from '../../server/platform-authorization.js';
 
 export default async function ProtectedLayout({
   children
@@ -37,6 +38,7 @@ export default async function ProtectedLayout({
       .where(eq(organisations.id, membership.organisationId))
       .limit(1);
     if (workspace === undefined) throw new Error('Organisation not found');
+    const platformOwner = await isPlatformOwner(session.userId);
     return (
       <AppShell
         displayName={session.displayName}
@@ -45,6 +47,7 @@ export default async function ProtectedLayout({
         onboardingIncomplete={
           workspace.edition === 'SOLO' && workspace.completedVersion !== 1
         }
+        platformOwner={platformOwner}
       >
         {children}
       </AppShell>
