@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
+import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createDatabase, migrateDatabase } from '../client.js';
@@ -277,5 +278,149 @@ describe('PostgresPlatformAdminRepository reads', () => {
       organisationName: 'Beta Services',
       reason: 'Owner review'
     });
+  });
+});
+
+const seedTrialOrganisation = async (label: string) => {
+  const organisationId = randomUUID();
+  const updatedAt = new Date('2026-11-10T00:00:00.000Z');
+  await client.db.insert(organisations).values({
+    id: organisationId,
+    xeroOrganisationId: `platform-trial-${organisationId}`,
+    name: label,
+    timeZone: 'Australia/Sydney',
+    baseCurrency: 'AUD',
+    edition: 'SOLO'
+  });
+  await client.db.insert(subscriptions).values({
+    organisationId,
+    planCode: 'SOLO_AU_2000',
+    status: 'TRIALING',
+    currentPeriodStart: new Date('2026-11-01T00:00:00.000Z'),
+    currentPeriodEnd: new Date('2026-11-20T00:00:00.000Z'),
+    trialEndsAt: new Date('2026-11-20T00:00:00.000Z'),
+    lastStripeEventCreatedAt: new Date('2026-11-10T00:00:00.000Z'),
+    updatedAt
+  });
+  return { organisationId, updatedAt };
+};
+
+describe('PostgresPlatformAdminRepository mutations', () => {
+  it('extends a trial without resetting its allowance period and audits atomically', async () => {
+    const seeded = await seedTrialOrganisation('Trial extension target');
+    const result = await repository.extendTrial({
+      actorUserId: ids.owner,
+      organisationId: seeded.organisationId,
+      newEnd: new Date('2026-11-30T00:00:00.000Z'),
+      expectedUpdatedAt: seeded.updatedAt,
+      reason: 'Approved beta extension',
+      now: new Date('2026-11-11T00:00:00.000Z')
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    const stored = await client.db.query.subscriptions.findFirst({
+      where: (table, { eq }) => eq(table.organisationId, seeded.organisationId)
+    });
+    expect(stored).toMatchObject({
+      currentPeriodStart: new Date('2026-11-01T00:00:00.000Z'),
+      currentPeriodEnd: new Date('2026-11-30T00:00:00.000Z'),
+      trialEndsAt: new Date('2026-11-30T00:00:00.000Z')
+    });
+    const audit = await repository.listAuditEvents({
+      organisationId: seeded.organisationId,
+      eventType: 'TRIAL_EXTENDED'
+    });
+    expect(audit.items).toHaveLength(1);
+    expect(audit.items[0]?.reason).toBe('Approved beta extension');
+  });
+
+  it('rejects stale or non-trial subscription changes without partial audit data', async () => {
+    const seeded = await seedTrialOrganisation('Stale trial target');
+    await client.db
+      .update(subscriptions)
+      .set({
+        status: 'ACTIVE',
+        updatedAt: new Date('2026-11-10T00:05:00.000Z')
+      })
+      .where(eq(subscriptions.organisationId, seeded.organisationId));
+
+    const result = await repository.extendTrial({
+      actorUserId: ids.owner,
+      organisationId: seeded.organisationId,
+      newEnd: new Date('2026-11-30T00:00:00.000Z'),
+      expectedUpdatedAt: seeded.updatedAt,
+      reason: 'Must not apply',
+      now: new Date('2026-11-11T00:00:00.000Z')
+    });
+    const audit = await repository.listAuditEvents({
+      organisationId: seeded.organisationId
+    });
+
+    expect(result).toEqual({ ok: false, code: 'CONFLICT' });
+    expect(audit.items).toHaveLength(0);
+  });
+
+  it('ends a current trial using server time', async () => {
+    const seeded = await seedTrialOrganisation('Trial end target');
+    const now = new Date('2026-11-11T05:30:00.000Z');
+    const result = await repository.endTrial({
+      actorUserId: ids.owner,
+      organisationId: seeded.organisationId,
+      expectedUpdatedAt: seeded.updatedAt,
+      reason: 'Customer requested immediate start',
+      now
+    });
+    const stored = await client.db.query.subscriptions.findFirst({
+      where: (table, { eq }) => eq(table.organisationId, seeded.organisationId)
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(stored?.trialEndsAt).toEqual(now);
+    expect(stored?.currentPeriodEnd).toEqual(now);
+  });
+
+  it('suspends and reactivates with optimistic versions and idempotent same-reason retries', async () => {
+    const organisationId = randomUUID();
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: `platform-status-${organisationId}`,
+      name: 'Platform status target',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+
+    const suspended = await repository.suspendOrganisation({
+      actorUserId: ids.owner,
+      organisationId,
+      reason: 'Payment review',
+      expectedVersion: 0,
+      now: new Date('2026-11-11T00:00:00.000Z')
+    });
+    const retried = await repository.suspendOrganisation({
+      actorUserId: ids.owner,
+      organisationId,
+      reason: 'Payment review',
+      expectedVersion: 1,
+      now: new Date('2026-11-11T00:01:00.000Z')
+    });
+    const stale = await repository.reactivateOrganisation({
+      actorUserId: ids.owner,
+      organisationId,
+      reason: 'Resolved',
+      expectedVersion: 0,
+      now: new Date('2026-11-11T00:02:00.000Z')
+    });
+    const reactivated = await repository.reactivateOrganisation({
+      actorUserId: ids.owner,
+      organisationId,
+      reason: 'Resolved',
+      expectedVersion: 1,
+      now: new Date('2026-11-11T00:03:00.000Z')
+    });
+
+    expect(suspended).toMatchObject({ ok: true, value: { platformStatusVersion: 1 } });
+    expect(retried).toMatchObject({ ok: true, value: { platformStatusVersion: 1 } });
+    expect(stale).toEqual({ ok: false, code: 'CONFLICT' });
+    expect(reactivated).toMatchObject({ ok: true, value: { platformStatus: 'ACTIVE', platformStatusVersion: 2 } });
   });
 });

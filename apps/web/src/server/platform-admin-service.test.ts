@@ -16,7 +16,11 @@ describe('platform administration read service', () => {
         listOrganisations,
         getOrganisationDetail: vi.fn(),
         listSmsNumbers: vi.fn(),
-        listAuditEvents: vi.fn()
+        listAuditEvents: vi.fn(),
+        extendTrial: vi.fn(),
+        endTrial: vi.fn(),
+        suspendOrganisation: vi.fn(),
+        reactivateOrganisation: vi.fn()
       }
     });
 
@@ -44,12 +48,44 @@ describe('platform administration read service', () => {
         listOrganisations: vi.fn(),
         getOrganisationDetail: vi.fn(),
         listSmsNumbers: vi.fn(),
-        listAuditEvents: vi.fn()
+        listAuditEvents: vi.fn(),
+        extendTrial: vi.fn(),
+        endTrial: vi.fn(),
+        suspendOrganisation: vi.fn(),
+        reactivateOrganisation: vi.fn()
       }
     });
 
     await expect(
       service.getOrganisationDetail('customer-admin', 'organisation-1')
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  it('validates trial extensions before calling the repository', async () => {
+    const extendTrial = vi.fn();
+    const service = createPlatformAdminService({
+      verifyOwner: async () => true,
+      repository: {
+        listOrganisations: vi.fn(),
+        getOrganisationDetail: vi.fn(),
+        listSmsNumbers: vi.fn(),
+        listAuditEvents: vi.fn(),
+        extendTrial,
+        endTrial: vi.fn(),
+        suspendOrganisation: vi.fn(),
+        reactivateOrganisation: vi.fn()
+      },
+      clock: { now: () => new Date('2026-11-11T00:00:00.000Z') }
+    });
+
+    await expect(
+      service.extendTrial('owner-user', {
+        organisationId: 'organisation-1',
+        newEnd: new Date('2027-03-01T00:00:00.000Z'),
+        expectedUpdatedAt: new Date('2026-11-10T00:00:00.000Z'),
+        reason: 'Too long'
+      })
+    ).resolves.toEqual({ ok: false, code: 'VALIDATION' });
+    expect(extendTrial).not.toHaveBeenCalled();
   });
 });

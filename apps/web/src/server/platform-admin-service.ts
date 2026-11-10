@@ -1,7 +1,7 @@
 import { AuthorizationFailure } from '@bc5000/auth';
 import {
   PostgresPlatformAdminRepository,
-  type PlatformAdminReadRepository,
+  type PlatformAdminRepository,
   type PlatformAuditListInput,
   type PlatformNumberListInput,
   type PlatformOrganisationListInput,
@@ -13,7 +13,8 @@ import { isPlatformOwner } from './platform-authorization.js';
 
 export interface PlatformAdminServiceDependencies {
   verifyOwner(userId: string): Promise<boolean>;
-  repository: PlatformAdminReadRepository;
+  repository: PlatformAdminRepository;
+  clock?: { now(): Date };
 }
 
 const positiveInteger = (value: unknown, fallback: number, maximum: number) =>
@@ -44,7 +45,13 @@ const assertOwner = async (
 
 export const createPlatformAdminService = (
   dependencies: PlatformAdminServiceDependencies
-) => ({
+) => {
+  const now = () => dependencies.clock?.now() ?? new Date();
+  const validReason = (reason: string) => {
+    const value = reason.trim();
+    return value.length > 0 && value.length <= 500;
+  };
+  return {
   async listOrganisations(
     actorUserId: string,
     input: Record<string, unknown> = {}
@@ -77,8 +84,84 @@ export const createPlatformAdminService = (
       page: positiveInteger(input.page, 1, Number.MAX_SAFE_INTEGER),
       pageSize: positiveInteger(input.pageSize, 25, 100)
     });
+  },
+
+  async extendTrial(
+    actorUserId: string,
+    input: {
+      organisationId: string;
+      newEnd: Date;
+      expectedUpdatedAt: Date;
+      reason: string;
+    }
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    const actionNow = now();
+    if (
+      !validReason(input.reason) ||
+      !Number.isFinite(input.newEnd.getTime()) ||
+      input.newEnd.getTime() <= actionNow.getTime() ||
+      input.newEnd.getTime() > actionNow.getTime() + 90 * 24 * 60 * 60 * 1000
+    ) {
+      return { ok: false, code: 'VALIDATION' } as const;
+    }
+    return dependencies.repository.extendTrial({
+      ...input,
+      reason: input.reason.trim(),
+      actorUserId,
+      now: actionNow
+    });
+  },
+
+  async endTrial(
+    actorUserId: string,
+    input: { organisationId: string; expectedUpdatedAt: Date; reason: string }
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    if (!validReason(input.reason)) {
+      return { ok: false, code: 'VALIDATION' } as const;
+    }
+    return dependencies.repository.endTrial({
+      ...input,
+      reason: input.reason.trim(),
+      actorUserId,
+      now: now()
+    });
+  },
+
+  async suspendOrganisation(
+    actorUserId: string,
+    input: { organisationId: string; expectedVersion: number; reason: string }
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    if (!validReason(input.reason) || !Number.isSafeInteger(input.expectedVersion)) {
+      return { ok: false, code: 'VALIDATION' } as const;
+    }
+    return dependencies.repository.suspendOrganisation({
+      ...input,
+      reason: input.reason.trim(),
+      actorUserId,
+      now: now()
+    });
+  },
+
+  async reactivateOrganisation(
+    actorUserId: string,
+    input: { organisationId: string; expectedVersion: number; reason: string }
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    if (!validReason(input.reason) || !Number.isSafeInteger(input.expectedVersion)) {
+      return { ok: false, code: 'VALIDATION' } as const;
+    }
+    return dependencies.repository.reactivateOrganisation({
+      ...input,
+      reason: input.reason.trim(),
+      actorUserId,
+      now: now()
+    });
   }
-});
+  };
+};
 
 let service: ReturnType<typeof createPlatformAdminService> | undefined;
 

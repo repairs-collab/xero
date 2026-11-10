@@ -173,6 +173,46 @@ export interface PlatformAdminReadRepository {
   listAuditEvents(input?: PlatformAuditListInput): Promise<PlatformAuditPage>;
 }
 
+export type PlatformMutationFailureCode =
+  | 'CONFLICT'
+  | 'INVALID_STATE'
+  | 'VALIDATION';
+
+export type PlatformMutationResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; code: PlatformMutationFailureCode };
+
+export interface PlatformTrialMutationInput {
+  actorUserId: string;
+  organisationId: string;
+  expectedUpdatedAt: Date;
+  reason: string;
+  now: Date;
+}
+
+export interface PlatformStatusMutationInput {
+  actorUserId: string;
+  organisationId: string;
+  expectedVersion: number;
+  reason: string;
+  now: Date;
+}
+
+export interface PlatformAdminRepository extends PlatformAdminReadRepository {
+  extendTrial(
+    input: PlatformTrialMutationInput & { newEnd: Date }
+  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>>;
+  endTrial(
+    input: PlatformTrialMutationInput
+  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>>;
+  suspendOrganisation(
+    input: PlatformStatusMutationInput
+  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>>;
+  reactivateOrganisation(
+    input: PlatformStatusMutationInput
+  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>>;
+}
+
 const pageValues = (page?: number, pageSize?: number) => ({
   page: Number.isInteger(page) && (page ?? 0) > 0 ? page! : 1,
   pageSize:
@@ -188,7 +228,7 @@ const compareNullableDates = (left: Date | null, right: Date | null): number => 
   return left.getTime() - right.getTime();
 };
 
-export class PostgresPlatformAdminRepository implements PlatformAdminReadRepository {
+export class PostgresPlatformAdminRepository implements PlatformAdminRepository {
   constructor(private readonly database: Database) {}
 
   private async organisationSummaries(): Promise<PlatformOrganisationSummary[]> {
@@ -486,5 +526,200 @@ export class PostgresPlatformAdminRepository implements PlatformAdminReadReposit
       page,
       pageSize
     };
+  }
+
+  private async updateTrial(
+    input: PlatformTrialMutationInput & {
+      newEnd: Date;
+      eventType: 'TRIAL_EXTENDED' | 'TRIAL_ENDED';
+      allowEarlierEnd: boolean;
+    }
+  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>> {
+    const result = await this.database.transaction(async (transaction) => {
+      const [subscription] = await transaction
+        .select()
+        .from(subscriptions)
+        .where(eq(subscriptions.organisationId, input.organisationId))
+        .for('update')
+        .limit(1);
+      if (!subscription) return { ok: false, code: 'INVALID_STATE' } as const;
+      if (subscription.updatedAt.getTime() !== input.expectedUpdatedAt.getTime()) {
+        return { ok: false, code: 'CONFLICT' } as const;
+      }
+      if (
+        subscription.status !== 'TRIALING' ||
+        subscription.trialEndsAt === null ||
+        subscription.currentPeriodStart === null ||
+        subscription.currentPeriodEnd === null
+      ) {
+        return { ok: false, code: 'INVALID_STATE' } as const;
+      }
+      const reason = input.reason.trim();
+      const maximumEnd = input.now.getTime() + 90 * 24 * 60 * 60 * 1000;
+      const validEnd =
+        reason.length > 0 &&
+        reason.length <= 500 &&
+        Number.isFinite(input.newEnd.getTime()) &&
+        (input.allowEarlierEnd
+          ? input.newEnd.getTime() >= input.now.getTime()
+          : input.newEnd.getTime() > input.now.getTime()) &&
+        input.newEnd.getTime() > subscription.currentPeriodStart.getTime() &&
+        input.newEnd.getTime() <= maximumEnd &&
+        (input.allowEarlierEnd ||
+          input.newEnd.getTime() > subscription.trialEndsAt.getTime());
+      if (!validEnd) return { ok: false, code: 'VALIDATION' } as const;
+
+      const beforeValue = {
+        status: subscription.status,
+        trialEndsAt: subscription.trialEndsAt.toISOString(),
+        currentPeriodStart: subscription.currentPeriodStart.toISOString(),
+        currentPeriodEnd: subscription.currentPeriodEnd.toISOString(),
+        updatedAt: subscription.updatedAt.toISOString()
+      };
+      await transaction
+        .update(subscriptions)
+        .set({
+          trialEndsAt: input.newEnd,
+          currentPeriodEnd: input.newEnd,
+          updatedAt: input.now
+        })
+        .where(eq(subscriptions.organisationId, input.organisationId));
+      await transaction.insert(platformAdminAuditEvents).values({
+        actorUserId: input.actorUserId,
+        targetOrganisationId: input.organisationId,
+        eventType: input.eventType,
+        entityType: 'SUBSCRIPTION',
+        entityId: input.organisationId,
+        reason,
+        beforeValue,
+        afterValue: {
+          ...beforeValue,
+          trialEndsAt: input.newEnd.toISOString(),
+          currentPeriodEnd: input.newEnd.toISOString(),
+          updatedAt: input.now.toISOString()
+        },
+        occurredAt: input.now
+      });
+      return { ok: true } as const;
+    });
+    if (!result.ok) return result;
+    const value = await this.getOrganisationDetail(input.organisationId);
+    return value
+      ? { ok: true, value }
+      : { ok: false, code: 'INVALID_STATE' };
+  }
+
+  extendTrial(
+    input: PlatformTrialMutationInput & { newEnd: Date }
+  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>> {
+    return this.updateTrial({
+      ...input,
+      eventType: 'TRIAL_EXTENDED',
+      allowEarlierEnd: false
+    });
+  }
+
+  endTrial(
+    input: PlatformTrialMutationInput
+  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>> {
+    return this.updateTrial({
+      ...input,
+      newEnd: input.now,
+      eventType: 'TRIAL_ENDED',
+      allowEarlierEnd: true
+    });
+  }
+
+  private async updatePlatformStatus(
+    input: PlatformStatusMutationInput & {
+      targetStatus: PlatformAccountStatus;
+      eventType: 'ORGANISATION_SUSPENDED' | 'ORGANISATION_REACTIVATED';
+    }
+  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>> {
+    const result = await this.database.transaction(async (transaction) => {
+      const [organisation] = await transaction
+        .select()
+        .from(organisations)
+        .where(eq(organisations.id, input.organisationId))
+        .for('update')
+        .limit(1);
+      if (!organisation) return { ok: false, code: 'INVALID_STATE' } as const;
+      if (organisation.platformStatusVersion !== input.expectedVersion) {
+        return { ok: false, code: 'CONFLICT' } as const;
+      }
+      const reason = input.reason.trim();
+      if (reason.length === 0 || reason.length > 500) {
+        return { ok: false, code: 'VALIDATION' } as const;
+      }
+      if (organisation.platformStatus === input.targetStatus) {
+        if (
+          input.targetStatus === 'SUSPENDED' &&
+          organisation.suspensionReason !== reason
+        ) {
+          return { ok: false, code: 'INVALID_STATE' } as const;
+        }
+        return { ok: true } as const;
+      }
+
+      const nextVersion = organisation.platformStatusVersion + 1;
+      await transaction
+        .update(organisations)
+        .set({
+          platformStatus: input.targetStatus,
+          platformStatusVersion: nextVersion,
+          suspendedAt: input.targetStatus === 'SUSPENDED' ? input.now : null,
+          suspensionReason: input.targetStatus === 'SUSPENDED' ? reason : null,
+          updatedAt: input.now
+        })
+        .where(eq(organisations.id, input.organisationId));
+      await transaction.insert(platformAdminAuditEvents).values({
+        actorUserId: input.actorUserId,
+        targetOrganisationId: input.organisationId,
+        eventType: input.eventType,
+        entityType: 'ORGANISATION',
+        entityId: input.organisationId,
+        reason,
+        beforeValue: {
+          platformStatus: organisation.platformStatus,
+          platformStatusVersion: organisation.platformStatusVersion,
+          suspendedAt: organisation.suspendedAt?.toISOString() ?? null,
+          suspensionReason: organisation.suspensionReason
+        },
+        afterValue: {
+          platformStatus: input.targetStatus,
+          platformStatusVersion: nextVersion,
+          suspendedAt:
+            input.targetStatus === 'SUSPENDED' ? input.now.toISOString() : null,
+          suspensionReason: input.targetStatus === 'SUSPENDED' ? reason : null
+        },
+        occurredAt: input.now
+      });
+      return { ok: true } as const;
+    });
+    if (!result.ok) return result;
+    const value = await this.getOrganisationDetail(input.organisationId);
+    return value
+      ? { ok: true, value }
+      : { ok: false, code: 'INVALID_STATE' };
+  }
+
+  suspendOrganisation(
+    input: PlatformStatusMutationInput
+  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>> {
+    return this.updatePlatformStatus({
+      ...input,
+      targetStatus: 'SUSPENDED',
+      eventType: 'ORGANISATION_SUSPENDED'
+    });
+  }
+
+  reactivateOrganisation(
+    input: PlatformStatusMutationInput
+  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>> {
+    return this.updatePlatformStatus({
+      ...input,
+      targetStatus: 'ACTIVE',
+      eventType: 'ORGANISATION_REACTIVATED'
+    });
   }
 }
