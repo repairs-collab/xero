@@ -26,13 +26,15 @@ export default async function PlatformAuditPage({
   const eventType = first(query.eventType) ?? '';
   const from = first(query.from) ?? '';
   const to = first(query.to) ?? '';
+  const requestedPage = Number(first(query.page) ?? '1');
   const page = await getPlatformAdminService().listAuditEvents(session.userId, {
     ...(organisationId ? { organisationId } : {}),
     ...(actorUserId ? { actorUserId } : {}),
     ...(eventType ? { eventType } : {}),
     ...(filterDate(from) ? { from: filterDate(from)! } : {}),
     ...(filterDate(to, true) ? { to: filterDate(to, true)! } : {}),
-    pageSize: 100
+    page: Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1,
+    pageSize: 50
   });
   return (
     <PlatformAuditList

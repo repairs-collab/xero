@@ -57,6 +57,7 @@ export interface PlatformSmsUsageSummary {
   warningPercent: number;
   committedParts: number;
   reservedParts: number;
+  allowanceUpdatedAt: Date | null;
 }
 
 export interface PlatformOrganisationSummary {
@@ -97,6 +98,7 @@ export interface PlatformOrganisationDetail extends PlatformOrganisationSummary 
     email: string;
     displayName: string;
     role: 'ADMIN' | 'OPERATOR';
+    membershipVersion: number;
     userDisabledAt: Date | null;
     membershipDisabledAt: Date | null;
   }>;
@@ -105,6 +107,7 @@ export interface PlatformOrganisationDetail extends PlatformOrganisationSummary 
     email: string;
     role: 'ADMIN' | 'OPERATOR';
     status: 'PENDING' | 'ACCEPTED' | 'EXPIRED' | 'REVOKED';
+    version: number;
     expiresAt: Date;
     createdAt: Date;
   }>;
@@ -162,7 +165,13 @@ export interface PlatformPage<T> {
   pageSize: number;
 }
 
-export type PlatformOrganisationPage = PlatformPage<PlatformOrganisationSummary>;
+export type PlatformOrganisationPage = PlatformPage<PlatformOrganisationSummary> & {
+  metrics: {
+    active: number;
+    suspended: number;
+    trialing: number;
+  };
+};
 export type PlatformNumberPage = PlatformPage<PlatformNumberSummary>;
 export type PlatformAuditPage = PlatformPage<PlatformAuditView>;
 
@@ -201,6 +210,7 @@ export interface PlatformStatusMutationInput {
 export interface PlatformNumberMutationInput {
   actorUserId: string;
   numberId: string;
+  expectedUpdatedAt: Date;
   reason: string;
   now: Date;
 }
@@ -262,6 +272,7 @@ export interface PlatformAdminRepository extends PlatformAdminReadRepository {
     organisationId: string;
     includedParts: number;
     warningPercent: number;
+    expectedUpdatedAt: Date | null;
     reason: string;
     now: Date;
   }): Promise<PlatformMutationResult<PlatformSmsAllowanceView>>;
@@ -351,8 +362,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
               (row) =>
                 row.organisationId === organisation.id &&
                 row.billingPeriodStart.getTime() ===
-                  subscription.currentPeriodStart!.getTime() &&
-                row.billingPeriodEnd.getTime() === subscription.currentPeriodEnd!.getTime()
+                  subscription.currentPeriodStart!.getTime()
             )
           : [];
       const usage = summariseSmsUsage(
@@ -405,7 +415,8 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
           includedParts: allowance?.includedParts ?? 2_000,
           warningPercent: allowance?.warningPercent ?? 80,
           committedParts: usage.committedParts,
-          reservedParts: usage.reservedParts
+          reservedParts: usage.reservedParts,
+          allowanceUpdatedAt: allowance?.updatedAt ?? null
         },
         userSearchTerms: membersByOrganisation.get(organisation.id) ?? []
       };
@@ -452,8 +463,13 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
       return compared === 0 ? left.id.localeCompare(right.id) : compared * direction;
     });
     const total = rows.length;
+    const metrics = {
+      active: rows.filter((row) => row.platformStatus === 'ACTIVE').length,
+      suspended: rows.filter((row) => row.platformStatus === 'SUSPENDED').length,
+      trialing: rows.filter((row) => row.subscription?.status === 'TRIALING').length
+    };
     const offset = (page - 1) * pageSize;
-    return { items: rows.slice(offset, offset + pageSize), total, page, pageSize };
+    return { items: rows.slice(offset, offset + pageSize), total, page, pageSize, metrics };
   }
 
   async getOrganisationDetail(
@@ -470,6 +486,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
           email: users.email,
           displayName: users.displayName,
           role: memberships.role,
+          membershipVersion: memberships.version,
           userDisabledAt: users.disabledAt,
           membershipDisabledAt: memberships.disabledAt
         })
@@ -483,6 +500,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
           email: invitations.email,
           role: invitations.role,
           status: invitations.status,
+          version: invitations.version,
           expiresAt: invitations.expiresAt,
           createdAt: invitations.createdAt
         })
@@ -913,6 +931,9 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
       if (!number || number.status !== input.expectedStatus) {
         return { ok: false, code: 'CONFLICT' } as const;
       }
+      if (number.updatedAt.getTime() !== input.expectedUpdatedAt.getTime()) {
+        return { ok: false, code: 'CONFLICT' } as const;
+      }
       const [organisation] = await transaction
         .select({ id: organisations.id })
         .from(organisations)
@@ -981,6 +1002,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
         if (
           !number ||
           number.status !== input.expectedStatus ||
+          number.updatedAt.getTime() !== input.expectedUpdatedAt.getTime() ||
           number.organisationId !== input.organisationId
         ) {
           return { ok: false, code: 'CONFLICT' } as const;
@@ -1053,7 +1075,8 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
     if (
       !reason ||
       !Number.isFinite(input.quarantineUntil.getTime()) ||
-      input.quarantineUntil.getTime() <= input.now.getTime()
+      input.quarantineUntil.getTime() <
+        input.now.getTime() + 30 * 24 * 60 * 60 * 1000
     ) {
       return { ok: false, code: 'VALIDATION' };
     }
@@ -1064,7 +1087,12 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
         .where(eq(smsNumberPool.id, input.numberId))
         .for('update')
         .limit(1);
-      if (!number || number.status !== input.expectedStatus || !number.organisationId) {
+      if (
+        !number ||
+        number.status !== input.expectedStatus ||
+        number.updatedAt.getTime() !== input.expectedUpdatedAt.getTime() ||
+        !number.organisationId
+      ) {
         return { ok: false, code: 'CONFLICT' } as const;
       }
       await transaction
@@ -1133,7 +1161,11 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
         .where(eq(smsNumberPool.id, input.numberId))
         .for('update')
         .limit(1);
-      if (!number || number.status !== input.expectedStatus) {
+      if (
+        !number ||
+        number.status !== input.expectedStatus ||
+        number.updatedAt.getTime() !== input.expectedUpdatedAt.getTime()
+      ) {
         return { ok: false, code: 'CONFLICT' } as const;
       }
       if (
@@ -1180,6 +1212,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
     organisationId: string;
     includedParts: number;
     warningPercent: number;
+    expectedUpdatedAt: Date | null;
     reason: string;
     now: Date;
   }): Promise<PlatformMutationResult<PlatformSmsAllowanceView>> {
@@ -1209,6 +1242,14 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
         .where(eq(smsAllowanceSettings.organisationId, input.organisationId))
         .for('update')
         .limit(1);
+      if (
+        (before === undefined && input.expectedUpdatedAt !== null) ||
+        (before !== undefined &&
+          (input.expectedUpdatedAt === null ||
+            before.updatedAt.getTime() !== input.expectedUpdatedAt.getTime()))
+      ) {
+        return { kind: 'conflict' } as const;
+      }
       await transaction
         .insert(smsAllowanceSettings)
         .values({
@@ -1243,8 +1284,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
             .where(
               and(
                 eq(smsUsageLedger.organisationId, input.organisationId),
-                eq(smsUsageLedger.billingPeriodStart, subscription.currentPeriodStart),
-                eq(smsUsageLedger.billingPeriodEnd, subscription.currentPeriodEnd)
+                eq(smsUsageLedger.billingPeriodStart, subscription.currentPeriodStart)
               )
             )
         : [];
@@ -1269,17 +1309,21 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
         occurredAt: input.now
       });
       return {
-        organisationId: input.organisationId,
-        billingPeriodStart: subscription?.currentPeriodStart ?? null,
-        billingPeriodEnd: subscription?.currentPeriodEnd ?? null,
-        includedParts: input.includedParts,
-        warningPercent: input.warningPercent,
-        committedParts: usage.committedParts,
-        reservedParts: usage.reservedParts
-      };
+        kind: 'updated',
+        value: {
+          organisationId: input.organisationId,
+          billingPeriodStart: subscription?.currentPeriodStart ?? null,
+          billingPeriodEnd: subscription?.currentPeriodEnd ?? null,
+          includedParts: input.includedParts,
+          warningPercent: input.warningPercent,
+          committedParts: usage.committedParts,
+          reservedParts: usage.reservedParts,
+          allowanceUpdatedAt: input.now
+        }
+      } as const;
     });
-    return value
-      ? { ok: true, value }
-      : { ok: false, code: 'INVALID_STATE' };
+    if (value === null) return { ok: false, code: 'INVALID_STATE' };
+    if (value.kind === 'conflict') return { ok: false, code: 'CONFLICT' };
+    return { ok: true, value: value.value };
   }
 }

@@ -26,6 +26,9 @@ export default async function PlatformSmsPage({
     requirePlatformOwnerPage('/platform-admin/sms')
   ]);
   const search = first(query.search) ?? '';
+  const customerSearch = first(query.customerSearch) ?? '';
+  const feedbackCode = first(query.result);
+  const requestedPage = Number(first(query.page) ?? '1');
   const statusValue = first(query.status) ?? '';
   const status = ['AVAILABLE', 'RESERVED', 'READY', 'QUARANTINED', 'RELEASED'].includes(statusValue)
     ? (statusValue as SmsNumberStatus)
@@ -35,11 +38,13 @@ export default async function PlatformSmsPage({
     service.listNumbers(session.userId, {
       search,
       ...(status ? { status } : {}),
-      pageSize: 100
+      page: Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1,
+      pageSize: 25
     }),
     service.listOrganisations(session.userId, {
       sort: 'name',
       direction: 'asc',
+      search: customerSearch,
       pageSize: 100
     })
   ]);
@@ -47,7 +52,8 @@ export default async function PlatformSmsPage({
     <PlatformSmsAdministration
       page={page}
       organisations={organisations.items.map(({ id, name }) => ({ id, name }))}
-      filters={{ search, status: status ?? '' }}
+      filters={{ search, customerSearch, status: status ?? '' }}
+      {...(feedbackCode ? { feedbackCode } : {})}
       actions={{
         register: registerSmsNumberAction,
         assign: assignSmsNumberAction,

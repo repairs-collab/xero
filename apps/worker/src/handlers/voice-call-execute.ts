@@ -74,6 +74,7 @@ export interface VoiceCallExecutionDependencies {
 
 export type VoiceCallCancellationCode =
   | VoicePolicyBlockCode
+  | 'ACCOUNT_SUSPENDED'
   | 'VOICE_CALL_NOT_FOUND'
   | 'DEPLOYMENT_DISABLED'
   | 'INITIATING_USER_DISABLED'
@@ -288,6 +289,13 @@ const revalidate = async (
       kind: 'blocked',
       actorUserId: call.actorUserId,
       reason: 'STALE_ACCOUNT_DATA'
+    };
+  }
+  if (organisation.platformStatus === 'SUSPENDED') {
+    return {
+      kind: 'blocked',
+      actorUserId: call.actorUserId,
+      reason: 'ACCOUNT_SUSPENDED'
     };
   }
   if (

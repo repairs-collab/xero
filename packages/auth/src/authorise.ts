@@ -1,6 +1,7 @@
 export const permissions = {
   ADMIN: [
     'user.manage',
+    'user.read',
     'billing.manage',
     'provider.configure',
     'sequence.manage',
@@ -62,7 +63,8 @@ export class AuthorizationFailure extends Error {
 const suspendedAccountActions = new Set<Action>([
   'audit.read',
   'outbox.read',
-  'billing.manage'
+  'billing.manage',
+  'user.read'
 ]);
 
 export function authorise(

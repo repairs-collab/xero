@@ -34,6 +34,25 @@ const Confirm = ({ copy }: { copy: string }) => (
   </label>
 );
 
+const feedback = (code: string | undefined) => {
+  switch (code) {
+    case 'UPDATED':
+      return { kind: 'success', title: 'Change saved', copy: 'The customer account is up to date.' };
+    case 'CONFLICT':
+      return { kind: 'warning', title: 'The record changed', copy: 'Refresh this page and review the latest values before trying again.' };
+    case 'LAST_ADMIN_REQUIRED':
+      return { kind: 'warning', title: 'Administrator required', copy: 'At least one active customer administrator must remain.' };
+    case 'INVALID_STATE':
+      return { kind: 'warning', title: 'Change not available', copy: 'The account is no longer in the state required for this action.' };
+    case 'VALIDATION':
+      return { kind: 'warning', title: 'Check the details', copy: 'One or more submitted values were invalid.' };
+    case 'FAILED':
+      return { kind: 'warning', title: 'Change failed', copy: 'The change was not completed. Review the account and try again.' };
+    default:
+      return null;
+  }
+};
+
 export function PlatformOrganisationDetailView({
   detail,
   actions,
@@ -45,6 +64,7 @@ export function PlatformOrganisationDetailView({
 }) {
   const smsUsed = detail.smsUsage.committedParts + detail.smsUsage.reservedParts;
   const expectedUpdatedAt = detail.subscription?.updatedAt.toISOString() ?? '';
+  const notice = feedback(feedbackCode);
   return (
     <div className="platform-page-stack">
       <header className="platform-page-heading">
@@ -59,10 +79,10 @@ export function PlatformOrganisationDetailView({
         </span>
       </header>
 
-      {feedbackCode === 'CONFLICT' ? (
-        <div className="platform-feedback platform-feedback--warning" role="alert">
-          <strong>The record changed</strong>
-          <span>Refresh this page and review the latest values before trying again.</span>
+      {notice ? (
+        <div className={`platform-feedback platform-feedback--${notice.kind}`} role={notice.kind === 'success' ? 'status' : 'alert'}>
+          <strong>{notice.title}</strong>
+          <span>{notice.copy}</span>
         </div>
       ) : null}
 
@@ -112,6 +132,7 @@ export function PlatformOrganisationDetailView({
           <h2>SMS allowance</h2>
           <form action={actions.updateAllowance as never}>
             <input type="hidden" name="organisationId" value={detail.id} />
+            <input type="hidden" name="expectedUpdatedAt" value={detail.smsUsage.allowanceUpdatedAt?.toISOString() ?? ''} />
             <label>Included SMS parts<input type="number" name="includedParts" min="1" max="1000000" defaultValue={detail.smsUsage.includedParts} required /></label>
             <label>Warning percent<input type="number" name="warningPercent" min="1" max="100" defaultValue={detail.smsUsage.warningPercent} required /></label>
             <label>Reason<textarea name="reason" required /></label>
@@ -143,6 +164,7 @@ export function PlatformOrganisationDetailView({
                     <form action={actions.changeRole as never}>
                       <input type="hidden" name="organisationId" value={detail.id} />
                       <input type="hidden" name="userId" value={user.id} />
+                      <input type="hidden" name="expectedVersion" value={user.membershipVersion} />
                       <select name="role" defaultValue={user.role}><option value="OPERATOR">Operator</option><option value="ADMIN">Administrator</option></select>
                       <input name="reason" aria-label={`Reason to change ${user.displayName}`} placeholder="Reason" required />
                       <button className="button button--quiet" type="submit">Change role</button>
@@ -150,6 +172,7 @@ export function PlatformOrganisationDetailView({
                     <form action={actions.disableUser as never}>
                       <input type="hidden" name="organisationId" value={detail.id} />
                       <input type="hidden" name="userId" value={user.id} />
+                      <input type="hidden" name="expectedVersion" value={user.membershipVersion} />
                       <input name="reason" aria-label={`Reason to disable ${user.displayName}`} placeholder="Reason" required />
                       <Confirm copy="Confirm disable" />
                       <button className="button button--danger" type="submit">Disable</button>
@@ -164,6 +187,7 @@ export function PlatformOrganisationDetailView({
           <form action={actions.resendInvitation as never} className="platform-pending-invite" key={invite.id}>
             <input type="hidden" name="organisationId" value={detail.id} />
             <input type="hidden" name="invitationId" value={invite.id} />
+            <input type="hidden" name="expectedVersion" value={invite.version} />
             <span>{invite.email} · pending until {dateTime(invite.expiresAt)}</span>
             <input name="reason" aria-label={`Reason to resend ${invite.email}`} placeholder="Reason" required />
             <button className="button button--quiet" type="submit">Resend invitation</button>

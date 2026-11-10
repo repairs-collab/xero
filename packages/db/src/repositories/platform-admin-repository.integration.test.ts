@@ -18,6 +18,7 @@ import {
   xeroConnections
 } from '../schema/index.js';
 import { PostgresPlatformAdminRepository } from './platform-admin-repository.js';
+import { PostgresSmsCommerceRepository } from './sms-commerce-repository.js';
 
 const databaseUrl =
   process.env.DATABASE_URL ??
@@ -308,6 +309,26 @@ const seedTrialOrganisation = async (label: string) => {
 describe('PostgresPlatformAdminRepository mutations', () => {
   it('extends a trial without resetting its allowance period and audits atomically', async () => {
     const seeded = await seedTrialOrganisation('Trial extension target');
+    await client.db.insert(smsUsageLedger).values([
+      {
+        organisationId: seeded.organisationId,
+        billingPeriodStart: new Date('2026-11-01T00:00:00.000Z'),
+        billingPeriodEnd: new Date('2026-11-20T00:00:00.000Z'),
+        source: 'REMINDER',
+        entryType: 'RESERVE',
+        partDelta: 23,
+        idempotencyKey: `trial-reserve-${seeded.organisationId}`
+      },
+      {
+        organisationId: seeded.organisationId,
+        billingPeriodStart: new Date('2026-11-01T00:00:00.000Z'),
+        billingPeriodEnd: new Date('2026-11-20T00:00:00.000Z'),
+        source: 'REMINDER',
+        entryType: 'COMMIT',
+        partDelta: 23,
+        idempotencyKey: `trial-commit-${seeded.organisationId}`
+      }
+    ]);
     const result = await repository.extendTrial({
       actorUserId: ids.owner,
       organisationId: seeded.organisationId,
@@ -325,6 +346,15 @@ describe('PostgresPlatformAdminRepository mutations', () => {
       currentPeriodStart: new Date('2026-11-01T00:00:00.000Z'),
       currentPeriodEnd: new Date('2026-11-30T00:00:00.000Z'),
       trialEndsAt: new Date('2026-11-30T00:00:00.000Z')
+    });
+    await expect(
+      new PostgresSmsCommerceRepository(client.db).loadUsage(
+        seeded.organisationId
+      )
+    ).resolves.toMatchObject({ committedParts: 23, reservedParts: 0 });
+    expect(result).toMatchObject({
+      ok: true,
+      value: { smsUsage: { committedParts: 23, reservedParts: 0 } }
     });
     const audit = await repository.listAuditEvents({
       organisationId: seeded.organisationId,
@@ -498,12 +528,23 @@ describe('PostgresPlatformAdminRepository mutations', () => {
     });
     if (!registered.ok) throw new Error('NUMBER_SETUP_FAILED');
 
+    await expect(repository.assignSmsNumber({
+      actorUserId: ids.owner,
+      numberId: registered.value.id,
+      organisationId: firstOrganisationId,
+      expectedStatus: 'AVAILABLE',
+      expectedUpdatedAt: new Date('2000-01-01T00:00:00.000Z'),
+      reason: 'Stale assignment must fail',
+      now
+    })).resolves.toEqual({ ok: false, code: 'CONFLICT' });
+
     const results = await Promise.all([
       repository.assignSmsNumber({
         actorUserId: ids.owner,
         numberId: registered.value.id,
         organisationId: firstOrganisationId,
         expectedStatus: 'AVAILABLE',
+        expectedUpdatedAt: registered.value.updatedAt,
         reason: 'Assign first customer',
         now
       }),
@@ -512,6 +553,7 @@ describe('PostgresPlatformAdminRepository mutations', () => {
         numberId: registered.value.id,
         organisationId: secondOrganisationId,
         expectedStatus: 'AVAILABLE',
+        expectedUpdatedAt: registered.value.updatedAt,
         reason: 'Assign second customer',
         now
       })
@@ -540,6 +582,7 @@ describe('PostgresPlatformAdminRepository mutations', () => {
       numberId: secondNumber.value.id,
       organisationId: winner.value.organisationId,
       expectedStatus: 'AVAILABLE',
+      expectedUpdatedAt: secondNumber.value.updatedAt,
       reason: 'Must reject a second active number',
       now
     })).resolves.toEqual({ ok: false, code: 'INVALID_STATE' });
@@ -569,6 +612,7 @@ describe('PostgresPlatformAdminRepository mutations', () => {
       numberId: registered.value.id,
       organisationId,
       expectedStatus: 'AVAILABLE',
+      expectedUpdatedAt: registered.value.updatedAt,
       reason: 'Allocate customer number',
       now
     });
@@ -579,24 +623,39 @@ describe('PostgresPlatformAdminRepository mutations', () => {
       numberId: registered.value.id,
       organisationId,
       expectedStatus: 'RESERVED',
+      expectedUpdatedAt: assigned.value.updatedAt,
       providerNumberId: '',
       reason: 'Verified in Sinch',
       now
     })).resolves.toEqual({ ok: false, code: 'VALIDATION' });
-    await expect(repository.markSmsNumberReady({
+    const ready = await repository.markSmsNumberReady({
       actorUserId: ids.owner,
       numberId: registered.value.id,
       organisationId,
       expectedStatus: 'RESERVED',
+      expectedUpdatedAt: assigned.value.updatedAt,
       providerNumberId: 'sinch-platform-666',
       reason: 'Verified in Sinch',
       now
-    })).resolves.toMatchObject({ ok: true, value: { status: 'READY' } });
+    });
+    expect(ready).toMatchObject({ ok: true, value: { status: 'READY' } });
+    if (!ready.ok) throw new Error('NUMBER_READY_FAILED');
+
+    await expect(repository.quarantineSmsNumber({
+      actorUserId: ids.owner,
+      numberId: registered.value.id,
+      expectedStatus: 'READY',
+      expectedUpdatedAt: ready.value.updatedAt,
+      quarantineUntil: new Date('2026-11-12T07:00:00.000Z'),
+      reason: 'Cooling period too short',
+      now
+    })).resolves.toEqual({ ok: false, code: 'VALIDATION' });
 
     const released = await repository.releaseSmsNumber({
       actorUserId: ids.owner,
       numberId: registered.value.id,
       expectedStatus: 'READY',
+      expectedUpdatedAt: ready.value.updatedAt,
       reason: 'Customer subscription ended',
       now
     });
@@ -608,10 +667,12 @@ describe('PostgresPlatformAdminRepository mutations', () => {
         quarantineUntil: new Date('2026-12-11T07:00:00.000Z')
       }
     });
+    if (!released.ok) throw new Error('NUMBER_RELEASE_FAILED');
     await expect(repository.returnSmsNumberToPool({
       actorUserId: ids.owner,
       numberId: registered.value.id,
       expectedStatus: 'QUARANTINED',
+      expectedUpdatedAt: released.value.updatedAt,
       reason: 'Attempt early return',
       now: new Date('2026-12-10T07:00:00.000Z')
     })).resolves.toEqual({ ok: false, code: 'INVALID_STATE' });
@@ -619,6 +680,7 @@ describe('PostgresPlatformAdminRepository mutations', () => {
       actorUserId: ids.owner,
       numberId: registered.value.id,
       expectedStatus: 'QUARANTINED',
+      expectedUpdatedAt: released.value.updatedAt,
       reason: 'Cooling period complete',
       now: new Date('2026-12-11T07:00:00.000Z')
     })).resolves.toMatchObject({
@@ -653,6 +715,10 @@ describe('PostgresPlatformAdminRepository mutations', () => {
       overageCapCents: 5_000,
       overageCentsPerPart: 7
     });
+    const originalSetting = await client.db.query.smsAllowanceSettings.findFirst({
+      where: (table, { eq }) => eq(table.organisationId, organisationId)
+    });
+    if (!originalSetting) throw new Error('ALLOWANCE_SETUP_FAILED');
     await client.db.insert(smsUsageLedger).values([
       {
         organisationId,
@@ -679,6 +745,7 @@ describe('PostgresPlatformAdminRepository mutations', () => {
       organisationId,
       includedParts: 0,
       warningPercent: 101,
+      expectedUpdatedAt: originalSetting.updatedAt,
       reason: 'Invalid limits',
       now
     })).resolves.toEqual({ ok: false, code: 'VALIDATION' });
@@ -687,6 +754,7 @@ describe('PostgresPlatformAdminRepository mutations', () => {
       organisationId,
       includedParts: 3_000,
       warningPercent: 90,
+      expectedUpdatedAt: originalSetting.updatedAt,
       reason: 'Approved higher allowance',
       now
     });
@@ -720,5 +788,15 @@ describe('PostgresPlatformAdminRepository mutations', () => {
     });
     expect(ledger).toHaveLength(2);
     expect(audit.items).toHaveLength(1);
+
+    await expect(repository.updateSmsAllowance({
+      actorUserId: ids.owner,
+      organisationId,
+      includedParts: 4_000,
+      warningPercent: 95,
+      expectedUpdatedAt: originalSetting.updatedAt,
+      reason: 'Stale form must not overwrite the newer allowance',
+      now: new Date(now.getTime() + 1_000)
+    })).resolves.toEqual({ ok: false, code: 'CONFLICT' });
   });
 });

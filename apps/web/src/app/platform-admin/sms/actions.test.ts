@@ -34,6 +34,7 @@ describe('platform SMS administration actions', () => {
       organisationId: 'organisation-1',
       includedParts: 2_000,
       warningPercent: 80,
+      expectedUpdatedAt: null,
       reason: 'Customer plan changed'
     });
   });

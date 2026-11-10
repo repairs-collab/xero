@@ -57,7 +57,8 @@ const organisation = {
     includedParts: 2_000,
     warningPercent: 80,
     committedParts: 450,
-    reservedParts: 10
+    reservedParts: 10,
+    allowanceUpdatedAt: now
   },
   userSearchTerms: ['owner@alpha.example']
 };
@@ -73,14 +74,14 @@ describe('platform owner views', () => {
     };
     const html = renderToStaticMarkup(
       <PlatformAdminOverview
-        page={{ items: [organisation, suspended], total: 2, page: 1, pageSize: 25 }}
+        page={{ items: [organisation, suspended], total: 60, page: 1, pageSize: 25, metrics: { active: 54, suspended: 6, trialing: 12 } }}
         filters={{ search: 'Alpha', sort: 'usage', direction: 'desc' }}
       />
     );
 
-    expect(html).toContain('2 customers');
-    expect(html).toContain('1 suspended');
-    expect(html).toContain('1 trialing');
+    expect(html).toContain('60 customers');
+    expect(html).toContain('6 suspended');
+    expect(html).toContain('12 trialing');
     expect(html).toContain('Search customers');
     expect(html).toContain('Sort customers');
     expect(html).toContain('Trial / subscription');
@@ -88,6 +89,8 @@ describe('platform owner views', () => {
     expect(html).toContain('SMS usage');
     expect(html).toContain('Last sync');
     expect(html).toContain('Alpha Repairs');
+    expect(html).toContain('Next →');
+    expect(html).toContain('Page 1 of 3');
   });
 
   it('renders customer facts and reasoned confirmation controls without secrets', () => {
@@ -100,6 +103,7 @@ describe('platform owner views', () => {
             email: 'owner@alpha.example',
             displayName: 'Alpha Owner',
             role: 'ADMIN',
+            membershipVersion: 0,
             userDisabledAt: null,
             membershipDisabledAt: null
           }],
@@ -148,9 +152,10 @@ describe('platform owner views', () => {
   it('renders Sinch number lifecycle and assignment controls', () => {
     const html = renderToStaticMarkup(
       <PlatformSmsAdministration
-        page={{ items: [organisation.smsNumber], total: 1, page: 1, pageSize: 25 }}
+        page={{ items: [organisation.smsNumber], total: 30, page: 1, pageSize: 25 }}
         organisations={[{ id: organisation.id, name: organisation.name }]}
-        filters={{ search: '', status: '' }}
+        filters={{ search: '', customerSearch: 'Alpha', status: '' }}
+        feedbackCode="UPDATED"
         actions={{
           register: noAction,
           assign: noAction,
@@ -168,6 +173,9 @@ describe('platform owner views', () => {
     expect(html).toContain('Assign customer');
     expect(html).toContain('Cooling until');
     expect(html).toContain('name="reason"');
+    expect(html).toContain('Find customer');
+    expect(html).toContain('Change saved');
+    expect(html).toContain('Next →');
   });
 
   it('renders filterable audit summaries while redacting sensitive and message fields', () => {
@@ -190,7 +198,7 @@ describe('platform owner views', () => {
             correlationId: 'correlation-1',
             occurredAt: now
           }],
-          total: 1,
+          total: 60,
           page: 1,
           pageSize: 25
         }}
@@ -203,5 +211,7 @@ describe('platform owner views', () => {
     expect(html).toContain('Status: RESERVED → READY');
     expect(html).not.toContain('never-render');
     expect(html).not.toContain('{&quot;status&quot;');
+    expect(html).toContain('Page 1 of 3');
+    expect(html).toContain('Next →');
   });
 });

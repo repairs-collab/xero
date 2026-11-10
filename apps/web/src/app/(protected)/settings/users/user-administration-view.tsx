@@ -17,6 +17,7 @@ export function UserAdministrationView({
   organisationId,
   currentUserId,
   members,
+  readOnly = false,
   feedback,
   inviteAction,
   resendAction,
@@ -26,6 +27,7 @@ export function UserAdministrationView({
   organisationId: string;
   currentUserId: string;
   members: UserAdministrationMember[];
+  readOnly?: boolean;
   feedback?: UserAdministrationFeedback;
   inviteAction: UserAction;
   resendAction: UserAction;
@@ -49,6 +51,12 @@ export function UserAdministrationView({
         </div>
       )}
 
+      {readOnly ? (
+        <div className="user-feedback user-feedback--error" role="status">
+          User management is paused while this account is suspended. Existing
+          access remains visible below.
+        </div>
+      ) : (
       <section className="panel user-invite-panel">
         <div>
           <span className="eyebrow">New account</span>
@@ -80,6 +88,7 @@ export function UserAdministrationView({
           </button>
         </form>
       </section>
+      )}
 
       <section className="panel user-list-panel">
         <div className="user-list-heading">
@@ -115,19 +124,21 @@ export function UserAdministrationView({
                 </span>
               </div>
               <div className="user-row__actions">
-                {member.status === 'INVITED' && member.invitationId !== null ? (
+                {!readOnly && member.status === 'INVITED' && member.invitationId !== null ? (
                   <form action={resendAction}>
                     <input type="hidden" name="organisationId" value={organisationId} />
                     <input type="hidden" name="invitationId" value={member.invitationId} />
+                    <input type="hidden" name="expectedVersion" value={member.invitationVersion ?? 0} />
                     <button className="button button--quiet" type="submit">
                       Resend invite
                     </button>
                   </form>
                 ) : null}
-                {member.status !== 'DISABLED' ? (
+                {!readOnly && member.status !== 'DISABLED' ? (
                   <form action={changeRoleAction} className="user-role-form">
                     <input type="hidden" name="organisationId" value={organisationId} />
                     <input type="hidden" name="userId" value={member.userId} />
+                    <input type="hidden" name="expectedVersion" value={member.membershipVersion} />
                     <select name="role" defaultValue={member.role} aria-label={`Access level for ${member.displayName}`}>
                       <option value="OPERATOR">Operator</option>
                       <option value="ADMIN">Administrator</option>
@@ -137,10 +148,11 @@ export function UserAdministrationView({
                     </button>
                   </form>
                 ) : null}
-                {member.status !== 'DISABLED' ? (
+                {!readOnly && member.status !== 'DISABLED' ? (
                   <form action={disableAction}>
                     <input type="hidden" name="organisationId" value={organisationId} />
                     <input type="hidden" name="userId" value={member.userId} />
+                    <input type="hidden" name="expectedVersion" value={member.membershipVersion} />
                     <button
                       className="button button--danger"
                       type="submit"

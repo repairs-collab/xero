@@ -154,6 +154,7 @@ export const memberships = pgTable(
     role: varchar('role', { length: 16 })
       .$type<'ADMIN' | 'OPERATOR'>()
       .notNull(),
+    version: integer('version').notNull().default(0),
     disabledAt: timestamp('disabled_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
@@ -181,6 +182,7 @@ export const invitations = pgTable(
       .notNull()
       .default('PENDING'),
     invitedByUserId: uuid('invited_by_user_id').references(() => users.id),
+    version: integer('version').notNull().default(0),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     acceptedAt: timestamp('accepted_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true })

@@ -1,5 +1,6 @@
 import { revalidatePath } from 'next/cache';
 import { headers } from 'next/headers';
+import { redirect } from 'next/navigation';
 
 import type { AppSession } from '@bc5000/auth';
 
@@ -42,6 +43,20 @@ const text = (formData: FormData, name: string): string => {
 const optionalText = (formData: FormData, name: string): string | null => {
   const value = formData.get(name);
   return typeof value === 'string' && value.trim() ? value.trim() : null;
+};
+
+const date = (formData: FormData, name: string): Date => {
+  const value = new Date(text(formData, name));
+  if (!Number.isFinite(value.getTime())) throw new Error(`${name} is invalid`);
+  return value;
+};
+
+const optionalDate = (formData: FormData, name: string): Date | null => {
+  const value = optionalText(formData, name);
+  if (value === null) return null;
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) throw new Error(`${name} is invalid`);
+  return parsed;
 };
 
 const positiveInteger = (formData: FormData, name: string): number => {
@@ -89,6 +104,7 @@ export const createSmsAdminActions = (
         numberId: text(formData, 'numberId'),
         organisationId,
         expectedStatus: text(formData, 'expectedStatus') as 'AVAILABLE' | 'RELEASED',
+        expectedUpdatedAt: date(formData, 'expectedUpdatedAt'),
         reason: text(formData, 'reason')
       });
       if (result.ok) finish(organisationId);
@@ -102,6 +118,7 @@ export const createSmsAdminActions = (
         numberId: text(formData, 'numberId'),
         organisationId,
         expectedStatus: 'RESERVED',
+        expectedUpdatedAt: date(formData, 'expectedUpdatedAt'),
         providerNumberId: text(formData, 'providerNumberId'),
         reason: text(formData, 'reason')
       });
@@ -114,6 +131,7 @@ export const createSmsAdminActions = (
       const result = await dependencies.service.quarantineSmsNumber(session.userId, {
         numberId: text(formData, 'numberId'),
         expectedStatus: text(formData, 'expectedStatus') as 'RESERVED' | 'READY',
+        expectedUpdatedAt: date(formData, 'expectedUpdatedAt'),
         quarantineUntil: new Date(text(formData, 'quarantineUntil')),
         reason: text(formData, 'reason')
       });
@@ -126,6 +144,7 @@ export const createSmsAdminActions = (
       const result = await dependencies.service.releaseSmsNumber(session.userId, {
         numberId: text(formData, 'numberId'),
         expectedStatus: text(formData, 'expectedStatus') as 'RESERVED' | 'READY',
+        expectedUpdatedAt: date(formData, 'expectedUpdatedAt'),
         reason: text(formData, 'reason')
       });
       if (result.ok) finish(result.value.organisationId ?? undefined);
@@ -137,6 +156,7 @@ export const createSmsAdminActions = (
       const result = await dependencies.service.returnSmsNumberToPool(session.userId, {
         numberId: text(formData, 'numberId'),
         expectedStatus: 'QUARANTINED',
+        expectedUpdatedAt: date(formData, 'expectedUpdatedAt'),
         reason: text(formData, 'reason')
       });
       if (result.ok) finish();
@@ -150,6 +170,7 @@ export const createSmsAdminActions = (
         organisationId,
         includedParts: positiveInteger(formData, 'includedParts'),
         warningPercent: positiveInteger(formData, 'warningPercent'),
+        expectedUpdatedAt: optionalDate(formData, 'expectedUpdatedAt'),
         reason: text(formData, 'reason')
       });
       if (result.ok) finish(organisationId);
@@ -169,31 +190,50 @@ const actions = createSmsAdminActions({
   revalidate: revalidatePath
 });
 
+const run = async (
+  formData: FormData,
+  action: (data: FormData) => Promise<SmsAdminActionState>,
+  destination: 'sms' | 'organisation' = 'sms'
+): Promise<never> => {
+  let result: SmsAdminActionState;
+  try {
+    result = await action(formData);
+  } catch {
+    result = { ok: false, code: 'VALIDATION' };
+  }
+  const organisationId = optionalText(formData, 'organisationId');
+  const path =
+    destination === 'organisation' && organisationId
+      ? `/platform-admin/organisations/${encodeURIComponent(organisationId)}`
+      : '/platform-admin/sms';
+  redirect(`${path}?result=${result.code}`);
+};
+
 export async function registerSmsNumberAction(formData: FormData) {
   'use server';
-  return actions.registerSmsNumberAction(formData);
+  return run(formData, (data) => actions.registerSmsNumberAction(data));
 }
 export async function assignSmsNumberAction(formData: FormData) {
   'use server';
-  return actions.assignSmsNumberAction(formData);
+  return run(formData, (data) => actions.assignSmsNumberAction(data));
 }
 export async function markSmsNumberReadyAction(formData: FormData) {
   'use server';
-  return actions.markSmsNumberReadyAction(formData);
+  return run(formData, (data) => actions.markSmsNumberReadyAction(data));
 }
 export async function quarantineSmsNumberAction(formData: FormData) {
   'use server';
-  return actions.quarantineSmsNumberAction(formData);
+  return run(formData, (data) => actions.quarantineSmsNumberAction(data));
 }
 export async function releaseSmsNumberAction(formData: FormData) {
   'use server';
-  return actions.releaseSmsNumberAction(formData);
+  return run(formData, (data) => actions.releaseSmsNumberAction(data));
 }
 export async function returnSmsNumberToPoolAction(formData: FormData) {
   'use server';
-  return actions.returnSmsNumberToPoolAction(formData);
+  return run(formData, (data) => actions.returnSmsNumberToPoolAction(data));
 }
 export async function updateSmsAllowanceAction(formData: FormData) {
   'use server';
-  return actions.updateSmsAllowanceAction(formData);
+  return run(formData, (data) => actions.updateSmsAllowanceAction(data), 'organisation');
 }

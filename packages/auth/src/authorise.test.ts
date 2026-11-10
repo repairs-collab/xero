@@ -34,6 +34,8 @@ describe('authorise', () => {
     ['OPERATOR', 'reminder.approve', true],
     ['OPERATOR', 'provider.configure', false],
     ['ADMIN', 'user.manage', true],
+    ['ADMIN', 'user.read', true],
+    ['OPERATOR', 'user.read', false],
     ['ADMIN', 'billing.manage', true],
     ['OPERATOR', 'billing.manage', false],
     ['OPERATOR', 'chase.operate', true],
@@ -94,7 +96,12 @@ describe('authorise', () => {
   it('keeps suspended organisations read-only while preserving billing access', () => {
     const suspended = sessionFixture({ role: 'ADMIN' });
     suspended.memberships[0]!.organisationStatus = 'SUSPENDED';
-    const allowed = new Set(['audit.read', 'outbox.read', 'billing.manage']);
+    const allowed = new Set([
+      'audit.read',
+      'outbox.read',
+      'billing.manage',
+      'user.read'
+    ]);
 
     for (const action of permissions.ADMIN) {
       const attempt = () => authorise(suspended, action, 'org-1');

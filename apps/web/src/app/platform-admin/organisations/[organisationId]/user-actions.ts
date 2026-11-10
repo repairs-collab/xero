@@ -1,5 +1,6 @@
 import { revalidatePath } from 'next/cache';
 import { headers } from 'next/headers';
+import { redirect } from 'next/navigation';
 
 import type { AppSession, Role } from '@bc5000/auth';
 
@@ -22,7 +23,7 @@ export interface PlatformUserActionDependencies {
 
 export interface PlatformUserActionState {
   ok: boolean;
-  code: 'UPDATED' | 'VALIDATION' | 'LAST_ADMIN_REQUIRED' | 'FAILED';
+  code: 'UPDATED' | 'VALIDATION' | 'LAST_ADMIN_REQUIRED' | 'CONFLICT' | 'FAILED';
 }
 
 const text = (formData: FormData, name: string): string => {
@@ -41,11 +42,18 @@ const role = (formData: FormData): Role => {
   return value;
 };
 
+const version = (formData: FormData): number => {
+  const value = Number(text(formData, 'expectedVersion'));
+  if (!Number.isInteger(value) || value < 0) throw new Error('expectedVersion is invalid');
+  return value;
+};
+
 const failure = (error: unknown): PlatformUserActionState => {
   const message = error instanceof Error ? error.message : '';
   if (message === 'LAST_ADMIN_REQUIRED') {
     return { ok: false, code: 'LAST_ADMIN_REQUIRED' };
   }
+  if (message === 'CONFLICT') return { ok: false, code: 'CONFLICT' };
   if (message === 'VALIDATION' || message.includes('required') || message.includes('invalid')) {
     return { ok: false, code: 'VALIDATION' };
   }
@@ -88,6 +96,7 @@ export const createPlatformUserActions = (
           {
             organisationId,
             invitationId: text(formData, 'invitationId'),
+            expectedVersion: version(formData),
             reason: text(formData, 'reason')
           }
         );
@@ -107,6 +116,7 @@ export const createPlatformUserActions = (
             organisationId,
             userId: text(formData, 'userId'),
             role: role(formData),
+            expectedVersion: version(formData),
             reason: text(formData, 'reason')
           }
         );
@@ -125,6 +135,7 @@ export const createPlatformUserActions = (
           {
             organisationId,
             userId: text(formData, 'userId'),
+            expectedVersion: version(formData),
             reason: text(formData, 'reason')
           }
         );
@@ -148,19 +159,30 @@ const actions = createPlatformUserActions({
   revalidate: revalidatePath
 });
 
+const run = async (
+  formData: FormData,
+  action: (data: FormData) => Promise<PlatformUserActionState>
+): Promise<never> => {
+  const organisationId = text(formData, 'organisationId');
+  const result = await action(formData);
+  redirect(
+    `/platform-admin/organisations/${encodeURIComponent(organisationId)}?result=${result.code}`
+  );
+};
+
 export async function inviteMemberAction(formData: FormData) {
   'use server';
-  return actions.inviteMemberAction(formData);
+  return run(formData, (data) => actions.inviteMemberAction(data));
 }
 export async function resendInvitationAction(formData: FormData) {
   'use server';
-  return actions.resendInvitationAction(formData);
+  return run(formData, (data) => actions.resendInvitationAction(data));
 }
 export async function changeMemberRoleAction(formData: FormData) {
   'use server';
-  return actions.changeMemberRoleAction(formData);
+  return run(formData, (data) => actions.changeMemberRoleAction(data));
 }
 export async function disableMemberAction(formData: FormData) {
   'use server';
-  return actions.disableMemberAction(formData);
+  return run(formData, (data) => actions.disableMemberAction(data));
 }

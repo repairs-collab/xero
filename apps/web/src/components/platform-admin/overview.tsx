@@ -25,15 +25,16 @@ export function PlatformAdminOverview({
     direction?: SortDirection;
   };
 }) {
-  const suspended = page.items.filter(
-    (item) => item.platformStatus === 'SUSPENDED'
-  ).length;
-  const trialing = page.items.filter(
-    (item) => item.subscription?.status === 'TRIALING'
-  ).length;
-  const active = page.items.filter(
-    (item) => item.platformStatus === 'ACTIVE'
-  ).length;
+  const { active, suspended, trialing } = page.metrics;
+  const totalPages = Math.max(1, Math.ceil(page.total / page.pageSize));
+  const pageHref = (target: number): string => {
+    const params = new URLSearchParams();
+    if (filters.search) params.set('search', filters.search);
+    if (filters.sort) params.set('sort', filters.sort);
+    if (filters.direction) params.set('direction', filters.direction);
+    params.set('page', String(target));
+    return `/platform-admin?${params.toString()}`;
+  };
   return (
     <div className="platform-page-stack">
       <header className="platform-page-heading">
@@ -114,6 +115,13 @@ export function PlatformAdminOverview({
           })}
           {page.items.length === 0 ? <p className="platform-empty">No customers matched these filters.</p> : null}
         </div>
+        {totalPages > 1 ? (
+          <nav className="platform-pagination" aria-label="Customer pages">
+            {page.page > 1 ? <Link href={pageHref(page.page - 1)}>← Previous</Link> : <span />}
+            <span>Page {page.page} of {totalPages}</span>
+            {page.page < totalPages ? <Link href={pageHref(page.page + 1)}>Next →</Link> : <span />}
+          </nav>
+        ) : null}
       </section>
     </div>
   );

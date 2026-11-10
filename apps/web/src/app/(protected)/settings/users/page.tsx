@@ -39,8 +39,9 @@ export default async function UsersPage({
   const session = await requireWebSession(
     new Request('http://localhost/', { headers: await headers() })
   );
-  const organisationId = session.memberships[0]?.organisationId;
-  if (organisationId === undefined) {
+  const membership = session.memberships[0];
+  const organisationId = membership?.organisationId;
+  if (organisationId === undefined || membership === undefined) {
     throw new Error('No active organisation membership');
   }
   const members = await createUserAdministration({
@@ -63,6 +64,7 @@ export default async function UsersPage({
     <UserAdministrationView
       organisationId={organisationId}
       currentUserId={session.userId}
+      readOnly={membership.organisationStatus === 'SUSPENDED'}
       members={members}
       {...(feedback === undefined ? {} : { feedback })}
       inviteAction={inviteMemberAction}

@@ -75,6 +75,58 @@ describe('platform administration read service', () => {
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 
+  it('denies forged platform mutations before any repository call', async () => {
+    const repository = {
+      listOrganisations: vi.fn(),
+      getOrganisationDetail: vi.fn(),
+      listSmsNumbers: vi.fn(),
+      listAuditEvents: vi.fn(),
+      extendTrial: vi.fn(),
+      endTrial: vi.fn(),
+      suspendOrganisation: vi.fn(),
+      reactivateOrganisation: vi.fn(),
+      registerSmsNumber: vi.fn(),
+      assignSmsNumber: vi.fn(),
+      markSmsNumberReady: vi.fn(),
+      quarantineSmsNumber: vi.fn(),
+      releaseSmsNumber: vi.fn(),
+      returnSmsNumberToPool: vi.fn(),
+      updateSmsAllowance: vi.fn()
+    };
+    const service = createPlatformAdminService({
+      verifyOwner: () => Promise.resolve(false),
+      repository
+    });
+
+    await expect(
+      service.suspendOrganisation('customer-admin', {
+        organisationId: 'another-customer',
+        expectedVersion: 0,
+        reason: 'Forged form submission'
+      })
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(
+      service.registerSmsNumber('customer-admin', {
+        e164Number: '+61400000000',
+        providerNumberId: null,
+        reason: 'Forged form submission'
+      })
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(
+      service.updateSmsAllowance('customer-admin', {
+        organisationId: 'another-customer',
+        includedParts: 999_999,
+        warningPercent: 100,
+        expectedUpdatedAt: null,
+        reason: 'Forged form submission'
+      })
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+    expect(repository.suspendOrganisation).not.toHaveBeenCalled();
+    expect(repository.registerSmsNumber).not.toHaveBeenCalled();
+    expect(repository.updateSmsAllowance).not.toHaveBeenCalled();
+  });
+
   it('validates trial extensions before calling the repository', async () => {
     const extendTrial = vi.fn();
     const service = createPlatformAdminService({
@@ -132,6 +184,7 @@ describe('platform administration read service', () => {
       organisationId: 'organisation-1',
       includedParts: 2_500,
       warningPercent: 85,
+      expectedUpdatedAt: new Date('2026-11-10T00:00:00.000Z'),
       reason: ' Plan change '
     })).resolves.toEqual({ ok: true, value: {} });
     expect(registerSmsNumber).not.toHaveBeenCalled();
@@ -140,6 +193,7 @@ describe('platform administration read service', () => {
       organisationId: 'organisation-1',
       includedParts: 2_500,
       warningPercent: 85,
+      expectedUpdatedAt: new Date('2026-11-10T00:00:00.000Z'),
       reason: 'Plan change',
       now: new Date('2026-11-11T00:00:00.000Z')
     });

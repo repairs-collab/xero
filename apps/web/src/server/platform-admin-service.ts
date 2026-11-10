@@ -185,6 +185,7 @@ export const createPlatformAdminService = (
       numberId: string;
       organisationId: string;
       expectedStatus: 'AVAILABLE' | 'RELEASED';
+      expectedUpdatedAt: Date;
       reason: string;
     }
   ) {
@@ -204,6 +205,7 @@ export const createPlatformAdminService = (
       numberId: string;
       organisationId: string;
       expectedStatus: 'RESERVED';
+      expectedUpdatedAt: Date;
       providerNumberId: string;
       reason: string;
     }
@@ -226,6 +228,7 @@ export const createPlatformAdminService = (
     input: {
       numberId: string;
       expectedStatus: 'RESERVED' | 'READY';
+      expectedUpdatedAt: Date;
       quarantineUntil: Date;
       reason: string;
     }
@@ -235,7 +238,8 @@ export const createPlatformAdminService = (
     if (
       !validReason(input.reason) ||
       !Number.isFinite(input.quarantineUntil.getTime()) ||
-      input.quarantineUntil <= actionNow
+      input.quarantineUntil.getTime() <
+        actionNow.getTime() + 30 * 24 * 60 * 60 * 1000
     ) {
       return { ok: false, code: 'VALIDATION' } as const;
     }
@@ -252,6 +256,7 @@ export const createPlatformAdminService = (
     input: {
       numberId: string;
       expectedStatus: 'RESERVED' | 'READY';
+      expectedUpdatedAt: Date;
       reason: string;
     }
   ) {
@@ -270,6 +275,7 @@ export const createPlatformAdminService = (
     input: {
       numberId: string;
       expectedStatus: 'QUARANTINED';
+      expectedUpdatedAt: Date;
       reason: string;
     }
   ) {
@@ -289,6 +295,7 @@ export const createPlatformAdminService = (
       organisationId: string;
       includedParts: number;
       warningPercent: number;
+      expectedUpdatedAt: Date | null;
       reason: string;
     }
   ) {

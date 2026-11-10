@@ -34,6 +34,32 @@ describe('user administration authorization seam', () => {
     expect(authorizer).toHaveBeenCalledWith(session, 'organisation-1');
   });
 
+  it('uses a separate read authorizer so suspended administrators can inspect users', async () => {
+    const authorizer = vi.fn(() => {
+      throw new Error('MUTATION_CHECKED');
+    });
+    const reader = vi.fn(() => {
+      throw new Error('READ_CHECKED');
+    });
+    const service = createUserAdministration({
+      database: {} as never,
+      cognito: {
+        createUser: vi.fn(),
+        resendInvitation: vi.fn(),
+        disableUser: vi.fn()
+      },
+      clock: { now: () => new Date('2026-11-11T00:00:00.000Z') },
+      authorizer,
+      reader
+    });
+
+    await expect(
+      service.listMembers(session, { organisationId: 'organisation-1' })
+    ).rejects.toThrow('READ_CHECKED');
+    expect(reader).toHaveBeenCalledWith(session, 'organisation-1');
+    expect(authorizer).not.toHaveBeenCalled();
+  });
+
   it('keeps tenant membership authorization as the default', async () => {
     const service = createUserAdministration({
       database: {} as never,

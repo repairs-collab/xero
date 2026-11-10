@@ -1,5 +1,6 @@
 import { revalidatePath } from 'next/cache';
 import { headers } from 'next/headers';
+import { redirect } from 'next/navigation';
 
 import type { AppSession } from '@bc5000/auth';
 
@@ -120,19 +121,41 @@ const actions = createOrganisationAdminActions({
   revalidate: revalidatePath
 });
 
+const redirectResult = (
+  organisationId: string,
+  result: PlatformActionState
+): never =>
+  redirect(
+    `/platform-admin/organisations/${encodeURIComponent(organisationId)}?result=${result.code}`
+  );
+
+const run = async (
+  formData: FormData,
+  action: (data: FormData) => Promise<PlatformActionState>
+): Promise<never> => {
+  const organisationId = requiredText(formData, 'organisationId');
+  let result: PlatformActionState;
+  try {
+    result = await action(formData);
+  } catch {
+    result = { ok: false, code: 'VALIDATION' };
+  }
+  return redirectResult(organisationId, result);
+};
+
 export async function extendTrialAction(formData: FormData) {
   'use server';
-  return actions.extendTrialAction(formData);
+  return run(formData, (data) => actions.extendTrialAction(data));
 }
 export async function endTrialAction(formData: FormData) {
   'use server';
-  return actions.endTrialAction(formData);
+  return run(formData, (data) => actions.endTrialAction(data));
 }
 export async function suspendOrganisationAction(formData: FormData) {
   'use server';
-  return actions.suspendOrganisationAction(formData);
+  return run(formData, (data) => actions.suspendOrganisationAction(data));
 }
 export async function reactivateOrganisationAction(formData: FormData) {
   'use server';
-  return actions.reactivateOrganisationAction(formData);
+  return run(formData, (data) => actions.reactivateOrganisationAction(data));
 }

@@ -1,7 +1,10 @@
 import { AuthorizationFailure, type AppSession, type Role } from '@bc5000/auth';
 import { platformAdminAuditEvents, type Database } from '@bc5000/db/web';
 
-import { createUserAdministration } from '../app/(protected)/settings/users/user-administration.js';
+import {
+  createUserAdministration,
+  type UserAdministrationAtomicAudit
+} from '../app/(protected)/settings/users/user-administration.js';
 import { createAwsCognitoUserAdministration } from './cognito-admin.js';
 import { isPlatformOwner } from './platform-authorization.js';
 import { getDatabaseClient } from './runtime.js';
@@ -31,26 +34,25 @@ export const createPlatformUserAdministration = (
       throw new AuthorizationFailure();
     }
   };
-  const audit = async (input: {
+  const atomicAudit = (input: {
     session: AppSession;
     organisationId: string;
     eventType: string;
-    entityType: string;
-    entityId: string;
     reason: string;
-    afterValue?: Record<string, unknown>;
-  }) => {
-    await dependencies.database.insert(platformAdminAuditEvents).values({
-      actorUserId: input.session.userId,
-      targetOrganisationId: input.organisationId,
-      eventType: input.eventType,
-      entityType: input.entityType,
-      entityId: input.entityId,
-      reason: reasonText(input.reason),
-      afterValue: input.afterValue ?? null,
-      occurredAt: dependencies.clock.now()
-    });
-  };
+  }): UserAdministrationAtomicAudit =>
+    async (transaction, mutation) => {
+      await transaction.insert(platformAdminAuditEvents).values({
+        actorUserId: input.session.userId,
+        targetOrganisationId: input.organisationId,
+        eventType: input.eventType,
+        entityType: mutation.entityType,
+        entityId: mutation.entityId,
+        reason: reasonText(input.reason),
+        beforeValue: mutation.beforeValue,
+        afterValue: mutation.afterValue,
+        occurredAt: dependencies.clock.now()
+      });
+    };
 
   return {
     async listMembers(
@@ -77,38 +79,39 @@ export const createPlatformUserAdministration = (
         organisationId: input.organisationId,
         email: input.email,
         displayName: input.displayName,
-        role: input.role
+        role: input.role,
+        atomicAudit: atomicAudit({
+          session,
+          organisationId: input.organisationId,
+          eventType: 'PLATFORM_USER_INVITED',
+          reason
+        })
       };
       const result = await dependencies.shared.inviteMember(session, sharedInput);
-      await audit({
-        session,
-        organisationId: input.organisationId,
-        eventType: 'PLATFORM_USER_INVITED',
-        entityType: 'USER',
-        entityId: result.userId,
-        reason,
-        afterValue: { role: input.role }
-      });
       return result;
     },
 
     async resendInvitation(
       session: AppSession,
-      input: { organisationId: string; invitationId: string; reason: string }
+      input: {
+        organisationId: string;
+        invitationId: string;
+        expectedVersion: number;
+        reason: string;
+      }
     ) {
       await assertOwner(session);
       const reason = reasonText(input.reason);
       await dependencies.shared.resendInvitation(session, {
         organisationId: input.organisationId,
-        invitationId: input.invitationId
-      });
-      await audit({
-        session,
-        organisationId: input.organisationId,
-        eventType: 'PLATFORM_USER_INVITATION_RESENT',
-        entityType: 'INVITATION',
-        entityId: input.invitationId,
-        reason
+        invitationId: input.invitationId,
+        expectedVersion: input.expectedVersion,
+        atomicAudit: atomicAudit({
+          session,
+          organisationId: input.organisationId,
+          eventType: 'PLATFORM_USER_INVITATION_RESENT',
+          reason
+        })
       });
     },
 
@@ -118,6 +121,7 @@ export const createPlatformUserAdministration = (
         organisationId: string;
         userId: string;
         role: Role;
+        expectedVersion: number;
         reason: string;
       }
     ) {
@@ -126,37 +130,38 @@ export const createPlatformUserAdministration = (
       await dependencies.shared.changeRole(session, {
         organisationId: input.organisationId,
         userId: input.userId,
-        role: input.role
-      });
-      await audit({
-        session,
-        organisationId: input.organisationId,
-        eventType: 'PLATFORM_USER_ROLE_CHANGED',
-        entityType: 'MEMBERSHIP',
-        entityId: input.userId,
-        reason,
-        afterValue: { role: input.role }
+        role: input.role,
+        expectedVersion: input.expectedVersion,
+        atomicAudit: atomicAudit({
+          session,
+          organisationId: input.organisationId,
+          eventType: 'PLATFORM_USER_ROLE_CHANGED',
+          reason
+        })
       });
     },
 
     async disableMember(
       session: AppSession,
-      input: { organisationId: string; userId: string; reason: string }
+      input: {
+        organisationId: string;
+        userId: string;
+        expectedVersion: number;
+        reason: string;
+      }
     ) {
       await assertOwner(session);
       const reason = reasonText(input.reason);
       await dependencies.shared.disableMember(session, {
         organisationId: input.organisationId,
-        userId: input.userId
-      });
-      await audit({
-        session,
-        organisationId: input.organisationId,
-        eventType: 'PLATFORM_USER_DISABLED',
-        entityType: 'MEMBERSHIP',
-        entityId: input.userId,
-        reason,
-        afterValue: { active: false }
+        userId: input.userId,
+        expectedVersion: input.expectedVersion,
+        atomicAudit: atomicAudit({
+          session,
+          organisationId: input.organisationId,
+          eventType: 'PLATFORM_USER_DISABLED',
+          reason
+        })
       });
     }
   };
@@ -171,15 +176,17 @@ let service: PlatformUserAdministration | undefined;
 const buildPlatformUserAdministration = (): PlatformUserAdministration => {
   if (service) return service;
   const database = getDatabaseClient().db;
+  const requireOwner = async (session: AppSession) => {
+    if (!(await isPlatformOwner(session.userId))) {
+      throw new AuthorizationFailure();
+    }
+  };
   const shared = createUserAdministration({
     database,
     cognito: createAwsCognitoUserAdministration(),
     clock: { now: () => new Date() },
-    authorizer: async (session) => {
-      if (!(await isPlatformOwner(session.userId))) {
-        throw new AuthorizationFailure();
-      }
-    }
+    authorizer: requireOwner,
+    reader: requireOwner
   });
   service = createPlatformUserAdministration({
     verifyOwner: isPlatformOwner,

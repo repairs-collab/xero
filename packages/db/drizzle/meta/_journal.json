@@ -141,6 +141,13 @@
       "when": 1794350596711,
       "tag": "0019_panoramic_talon",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1794354068333,
+      "tag": "0020_dry_firebrand",
+      "breakpoints": true
     }
   ]
 }

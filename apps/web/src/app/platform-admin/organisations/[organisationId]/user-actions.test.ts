@@ -19,6 +19,7 @@ describe('platform customer-user actions', () => {
     const form = new FormData();
     form.set('organisationId', 'organisation-1');
     form.set('userId', 'user-1');
+    form.set('expectedVersion', '3');
     form.set('reason', 'Customer confirmed departure');
     form.set('actorUserId', 'untrusted-user');
 
@@ -31,6 +32,7 @@ describe('platform customer-user actions', () => {
       {
         organisationId: 'organisation-1',
         userId: 'user-1',
+        expectedVersion: 3,
         reason: 'Customer confirmed departure'
       }
     );
