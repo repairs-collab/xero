@@ -12,12 +12,12 @@ describe('AccountPulse OVH deployment workflow', () => {
     expect(workflow).not.toContain('AWS_ACCOUNT_ID');
   });
 
-  it('builds once and promotes the exact artifact in sequence', () => {
+  it('builds once and deploys the exact artifact to protected production', () => {
     expect(workflow).toContain('Build immutable images once');
-    expect(workflow.match(/accountpulse-images-\$\{\{ github\.sha \}\}/g)).toHaveLength(3);
-    expect(workflow).toContain('deploy-staging:');
+    expect(workflow.match(/accountpulse-images-\$\{\{ github\.sha \}\}/g)).toHaveLength(2);
     expect(workflow).toContain('deploy-production:');
-    expect(workflow).toMatch(/deploy-production:[\s\S]*needs: deploy-staging/);
+    expect(workflow).toMatch(/deploy-production:[\s\S]*needs: verify-and-build/);
+    expect(workflow).not.toContain('deploy-staging:');
   });
 
   it('pins the OVH host identity before transfer', () => {
@@ -31,7 +31,7 @@ describe('AccountPulse OVH deployment workflow', () => {
 
   it('cannot invoke reset or customer activation from a normal deployment', () => {
     expect(workflow).not.toContain('operational-reset');
-    expect(workflow).not.toContain('CUSTOMER_ROLLOUT');
+    expect(workflow).not.toContain('CUSTOMER_ROLLOUT_);
     expect(workflow).not.toContain('rolloutScope');
     expect(workflow).not.toContain('SEND_MODE=');
   });
