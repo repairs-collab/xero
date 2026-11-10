@@ -69,6 +69,14 @@ describe('OVH release pipeline', () => {
       expect(workflow).toContain(`secrets.${name}`);
       expect(installer).toContain(name);
     }
+    for (const name of [
+      'ACCOUNT_PULSE_LEGAL_ENTITY',
+      'ACCOUNT_PULSE_SUPPORT_EMAIL',
+      'SMS_NUMBER_QUARANTINE_DAYS'
+    ]) {
+      expect(workflow).toContain(`vars.${name}`);
+      expect(installer).toContain(name);
+    }
     expect(workflow).toContain('install-protected-environment.sh');
     expect(workflow).toContain('Install protected production environment');
     expect(installer).toContain('docker inspect');

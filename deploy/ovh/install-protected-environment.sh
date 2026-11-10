@@ -131,6 +131,9 @@ if [[ -f "$PROTECTED_ENV" ]]; then
 fi
 
 declare -A commercial_names=(
+  [ACCOUNT_PULSE_LEGAL_ENTITY]=true
+  [ACCOUNT_PULSE_SUPPORT_EMAIL]=true
+  [SMS_NUMBER_QUARANTINE_DAYS]=true
   [XERO_OAUTH_CLIENT_ID]=true
   [XERO_OAUTH_CLIENT_SECRET]=true
   [STRIPE_SECRET_KEY]=true
