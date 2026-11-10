@@ -31,7 +31,7 @@ describe('AccountPulse OVH deployment workflow', () => {
 
   it('cannot invoke reset or customer activation from a normal deployment', () => {
     expect(workflow).not.toContain('operational-reset');
-    expect(workflow).not.toContain('CUSTOMER_ROLLOUT_);
+    expect(workflow).not.toContain('CUSTOMER_ROLLOUT');
     expect(workflow).not.toContain('rolloutScope');
     expect(workflow).not.toContain('SEND_MODE=');
   });
