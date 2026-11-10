@@ -8,7 +8,7 @@ const repositoryFile = (path: string): string => {
 };
 
 describe('OVH release pipeline', () => {
-  it('builds once and promotes immutable artifacts through protected OVH environments', () => {
+  it('builds once and deploys immutable artifacts through protected OVH production', () => {
     const workflow = repositoryFile('.github/workflows/deploy.yml');
 
     expect(workflow).not.toMatch(/configure-aws-credentials|amazon-ecr-login/i);
@@ -16,15 +16,15 @@ describe('OVH release pipeline', () => {
     expect(workflow).toContain('IMAGE_TAG: ${{ github.sha }}');
     expect(workflow).toContain('accountpulse-web:${IMAGE_TAG}');
     expect(workflow).toContain('accountpulse-worker:${IMAGE_TAG}');
-    expect(workflow.match(/environment: staging/g)).toHaveLength(1);
+    expect(workflow.match(/environment: staging/g)).toBeNull();
     expect(workflow.match(/environment: production/g)).toHaveLength(1);
-    expect(workflow.match(/accountpulse-images-\$\{\{ github\.sha \}\}/g)).toHaveLength(3);
+    expect(workflow.match(/accountpulse-images-\$\{\{ github\.sha \}\}/g)).toHaveLength(2);
     expect(workflow).toContain('Install pinned OVH host key');
     expect(workflow.indexOf('Install pinned OVH host key')).toBeLessThan(
       workflow.indexOf('Transfer immutable release bundle')
     );
-    expect(workflow.match(/Run migration and health-checked release/g)).toHaveLength(2);
-    expect(workflow.match(/Record rollback metadata/g)).toHaveLength(2);
+    expect(workflow.match(/Run migration and health-checked release/g)).toHaveLength(1);
+    expect(workflow.match(/Record rollback metadata/g)).toHaveLength(1);
   });
 
   it('uses only the scoped OVH release connection contract', () => {
