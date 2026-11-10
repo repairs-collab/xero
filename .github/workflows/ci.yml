@@ -37,7 +37,9 @@ jobs:
       - run: pnpm --filter @bc5000/infra cdk synth --quiet
 
   browser-journeys:
-    runs-on: ubuntu-latest
+    # Playwright 1.55 does not support the Ubuntu 26 image currently behind
+    # ubuntu-latest. Pin the supported runner until Playwright is upgraded.
+    runs-on: ubuntu-24.04
     needs: verify
     services:
       postgres:
