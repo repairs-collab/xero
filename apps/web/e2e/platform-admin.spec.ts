@@ -72,9 +72,12 @@ test('registers, assigns and verifies a Sinch number', async ({ page }) => {
 
   const number = page.locator('article').filter({ hasText: '+61400000999' });
   await expect(number).toBeVisible();
-  await number.getByLabel('Customer for +61400000999').selectOption(launchScenario.organisationId);
-  await number.getByPlaceholder('Reason').fill('Assign beta customer');
-  await number.getByRole('button', { name: 'Assign customer' }).click();
+  const assignment = number.locator('form').filter({
+    has: page.getByRole('button', { name: 'Assign customer' })
+  });
+  await assignment.getByLabel('Customer for +61400000999').selectOption(launchScenario.organisationId);
+  await assignment.getByPlaceholder('Reason', { exact: true }).fill('Assign beta customer');
+  await assignment.getByRole('button', { name: 'Assign customer' }).click();
 
   const reserved = page.locator('article').filter({ hasText: '+61400000999' });
   await expect(reserved.getByPlaceholder('Verified Sinch provider ID')).toBeVisible();
