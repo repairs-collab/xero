@@ -1,4 +1,7 @@
+import { legalIdentity } from '../../server/legal-content.js';
+
 export default function AccountRecoveryPage() {
+  const support = legalIdentity();
   return (
     <main
       id="main-content"
@@ -21,7 +24,7 @@ export default function AccountRecoveryPage() {
           <a className="button button--primary" href="/auth/login">
             Sign in again
           </a>
-          <a className="button" href="mailto:repairs@motts.com.au">
+          <a className="button" href={`mailto:${support.supportEmail}`}>
             Contact support
           </a>
         </div>

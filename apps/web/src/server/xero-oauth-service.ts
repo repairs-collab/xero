@@ -350,9 +350,9 @@ export const createXeroOAuthService = (
       tokens.refreshToken
     );
     let candidates = tenantCandidates(connections);
-    if (transaction.flowPurpose === 'NEW_SOLO') {
+    if (dependencies.organisationForTenant !== undefined) {
       if (
-        dependencies.organisationForTenant === undefined ||
+        transaction.flowPurpose === 'NEW_SOLO' &&
         dependencies.provisionSolo === undefined
       ) {
         throw new Error('XERO_SOLO_PROVISIONING_NOT_CONFIGURED');
@@ -375,6 +375,8 @@ export const createXeroOAuthService = (
           };
         })
       );
+    } else if (transaction.flowPurpose === 'NEW_SOLO') {
+      throw new Error('XERO_SOLO_PROVISIONING_NOT_CONFIGURED');
     }
     const pendingAuthorisationId =
       await dependencies.repository.createPendingAuthorisation({

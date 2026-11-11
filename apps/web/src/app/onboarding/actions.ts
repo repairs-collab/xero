@@ -7,7 +7,7 @@ import { redirect } from 'next/navigation';
 import {
   getMobileVerificationService,
   getOnboardingService,
-  requireWebSession
+  requireWebAcceptedSession
 } from '../../server/runtime.js';
 
 const organisationIdFrom = (formData: FormData): string => {
@@ -19,7 +19,7 @@ const organisationIdFrom = (formData: FormData): string => {
 };
 
 const sessionForAction = async () =>
-  requireWebSession(
+  requireWebAcceptedSession(
     new Request('http://localhost/', { headers: await headers() })
   );
 

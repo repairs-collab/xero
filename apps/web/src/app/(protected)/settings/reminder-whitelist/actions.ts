@@ -8,7 +8,7 @@ import type { ReminderWhitelistScope } from '@bc5000/db/web';
 import { getJobQueue } from '../../../../server/job-runtime.js';
 import {
   getDatabaseClient,
-  requireWebSession
+  requireWebAcceptedSession
 } from '../../../../server/runtime.js';
 import { createReminderWhitelistService } from '../../../../server/reminder-whitelist-service.js';
 
@@ -34,7 +34,7 @@ const requireConfirmation = (formData: FormData): void => {
 };
 
 const getService = async () => ({
-  session: await requireWebSession(
+  session: await requireWebAcceptedSession(
     new Request('http://localhost/', { headers: await headers() })
   ),
   whitelist: createReminderWhitelistService({

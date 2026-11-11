@@ -9,6 +9,7 @@ import {
 } from 'drizzle-orm';
 
 import type { Database, DbTransaction } from '../connection.js';
+import { organisations } from '../schema/organisation.js';
 import {
   xeroConnections,
   xeroOAuthTransactions,
@@ -207,6 +208,24 @@ export class PostgresXeroConnectionRepository {
           value.tenantId === input.tenantId
       );
       if (candidate === undefined) throw new Error('XERO_TENANT_NOT_AUTHORISED');
+
+      if (
+        candidate.xeroOrganisationId !== undefined &&
+        candidate.organisationName !== undefined &&
+        candidate.baseCurrency !== undefined &&
+        candidate.timeZone !== undefined
+      ) {
+        await transaction
+          .update(organisations)
+          .set({
+            xeroOrganisationId: candidate.xeroOrganisationId,
+            name: candidate.organisationName,
+            baseCurrency: candidate.baseCurrency.toUpperCase(),
+            timeZone: candidate.timeZone,
+            updatedAt: input.now
+          })
+          .where(eq(organisations.id, input.organisationId));
+      }
 
       const [existingOwner] = await transaction
         .select()

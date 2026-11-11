@@ -6,7 +6,7 @@ import { redirect } from 'next/navigation';
 
 import type { ReminderStageChannel } from '@bc5000/domain';
 
-import { getDatabaseClient, requireWebSession } from '../../../server/runtime.js';
+import { getDatabaseClient, requireWebAcceptedSession } from '../../../server/runtime.js';
 import {
   createSequenceService,
   type SequenceDraft,
@@ -14,7 +14,7 @@ import {
 } from './sequence-service.js';
 
 async function context() {
-  const session = await requireWebSession(
+  const session = await requireWebAcceptedSession(
     new Request('http://localhost/', { headers: await headers() })
   );
   return {

@@ -3,6 +3,7 @@ import {
   ArrowRightIcon,
   BanknotesIcon,
   CheckCircleIcon,
+  ChatBubbleLeftRightIcon,
   ClockIcon,
   ExclamationTriangleIcon,
   PauseIcon
@@ -21,6 +22,8 @@ export interface DashboardModel {
   lastXeroSync: string;
   xeroHealthy: boolean;
   sinchHealthy: boolean;
+  supportEmail: string;
+  supportChatUrl: string | null;
 }
 
 const StatusDot = ({ healthy }: { healthy: boolean }) => (
@@ -106,6 +109,36 @@ export function DashboardView({ model }: { model: DashboardModel }) {
             <div>
               <h2>{model.xeroHealthy ? 'Xero connected' : 'Xero needs attention'}</h2>
               <p>{model.xeroHealthy ? 'Invoices, payments and customers are in sync.' : 'Open settings to restore invoice and payment updates.'}</p>
+            </div>
+          </article>
+          <article className="panel support-panel">
+            <ChatBubbleLeftRightIcon aria-hidden="true" />
+            <div>
+              <span className="eyebrow">Support</span>
+              <h2>Need help with AccountPulse?</h2>
+              <p>
+                Sophie is our AI support assistant. You can always contact a
+                person by email.
+              </p>
+              <div className="button-row">
+                {model.supportChatUrl === null ? (
+                  <span className="button" aria-disabled="true">
+                    Sophie chat coming soon
+                  </span>
+                ) : (
+                  <a
+                    className="button button--primary"
+                    href={model.supportChatUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Chat with Sophie
+                  </a>
+                )}
+                <a className="button" href={`mailto:${model.supportEmail}`}>
+                  Email support
+                </a>
+              </div>
             </div>
           </article>
         </aside>

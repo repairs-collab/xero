@@ -13,6 +13,10 @@ import {
   getSessionSecret
 } from '../../../server/runtime.js';
 import {
+  hasCurrentLegalAcceptance,
+  safeLocalReturnTo
+} from '../../../server/legal-acceptance.js';
+import {
   ensureSelfServiceIdentity,
   SelfServiceIdentityConflict
 } from '../../../server/self-service-identity.js';
@@ -31,8 +35,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     { code, returnedState, transaction },
     configuration
   );
+  const database = getDatabaseClient().db;
+  let applicationIdentity: Awaited<ReturnType<typeof ensureSelfServiceIdentity>>;
   try {
-    await ensureSelfServiceIdentity(getDatabaseClient().db, identity);
+    applicationIdentity = await ensureSelfServiceIdentity(database, identity);
   } catch (error) {
     if (!(error instanceof SelfServiceIdentityConflict)) throw error;
     const recovery = new URL('/account-recovery', configuration.redirectUri);
@@ -41,13 +47,16 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     response.headers.append('Set-Cookie', clearCognitoTransactionCookie());
     return response;
   }
-  await acceptPendingInvitations(
-    getDatabaseClient().db,
-    identity.subject,
-    new Date()
-  );
+  await acceptPendingInvitations(database, identity.subject, new Date());
+  const requestedReturnTo = safeLocalReturnTo(transaction.returnTo, '/');
+  const returnTo = await hasCurrentLegalAcceptance(
+    database,
+    applicationIdentity.userId
+  )
+    ? requestedReturnTo
+    : `/account/accept-terms?returnTo=${encodeURIComponent(requestedReturnTo)}`;
   const response = NextResponse.redirect(
-    new URL(transaction.returnTo ?? '/', configuration.redirectUri),
+    new URL(returnTo, configuration.redirectUri),
     303
   );
   response.headers.append(

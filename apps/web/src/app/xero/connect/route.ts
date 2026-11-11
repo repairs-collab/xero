@@ -2,14 +2,14 @@ import { type NextRequest, NextResponse } from 'next/server';
 
 import {
   getXeroOAuthService,
-  requireWebIdentitySession,
-  requireWebSession
+  requireWebAcceptedIdentitySession,
+  requireWebAcceptedSession
 } from '../../../server/runtime.js';
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   if (request.nextUrl.searchParams.get('purpose') === 'solo') {
     try {
-      const session = await requireWebIdentitySession(request);
+      const session = await requireWebAcceptedIdentitySession(request);
       const result = await getXeroOAuthService().startSoloConnection(session);
       return NextResponse.redirect(result.authorizationUrl, 303);
     } catch {
@@ -23,7 +23,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return new NextResponse('Organisation is required', { status: 400 });
   }
   try {
-    const session = await requireWebSession(request);
+    const session = await requireWebAcceptedSession(request);
     const result = await getXeroOAuthService().startConnection(session, {
       organisationId,
       returnPath:

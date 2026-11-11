@@ -6,7 +6,7 @@ import { redirect } from 'next/navigation';
 
 import {
   getDatabaseClient,
-  requireWebSession
+  requireWebAcceptedSession
 } from '../../../../server/runtime.js';
 import {
   createSendingSettings,
@@ -106,7 +106,7 @@ const rolloutActionStatusForError = (error: unknown): string => {
 };
 
 async function context() {
-  const session = await requireWebSession(
+  const session = await requireWebAcceptedSession(
     new Request('http://localhost/', { headers: await headers() })
   );
   return {

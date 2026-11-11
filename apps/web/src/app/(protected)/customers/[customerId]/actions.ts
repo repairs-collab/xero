@@ -5,11 +5,11 @@ import { revalidatePath } from 'next/cache';
 
 import { createCustomerOperations } from './customer-operations.js';
 import { getJobQueue } from '../../../../server/job-runtime.js';
-import { getDatabaseClient, requireWebSession } from '../../../../server/runtime.js';
+import { getDatabaseClient, requireWebAcceptedSession } from '../../../../server/runtime.js';
 
 const requiredText = (formData: FormData, name: string): string => { const value = formData.get(name); if (typeof value !== 'string' || value.trim() === '') throw new Error(`${name} is required`); return value; };
 const optionalText = (formData: FormData, name: string): string | undefined => { const value = formData.get(name); return typeof value === 'string' && value.trim() !== '' ? value : undefined; };
-async function context() { const session = await requireWebSession(new Request('http://localhost/', { headers: await headers() })); return { session, operations: createCustomerOperations({ database: getDatabaseClient().db, publisher: await getJobQueue(), clock: { now: () => new Date() } }) }; }
+async function context() { const session = await requireWebAcceptedSession(new Request('http://localhost/', { headers: await headers() })); return { session, operations: createCustomerOperations({ database: getDatabaseClient().db, publisher: await getJobQueue(), clock: { now: () => new Date() } }) }; }
 const identifiers = (formData: FormData) => ({ organisationId: requiredText(formData, 'organisationId'), customerId: requiredText(formData, 'customerId') });
 const refresh = (customerId: string) => revalidatePath(`/customers/${customerId}`);
 

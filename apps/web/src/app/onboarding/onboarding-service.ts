@@ -80,6 +80,10 @@ export const createPostgresOnboardingRepository = (
   } = {}
 ): OnboardingRepository => ({
   load: async (organisationId) => {
+    await database
+      .insert(organisationOnboarding)
+      .values({ organisationId, version: 1 })
+      .onConflictDoNothing();
     const [base] = await database
       .select({
         operationalState: organisations.operationalState,

@@ -9,7 +9,7 @@ import type { Role } from '@bc5000/auth';
 import { createAwsCognitoUserAdministration } from '../../../../server/cognito-admin.js';
 import {
   getDatabaseClient,
-  requireWebSession
+  requireWebAcceptedSession
 } from '../../../../server/runtime.js';
 import { createUserAdministration } from './user-administration.js';
 
@@ -21,7 +21,7 @@ const service = () =>
   });
 
 const session = async () =>
-  requireWebSession(
+  requireWebAcceptedSession(
     new Request('http://localhost/', { headers: await headers() })
   );
 
@@ -56,6 +56,9 @@ const errorMessage = (error: unknown): string => {
   }
   if (message === 'LAST_ADMIN_REQUIRED') {
     return 'At least one active administrator must remain.';
+  }
+  if (message === 'SOLO_USER_LIMIT') {
+    return 'AccountPulse Solo includes one user. Enterprise multi-user access is not enabled for this account.';
   }
   if (message === 'CONFLICT') {
     return 'This user changed since the page loaded. Refresh the page and try again.';

@@ -13,6 +13,7 @@ import {
 import { AppShell } from '../../components/app-shell.js';
 import { AccountSuspendedBanner } from '../../components/account-suspended-banner.js';
 import { isPlatformOwner } from '../../server/platform-authorization.js';
+import { hasCurrentLegalAcceptance } from '../../server/legal-acceptance.js';
 
 export default async function ProtectedLayout({
   children
@@ -23,6 +24,14 @@ export default async function ProtectedLayout({
     const session = await requireWebSession(
       new Request('http://localhost/', { headers: await headers() })
     );
+    if (
+      !(await hasCurrentLegalAcceptance(
+        getDatabaseClient().db,
+        session.userId
+      ))
+    ) {
+      redirect('/account/accept-terms?returnTo=%2F');
+    }
     const membership = session.memberships[0];
     if (membership === undefined) redirect('/auth/login');
     const [workspace] = await getDatabaseClient()

@@ -92,6 +92,16 @@ test('shows evidence-backed onboarding after the self-service workspace is creat
 
     await page.goto('/');
     await expect(
+      page.getByRole('heading', {
+        name: 'Review and accept the AccountPulse terms'
+      })
+    ).toBeVisible();
+    await page.getByRole('checkbox').nth(0).check();
+    await page.getByRole('checkbox').nth(1).check();
+    await page.getByRole('checkbox').nth(2).check();
+    await page.getByRole('button', { name: 'Accept and continue' }).click();
+
+    await expect(
       page.getByRole('link', { name: 'Finish setup' })
     ).toBeVisible();
     await page.getByRole('link', { name: 'Finish setup' }).click();

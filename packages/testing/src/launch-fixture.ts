@@ -24,6 +24,7 @@ import {
   stageInstances,
   suppressions,
   tasks,
+  userLegalAcceptances,
   users
 } from '@bc5000/db';
 
@@ -65,6 +66,22 @@ export async function seedLaunchScenario(
         cognitoSubject: scenario.operatorSubject,
         email: 'operator@billchaser.test',
         displayName: 'Olivia Operator'
+      }
+    ]);
+    await client.db.insert(userLegalAcceptances).values([
+      {
+        userId: scenario.adminUserId,
+        termsVersion: '2026-11-11',
+        privacyVersion: '2026-11-11',
+        acceptableUseVersion: '2026-11-11',
+        acceptedAt: now
+      },
+      {
+        userId: scenario.operatorUserId,
+        termsVersion: '2026-11-11',
+        privacyVersion: '2026-11-11',
+        acceptableUseVersion: '2026-11-11',
+        acceptedAt: now
       }
     ]);
     await client.db.insert(memberships).values([

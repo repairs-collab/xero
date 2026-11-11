@@ -1,6 +1,8 @@
 import { headers } from 'next/headers';
 
 import { createAwsCognitoUserAdministration } from '../../../../server/cognito-admin.js';
+import { eq } from 'drizzle-orm';
+import { organisations } from '@bc5000/db/web';
 import {
   getDatabaseClient,
   requireWebSession
@@ -49,6 +51,11 @@ export default async function UsersPage({
     cognito: createAwsCognitoUserAdministration(),
     clock: { now: () => new Date() }
   }).listMembers(session, { organisationId });
+  const [organisation] = await getDatabaseClient().db
+    .select({ edition: organisations.edition })
+    .from(organisations)
+    .where(eq(organisations.id, organisationId))
+    .limit(1);
   const parameters = await searchParams;
   const error = firstValue(parameters.error);
   const success = firstValue(parameters.success);
@@ -65,6 +72,7 @@ export default async function UsersPage({
       organisationId={organisationId}
       currentUserId={session.userId}
       readOnly={membership.organisationStatus === 'SUSPENDED'}
+      soloUserLimit={organisation?.edition === 'SOLO'}
       members={members}
       {...(feedback === undefined ? {} : { feedback })}
       inviteAction={inviteMemberAction}

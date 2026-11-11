@@ -12,7 +12,7 @@ import { getJobQueue } from '../../../../server/job-runtime.js';
 import {
   getDatabaseClient,
   getXeroOAuthService,
-  requireWebSession
+  requireWebAcceptedSession
 } from '../../../../server/runtime.js';
 import { createIntegrationSettings } from './integration-settings.js';
 
@@ -33,7 +33,7 @@ const provider = (formData: FormData) => {
 };
 
 async function context() {
-  const session = await requireWebSession(
+  const session = await requireWebAcceptedSession(
     new Request('http://localhost/', { headers: await headers() })
   );
   const database = getDatabaseClient().db;

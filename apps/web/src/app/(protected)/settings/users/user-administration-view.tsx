@@ -18,6 +18,7 @@ export function UserAdministrationView({
   currentUserId,
   members,
   readOnly = false,
+  soloUserLimit = false,
   feedback,
   inviteAction,
   resendAction,
@@ -28,6 +29,7 @@ export function UserAdministrationView({
   currentUserId: string;
   members: UserAdministrationMember[];
   readOnly?: boolean;
+  soloUserLimit?: boolean;
   feedback?: UserAdministrationFeedback;
   inviteAction: UserAction;
   resendAction: UserAction;
@@ -51,7 +53,12 @@ export function UserAdministrationView({
         </div>
       )}
 
-      {readOnly ? (
+      {soloUserLimit ? (
+        <div className="user-feedback user-feedback--success" role="status">
+          AccountPulse Solo includes one Administrator. Multi-user access will
+          be available with the Enterprise edition.
+        </div>
+      ) : readOnly ? (
         <div className="user-feedback user-feedback--error" role="status">
           User management is paused while this account is suspended. Existing
           access remains visible below.

@@ -1,10 +1,13 @@
 import { headers } from 'next/headers';
 import Link from 'next/link';
+import { redirect } from 'next/navigation';
 
 import {
   getOnboardingService,
-  requireWebIdentitySession
+  requireWebAcceptedIdentitySession
 } from '../../server/runtime.js';
+import { legalIdentity } from '../../server/legal-content.js';
+import { LegalAcceptanceRequired } from '../../server/legal-acceptance.js';
 import {
   confirmBusinessDetails,
   confirmSequenceReview,
@@ -17,9 +20,18 @@ export default async function SelfServiceOnboardingPage({
 }: {
   searchParams: Promise<{ sync?: string; mobile?: string }>;
 }) {
-  const session = await requireWebIdentitySession(
-    new Request('http://localhost/', { headers: await headers() })
-  );
+  const support = legalIdentity();
+  let session;
+  try {
+    session = await requireWebAcceptedIdentitySession(
+      new Request('http://localhost/', { headers: await headers() })
+    );
+  } catch (error) {
+    if (error instanceof LegalAcceptanceRequired) {
+      redirect('/account/accept-terms?returnTo=%2Fonboarding');
+    }
+    throw error;
+  }
   const parameters = await searchParams;
   const activeMembership = session.memberships.find((value) => value.active);
 
@@ -28,16 +40,39 @@ export default async function SelfServiceOnboardingPage({
       session,
       activeMembership.organisationId
     );
+    const xeroConnected = status.steps.some(
+      (step) => step.key === 'XERO_CONNECTED' && step.complete
+    );
     return (
       <main className="content page-stack onboarding-page">
         <section className="panel">
-          <span className="eyebrow">Workspace ready</span>
-          <h1>Your Xero organisation is connected</h1>
+          <span className="eyebrow">Customer onboarding</span>
+          <h1>
+            {xeroConnected
+              ? 'Your Xero organisation is connected'
+              : 'Complete your AccountPulse setup'}
+          </h1>
           <p>
-            AccountPulse created the Solo workspace in safe review mode. No
-            customer reminders are sent during this setup step.
+            Your Solo workspace is in safe review mode. No customer reminders
+            are sent during setup.
           </p>
-          {parameters.sync === 'retry' ? (
+          {!xeroConnected ? (
+            <div className="callout callout--warning">
+              <strong>Connect Xero to begin</strong>
+              <p>
+                Choose the Xero organisation this AccountPulse workspace will
+                manage. You must be authorised to connect it.
+              </p>
+              <Link
+                className="button button--primary"
+                href={`/xero/connect?organisationId=${encodeURIComponent(
+                  activeMembership.organisationId
+                )}&returnTo=%2Fonboarding`}
+              >
+                Connect Xero
+              </Link>
+            </div>
+          ) : parameters.sync === 'retry' ? (
             <div className="callout callout--warning">
               <strong>The first sync needs another attempt</strong>
               <p>
@@ -45,12 +80,12 @@ export default async function SelfServiceOnboardingPage({
                 to retry the initial sync.
               </p>
             </div>
-          ) : (
+          ) : xeroConnected ? (
             <div className="callout">
               <strong>Initial sync queued</strong>
               <p>AccountPulse will reconcile the Xero totals before sending.</p>
             </div>
-          )}
+          ) : null}
           {status.trial.readOnly && (
             <div className="callout callout--warning" role="status">
               <strong>Your trial is read-only</strong>
@@ -193,7 +228,7 @@ export default async function SelfServiceOnboardingPage({
           <p className="muted-copy">
             AccountPulse Solo supports one Xero organisation. To register
             interest in multiple organisations, contact
-            repairs@motts.com.au for the Enterprise waitlist.
+            {support.supportEmail} for the Enterprise waitlist.
           </p>
         </section>
       </main>
