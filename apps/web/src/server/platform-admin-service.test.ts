@@ -22,6 +22,7 @@ describe('platform administration read service', () => {
         suspendOrganisation: vi.fn(),
         reactivateOrganisation: vi.fn(),
         registerSmsNumber: vi.fn(),
+        verifySmsNumberForPool: vi.fn(),
         assignSmsNumber: vi.fn(),
         markSmsNumberReady: vi.fn(),
         quarantineSmsNumber: vi.fn(),
@@ -61,6 +62,7 @@ describe('platform administration read service', () => {
         suspendOrganisation: vi.fn(),
         reactivateOrganisation: vi.fn(),
         registerSmsNumber: vi.fn(),
+        verifySmsNumberForPool: vi.fn(),
         assignSmsNumber: vi.fn(),
         markSmsNumberReady: vi.fn(),
         quarantineSmsNumber: vi.fn(),
@@ -86,6 +88,7 @@ describe('platform administration read service', () => {
       suspendOrganisation: vi.fn(),
       reactivateOrganisation: vi.fn(),
       registerSmsNumber: vi.fn(),
+      verifySmsNumberForPool: vi.fn(),
       assignSmsNumber: vi.fn(),
       markSmsNumberReady: vi.fn(),
       quarantineSmsNumber: vi.fn(),
@@ -141,6 +144,7 @@ describe('platform administration read service', () => {
         suspendOrganisation: vi.fn(),
         reactivateOrganisation: vi.fn(),
         registerSmsNumber: vi.fn(),
+        verifySmsNumberForPool: vi.fn(),
         assignSmsNumber: vi.fn(),
         markSmsNumberReady: vi.fn(),
         quarantineSmsNumber: vi.fn(),
@@ -196,6 +200,44 @@ describe('platform administration read service', () => {
       expectedUpdatedAt: new Date('2026-11-10T00:00:00.000Z'),
       reason: 'Plan change',
       now: new Date('2026-11-11T00:00:00.000Z')
+    });
+  });
+
+  it('requires explicit owner confirmation before verifying a number for automatic allocation', async () => {
+    const verifySmsNumberForPool = vi
+      .fn()
+      .mockResolvedValue({ ok: true, value: {} });
+    const service = createPlatformAdminService({
+      verifyOwner: () => Promise.resolve(true),
+      repository: { verifySmsNumberForPool } as never,
+      clock: { now: () => new Date('2026-11-11T01:00:00.000Z') }
+    });
+    const input = {
+      numberId: 'number-1',
+      expectedUpdatedAt: new Date('2026-11-10T00:00:00.000Z'),
+      providerNumberId: ' sinch-number-1 ',
+      reason: ' Ownership and message tests passed ',
+      verificationConfirmed: false
+    };
+
+    await expect(
+      service.verifySmsNumberForPool('owner-user', input)
+    ).resolves.toEqual({ ok: false, code: 'VALIDATION' });
+    expect(verifySmsNumberForPool).not.toHaveBeenCalled();
+
+    await expect(
+      service.verifySmsNumberForPool('owner-user', {
+        ...input,
+        verificationConfirmed: true
+      })
+    ).resolves.toEqual({ ok: true, value: {} });
+    expect(verifySmsNumberForPool).toHaveBeenCalledWith({
+      actorUserId: 'owner-user',
+      numberId: 'number-1',
+      expectedUpdatedAt: new Date('2026-11-10T00:00:00.000Z'),
+      providerNumberId: 'sinch-number-1',
+      reason: 'Ownership and message tests passed',
+      now: new Date('2026-11-11T01:00:00.000Z')
     });
   });
 });

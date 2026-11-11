@@ -23,7 +23,7 @@ const client = createDatabase(
   process.env.DATABASE_URL ??
     'postgres://bc5000:bc5000@localhost:5432/bc5000'
 );
-const now = new Date('2026-11-09T02:00:00.000Z');
+const now = new Date('2026-11-11T02:00:00.000Z');
 
 beforeAll(async () => migrateDatabase(client.db));
 afterAll(async () => client.pool.end());
@@ -83,7 +83,7 @@ async function seed() {
     userId,
     cognitoSubject: randomUUID(),
     displayName: 'OAuth Admin',
-    expiresAt: '2026-11-10T00:00:00.000Z',
+    expiresAt: '2026-11-12T00:00:00.000Z',
     memberships: [
       { organisationId, role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }
     ]

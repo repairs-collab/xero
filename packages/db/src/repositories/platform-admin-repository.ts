@@ -130,6 +130,7 @@ export interface PlatformNumberSummary {
   e164Number: string;
   provider: string;
   providerNumberId: string | null;
+  providerVerifiedAt: Date | null;
   status: SmsNumberStatus;
   organisationId: string | null;
   organisationName: string | null;
@@ -240,6 +241,9 @@ export interface PlatformAdminRepository extends PlatformAdminReadRepository {
     reason: string;
     now: Date;
   }): Promise<PlatformMutationResult<PlatformNumberSummary>>;
+  verifySmsNumberForPool(
+    input: PlatformNumberMutationInput & { providerNumberId: string }
+  ): Promise<PlatformMutationResult<PlatformNumberSummary>>;
   assignSmsNumber(
     input: PlatformNumberMutationInput & {
       organisationId: string;
@@ -908,6 +912,82 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
     return this.numberResult(numberId!);
   }
 
+  async verifySmsNumberForPool(
+    input: PlatformNumberMutationInput & { providerNumberId: string }
+  ): Promise<PlatformMutationResult<PlatformNumberSummary>> {
+    const reason = this.validReason(input.reason);
+    const providerNumberId = input.providerNumberId.trim();
+    if (!reason || providerNumberId.length === 0 || providerNumberId.length > 128) {
+      return { ok: false, code: 'VALIDATION' };
+    }
+    try {
+      const result = await this.database.transaction(async (transaction) => {
+        const [number] = await transaction
+          .select()
+          .from(smsNumberPool)
+          .where(eq(smsNumberPool.id, input.numberId))
+          .for('update')
+          .limit(1);
+        if (
+          !number ||
+          number.status !== 'AVAILABLE' ||
+          number.organisationId !== null ||
+          number.provider !== 'SINCH' ||
+          number.updatedAt.getTime() !== input.expectedUpdatedAt.getTime()
+        ) {
+          return { ok: false, code: 'CONFLICT' } as const;
+        }
+        const [duplicate] = await transaction
+          .select({ id: smsNumberPool.id })
+          .from(smsNumberPool)
+          .where(
+            and(
+              eq(smsNumberPool.provider, 'SINCH'),
+              eq(smsNumberPool.providerNumberId, providerNumberId)
+            )
+          )
+          .limit(1);
+        if (duplicate && duplicate.id !== input.numberId) {
+          return { ok: false, code: 'CONFLICT' } as const;
+        }
+        await transaction
+          .update(smsNumberPool)
+          .set({
+            providerNumberId,
+            providerVerifiedAt: input.now,
+            updatedAt: input.now
+          })
+          .where(eq(smsNumberPool.id, input.numberId));
+        await transaction.insert(platformAdminAuditEvents).values({
+          actorUserId: input.actorUserId,
+          eventType: 'SMS_NUMBER_POOL_VERIFIED',
+          entityType: 'SMS_NUMBER',
+          entityId: input.numberId,
+          reason,
+          beforeValue: {
+            status: number.status,
+            providerNumberIdPresent: number.providerNumberId !== null,
+            providerVerified: number.providerVerifiedAt !== null
+          },
+          afterValue: {
+            status: 'AVAILABLE',
+            providerNumberIdPresent: true,
+            providerVerified: true,
+            providerVerifiedAt: input.now.toISOString()
+          },
+          occurredAt: input.now
+        });
+        return { ok: true } as const;
+      });
+      return result.ok ? this.numberResult(input.numberId) : result;
+    } catch (error) {
+      if ((error as { code?: string }).code === '23505') {
+        return { ok: false, code: 'CONFLICT' };
+      }
+      throw error;
+    }
+  }
+
   async assignSmsNumber(
     input: PlatformNumberMutationInput & {
       organisationId: string;
@@ -1024,6 +1104,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
           .update(smsNumberPool)
           .set({
             providerNumberId,
+            providerVerifiedAt: input.now,
             status: 'READY',
             readyAt: input.now,
             updatedAt: input.now
@@ -1099,6 +1180,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
         .update(smsNumberPool)
         .set({
           status: 'QUARANTINED',
+          providerVerifiedAt: null,
           quarantineUntil: input.quarantineUntil,
           releasedAt: input.eventType === 'SMS_NUMBER_RELEASED' ? input.now : number.releasedAt,
           updatedAt: input.now
@@ -1181,6 +1263,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
         .set({
           status: 'AVAILABLE',
           organisationId: null,
+          providerVerifiedAt: null,
           reservedAt: null,
           readyAt: null,
           quarantineUntil: null,

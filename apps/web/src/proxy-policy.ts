@@ -8,6 +8,9 @@ const publicExactPaths = new Set([
   '/auth/logout',
   '/health/live',
   '/health/ready',
+  '/legal/acceptable-use',
+  '/legal/privacy',
+  '/legal/terms',
   '/start',
   '/favicon.ico'
 ]);

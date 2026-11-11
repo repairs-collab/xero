@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull } from 'drizzle-orm';
 
 import {
   decideSmsAllowance,
@@ -386,7 +386,10 @@ export class PostgresSmsCommerceRepository {
         .select({
           id: smsNumberPool.id,
           e164Number: smsNumberPool.e164Number,
-          status: smsNumberPool.status
+          status: smsNumberPool.status,
+          provider: smsNumberPool.provider,
+          providerNumberId: smsNumberPool.providerNumberId,
+          providerVerifiedAt: smsNumberPool.providerVerifiedAt
         })
         .from(smsNumberPool)
         .where(
@@ -401,6 +404,14 @@ export class PostgresSmsCommerceRepository {
         )
         .limit(1);
       if (existing !== undefined) {
+        if (
+          existing.status !== 'READY' &&
+          (existing.provider !== 'SINCH' ||
+            existing.providerNumberId === null ||
+            existing.providerVerifiedAt === null)
+        ) {
+          throw new Error('SMS_NUMBER_NOT_VERIFIED');
+        }
         if (existing.status === 'QUARANTINED') {
           await transaction
             .update(smsNumberPool)
@@ -435,7 +446,14 @@ export class PostgresSmsCommerceRepository {
       const [available] = await transaction
         .select({ id: smsNumberPool.id, e164Number: smsNumberPool.e164Number })
         .from(smsNumberPool)
-        .where(eq(smsNumberPool.status, 'AVAILABLE'))
+        .where(
+          and(
+            eq(smsNumberPool.status, 'AVAILABLE'),
+            eq(smsNumberPool.provider, 'SINCH'),
+            isNotNull(smsNumberPool.providerNumberId),
+            isNotNull(smsNumberPool.providerVerifiedAt)
+          )
+        )
         .orderBy(asc(smsNumberPool.createdAt))
         .for('update')
         .limit(1);
@@ -470,6 +488,32 @@ export class PostgresSmsCommerceRepository {
     now: Date
   ): Promise<void> {
     await this.database.transaction(async (transaction) => {
+      const [reserved] = await transaction
+        .select({
+          provider: smsNumberPool.provider,
+          providerNumberId: smsNumberPool.providerNumberId,
+          providerVerifiedAt: smsNumberPool.providerVerifiedAt
+        })
+        .from(smsNumberPool)
+        .where(
+          and(
+            eq(smsNumberPool.id, numberId),
+            eq(smsNumberPool.organisationId, organisationId),
+            eq(smsNumberPool.status, 'RESERVED')
+          )
+        )
+        .for('update')
+        .limit(1);
+      if (reserved === undefined) {
+        throw new Error('SMS_NUMBER_RESERVATION_NOT_FOUND');
+      }
+      if (
+        reserved.provider !== 'SINCH' ||
+        reserved.providerNumberId === null ||
+        reserved.providerVerifiedAt === null
+      ) {
+        throw new Error('SMS_NUMBER_NOT_VERIFIED');
+      }
       const updated = await transaction
         .update(smsNumberPool)
         .set({ status: 'READY', readyAt: now, updatedAt: now })
@@ -477,7 +521,10 @@ export class PostgresSmsCommerceRepository {
           and(
             eq(smsNumberPool.id, numberId),
             eq(smsNumberPool.organisationId, organisationId),
-            eq(smsNumberPool.status, 'RESERVED')
+            eq(smsNumberPool.status, 'RESERVED'),
+            eq(smsNumberPool.provider, 'SINCH'),
+            isNotNull(smsNumberPool.providerNumberId),
+            isNotNull(smsNumberPool.providerVerifiedAt)
           )
         )
         .returning({ id: smsNumberPool.id });
@@ -511,7 +558,11 @@ export class PostgresSmsCommerceRepository {
     await this.database.transaction(async (transaction) => {
       const quarantined = await transaction
         .update(smsNumberPool)
-        .set({ status: 'QUARANTINED', quarantineUntil, updatedAt: now })
+        .set({
+          status: 'QUARANTINED',
+          quarantineUntil,
+          updatedAt: now
+        })
         .where(
           and(
             eq(smsNumberPool.organisationId, organisationId),

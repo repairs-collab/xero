@@ -19,4 +19,11 @@ describe('public account recovery boundary', () => {
     expect(evaluateProxyAccess('/start', false)).toBe('allow');
     expect(evaluateProxyAccess('/onboarding', false)).toBe('login');
   });
+
+  it('keeps published legal documents public without exposing similarly named pages', () => {
+    expect(evaluateProxyAccess('/legal/terms', false)).toBe('allow');
+    expect(evaluateProxyAccess('/legal/privacy', false)).toBe('allow');
+    expect(evaluateProxyAccess('/legal/acceptable-use', false)).toBe('allow');
+    expect(evaluateProxyAccess('/legal-admin', false)).toBe('login');
+  });
 });

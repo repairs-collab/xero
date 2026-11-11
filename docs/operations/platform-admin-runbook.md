@@ -25,10 +25,9 @@ and review the append-only platform audit log.
 1. Record the candidate full Git SHA and the currently deployed SHA.
 2. Confirm the release has passed lint, type-check, unit/integration, build and
    browser tests.
-3. Inspect migration `packages/db/drizzle/0019_panoramic_talon.sql`. It must add
-   the platform columns/table, seed only the active normalized
-   `repairs@motts.com.au` user as `OWNER`, and contain no credential values or
-   destructive changes to customer status, numbers or allowances.
+3. Inspect the pending migrations, including
+   `packages/db/drizzle/0022_yummy_darwin.sql`. They must contain no credential
+   values or destructive changes to customer status, numbers or allowances.
 4. Confirm the protected OVH environment file and image manifest are present.
    This release adds no new secret or environment variable.
 5. Confirm enough disk space exists for the immutable images and a PostgreSQL
@@ -82,15 +81,28 @@ unexpected owner or suspended customer.
 
 ## Sinch number lifecycle
 
-### Register and assign
+### Register and verify the allocation pool
 
 1. In **Sinch & SMS**, register an Australian E.164 number such as
    `+61412345678`, its non-secret Sinch provider number ID if already known, and
    an operational reason.
-2. Confirm the number appears as `AVAILABLE`.
-3. Assign it to the intended customer. Exactly one owner can win a concurrent
+2. Confirm the number appears as `AVAILABLE` and **Not verified for automatic
+   allocation**. A provider ID by itself is not proof that the number is safe.
+3. In Sinch APAC, confirm ownership, a controlled outbound SMS, the inbound
+   reply/webhook route and the exact non-secret provider number ID. Enter that
+   evidence in the reason field, confirm the checklist and select **Verify for
+   automatic allocation**.
+4. Confirm the number remains `AVAILABLE` but now shows **Verified for automatic
+   allocation**. Only records with this owner verification are eligible for
+   automatic paid-customer allocation. If the pool is empty, onboarding must
+   remain blocked rather than assigning an unverified number or changing any
+   customer's live-sending state.
+
+### Assign manually
+
+1. Assign an available number to the intended customer. Exactly one owner can win a concurrent
    assignment; if a conflict appears, refresh and inspect the current owner.
-4. The number is now `RESERVED`. This is not permission to send customer SMS.
+2. The number is now `RESERVED`. This is not permission to send customer SMS.
 
 ### Verify before READY
 
@@ -104,7 +116,8 @@ In Sinch APAC, verify that the exact number:
 
 Record a concise verification reason, enter the provider number ID, and only
 then select **Mark ready**. Do not include message content, phone-owner data or
-credentials in the reason.
+credentials in the reason. This manual fallback also records the provider
+verification time before changing the assigned number to `READY`.
 
 ### Release and cooling
 
@@ -112,7 +125,12 @@ Releasing an assigned number starts a 30-day `QUARANTINED` period. The former
 organisation remains associated during cooling so late replies stay correctly
 routed. The return-to-pool action must fail before the cooling date. After the
 date, verify there are no unresolved reply-routing incidents, then return it to
-the pool with a reason. Never bypass cooling by editing the database.
+the pool with a reason. Owner-initiated quarantine/release clears allocation
+verification. Subscription cooling may retain it only while the number remains
+bound to the same customer so that customer can reactivate safely; returning it
+to the shared pool always clears it. Complete the full Sinch verification
+checklist again before the number can be selected for another customer. Never
+bypass cooling by editing the database.
 
 ## SMS allowance changes
 
@@ -167,9 +185,10 @@ and run the protected OVH rollback described in `docs/runbooks/deployment.md`.
 The rollback script restores web and worker images together, leaves PostgreSQL
 untouched and checks `/health/ready`.
 
-Migration `0019_panoramic_talon.sql` is additive and compatible with the prior
-application. Do not drop `platform_admin_audit_events`, `users.platform_role` or
-the organisation platform-status columns during application rollback. Keep the
+The platform migrations are additive and compatible with the prior application.
+Do not drop `platform_admin_audit_events`, `users.platform_role`,
+`sms_number_pool.provider_verified_at` or the organisation platform-status
+columns during application rollback. Keep the
 pre-release backup for investigation. If a database restore is genuinely
 required, stop and follow `docs/runbooks/restore.md` into a new database target;
 never overwrite production as part of a normal rollback.
