@@ -6,6 +6,7 @@ import { authorise, type AppSession, type Role } from '@bc5000/auth';
 import {
   auditEvents,
   type Database,
+  type DbTransaction,
   invitations,
   memberships,
   organisations,
@@ -27,6 +28,8 @@ export interface UserAdministrationMember {
   role: Role;
   status: MemberStatus;
   invitationId: string | null;
+  membershipVersion: number;
+  invitationVersion: number | null;
 }
 
 export class LastAdminRequired extends Error {
@@ -38,11 +41,44 @@ export class LastAdminRequired extends Error {
   }
 }
 
+export class UserAdministrationConflict extends Error {
+  readonly code = 'CONFLICT';
+
+  constructor() {
+    super('CONFLICT');
+    this.name = 'UserAdministrationConflict';
+  }
+}
+
+export interface UserAdministrationMutationAudit {
+  eventType:
+    | 'USER_INVITED'
+    | 'USER_INVITATION_RESENT'
+    | 'USER_ROLE_CHANGED'
+    | 'USER_DISABLED';
+  entityType: 'USER' | 'INVITATION' | 'MEMBERSHIP';
+  entityId: string;
+  beforeValue: Record<string, unknown> | null;
+  afterValue: Record<string, unknown> | null;
+}
+
+export type UserAdministrationAtomicAudit = (
+  transaction: DbTransaction,
+  audit: UserAdministrationMutationAudit
+) => Promise<void>;
+
 export interface UserAdministrationDependencies {
   database: Database;
   cognito: CognitoUserAdministration;
   clock: { now(): Date };
+  authorizer?: UserManageAuthorizer;
+  reader?: UserManageAuthorizer;
 }
+
+export type UserManageAuthorizer = (
+  session: AppSession,
+  organisationId: string
+) => void | Promise<void>;
 
 export async function acceptPendingInvitations(
   database: Database,
@@ -62,7 +98,11 @@ export async function acceptPendingInvitations(
   if (organisationRows.length === 0) return;
   await database
     .update(invitations)
-    .set({ status: 'ACCEPTED', acceptedAt: now })
+    .set({
+      status: 'ACCEPTED',
+      acceptedAt: now,
+      version: sql`${invitations.version} + 1`
+    })
     .where(
       and(
         inArray(
@@ -78,6 +118,17 @@ export async function acceptPendingInvitations(
 export function createUserAdministration(
   dependencies: UserAdministrationDependencies
 ) {
+  const authorize: UserManageAuthorizer =
+    dependencies.authorizer ??
+    ((session, organisationId) => {
+      authorise(session, 'user.manage', organisationId);
+    });
+  const authorizeRead: UserManageAuthorizer =
+    dependencies.reader ??
+    dependencies.authorizer ??
+    ((session, organisationId) => {
+      authorise(session, 'user.read', organisationId);
+    });
   const inviteMember = async (
     session: AppSession,
     input: {
@@ -85,9 +136,10 @@ export function createUserAdministration(
       email: string;
       displayName: string;
       role: Role;
+      atomicAudit?: UserAdministrationAtomicAudit;
     }
   ): Promise<{ invitationId: string; userId: string }> => {
-    authorise(session, 'user.manage', input.organisationId);
+    await authorize(session, input.organisationId);
     const email = input.email.trim().toLowerCase();
     if (email.length === 0) throw new Error('Email is required');
     const [existingUser] = await dependencies.database
@@ -131,6 +183,13 @@ export function createUserAdministration(
           afterValue: { email, role: input.role },
           occurredAt: now
         });
+        await input.atomicAudit?.(transaction, {
+          eventType: 'USER_INVITED',
+          entityType: 'USER',
+          entityId: userId,
+          beforeValue: null,
+          afterValue: { email, role: input.role }
+        });
       });
     } catch (error) {
       await dependencies.cognito.disableUser(created.subject).catch(() => undefined);
@@ -143,7 +202,7 @@ export function createUserAdministration(
     session: AppSession,
     input: { organisationId: string }
   ): Promise<UserAdministrationMember[]> => {
-    authorise(session, 'user.manage', input.organisationId);
+    await authorizeRead(session, input.organisationId);
     const memberRows = await dependencies.database
       .select({ membership: memberships, user: users })
       .from(memberships)
@@ -172,16 +231,23 @@ export function createUserAdministration(
           : pendingInvitation === undefined
             ? 'ACTIVE'
             : 'INVITED',
-        invitationId: pendingInvitation?.id ?? null
+        invitationId: pendingInvitation?.id ?? null,
+        membershipVersion: membership.version,
+        invitationVersion: pendingInvitation?.version ?? null
       };
     });
   };
 
   const resendInvitation = async (
     session: AppSession,
-    input: { organisationId: string; invitationId: string }
+    input: {
+      organisationId: string;
+      invitationId: string;
+      expectedVersion?: number;
+      atomicAudit?: UserAdministrationAtomicAudit;
+    }
   ): Promise<void> => {
-    authorise(session, 'user.manage', input.organisationId);
+    await authorize(session, input.organisationId);
     const [invitation] = await dependencies.database
       .select()
       .from(invitations)
@@ -194,13 +260,29 @@ export function createUserAdministration(
       )
       .limit(1);
     if (invitation === undefined) throw new Error('Invitation was not found');
+    if (
+      input.expectedVersion !== undefined &&
+      invitation.version !== input.expectedVersion
+    ) {
+      throw new UserAdministrationConflict();
+    }
     await dependencies.cognito.resendInvitation(invitation.email);
     const now = dependencies.clock.now();
     await dependencies.database.transaction(async (transaction) => {
-      await transaction
+      const updated = await transaction
         .update(invitations)
-        .set({ expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000) })
-        .where(eq(invitations.id, invitation.id));
+        .set({
+          expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+          version: sql`${invitations.version} + 1`
+        })
+        .where(
+          and(
+            eq(invitations.id, invitation.id),
+            eq(invitations.version, invitation.version)
+          )
+        )
+        .returning({ version: invitations.version });
+      if (updated.length !== 1) throw new UserAdministrationConflict();
       await transaction.insert(auditEvents).values({
         organisationId: input.organisationId,
         actorUserId: session.userId,
@@ -209,14 +291,30 @@ export function createUserAdministration(
         entityId: invitation.id,
         occurredAt: now
       });
+      await input.atomicAudit?.(transaction, {
+        eventType: 'USER_INVITATION_RESENT',
+        entityType: 'INVITATION',
+        entityId: invitation.id,
+        beforeValue: { version: invitation.version, expiresAt: invitation.expiresAt },
+        afterValue: {
+          version: invitation.version + 1,
+          expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
+        }
+      });
     });
   };
 
   const changeRole = async (
     session: AppSession,
-    input: { organisationId: string; userId: string; role: Role }
+    input: {
+      organisationId: string;
+      userId: string;
+      role: Role;
+      expectedVersion?: number;
+      atomicAudit?: UserAdministrationAtomicAudit;
+    }
   ): Promise<void> => {
-    authorise(session, 'user.manage', input.organisationId);
+    await authorize(session, input.organisationId);
     const now = dependencies.clock.now();
     await dependencies.database.transaction(async (transaction) => {
       await transaction
@@ -237,6 +335,12 @@ export function createUserAdministration(
         )
         .limit(1);
       if (row === undefined) throw new Error('Membership was not found');
+      if (
+        input.expectedVersion !== undefined &&
+        row.membership.version !== input.expectedVersion
+      ) {
+        throw new UserAdministrationConflict();
+      }
       if (row.membership.role === 'ADMIN' && input.role !== 'ADMIN') {
         const [adminCount] = await transaction
           .select({ count: sql<number>`count(*)::integer` })
@@ -254,7 +358,7 @@ export function createUserAdministration(
       }
       await transaction
         .update(memberships)
-        .set({ role: input.role })
+        .set({ role: input.role, version: sql`${memberships.version} + 1` })
         .where(
           and(
             eq(memberships.organisationId, input.organisationId),
@@ -263,7 +367,7 @@ export function createUserAdministration(
         );
       await transaction
         .update(invitations)
-        .set({ role: input.role })
+        .set({ role: input.role, version: sql`${invitations.version} + 1` })
         .where(
           and(
             eq(invitations.organisationId, input.organisationId),
@@ -281,14 +385,32 @@ export function createUserAdministration(
         afterValue: { role: input.role },
         occurredAt: now
       });
+      await input.atomicAudit?.(transaction, {
+        eventType: 'USER_ROLE_CHANGED',
+        entityType: 'MEMBERSHIP',
+        entityId: input.userId,
+        beforeValue: {
+          role: row.membership.role,
+          version: row.membership.version
+        },
+        afterValue: {
+          role: input.role,
+          version: row.membership.version + 1
+        }
+      });
     });
   };
 
   const disableMember = async (
     session: AppSession,
-    input: { organisationId: string; userId: string }
+    input: {
+      organisationId: string;
+      userId: string;
+      expectedVersion?: number;
+      atomicAudit?: UserAdministrationAtomicAudit;
+    }
   ): Promise<void> => {
-    authorise(session, 'user.manage', input.organisationId);
+    await authorize(session, input.organisationId);
     const now = dependencies.clock.now();
     const disabledIdentity = await dependencies.database.transaction(async (transaction) => {
       await transaction
@@ -315,6 +437,12 @@ export function createUserAdministration(
         )
         .limit(1);
       if (membership === undefined) throw new Error('Membership was not found');
+      if (
+        input.expectedVersion !== undefined &&
+        membership.version !== input.expectedVersion
+      ) {
+        throw new UserAdministrationConflict();
+      }
       if (membership.role === 'ADMIN') {
         const [adminCount] = await transaction
           .select({ count: sql<number>`count(*)::integer` })
@@ -332,7 +460,10 @@ export function createUserAdministration(
       }
       await transaction
         .update(memberships)
-        .set({ disabledAt: now })
+        .set({
+          disabledAt: now,
+          version: sql`${memberships.version} + 1`
+        })
         .where(
           and(
             eq(memberships.organisationId, input.organisationId),
@@ -341,7 +472,10 @@ export function createUserAdministration(
         );
       await transaction
         .update(invitations)
-        .set({ status: 'REVOKED' })
+        .set({
+          status: 'REVOKED',
+          version: sql`${invitations.version} + 1`
+        })
         .where(
           and(
             eq(invitations.organisationId, input.organisationId),
@@ -359,6 +493,21 @@ export function createUserAdministration(
         afterValue: { role: membership.role, active: false },
         occurredAt: now
       });
+      await input.atomicAudit?.(transaction, {
+        eventType: 'USER_DISABLED',
+        entityType: 'MEMBERSHIP',
+        entityId: input.userId,
+        beforeValue: {
+          role: membership.role,
+          active: true,
+          version: membership.version
+        },
+        afterValue: {
+          role: membership.role,
+          active: false,
+          version: membership.version + 1
+        }
+      });
       const [remainingMembership] = await transaction
         .select({ organisationId: memberships.organisationId })
         .from(memberships)
@@ -371,7 +520,8 @@ export function createUserAdministration(
         .limit(1);
       return {
         cognitoSubject: targetUser.cognitoSubject,
-        disableCognito: remainingMembership === undefined
+        disableCognito:
+          remainingMembership === undefined && targetUser.platformRole !== 'OWNER'
       };
     });
     if (disabledIdentity.disableCognito) {

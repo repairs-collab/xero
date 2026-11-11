@@ -52,7 +52,7 @@ async function seed() {
     cognitoSubject: randomUUID(),
     displayName: 'Voice Administrator',
     expiresAt: '2026-10-09T00:00:00.000Z',
-    memberships: [{ organisationId, role, active: true }]
+    memberships: [{ organisationId, role, active: true, organisationStatus: 'ACTIVE' }]
   });
   return { organisationId, userId, session };
 }

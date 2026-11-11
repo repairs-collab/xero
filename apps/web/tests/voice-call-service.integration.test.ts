@@ -192,7 +192,7 @@ async function seed() {
     cognitoSubject: randomUUID(),
     displayName: 'Voice Operator',
     expiresAt: '2026-10-09T00:00:00.000Z',
-    memberships: [{ organisationId, role: 'OPERATOR', active: true }]
+    memberships: [{ organisationId, role: 'OPERATOR', active: true, organisationStatus: 'ACTIVE' }]
   };
   const publisher = {
     publish: vi.fn(() => Promise.resolve(randomUUID()))

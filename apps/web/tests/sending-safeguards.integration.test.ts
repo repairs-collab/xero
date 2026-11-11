@@ -74,7 +74,7 @@ async function seedBasic() {
     cognitoSubject: randomUUID(),
     displayName: 'User',
     expiresAt: '2026-09-18T10:00:00Z',
-    memberships: [{ organisationId, role, active: true }]
+    memberships: [{ organisationId, role, active: true, organisationStatus: 'ACTIVE' }]
   });
   return { organisationId, userId, session };
 }

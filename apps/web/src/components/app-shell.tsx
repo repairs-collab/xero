@@ -13,6 +13,7 @@ import {
   HomeIcon,
   MagnifyingGlassIcon,
   PaperAirplaneIcon,
+  ShieldCheckIcon,
   UserGroupIcon
 } from '@heroicons/react/24/outline';
 import Link from 'next/link';
@@ -39,13 +40,15 @@ export function AppShell({
   displayName,
   role,
   organisationName = 'Mott Appliance Repairs',
-  onboardingIncomplete = false
+  onboardingIncomplete = false,
+  platformOwner = false
 }: {
   children: ReactNode;
   displayName: string;
   role: 'ADMIN' | 'OPERATOR';
   organisationName?: string;
   onboardingIncomplete?: boolean;
+  platformOwner?: boolean;
 }) {
   const pathname = usePathname();
   const initials = displayName.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase();
@@ -106,6 +109,12 @@ export function AppShell({
             <Link href="/settings" className={`nav-item nav-item--settings ${isActivePath(pathname, '/settings') ? 'nav-item--active' : ''}`}>
               <Cog6ToothIcon aria-hidden="true" />
               <span>Admin Settings</span>
+            </Link>
+          )}
+          {platformOwner && (
+            <Link href="/platform-admin" className={`nav-item ${isActivePath(pathname, '/platform-admin') ? 'nav-item--active' : ''}`}>
+              <ShieldCheckIcon aria-hidden="true" />
+              <span>Owner console</span>
             </Link>
           )}
         </div>

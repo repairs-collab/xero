@@ -26,6 +26,7 @@ vi.mock('next/navigation', () => ({
 }));
 
 import { AppShell } from '../src/components/app-shell.js';
+import { PlatformAdminShell } from '../src/components/platform-admin-shell.js';
 
 describe('AppShell', () => {
   it('uses AccountPulse as the accessible product identity', () => {
@@ -109,5 +110,43 @@ describe('AppShell', () => {
     expect(incomplete).toContain('href="/onboarding"');
     expect(incomplete).toContain('Finish setup');
     expect(complete).not.toContain('href="/onboarding"');
+  });
+
+  it('shows the owner console link only for a verified platform owner', () => {
+    const owner = renderToStaticMarkup(
+      createElement(AppShell, {
+        displayName: 'AccountPulse Owner',
+        role: 'ADMIN',
+        platformOwner: true,
+        children: createElement('p', null, 'Dashboard')
+      })
+    );
+    const customerAdmin = renderToStaticMarkup(
+      createElement(AppShell, {
+        displayName: 'Customer Admin',
+        role: 'ADMIN',
+        platformOwner: false,
+        children: createElement('p', null, 'Dashboard')
+      })
+    );
+
+    expect(owner).toContain('href="/platform-admin"');
+    expect(owner).toContain('Owner console');
+    expect(customerAdmin).not.toContain('href="/platform-admin"');
+  });
+
+  it('keeps platform administration separate from customer workspace navigation', () => {
+    const html = renderToStaticMarkup(
+      createElement(PlatformAdminShell, {
+        displayName: 'AccountPulse Owner',
+        children: createElement('p', null, 'Owner overview')
+      })
+    );
+
+    expect(html).toContain('AccountPulse Owner');
+    expect(html).toContain('href="/platform-admin"');
+    expect(html).toContain('Sinch &amp; SMS');
+    expect(html).toContain('Audit');
+    expect(html).not.toContain('Current workspace:');
   });
 });

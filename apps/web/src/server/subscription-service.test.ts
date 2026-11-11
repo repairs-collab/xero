@@ -21,13 +21,13 @@ const adminSession: AppSession = {
   cognitoSubject: 'cognito-admin',
   displayName: 'Admin',
   expiresAt: '2026-11-10T00:00:00.000Z',
-  memberships: [{ organisationId: 'org_solo', role: 'ADMIN', active: true }]
+  memberships: [{ organisationId: 'org_solo', role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }]
 };
 
 const operatorSession: AppSession = {
   ...adminSession,
   userId: 'user_operator',
-  memberships: [{ organisationId: 'org_solo', role: 'OPERATOR', active: true }]
+  memberships: [{ organisationId: 'org_solo', role: 'OPERATOR', active: true, organisationStatus: 'ACTIVE' }]
 };
 
 const account = (overrides: Partial<BillingAccount> = {}): BillingAccount => ({

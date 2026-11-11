@@ -35,7 +35,7 @@ describe('encrypted application sessions', () => {
               displayName: 'Alex',
               active: true,
               memberships: [
-                { organisationId: 'org-1', role: 'ADMIN', active: true }
+                { organisationId: 'org-1', role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }
               ]
             })
         }

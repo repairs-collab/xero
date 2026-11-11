@@ -456,6 +456,67 @@ describe('voice call execution', () => {
     expect(createPhoneCall).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { name: 'manual', options: {} },
+    { name: 'test', options: { purpose: 'TEST' as const } },
+    { name: 'automatic', options: { scheduledAutomatic: true } }
+  ])('cancels a queued $name call when the account is suspended', async ({ options }) => {
+    const seeded = await seedApprovedCall(options);
+    await client.db
+      .update(organisations)
+      .set({
+        platformStatus: 'SUSPENDED',
+        suspendedAt: now,
+        suspensionReason: 'Billing review'
+      })
+      .where(eq(organisations.id, seeded.organisationId));
+    const createPhoneCall = vi.fn(() =>
+      Promise.resolve({ callId: 'not-used', callStatus: 'registered' })
+    );
+    const runtime = executionDependencies(seeded.repository, createPhoneCall);
+
+    await expect(
+      executeVoiceCall(runtime.dependencies, {
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId
+      })
+    ).resolves.toEqual({ kind: 'cancelled', reason: 'ACCOUNT_SUSPENDED' });
+    expect(createPhoneCall).not.toHaveBeenCalled();
+  });
+
+  it('rechecks suspension after claiming a queued call and before contacting the gateway', async () => {
+    const seeded = await seedApprovedCall();
+    const originalClaim = seeded.repository.claimForSubmission.bind(
+      seeded.repository
+    );
+    vi.spyOn(seeded.repository, 'claimForSubmission').mockImplementationOnce(
+      async (input) => {
+        const result = await originalClaim(input);
+        await client.db
+          .update(organisations)
+          .set({
+            platformStatus: 'SUSPENDED',
+            suspendedAt: now,
+            suspensionReason: 'Billing review'
+          })
+          .where(eq(organisations.id, seeded.organisationId));
+        return result;
+      }
+    );
+    const createPhoneCall = vi.fn(() =>
+      Promise.resolve({ callId: 'not-used', callStatus: 'registered' })
+    );
+    const runtime = executionDependencies(seeded.repository, createPhoneCall);
+
+    await expect(
+      executeVoiceCall(runtime.dependencies, {
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId
+      })
+    ).resolves.toEqual({ kind: 'cancelled', reason: 'ACCOUNT_SUSPENDED' });
+    expect(createPhoneCall).not.toHaveBeenCalled();
+  });
+
   it('executes a TEST call while customer voice is disabled and does not require the staff number on the customer', async () => {
     const seeded = await seedApprovedCall({
       purpose: 'TEST',

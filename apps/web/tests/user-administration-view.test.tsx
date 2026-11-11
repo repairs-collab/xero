@@ -22,7 +22,9 @@ describe('UserAdministrationView', () => {
             displayName: 'Admin User',
             role: 'ADMIN',
             status: 'ACTIVE',
-            invitationId: null
+            invitationId: null,
+            membershipVersion: 0,
+            invitationVersion: null
           },
           {
             userId: 'user-2',
@@ -30,7 +32,9 @@ describe('UserAdministrationView', () => {
             displayName: 'New Operator',
             role: 'OPERATOR',
             status: 'INVITED',
-            invitationId: 'invite-2'
+            invitationId: 'invite-2',
+            membershipVersion: 0,
+            invitationVersion: 0
           },
           {
             userId: 'user-3',
@@ -38,7 +42,9 @@ describe('UserAdministrationView', () => {
             displayName: 'Disabled User',
             role: 'OPERATOR',
             status: 'DISABLED',
-            invitationId: null
+            invitationId: null,
+            membershipVersion: 1,
+            invitationVersion: null
           }
         ]}
         inviteAction={noAction}
@@ -57,5 +63,37 @@ describe('UserAdministrationView', () => {
     expect(html).toContain('Disable access');
     expect(html).toContain('Disabled');
     expect(html).toContain('You');
+  });
+
+  it('renders suspended accounts as read-only without mutation controls', () => {
+    const html = renderToStaticMarkup(
+      <UserAdministrationView
+        organisationId="org-1"
+        currentUserId="user-1"
+        readOnly
+        members={[
+          {
+            userId: 'user-1',
+            email: 'admin@example.com',
+            displayName: 'Admin User',
+            role: 'ADMIN',
+            status: 'ACTIVE',
+            invitationId: null,
+            membershipVersion: 0,
+            invitationVersion: null
+          }
+        ]}
+        inviteAction={noAction}
+        resendAction={noAction}
+        changeRoleAction={noAction}
+        disableAction={noAction}
+      />
+    );
+
+    expect(html).toContain('User management is paused while this account is suspended.');
+    expect(html).toContain('Admin User');
+    expect(html).not.toContain('Send invitation');
+    expect(html).not.toContain('Change role');
+    expect(html).not.toContain('Disable access');
   });
 });

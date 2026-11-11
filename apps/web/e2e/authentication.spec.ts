@@ -16,7 +16,6 @@ test('keeps the session active until the user chooses to sign out', async ({ pag
   });
 
   await page.goto('/');
-  await page.waitForLoadState('networkidle');
 
   expect(logoutRequests).toEqual([]);
   await expect(page.getByRole('link', { name: 'Sign out' })).toBeVisible();
@@ -27,4 +26,9 @@ test('keeps the session active until the user chooses to sign out', async ({ pag
       )
     )
     .toBe(true);
+});
+
+test('does not advertise the private owner console to a customer administrator', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByRole('link', { name: 'Platform admin' })).toHaveCount(0);
 });
