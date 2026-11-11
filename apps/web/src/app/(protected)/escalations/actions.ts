@@ -5,7 +5,7 @@ import { headers } from 'next/headers';
 
 import { getJobQueue } from '../../../server/job-runtime.js';
 import { createManualReminderService } from '../../../server/manual-reminder-service.js';
-import { getDatabaseClient, requireWebSession } from '../../../server/runtime.js';
+import { getDatabaseClient, requireWebAcceptedSession } from '../../../server/runtime.js';
 import { createEscalationService } from './escalation-service.js';
 
 const requiredText = (formData: FormData, name: string): string => {
@@ -17,7 +17,7 @@ const requiredText = (formData: FormData, name: string): string => {
 };
 
 const context = async () => {
-  const session = await requireWebSession(
+  const session = await requireWebAcceptedSession(
     new Request('http://localhost/', { headers: await headers() })
   );
   const database = getDatabaseClient().db;

@@ -46,6 +46,10 @@ import {
   createPostgresMobileVerificationRepository
 } from '../app/onboarding/mobile-verification-service.js';
 import { getJobQueue } from './job-runtime.js';
+import {
+  hasCurrentLegalAcceptance,
+  LegalAcceptanceRequired
+} from './legal-acceptance.js';
 import { PostgresMembershipLoader } from './membership-loader.js';
 import {
   createPostgresSoloProvisioningRepository,
@@ -342,6 +346,35 @@ export const getSubscriptionService = () => {
   return subscriptionServicePromise;
 };
 
+export const isStripeBillingConfigured = (): boolean => {
+  try {
+    getStripeConfiguration();
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const getBillingAccountSnapshot = async (
+  session: AppSession,
+  organisationId: string
+) => {
+  if (
+    !session.memberships.some(
+      (membership) =>
+        membership.organisationId === organisationId && membership.active
+    )
+  ) {
+    throw new Error('FORBIDDEN');
+  }
+  const account = await createPostgresSubscriptionRepository(
+    getDatabaseClient().db,
+    { now: () => new Date() }
+  ).loadBillingAccount(organisationId, session.userId);
+  if (account === null) throw new Error('SUBSCRIPTION_NOT_FOUND');
+  return account;
+};
+
 export const getOnboardingService = () =>
   createOnboardingService({
     repository: createPostgresOnboardingRepository(getDatabaseClient().db),
@@ -465,7 +498,39 @@ export async function requireWebSession(request: Request): Promise<AppSession> {
   });
 }
 
+export async function requireWebAcceptedSession(
+  request: Request
+): Promise<AppSession> {
+  const client = getDatabaseClient();
+  const session = await requireWebSession(request);
+  if (!(await hasCurrentLegalAcceptance(client.db, session.userId))) {
+    throw new LegalAcceptanceRequired();
+  }
+  return session;
+}
+
 export async function requireWebIdentitySession(
+  request: Request
+): Promise<AppSession> {
+  const client = getDatabaseClient();
+  return requireIdentitySession(request, {
+    secret: getSessionSecret(),
+    memberships: new PostgresMembershipLoader(client.db)
+  });
+}
+
+export async function requireWebAcceptedIdentitySession(
+  request: Request
+): Promise<AppSession> {
+  const client = getDatabaseClient();
+  const session = await requireWebIdentitySession(request);
+  if (!(await hasCurrentLegalAcceptance(client.db, session.userId))) {
+    throw new LegalAcceptanceRequired();
+  }
+  return session;
+}
+
+export async function requireWebRawIdentitySession(
   request: Request
 ): Promise<AppSession> {
   const client = getDatabaseClient();

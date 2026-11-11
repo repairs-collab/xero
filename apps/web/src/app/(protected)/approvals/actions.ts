@@ -8,11 +8,11 @@ import { PostgresVoiceCallRepository } from '@bc5000/db/web';
 import { createApprovalService } from './approval-service.js';
 import { createVoiceApprovalService } from './voice-approval-service.js';
 import { getJobQueue } from '../../../server/job-runtime.js';
-import { getDatabaseClient, requireWebSession } from '../../../server/runtime.js';
+import { getDatabaseClient, requireWebAcceptedSession } from '../../../server/runtime.js';
 import { createReminderWhitelistService } from '../../../server/reminder-whitelist-service.js';
 
 async function service() {
-  const session = await requireWebSession(new Request('http://localhost/', { headers: await headers() }));
+  const session = await requireWebAcceptedSession(new Request('http://localhost/', { headers: await headers() }));
   const database = getDatabaseClient().db;
   return {
     session,

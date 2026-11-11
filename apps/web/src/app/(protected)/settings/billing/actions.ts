@@ -5,7 +5,7 @@ import { redirect } from 'next/navigation';
 
 import {
   getSubscriptionService,
-  requireWebSession
+  requireWebAcceptedSession
 } from '../../../../server/runtime.js';
 
 const organisationIdFrom = (formData: FormData): string => {
@@ -17,7 +17,7 @@ const organisationIdFrom = (formData: FormData): string => {
 };
 
 const context = async () => ({
-  session: await requireWebSession(
+  session: await requireWebAcceptedSession(
     new Request('http://localhost/', { headers: await headers() })
   ),
   service: await getSubscriptionService()

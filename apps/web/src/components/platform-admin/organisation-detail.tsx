@@ -74,9 +74,17 @@ export function PlatformOrganisationDetailView({
           <h1>{detail.name}</h1>
           <p>{detail.xeroOrganisationId}</p>
         </div>
-        <span className={`platform-status platform-status--${detail.platformStatus.toLowerCase()}`}>
-          {detail.platformStatus}
-        </span>
+        <div className="platform-heading-links">
+          <a
+            className="button button--quiet"
+            href={`/platform-admin/organisations/${encodeURIComponent(detail.id)}/backup`}
+          >
+            Download backup
+          </a>
+          <span className={`platform-status platform-status--${detail.platformStatus.toLowerCase()}`}>
+            {detail.platformStatus}
+          </span>
+        </div>
       </header>
 
       {notice ? (

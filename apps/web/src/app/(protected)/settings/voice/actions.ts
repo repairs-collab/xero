@@ -11,7 +11,7 @@ import { createServerClock } from '../../../../server/clock.js';
 import {
   getDatabaseClient,
   getVoiceProviderTester,
-  requireWebSession,
+  requireWebAcceptedSession,
   verifyVoicePreviewSession
 } from '../../../../server/runtime.js';
 import { createVoiceSettingsService } from './voice-settings.js';
@@ -44,7 +44,7 @@ const integer = (formData: FormData, name: string): number => {
 };
 
 async function context() {
-  const session = await requireWebSession(
+  const session = await requireWebAcceptedSession(
     new Request('http://localhost/', { headers: await headers() })
   );
   const database = getDatabaseClient().db;

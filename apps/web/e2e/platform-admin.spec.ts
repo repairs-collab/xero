@@ -16,6 +16,12 @@ test('denies an ordinary customer administrator', async ({ page }) => {
   await loginAs(page, 'ADMIN');
   await page.goto('/platform-admin');
   await expect(page.getByRole('heading', { name: 'This page could not be found.' })).toBeVisible();
+
+  const backup = await page.request.get(
+    `/platform-admin/organisations/${launchScenario.organisationId}/backup`
+  );
+  expect(backup.status()).toBe(404);
+  expect(await backup.text()).not.toContain(platformOwnerScenario.customerName);
 });
 
 test('lets a membership-free owner administer the beta customer without exposing secrets', async ({ page }) => {

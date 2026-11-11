@@ -5,7 +5,7 @@ import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 
 import { getJobQueue } from '../../../../server/job-runtime.js';
-import { getDatabaseClient, requireWebSession } from '../../../../server/runtime.js';
+import { getDatabaseClient, requireWebAcceptedSession } from '../../../../server/runtime.js';
 import { createTestSmsService } from './test-sms-service.js';
 
 const requiredValue = (formData: FormData, name: string): string => {
@@ -17,7 +17,7 @@ const requiredValue = (formData: FormData, name: string): string => {
 };
 
 export async function queueTestSms(formData: FormData): Promise<void> {
-  const session = await requireWebSession(
+  const session = await requireWebAcceptedSession(
     new Request('http://localhost/', { headers: await headers() })
   );
   const service = createTestSmsService({

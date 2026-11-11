@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
-const requireWebIdentitySession = vi.hoisted(() => vi.fn());
+const requireWebAcceptedIdentitySession = vi.hoisted(() => vi.fn());
 const getStatus = vi.hoisted(() => vi.fn());
 
 vi.mock('next/headers', () => ({
@@ -9,7 +9,7 @@ vi.mock('next/headers', () => ({
 }));
 
 vi.mock('../../server/runtime.js', () => ({
-  requireWebIdentitySession,
+  requireWebAcceptedIdentitySession,
   getOnboardingService: () => ({ getStatus })
 }));
 
@@ -17,7 +17,7 @@ import SelfServiceOnboardingPage from './page.js';
 
 describe('self-service onboarding entry', () => {
   it('offers Xero connection to a verified provisional identity', async () => {
-    requireWebIdentitySession.mockResolvedValueOnce({
+    requireWebAcceptedIdentitySession.mockResolvedValueOnce({
       userId: 'user_new',
       cognitoSubject: 'subject_new',
       displayName: 'New Owner',
@@ -35,7 +35,7 @@ describe('self-service onboarding entry', () => {
   });
 
   it('shows the existing Solo workspace and Enterprise waitlist instead of another connection', async () => {
-    requireWebIdentitySession.mockResolvedValueOnce({
+    requireWebAcceptedIdentitySession.mockResolvedValueOnce({
       userId: 'user_existing',
       cognitoSubject: 'subject_existing',
       displayName: 'Existing Owner',
@@ -92,5 +92,50 @@ describe('self-service onboarding entry', () => {
     expect(markup).toContain('2 of 8 complete');
     expect(markup).toContain('Enterprise waitlist');
     expect(markup).not.toContain('href="/xero/connect?purpose=solo"');
+  });
+
+  it('guides an owner-created customer to connect Xero without claiming it is connected', async () => {
+    requireWebAcceptedIdentitySession.mockResolvedValueOnce({
+      userId: 'user_invited',
+      cognitoSubject: 'subject_invited',
+      displayName: 'Invited Administrator',
+      expiresAt: '2026-11-11T00:00:00.000Z',
+      memberships: [
+        { organisationId: 'org_invited', role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }
+      ]
+    });
+    getStatus.mockResolvedValueOnce({
+      completedCount: 0,
+      complete: false,
+      steps: [
+        {
+          key: 'XERO_CONNECTED',
+          label: 'Connect Xero',
+          description: 'Connect Xero',
+          href: '/settings/integrations',
+          complete: false
+        }
+      ],
+      trial: {
+        readOnly: false,
+        canSync: true,
+        canPreview: true,
+        testSmsPartLimit: 10,
+        testSmsDestination: null,
+        canSendCustomers: false,
+        canEnableAutomatic: false,
+        canAssignPermanentNumber: false,
+        actions: []
+      }
+    });
+
+    const markup = renderToStaticMarkup(
+      await SelfServiceOnboardingPage({ searchParams: Promise.resolve({}) })
+    );
+
+    expect(markup).toContain('Complete your AccountPulse setup');
+    expect(markup).toContain('Connect Xero to begin');
+    expect(markup).toContain('organisationId=org_invited');
+    expect(markup).not.toContain('Your Xero organisation is connected');
   });
 });

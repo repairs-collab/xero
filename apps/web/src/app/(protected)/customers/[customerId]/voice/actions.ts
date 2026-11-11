@@ -10,7 +10,7 @@ import { getJobQueue } from '../../../../../server/job-runtime.js';
 import { createServerClock } from '../../../../../server/clock.js';
 import {
   getDatabaseClient,
-  requireWebSession
+  requireWebAcceptedSession
 } from '../../../../../server/runtime.js';
 import { createVoiceCallService } from './voice-call-service.js';
 
@@ -29,7 +29,7 @@ const requiredInteger = (formData: FormData, name: string): number => {
 };
 
 async function context() {
-  const session = await requireWebSession(
+  const session = await requireWebAcceptedSession(
     new Request('http://localhost/', { headers: await headers() })
   );
   const database = getDatabaseClient().db;

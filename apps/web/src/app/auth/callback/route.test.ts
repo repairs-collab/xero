@@ -13,6 +13,7 @@ const identity = vi.hoisted(() => {
     )
   };
 });
+const hasCurrentLegalAcceptance = vi.hoisted(() => vi.fn());
 
 vi.mock('@bc5000/auth', () => ({
   clearCognitoTransactionCookie: () =>
@@ -52,6 +53,10 @@ vi.mock('../../(protected)/settings/users/user-administration.js', () => ({
 }));
 
 vi.mock('../../../server/self-service-identity.js', () => identity);
+vi.mock('../../../server/legal-acceptance.js', () => ({
+  hasCurrentLegalAcceptance,
+  safeLocalReturnTo: (value: string | null, fallback: string) => value ?? fallback
+}));
 
 import { GET } from './route.js';
 
@@ -62,6 +67,24 @@ describe('Cognito callback', () => {
       userId: 'user-1',
       created: true
     });
+    hasCurrentLegalAcceptance.mockResolvedValue(true);
+  });
+
+  it('requires current legal acceptance before entering the application', async () => {
+    hasCurrentLegalAcceptance.mockResolvedValueOnce(false);
+    const request = new NextRequest(
+      'https://ap.motts.com.au/auth/callback?code=code-1&state=state-1'
+    );
+
+    const response = await GET(request);
+
+    expect(response.status).toBe(303);
+    expect(response.headers.get('location')).toBe(
+      'https://billchaser.motts.com.au/account/accept-terms?returnTo=%2Fapprovals'
+    );
+    expect(response.headers.get('set-cookie')).toContain(
+      'bc5000_session=session'
+    );
   });
   it('redirects to the public application origin after authentication', async () => {
     const request = new NextRequest(

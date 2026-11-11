@@ -5,7 +5,7 @@ import { redirect } from 'next/navigation';
 
 import {
   getXeroOAuthService,
-  requireWebSession
+  requireWebAcceptedSession
 } from '../../../../../../server/runtime.js';
 
 const required = (formData: FormData, name: string): string => {
@@ -17,7 +17,7 @@ const required = (formData: FormData, name: string): string => {
 };
 
 export async function selectXeroTenant(formData: FormData): Promise<void> {
-  const session = await requireWebSession(
+  const session = await requireWebAcceptedSession(
     new Request('http://localhost/', { headers: await headers() })
   );
   await getXeroOAuthService().selectTenant(session, {

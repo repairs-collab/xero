@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 
+import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createDatabase, migrateDatabase } from '../client.js';
@@ -137,7 +138,11 @@ describe('PostgresXeroConnectionRepository', () => {
       connectionId: randomUUID(),
       tenantId: randomUUID(),
       tenantName: 'Example Pty Ltd',
-      tenantType: 'ORGANISATION'
+      tenantType: 'ORGANISATION',
+      xeroOrganisationId: 'xero-example-organisation',
+      organisationName: 'Example Pty Ltd',
+      baseCurrency: 'AUD',
+      timeZone: 'Australia/Sydney'
     };
     const pendingId = await firstRepository.createPendingAuthorisation({
       userId,
@@ -161,6 +166,16 @@ describe('PostgresXeroConnectionRepository', () => {
       });
 
     const first = await finalise();
+    const [updatedOrganisation] = await firstClient.db
+      .select()
+      .from(organisations)
+      .where(eq(organisations.id, firstOrganisationId));
+    expect(updatedOrganisation).toMatchObject({
+      xeroOrganisationId: 'xero-example-organisation',
+      name: 'Example Pty Ltd',
+      baseCurrency: 'AUD',
+      timeZone: 'Australia/Sydney'
+    });
     await expect(finalise()).resolves.toEqual(first);
     await expect(
       firstRepository.findPendingAuthorisation({

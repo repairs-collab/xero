@@ -44,6 +44,9 @@ export function PlatformAdminOverview({
           <p>Manage AccountPulse customers, trials, service state and usage.</p>
         </div>
         <div className="platform-heading-links">
+          <Link className="button button--primary" href="/platform-admin/organisations/new">
+            New customer
+          </Link>
           <Link className="button button--quiet" href="/platform-admin/sms">
             Sinch &amp; SMS
           </Link>

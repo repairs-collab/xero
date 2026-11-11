@@ -92,6 +92,24 @@ describe('Bill Chaser 5000 AWS stacks', () => {
     );
   });
 
+  it('sends branded account creation and verification emails', () => {
+    identityTemplate.hasResourceProperties('AWS::Cognito::UserPool', {
+      AdminCreateUserConfig: {
+        InviteMessageTemplate: {
+          EmailSubject: 'Welcome to AccountPulse — your account is ready',
+          EmailMessage: Match.stringLikeRegexp(
+            'AccountPulse[\\s\\S]*\\{username\\}[\\s\\S]*\\{####\\}[\\s\\S]*auth/login'
+          )
+        }
+      },
+      VerificationMessageTemplate: {
+        DefaultEmailOption: 'CONFIRM_WITH_CODE',
+        EmailSubject: 'Verify your AccountPulse account',
+        EmailMessage: Match.stringLikeRegexp('verification code is \\{####\\}')
+      }
+    });
+  });
+
   it('uses the deployed hostname for Cognito callbacks and logout', () => {
     identityTemplate.hasResourceProperties('AWS::Cognito::UserPoolClient', {
       CallbackURLs: ['https://billchaser.example.com/auth/callback'],

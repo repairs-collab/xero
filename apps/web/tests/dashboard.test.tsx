@@ -17,7 +17,9 @@ describe('DashboardView', () => {
           paidAfterReminders: '$12,400',
           lastXeroSync: '18 Sep 2026, 10:05 am',
           xeroHealthy: true,
-          sinchHealthy: true
+          sinchHealthy: true,
+          supportEmail: 'AP@motts.com.au',
+          supportChatUrl: null
         }
       })
     );

@@ -2,7 +2,8 @@ import { headers } from 'next/headers';
 import Link from 'next/link';
 
 import {
-  getSubscriptionService,
+  getBillingAccountSnapshot,
+  isStripeBillingConfigured,
   getSmsCommerceRepository,
   requireWebSession
 } from '../../../../server/runtime.js';
@@ -31,9 +32,11 @@ export default async function BillingSettingsPage() {
   );
   const membership = session.memberships[0];
   if (membership === undefined) throw new Error('No active organisation membership');
-  const account = await (
-    await getSubscriptionService()
-  ).getBillingAccount(session, membership.organisationId);
+  const account = await getBillingAccountSnapshot(
+    session,
+    membership.organisationId
+  );
+  const stripeConfigured = isStripeBillingConfigured();
   const smsUsage = await getSmsCommerceRepository().loadUsage(
     membership.organisationId
   );
@@ -148,7 +151,16 @@ export default async function BillingSettingsPage() {
 
       <section className="panel">
         <h2>Billing actions</h2>
-        {admin ? (
+        {!stripeConfigured ? (
+          <div className="callout callout--warning" role="status">
+            <strong>Online billing setup is temporarily unavailable</strong>
+            <p>
+              Your trial and AccountPulse data are safe. Contact support before
+              the trial ends; no card details can be entered on this page while
+              billing is unavailable.
+            </p>
+          </div>
+        ) : admin ? (
           <div className="button-row">
             {account.stripeSubscriptionId === null ||
             account.status === 'CANCELLED' ? (

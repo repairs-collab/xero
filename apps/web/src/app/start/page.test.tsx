@@ -4,13 +4,15 @@ import { describe, expect, it } from 'vitest';
 import StartPage from './page.js';
 
 describe('AccountPulse Solo start page', () => {
-  it('starts hosted signup with an explicit onboarding return destination', () => {
+  it('keeps beta access invite-only and signs invited customers into onboarding', () => {
     const markup = renderToStaticMarkup(<StartPage />);
 
     expect(markup).toContain(
-      'href="/auth/login?mode=signup&amp;returnTo=%2Fonboarding"'
+      'href="/auth/login?returnTo=%2Fonboarding"'
     );
-    expect(markup).toContain('Start free trial');
+    expect(markup).toContain('Request beta access');
+    expect(markup).toContain('mailto:AP@motts.com.au');
+    expect(markup).not.toContain('mode=signup');
   });
 
   it('keeps Sign Up with Xero visibly disabled until Xero approval', () => {

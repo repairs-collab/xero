@@ -1,4 +1,5 @@
 export * from './commerce.js';
+export * from './legal.js';
 export * from './messaging.js';
 export * from './onboarding.js';
 export * from './operations.js';

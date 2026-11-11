@@ -50,6 +50,15 @@ export class UserAdministrationConflict extends Error {
   }
 }
 
+export class SoloUserLimitReached extends Error {
+  readonly code = 'SOLO_USER_LIMIT';
+
+  constructor() {
+    super('SOLO_USER_LIMIT');
+    this.name = 'SoloUserLimitReached';
+  }
+}
+
 export interface UserAdministrationMutationAudit {
   eventType:
     | 'USER_INVITED'
@@ -142,6 +151,20 @@ export function createUserAdministration(
     await authorize(session, input.organisationId);
     const email = input.email.trim().toLowerCase();
     if (email.length === 0) throw new Error('Email is required');
+    const [organisation] = await dependencies.database
+      .select({ edition: organisations.edition })
+      .from(organisations)
+      .where(eq(organisations.id, input.organisationId))
+      .limit(1);
+    if (organisation === undefined) throw new Error('ORGANISATION_NOT_FOUND');
+    if (organisation.edition === 'SOLO') {
+      const [existingMembership] = await dependencies.database
+        .select({ userId: memberships.userId })
+        .from(memberships)
+        .where(eq(memberships.organisationId, input.organisationId))
+        .limit(1);
+      if (existingMembership !== undefined) throw new SoloUserLimitReached();
+    }
     const [existingUser] = await dependencies.database
       .select({ id: users.id })
       .from(users)
@@ -172,7 +195,7 @@ export function createUserAdministration(
           role: input.role,
           status: 'PENDING',
           invitedByUserId: session.userId,
-          expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
+          expiresAt: new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000)
         });
         await transaction.insert(auditEvents).values({
           organisationId: input.organisationId,
@@ -272,7 +295,7 @@ export function createUserAdministration(
       const updated = await transaction
         .update(invitations)
         .set({
-          expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+          expiresAt: new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000),
           version: sql`${invitations.version} + 1`
         })
         .where(
@@ -298,7 +321,7 @@ export function createUserAdministration(
         beforeValue: { version: invitation.version, expiresAt: invitation.expiresAt },
         afterValue: {
           version: invitation.version + 1,
-          expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
+          expiresAt: new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000)
         }
       });
     });
