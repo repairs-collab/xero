@@ -32,6 +32,7 @@ export interface ProviderSendDecisionInput {
   smsPartCount?: number;
   outboundMessageId?: string;
   now: Date;
+  clock: { now(): Date };
 }
 
 export type { EntitlementSendBlocker } from './outbound-entitlement.js';
@@ -42,12 +43,18 @@ export type ProviderDispatchResult<Value> =
   | { kind: 'suppressed'; source: string }
   | { kind: 'dispatched'; value: Value };
 
+class FinalEntitlementBlocked extends Error {
+  constructor(readonly reason: EntitlementSendBlocker, readonly checkedAt: Date) {
+    super(reason);
+  }
+}
+
 export async function dispatchWithProviderSendLock<Value>(
   database: Database,
   input: ProviderSendDecisionInput,
   dispatch: (
     transaction: DbTransaction,
-    context: { smsSourceNumber: string | null }
+    context: { smsSourceNumber: string | null; assertEntitlement(): Promise<void> }
   ) => Promise<Value>,
   wasDispatched: (value: Value) => boolean = () => true
 ): Promise<ProviderDispatchResult<Value>> {
@@ -66,9 +73,10 @@ export async function dispatchWithProviderSendLock<Value>(
       return { kind: 'blocked', reason: 'UNSUPPORTED_SENDING_STATE' };
     }
 
+    const lockedNow = new Date(Math.max(input.now.getTime(), input.clock.now().getTime()));
     const entitlements = await new PostgresEntitlementRepository(
       database
-    ).decide(input.organisationId, input.now, transaction);
+    ).decide(input.organisationId, lockedNow, transaction);
     const entitlementDecision = decideOutboundEntitlement(entitlements, {
       source: input.source,
       destination: input.destination,
@@ -77,6 +85,26 @@ export async function dispatchWithProviderSendLock<Value>(
         ? {}
         : { smsPartCount: input.smsPartCount })
     });
+    const assertEntitlement = async (): Promise<void> => {
+      let checkedAt = input.now;
+      const current = await new PostgresEntitlementRepository(database).decide(
+        input.organisationId,
+        () => {
+          checkedAt = new Date(Math.max(input.now.getTime(), input.clock.now().getTime()));
+          return checkedAt;
+        },
+        transaction
+      );
+      const finalDecision = decideOutboundEntitlement(current, {
+        source: input.source,
+        destination: input.destination,
+        automatic: input.automatic ?? false,
+        ...(input.smsPartCount === undefined ? {} : { smsPartCount: input.smsPartCount })
+      });
+      if (finalDecision.kind === 'blocked') {
+        throw new FinalEntitlementBlocked(finalDecision.reason, checkedAt);
+      }
+    };
     if (entitlementDecision.kind === 'blocked') return entitlementDecision;
     if (
       entitlementDecision.kind === 'verified-admin-test' ||
@@ -85,10 +113,17 @@ export async function dispatchWithProviderSendLock<Value>(
       if (organisation.maintenanceMode) {
         return { kind: 'blocked', reason: 'OPERATIONAL_MAINTENANCE' };
       }
-      return {
-        kind: 'dispatched',
-        value: await dispatch(transaction, { smsSourceNumber: null })
-      };
+      try {
+        return {
+          kind: 'dispatched',
+          value: await dispatch(transaction, { smsSourceNumber: null, assertEntitlement })
+        };
+      } catch (error) {
+        if (error instanceof FinalEntitlementBlocked) {
+          return { kind: 'blocked', reason: error.reason };
+        }
+        throw error;
+      }
     }
 
     const decision = evaluateProviderSendPolicy({
@@ -148,7 +183,7 @@ export async function dispatchWithProviderSendLock<Value>(
     }
 
     try {
-      const value = await dispatch(transaction, { smsSourceNumber });
+      const value = await dispatch(transaction, { smsSourceNumber, assertEntitlement });
       if (reserved && input.outboundMessageId !== undefined) {
         const smsCommerce = new PostgresSmsCommerceRepository(database);
         if (wasDispatched(value)) {
@@ -169,6 +204,14 @@ export async function dispatchWithProviderSendLock<Value>(
       }
       return { kind: 'dispatched', value } as const;
     } catch (error) {
+      if (error instanceof FinalEntitlementBlocked) {
+        if (reserved && input.outboundMessageId !== undefined) {
+          await new PostgresSmsCommerceRepository(database).releaseUsage(
+            input.organisationId, input.outboundMessageId, error.checkedAt, transaction
+          );
+        }
+        return { kind: 'blocked', reason: error.reason };
+      }
       return { kind: 'provider-error', error } as const;
     }
     }

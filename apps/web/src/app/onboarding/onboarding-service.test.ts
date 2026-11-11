@@ -75,6 +75,16 @@ describe('AccountPulse Solo onboarding evidence', () => {
     expect(status.complete).toBe(false);
   });
 
+  it.each([
+    ['before', 'active', new Date(now.getTime() + 1), true],
+    ['at', 'active', now, false],
+    ['without verified provenance', null, new Date(now.getTime() + 1), false]
+  ])('uses paid cancellation eligibility %s the boundary', (_label, stripeProviderStatus, currentPeriodEnd, paid) => {
+    const input = evidence({ subscriptionStatus: 'CANCEL_AT_PERIOD_END', stripeProviderStatus, currentPeriodEnd, cancelAt: null });
+    expect(deriveOnboardingStatus(input, now).steps.find((step) => step.key === 'SUBSCRIPTION_ACTIVE')?.complete).toBe(paid);
+    expect(deriveSoloTrialExperience({ subscriptionStatus: input.subscriptionStatus, stripeProviderStatus: input.stripeProviderStatus ?? null, currentPeriodEnd: input.currentPeriodEnd ?? null, cancelAt: input.cancelAt ?? null, trialEndsAt: input.trialEndsAt, verifiedAdminMobile: input.adminMobile }, now).canAssignPermanentNumber).toBe(paid);
+  });
+
   it('requires at least one reviewed sequence and keeps automatic mode out of onboarding', () => {
     expect(
       deriveOnboardingStatus(evidence({ sequenceCount: 0 })).steps.find(

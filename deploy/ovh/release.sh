@@ -14,6 +14,7 @@ if [[ ! "$PUBLIC_HOSTNAME" =~ ^[A-Za-z0-9.-]+$ ]]; then
 fi
 
 DEPLOY_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+source "$DEPLOY_ROOT/rollback-safety.sh"
 COMPOSE_FILE="$DEPLOY_ROOT/docker-compose.yml"
 BASE_ENV=${ACCOUNT_PULSE_ENV_FILE:-$DEPLOY_ROOT/accountpulse.env}
 CURRENT_MANIFEST="$DEPLOY_ROOT/current-images.env"
@@ -89,7 +90,8 @@ rollback_images() {
     return 0
   fi
   echo "Release failed; restoring the previous Compose image values." >&2
-  cp "$PREVIOUS_MANIFEST" "$CURRENT_MANIFEST"
+  rollback_safeguard "${current_compose[@]}" || return 1
+  cp "$PREVIOUS_MANIFEST" "$CURRENT_MANIFEST" || return 1
   local rollback_compose=(docker compose --env-file "$BASE_ENV" --env-file "$CURRENT_MANIFEST" -f "$COMPOSE_FILE")
   "${rollback_compose[@]}" up -d
 }
@@ -104,10 +106,11 @@ on_error() {
 trap on_error ERR
 
 candidate_compose=(docker compose --env-file "$BASE_ENV" --env-file "$CANDIDATE_MANIFEST" -f "$COMPOSE_FILE")
+rollback_armed=true
+"${current_compose[@]}" stop web worker
 "${candidate_compose[@]}" run --rm worker node /app/worker.mjs migrate
 
 cp "$CANDIDATE_MANIFEST" "$CURRENT_MANIFEST"
-rollback_armed=true
 active_compose=(docker compose --env-file "$BASE_ENV" --env-file "$CURRENT_MANIFEST" -f "$COMPOSE_FILE")
 "${active_compose[@]}" up -d
 

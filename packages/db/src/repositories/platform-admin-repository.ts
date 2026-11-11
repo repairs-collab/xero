@@ -2,7 +2,7 @@ import { and, asc, eq, inArray, or, sql } from 'drizzle-orm';
 
 import { summariseSmsUsage } from '@bc5000/domain';
 
-import type { Database } from '../connection.js';
+import type { Database, DbTransaction } from '../connection.js';
 import {
   invitations,
   memberships,
@@ -21,6 +21,13 @@ import {
   type SubscriptionStatus,
   type XeroConnectionStatus
 } from '../schema/index.js';
+
+const lockNumberOrganisation = async (transaction: DbTransaction, organisationId: string): Promise<boolean> => {
+  const [organisation] = await transaction.select({ id: organisations.id }).from(organisations).where(eq(organisations.id, organisationId)).for('update').limit(1);
+  if (organisation === undefined) return false;
+  await transaction.select({ organisationId: subscriptions.organisationId }).from(subscriptions).where(eq(subscriptions.organisationId, organisationId)).for('update').limit(1);
+  return true;
+};
 
 export type PlatformOrganisationSort = 'name' | 'trialEnd' | 'status' | 'usage';
 export type SortDirection = 'asc' | 'desc';
@@ -612,6 +619,13 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
     }
   ): Promise<PlatformMutationResult<PlatformOrganisationDetail>> {
     const result = await this.database.transaction(async (transaction) => {
+      const [organisation] = await transaction
+        .select({ id: organisations.id })
+        .from(organisations)
+        .where(eq(organisations.id, input.organisationId))
+        .for('update')
+        .limit(1);
+      if (!organisation) return { ok: false, code: 'INVALID_STATE' } as const;
       const [subscription] = await transaction
         .select()
         .from(subscriptions)
@@ -1002,6 +1016,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
       await transaction.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${`platform-org-number:${input.organisationId}`}, 0))`
       );
+      if (!(await lockNumberOrganisation(transaction, input.organisationId))) return { ok: false, code: 'INVALID_STATE' } as const;
       const [number] = await transaction
         .select()
         .from(smsNumberPool)
@@ -1073,6 +1088,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
     }
     try {
       const result = await this.database.transaction(async (transaction) => {
+        if (!(await lockNumberOrganisation(transaction, input.organisationId))) return { ok: false, code: 'INVALID_STATE' } as const;
         const [number] = await transaction
           .select()
           .from(smsNumberPool)
@@ -1162,6 +1178,8 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
       return { ok: false, code: 'VALIDATION' };
     }
     const result = await this.database.transaction(async (transaction) => {
+      const [owner] = await transaction.select({ organisationId: smsNumberPool.organisationId }).from(smsNumberPool).where(eq(smsNumberPool.id, input.numberId)).limit(1);
+      if (!owner?.organisationId || !(await lockNumberOrganisation(transaction, owner.organisationId))) return { ok: false, code: 'CONFLICT' } as const;
       const [number] = await transaction
         .select()
         .from(smsNumberPool)
@@ -1172,7 +1190,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
         !number ||
         number.status !== input.expectedStatus ||
         number.updatedAt.getTime() !== input.expectedUpdatedAt.getTime() ||
-        !number.organisationId
+        !number.organisationId || number.organisationId !== owner.organisationId
       ) {
         return { ok: false, code: 'CONFLICT' } as const;
       }
@@ -1237,6 +1255,8 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
     const reason = this.validReason(input.reason);
     if (!reason) return { ok: false, code: 'VALIDATION' };
     const result = await this.database.transaction(async (transaction) => {
+      const [owner] = await transaction.select({ organisationId: smsNumberPool.organisationId }).from(smsNumberPool).where(eq(smsNumberPool.id, input.numberId)).limit(1);
+      if (!owner?.organisationId || !(await lockNumberOrganisation(transaction, owner.organisationId))) return { ok: false, code: 'CONFLICT' } as const;
       const [number] = await transaction
         .select()
         .from(smsNumberPool)
@@ -1246,7 +1266,8 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
       if (
         !number ||
         number.status !== input.expectedStatus ||
-        number.updatedAt.getTime() !== input.expectedUpdatedAt.getTime()
+        number.updatedAt.getTime() !== input.expectedUpdatedAt.getTime() ||
+        number.organisationId !== owner.organisationId
       ) {
         return { ok: false, code: 'CONFLICT' } as const;
       }

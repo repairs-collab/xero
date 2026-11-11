@@ -91,7 +91,7 @@ jobs:
           SSH=(ssh -i ~/.ssh/id_accountpulse -p "$OVH_PORT" "$OVH_USER@$OVH_HOST")
           SCP=(scp -i ~/.ssh/id_accountpulse -P "$OVH_PORT")
           "${SSH[@]}" "mkdir -p '$OVH_DEPLOY_PATH/artifacts/$IMAGE_TAG'"
-          "${SCP[@]}" deploy/ovh/docker-compose.yml deploy/ovh/release.sh deploy/ovh/rollback.sh deploy/ovh/install-protected-environment.sh deploy/ovh/install-public-hostname.sh deploy/ovh/accountpulse-site.caddy "$OVH_USER@$OVH_HOST:$OVH_DEPLOY_PATH/"
+          "${SCP[@]}" deploy/ovh/docker-compose.yml deploy/ovh/release.sh deploy/ovh/rollback.sh deploy/ovh/rollback-safety.sh deploy/ovh/install-protected-environment.sh deploy/ovh/install-public-hostname.sh deploy/ovh/accountpulse-site.caddy "$OVH_USER@$OVH_HOST:$OVH_DEPLOY_PATH/"
           "${SCP[@]}" accountpulse-web.tar.zst accountpulse-worker.tar.zst "$OVH_USER@$OVH_HOST:$OVH_DEPLOY_PATH/artifacts/$IMAGE_TAG/"
       - name: Install protected production environment
         env:

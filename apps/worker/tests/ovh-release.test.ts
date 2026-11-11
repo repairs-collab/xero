@@ -8,6 +8,27 @@ const repositoryFile = (path: string): string => {
 };
 
 describe('OVH release pipeline', () => {
+  it('stops apps and reconciles cancellations transactionally before either rollback starts old images', () => {
+    const safety = repositoryFile('deploy/ovh/rollback-safety.sh');
+    const release = repositoryFile('deploy/ovh/release.sh');
+    const rollback = repositoryFile('deploy/ovh/rollback.sh');
+    const workflow = repositoryFile('.github/workflows/deploy.yml');
+    expect(safety.indexOf('stop web worker')).toBeGreaterThan(-1);
+    expect(safety.indexOf('stop web worker')).toBeLessThan(safety.indexOf('psql'));
+    expect(safety).toContain('--single-transaction');
+    expect(safety).toContain('psql -X ');
+    expect(safety).toContain('--single-transaction -f -');
+    expect(safety).toContain('ON_ERROR_STOP=1');
+    expect(safety).toContain("'CANCEL_AT_PERIOD_END'");
+    expect(safety).toContain("'INCOMPLETE'");
+    expect(safety).toContain("'dry-run'");
+    expect(safety).toContain("'CONTROLLED'");
+    expect(safety).toContain('live_send_acknowledged = false');
+    expect(release).toMatch(/rollback_safeguard[\s\S]*?\|\| return 1[\s\S]*?up -d/);
+    expect(release.indexOf('rollback_armed=true')).toBeLessThan(release.indexOf('worker.mjs migrate'));
+    expect(rollback.indexOf('rollback_safeguard')).toBeLessThan(rollback.indexOf('up -d'));
+    expect(workflow).toContain('deploy/ovh/rollback-safety.sh');
+  });
   it('keeps Linux deployment scripts executable across Windows checkouts', () => {
     const attributes = repositoryFile('.gitattributes');
 

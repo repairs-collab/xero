@@ -14,6 +14,7 @@ if [[ ! "$PUBLIC_HOSTNAME" =~ ^[A-Za-z0-9.-]+$ ]]; then
 fi
 
 DEPLOY_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+source "$DEPLOY_ROOT/rollback-safety.sh"
 COMPOSE_FILE="$DEPLOY_ROOT/docker-compose.yml"
 BASE_ENV=${ACCOUNT_PULSE_ENV_FILE:-$DEPLOY_ROOT/accountpulse.env}
 CURRENT_MANIFEST="$DEPLOY_ROOT/current-images.env"
@@ -29,8 +30,9 @@ grep -Fxq "ACCOUNT_PULSE_WORKER_IMAGE=accountpulse-worker:${TARGET_SHA}" "$TARGE
 exec 9>"$DEPLOY_ROOT/.release.lock"
 flock -n 9 || { echo "Another AccountPulse release or rollback is active." >&2; exit 75; }
 
+compose=(docker compose --env-file "$BASE_ENV" --env-file "$TARGET_MANIFEST" -f "$COMPOSE_FILE")
+rollback_safeguard "${compose[@]}"
 cp "$TARGET_MANIFEST" "$CURRENT_MANIFEST"
-compose=(docker compose --env-file "$BASE_ENV" --env-file "$CURRENT_MANIFEST" -f "$COMPOSE_FILE")
 "${compose[@]}" up -d
 curl --fail --show-error --silent --retry 12 --retry-delay 5 \
   "https://${PUBLIC_HOSTNAME}/health/ready" >/dev/null
@@ -39,4 +41,4 @@ printf '{\n  "targetReleaseSha": "%s",\n  "hostname": "%s",\n  "rolledBackAt": "
   "$TARGET_SHA" "$PUBLIC_HOSTNAME" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   > "$ROLLBACK_METADATA"
 
-echo "AccountPulse is healthy on recorded release $TARGET_SHA. Database contents were preserved."
+echo "AccountPulse is healthy on recorded release $TARGET_SHA. Database records were preserved; affected subscriptions were paused."

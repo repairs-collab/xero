@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
+import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createDatabase, migrateDatabase } from '../client.js';
@@ -63,6 +64,15 @@ const seedOrganisation = async (input: {
 };
 
 describe('PostgresEntitlementRepository', () => {
+  it('enforces cancellation provenance and the period boundary', async () => {
+    const organisationId = await seedOrganisation({ edition: 'SOLO', subscriptionStatus: 'ACTIVE', completed: true, numberReady: true });
+    await client.db.update(subscriptions).set({ status: 'CANCEL_AT_PERIOD_END', stripeProviderStatus: 'active', currentPeriodStart: new Date(now.getTime() - 1000), currentPeriodEnd: now }).where(eq(subscriptions.organisationId, organisationId));
+    await expect(repository.decide(organisationId, new Date(now.getTime() - 1))).resolves.toMatchObject({ canCustomerSend: true });
+    await expect(repository.decide(organisationId, now)).resolves.toMatchObject({ canCustomerSend: false });
+    await client.db.update(subscriptions).set({ status: 'CANCEL_AT_PERIOD_END', currentPeriodEnd: new Date(now.getTime() + 1000) }).where(eq(subscriptions.organisationId, organisationId));
+    await expect(repository.decide(organisationId, now)).resolves.toMatchObject({ canCustomerSend: false });
+  });
+
   it('blocks all sending capabilities for a suspended account', async () => {
     const organisationId = await seedOrganisation({
       edition: 'INTERNAL_LEGACY',

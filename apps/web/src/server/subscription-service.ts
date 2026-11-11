@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import { authorise, type AppSession } from '@bc5000/auth';
+import { hasPaidSubscriptionAccess } from '@bc5000/domain';
 import type {
   AccountPulseSubscriptionStatus,
   SoloCheckoutRequest,
@@ -15,6 +16,7 @@ export interface BillingAccount {
   edition: 'INTERNAL_LEGACY' | 'SOLO';
   planCode: 'SOLO_AU_2000';
   status: AccountPulseSubscriptionStatus;
+  stripeProviderStatus?: string | null;
   stripeCustomerId: string | null;
   stripeSubscriptionId: string | null;
   currentPeriodStart: Date | null;
@@ -48,6 +50,7 @@ export interface StripeLifecycleEventInput {
   stripeSubscriptionId: string;
   planCode: 'SOLO_AU_2000';
   status: AccountPulseSubscriptionStatus;
+  stripeProviderStatus: string;
   currentPeriodStart: Date;
   currentPeriodEnd: Date;
   trialEndsAt: Date | null;
@@ -105,10 +108,15 @@ interface StripeEventDecisionInput {
   eventAlreadyProcessed: boolean;
   eventCreatedAt: Date;
   lastAppliedAt: Date | null;
+  lastAppliedCheckoutAt?: Date | null;
   existingCustomerId: string | null;
   incomingCustomerId: string;
   existingSubscriptionId: string | null;
   incomingSubscriptionId: string;
+  existingStatus?: AccountPulseSubscriptionStatus;
+  incomingStatus?: AccountPulseSubscriptionStatus;
+  allowReplacement?: boolean;
+  isRetired?: boolean;
 }
 
 export const decideStripeEventApplication = (
@@ -119,7 +127,8 @@ export const decideStripeEventApplication = (
     (input.existingCustomerId !== null &&
       input.existingCustomerId !== input.incomingCustomerId) ||
     (input.existingSubscriptionId !== null &&
-      input.existingSubscriptionId !== input.incomingSubscriptionId)
+      input.existingSubscriptionId !== input.incomingSubscriptionId &&
+      !(input.allowReplacement && input.existingStatus === 'CANCELLED' && input.existingCustomerId !== null && input.existingCustomerId === input.incomingCustomerId)) || input.isRetired
   ) {
     return 'REJECTED';
   }
@@ -129,8 +138,43 @@ export const decideStripeEventApplication = (
   ) {
     return 'IGNORED_OUT_OF_ORDER';
   }
+  if (input.existingStatus === 'CANCELLED' && input.existingSubscriptionId !== null &&
+    input.existingSubscriptionId !== input.incomingSubscriptionId && input.lastAppliedCheckoutAt != null &&
+    input.eventCreatedAt.getTime() <= input.lastAppliedCheckoutAt.getTime()) {
+    return 'IGNORED_OUT_OF_ORDER';
+  }
+  const risk: Record<AccountPulseSubscriptionStatus, number> = {
+    ACTIVE: 0,
+    CANCEL_AT_PERIOD_END: 1,
+    TRIALING: 2,
+    PAST_DUE: 3,
+    INCOMPLETE: 3,
+    CANCELLED: 3
+  };
+  if (input.lastAppliedAt !== null && input.eventCreatedAt.getTime() === input.lastAppliedAt.getTime() && input.existingStatus !== undefined && input.incomingStatus !== undefined &&
+    risk[input.incomingStatus] <= risk[input.existingStatus]) {
+    return 'IGNORED_OUT_OF_ORDER';
+  }
   return 'APPLIED';
 };
+
+export const shouldRetireIgnoredReplacementCandidate = (input: {
+  outcome: StripeEventApplicationOutcome;
+  existingStatus: AccountPulseSubscriptionStatus;
+  existingCustomerId: string | null;
+  incomingCustomerId: string;
+  existingSubscriptionId: string | null;
+  incomingSubscriptionId: string;
+}): boolean =>
+  input.outcome === 'IGNORED_OUT_OF_ORDER' &&
+  input.existingStatus === 'CANCELLED' &&
+  input.existingCustomerId !== null &&
+  input.existingCustomerId === input.incomingCustomerId &&
+  input.existingSubscriptionId !== null &&
+  input.existingSubscriptionId !== input.incomingSubscriptionId;
+
+export const retainedTrialEnd = (local: Date | null, incoming: Date | null): Date | null =>
+  local === null || incoming === null ? local : new Date(Math.min(local.getTime(), incoming.getTime()));
 
 const objectValue = (value: unknown): Record<string, unknown> => {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -220,18 +264,20 @@ const parseLifecycleEvent = (
   ) {
     throw new SubscriptionFailure('STRIPE_PLAN_MISMATCH');
   }
-  const currentPeriodStart = eventDate(object.current_period_start);
-  const currentPeriodEnd = eventDate(object.current_period_end);
+  const hasItemPeriod = item.current_period_start !== undefined || item.current_period_end !== undefined;
+  const currentPeriodStart = eventDate(hasItemPeriod ? item.current_period_start : object.current_period_start);
+  const currentPeriodEnd = eventDate(hasItemPeriod ? item.current_period_end : object.current_period_end);
   if (currentPeriodEnd <= currentPeriodStart) {
     throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
   }
   if (typeof object.cancel_at_period_end !== 'boolean') {
     throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
   }
+  const stripeProviderStatus = requiredString(object.status);
   let status: AccountPulseSubscriptionStatus;
   try {
     status = mapStripeSubscriptionStatus(
-      requiredString(object.status),
+      stripeProviderStatus,
       object.cancel_at_period_end
     );
   } catch {
@@ -247,6 +293,7 @@ const parseLifecycleEvent = (
     stripeSubscriptionId: requiredString(object.id),
     planCode: metadata.planCode,
     status,
+    stripeProviderStatus,
     currentPeriodStart,
     currentPeriodEnd,
     trialEndsAt: nullableEventDate(object.trial_end),
@@ -299,6 +346,9 @@ export const createSubscriptionService = (dependencies: {
       organisationId,
       userId: session.userId,
       customerEmail: account.billingEmail,
+      ...(account.trialEndsAt !== null && Math.floor(account.trialEndsAt.getTime() / 1000) >= Math.ceil(dependencies.clock.now().getTime() / 1000) + 48 * 60 * 60 + 300
+        ? { trialEnd: Math.floor(account.trialEndsAt.getTime() / 1000) }
+        : {}),
       ...(account.stripeCustomerId === null
         ? {}
         : { stripeCustomerId: account.stripeCustomerId }),
@@ -385,8 +435,7 @@ export const createSubscriptionService = (dependencies: {
     }
     if (
       (outcome === 'APPLIED' || outcome === 'DUPLICATE') &&
-      (input.status === 'ACTIVE' ||
-        input.status === 'CANCEL_AT_PERIOD_END')
+      hasPaidSubscriptionAccess({ subscriptionStatus: input.status, stripeProviderStatus: input.stripeProviderStatus, currentPeriodEnd: input.currentPeriodEnd, cancelAt: input.cancelAt, now: dependencies.clock.now() })
     ) {
       await dependencies.publishNumberProvision({
         organisationId: input.organisationId

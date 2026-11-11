@@ -87,7 +87,7 @@ cd /the/protected/OVH_DEPLOY_PATH
 ./rollback.sh FULL_40_CHARACTER_GIT_SHA accountpulse.example.com
 ```
 
-The rollback script accepts only a manifest previously recorded for that exact immutable SHA. It takes the same exclusive lock, restores the selected web and worker images, leaves PostgreSQL untouched and checks `/health/ready`. Review any forward database migration for compatibility before rolling application code back.
+The rollback script accepts only a manifest previously recorded for that exact immutable SHA. It takes the same exclusive lock, stops web and worker, and transactionally changes scheduled cancellations to incomplete and pauses the affected organisations before starting the selected images. Automatic rollback uses the same safeguard. If stopping services or reconciliation fails, older images must remain stopped until the failure is resolved. PostgreSQL and its records are preserved; no database restore occurs. The script checks `/health/ready`. Review forward database migrations for compatibility before rolling application code back.
 
 If a database restore is genuinely required, stop and use the separate restore procedure with a new database target. Never overwrite the current database or replay customer communications as part of a normal rollback.
 
@@ -123,8 +123,11 @@ enabling paid Solo onboarding in an environment:
 5. Complete the eight-step onboarding checklist. The final step reads the READY
    pool record; it is not a manually editable checkbox.
 6. Send a multi-part test and verify Billing shows committed and reserved parts.
-   Paid customer sends stop before exceeding 2,000 parts unless a verified rate
-   and explicit AUD-cent cap have both been configured.
+   Verify Billing also shows the configured included, used and remaining parts.
+   Paid Solo customer sends that would exceed the configured included allowance
+   must return `SMS_ALLOWANCE_EXHAUSTED` without creating a reservation or
+   reaching the provider. Persisted legacy overage settings do not authorise the
+   send, and blocked work is not automatically replayed.
 7. Reply to the assigned number. The webhook must resolve the organisation by
    `destination_number` before debtor/contact matching. An unknown destination
    is acknowledged but not persisted into any tenant.

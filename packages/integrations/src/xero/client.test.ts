@@ -57,6 +57,13 @@ const createClient = (http: HttpClient) =>
   });
 
 describe('XeroClient request contract', () => {
+  it('runs the invoice email guard after session acquisition and before HTTP', async () => {
+    const http = new FakeHttpClient();
+    let expired = false;
+    const client = new XeroClient({ http, sessionProvider: { getSession: () => { expired = true; return Promise.resolve({ accessToken: 'test', tenantId: null }); } } });
+    await expect(client.emailInvoice('invoice-id', () => expired ? Promise.reject(new Error('SUBSCRIPTION_REQUIRED')) : Promise.resolve())).rejects.toThrow('SUBSCRIPTION_REQUIRED');
+    expect(http.requests).toEqual([]);
+  });
   it('does not send xero-tenant-id for a Custom Connection', async () => {
     const http = new FakeHttpClient();
     http.responses.push({

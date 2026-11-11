@@ -38,7 +38,7 @@ export const mapStripeSubscriptionStatus = (
 ): AccountPulseSubscriptionStatus => {
   if (!knownStatuses.has(providerStatus)) throw new StripeStatusFailure();
   if (terminalStatuses.has(providerStatus)) return 'CANCELLED';
-  if (cancelAtPeriodEnd) return 'CANCEL_AT_PERIOD_END';
+  if (providerStatus === 'active' && cancelAtPeriodEnd) return 'CANCEL_AT_PERIOD_END';
 
   switch (providerStatus) {
     case 'trialing':

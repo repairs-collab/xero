@@ -166,10 +166,12 @@ export async function executeTestSms(
         destination: candidate.outbound.recipientKey,
         outboundMessageId: claim.outboundId,
         smsPartCount: renderSms(content, {}, { maxSegments: 10 }).segmentCount,
-        now
+        now,
+        clock: dependencies.clock
       },
-      (_transaction, sendContext) =>
-        dependencies.sinch.sendSms({
+      async (_transaction, sendContext) => {
+        await sendContext.assertEntitlement();
+        return dependencies.sinch.sendSms({
           destinationNumber: candidate.outbound.recipientKey,
           ...(sendContext.smsSourceNumber === null
             ? {}
@@ -180,7 +182,8 @@ export async function executeTestSms(
             organisationId: payload.organisationId,
             outboundMessageId: payload.outboundMessageId
           }
-        })
+        });
+      }
     );
     if (sendResult.kind === 'dry-run') {
       await repository.markDryRun({

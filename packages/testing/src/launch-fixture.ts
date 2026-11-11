@@ -71,14 +71,14 @@ export async function seedLaunchScenario(
     await client.db.insert(userLegalAcceptances).values([
       {
         userId: scenario.adminUserId,
-        termsVersion: '2026-11-11',
+        termsVersion: '2026-11-12',
         privacyVersion: '2026-11-11',
         acceptableUseVersion: '2026-11-11',
         acceptedAt: now
       },
       {
         userId: scenario.operatorUserId,
-        termsVersion: '2026-11-11',
+        termsVersion: '2026-11-12',
         privacyVersion: '2026-11-11',
         acceptableUseVersion: '2026-11-11',
         acceptedAt: now

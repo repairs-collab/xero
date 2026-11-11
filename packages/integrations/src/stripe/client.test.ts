@@ -111,7 +111,6 @@ describe('StripeBillingClient checkout', () => {
             plan_code: 'SOLO_AU_2000'
           },
           subscription_data: {
-            trial_period_days: 14,
             metadata: {
               organisation_id: 'org_solo',
               initiating_user_id: 'user_owner',
@@ -126,6 +125,12 @@ describe('StripeBillingClient checkout', () => {
         options: { idempotencyKey: 'solo-checkout:org_solo:attempt_1' }
       }
     ]);
+  });
+
+  it('passes the exact eligible local trial deadline to Stripe', async () => {
+    const api = new FakeStripeApi();
+    await createClient(api).createSoloCheckout({organisationId:'org_solo', userId:'user_owner', customerEmail:'owner@example.com', idempotencyKey:'trial', trialEnd:1795392000});
+    expect(api.checkoutCalls[0]?.parameters.subscription_data).toMatchObject({trial_end:1795392000});
   });
 
   it('uses a stored Stripe customer instead of accepting caller-controlled customer details', async () => {

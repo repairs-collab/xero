@@ -15,6 +15,17 @@ The live `ap.motts.com.au` TLS and readiness endpoint were verified after the
 older deployment notes were written, so TLS is not treated as a current launch
 blocker.
 
+## Safety update — 12 November 2026
+
+The commercial safety release selects a hard cap for Solo SMS usage. Every send
+whose complete part count would exceed the configured included allowance is
+blocked before provider submission, with no paid overage or automatic replay.
+Legacy overage database columns remain only for compatibility and do not grant
+runtime authority. Local unit, rendered-copy and PostgreSQL regressions cover
+this rule. The verified release candidate passed 706 unit tests across 118
+files and 496 integration tests across 62 files on the isolated local
+PostgreSQL 18 test database on 12 November 2026.
+
 ## Release stages
 
 | Stage | Current position | Required next work |
@@ -48,12 +59,15 @@ blocker.
 
 ## P0 — complete before charging any customer
 
-1. **Correct Stripe access rules.** A subscription marked for cancellation can
-   currently override trialing, past-due, unpaid or incomplete provider states
-   and receive active sending entitlements. Provider payment state must win.
-2. **Prevent repeat trials.** The local trial and Stripe Checkout can create two
-   consecutive trials, and a cancelled customer can start another. Record trial
-   consumption and convert the existing trial rather than resetting it.
+1. **Stripe access rules — verified.** Provider payment risk now wins over a
+   scheduled cancellation, ambiguous historical rows fail closed, and the
+   migration plus boundary regressions pass against PostgreSQL. This item is
+   closed for the current release.
+2. **One trial per customer — verified.** Checkout can preserve or shorten the
+   original local trial but cannot create a fresh trial. Cancelled subscription
+   identifiers are retired, cross-tenant ownership is rejected, and both
+   webhook orderings pass against PostgreSQL. This item is closed for the
+   current release.
 3. **Finish the legal/commercial identity.** Confirm legal entity, ABN, GST
    registration, business address, tax treatment, refund policy, subprocessors,
    security contact and incident-notification terms with Australian legal and
@@ -62,9 +76,11 @@ blocker.
    number ownership, sender compliance, outbound delivery and inbound reply
    routing. Until automated provider provisioning exists, only owner-verified
    numbers may enter the allocation pool.
-5. **Resolve SMS overage claims.** Either remove overage pricing from the launch
-   UI/terms and enforce a hard allowance, or implement metered billing, caps,
-   invoices and reconciliation end to end.
+5. **Selected SMS hard cap — verified.** Launch UI, Terms and support guidance
+   no longer promise paid overage, and runtime authorization blocks sends above
+   the configured included allowance even when legacy overage fields are set.
+   The PostgreSQL hard-cap regressions and full integration project pass. This
+   item is closed; genuine metered overage remains a future product feature.
 6. **Build payment operations.** Verify payment-failure/dunning emails, refunds,
    disputes, chargebacks, receipts, cancellation and provider webhook handling.
 7. **Add essential lifecycle email.** Welcome, onboarding, usage warning, trial
@@ -115,7 +131,10 @@ blocker.
   during cooling. Owner release and every return to the shared pool clear
   verification before the number can be reused for a different customer.
 - Public Terms, Privacy and Acceptable Use pages no longer require login.
-- Verification passed on a fresh database: 171 test files / 1,120 tests, plus
+- Solo SMS authorization, Billing, Terms and support guidance now use the same
+  hard-cap rule; legacy overage fields are retained only for database
+  compatibility.
+- Verification passed on a fresh database: 180 test files / 1,202 tests, plus
   lint, type-check and production build.
 
 ## Official Xero references

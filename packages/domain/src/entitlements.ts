@@ -20,6 +20,9 @@ export interface AccountEntitlementInput {
   edition: AccountEdition;
   platformStatus: 'ACTIVE' | 'SUSPENDED';
   subscriptionStatus: AccountSubscriptionStatus | null;
+  stripeProviderStatus?: string | null;
+  currentPeriodEnd?: Date | null;
+  cancelAt?: Date | null;
   trialEndsAt: Date | null;
   onboardingCompletedVersion: number | null;
   requiredOnboardingVersion: number;
@@ -55,6 +58,19 @@ const readOnly = (
   remainingTrialTestSmsParts: 0,
   blocker
 });
+
+export const hasPaidSubscriptionAccess = (input: {
+  subscriptionStatus: AccountSubscriptionStatus | null;
+  stripeProviderStatus?: string | null;
+  currentPeriodEnd?: Date | null;
+  cancelAt?: Date | null;
+  now: Date;
+}): boolean => {
+  if (input.subscriptionStatus === 'ACTIVE') return true;
+  if (input.subscriptionStatus !== 'CANCEL_AT_PERIOD_END' || input.stripeProviderStatus !== 'active' || input.currentPeriodEnd == null) return false;
+  const now = input.now.getTime();
+  return input.currentPeriodEnd.getTime() > now && (input.cancelAt == null || input.cancelAt.getTime() > now);
+};
 
 export const decideAccountEntitlements = (
   input: AccountEntitlementInput
@@ -98,10 +114,7 @@ export const decideAccountEntitlements = (
   if (input.subscriptionStatus === 'PAST_DUE') {
     return readOnly('PAYMENT_PAST_DUE');
   }
-  if (
-    input.subscriptionStatus !== 'ACTIVE' &&
-    input.subscriptionStatus !== 'CANCEL_AT_PERIOD_END'
-  ) {
+  if (!hasPaidSubscriptionAccess(input)) {
     return readOnly('SUBSCRIPTION_REQUIRED');
   }
 

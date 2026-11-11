@@ -164,10 +164,12 @@ export async function executeOperatorReply(
         outboundMessageId: claim.outboundId,
         smsPartCount: renderSms(row.reply.content, {}, { maxSegments: 10 })
           .segmentCount,
-        now
+        now,
+        clock: dependencies.clock
       },
-      (_transaction, sendContext) =>
-        dependencies.sinch.sendSms({
+      async (_transaction, sendContext) => {
+        await sendContext.assertEntitlement();
+        return dependencies.sinch.sendSms({
           destinationNumber: row.conversation.normalisedNumber,
           ...(sendContext.smsSourceNumber === null
             ? {}
@@ -180,7 +182,8 @@ export async function executeOperatorReply(
             conversationId: row.conversation.id,
             outboundMessageId: claim.outboundId
           }
-        })
+        });
+      }
     );
     if (sendResult.kind === 'dry-run') {
       await messages.markDryRun({

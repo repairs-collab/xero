@@ -124,6 +124,30 @@ describe('Solo commerce schema contract', () => {
     );
   });
 
+  it('normalizes untrusted scheduled cancellations after provenance triggers', async () => {
+    const migration = await readFile(new URL('../../drizzle/0023_reconcile_ambiguous_cancellations.sql', import.meta.url), 'utf8');
+    expect(migration).toMatch(/CREATE FUNCTION subscription_normalize_untrusted_cancellation\(\) RETURNS trigger LANGUAGE plpgsql AS \$\$[\s\S]*?END;\s*\$\$;/);
+    expect(migration).toMatch(/IF NEW\.status = 'CANCEL_AT_PERIOD_END' AND NEW\.trusted_stripe_provider_status IS DISTINCT FROM 'active' THEN\s+NEW\.status := 'INCOMPLETE'/i);
+    expect(migration).toMatch(/CREATE TRIGGER z_subscription_normalize_cancellation BEFORE INSERT OR UPDATE ON subscriptions/i);
+  });
+
+  it('orders migration journal timestamps strictly through the retired subscription migration', async () => {
+    const journal = JSON.parse(await readFile(new URL('../../drizzle/meta/_journal.json', import.meta.url), 'utf8')) as { entries: Array<{ idx: number; when: number; tag: string }> };
+    const entries = journal.entries.filter((entry) => entry.idx <= 24);
+    expect(entries.map((entry) => entry.idx)).toEqual(Array.from({ length: 25 }, (_, index) => index));
+    expect(entries[24]?.tag).toBe('0024_lyrical_may_parker');
+    for (let index = 1; index < entries.length; index += 1) {
+      expect(entries[index]!.when).toBeGreaterThan(entries[index - 1]!.when);
+    }
+  });
+
+  it('creates retired subscription storage and does not grant a future trial during backfill', async () => {
+    const migration = await readFile(new URL('../../drizzle/0024_lyrical_may_parker.sql', import.meta.url), 'utf8');
+    expect(migration).toMatch(/CREATE TABLE "retired_stripe_subscriptions"/i);
+    expect(migration).toContain(`UPDATE "subscriptions" AS s SET "trial_ends_at" = LEAST(s."created_at" + interval '14 days', now())`);
+    expect(migration).toContain(`o."edition" = 'SOLO' AND s."trial_ends_at" IS NULL`);
+  });
+
   it('adds SMS commerce storage without mutating existing live organisations', async () => {
     const migration = await readFile(
       new URL(

@@ -1,4 +1,4 @@
-import { legalIdentity, legalLastUpdated } from '../../../server/legal-content.js';
+import { legalIdentity, termsLastUpdated } from '../../../server/legal-content.js';
 
 export default function TermsPage() {
   const legal = legalIdentity();
@@ -6,7 +6,7 @@ export default function TermsPage() {
     <>
       <span className="eyebrow">Legal</span>
       <h1>AccountPulse Terms of Service</h1>
-      <p className="muted-copy">Last updated: {legalLastUpdated}</p>
+      <p className="muted-copy">Last updated: {termsLastUpdated}</p>
       <p>
         These Terms govern access to AccountPulse, a subscription accounts
         receivable workflow service operated by {legal.entity}. By creating or
@@ -38,10 +38,12 @@ export default function TermsPage() {
       <p>
         Trial limits and included SMS parts are shown during onboarding and in
         billing. An SMS may consume more than one part because of message length
-        or character encoding. Paid subscriptions renew until cancelled. Prices,
-        taxes and any approved overage are disclosed before purchase. Except
-        where consumer law requires otherwise, fees already incurred are not
-        refundable merely because the service was unused.
+        or character encoding. Paid subscriptions renew until cancelled. Prices
+        and taxes are disclosed before purchase. Sends that would exceed the
+        included SMS allowance are blocked and are not submitted to the SMS
+        provider. Blocked sends are not automatically replayed. Except where
+        consumer law requires otherwise, fees already incurred are not refundable
+        merely because the service was unused.
       </p>
       <h2>5. Safe sending</h2>
       <p>
