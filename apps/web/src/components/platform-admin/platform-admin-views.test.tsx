@@ -41,6 +41,7 @@ const organisation = {
     e164Number: '+61400000001',
     provider: 'SINCH',
     providerNumberId: 'sinch-number-1',
+    providerVerifiedAt: now,
     status: 'READY' as const,
     organisationId: 'organisation-1',
     organisationName: 'Alpha Repairs',
@@ -150,14 +151,27 @@ describe('platform owner views', () => {
   });
 
   it('renders Sinch number lifecycle and assignment controls', () => {
+    const availableNumber = {
+      ...organisation.smsNumber,
+      id: 'number-2',
+      e164Number: '+61400000002',
+      providerNumberId: null,
+      providerVerifiedAt: null,
+      status: 'AVAILABLE' as const,
+      organisationId: null,
+      organisationName: null,
+      reservedAt: null,
+      readyAt: null
+    };
     const html = renderToStaticMarkup(
       <PlatformSmsAdministration
-        page={{ items: [organisation.smsNumber], total: 30, page: 1, pageSize: 25 }}
+        page={{ items: [organisation.smsNumber, availableNumber], total: 30, page: 1, pageSize: 25 }}
         organisations={[{ id: organisation.id, name: organisation.name }]}
         filters={{ search: '', customerSearch: 'Alpha', status: '' }}
         feedbackCode="UPDATED"
         actions={{
           register: noAction,
+          verify: noAction,
           assign: noAction,
           ready: noAction,
           quarantine: noAction,
@@ -172,6 +186,10 @@ describe('platform owner views', () => {
     expect(html).toContain('Ready');
     expect(html).toContain('Assign customer');
     expect(html).toContain('Cooling until');
+    expect(html).toContain('Verify for automatic allocation');
+    expect(html).toContain('name="verificationConfirmed"');
+    expect(html).toContain('Only verified pool numbers can be assigned automatically');
+    expect(html).toContain('Verified for automatic allocation');
     expect(html).toContain('name="reason"');
     expect(html).toContain('Find customer');
     expect(html).toContain('Change saved');

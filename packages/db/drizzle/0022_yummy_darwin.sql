@@ -1,0 +1,2 @@
+ALTER TABLE "sms_number_pool" ADD COLUMN "provider_verified_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "sms_number_pool" ADD CONSTRAINT "sms_number_pool_provider_verification_ck" CHECK ("sms_number_pool"."provider_verified_at" is null or "sms_number_pool"."provider_number_id" is not null);

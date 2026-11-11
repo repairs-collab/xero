@@ -45,14 +45,25 @@ const seedPaidOrganisation = async () => {
   return organisationId;
 };
 
-const seedPoolNumber = async () => {
+const seedPoolNumber = async (options: {
+  verified?: boolean;
+  createdAt?: Date;
+  organisationId?: string;
+  status?: 'AVAILABLE' | 'RESERVED' | 'READY';
+} = {}) => {
   const e164Number = `+614${randomInt(10_000_000, 99_999_999)}`;
   const [number] = await client.db
     .insert(smsNumberPool)
     .values({
       e164Number,
       provider: 'SINCH',
-      providerNumberId: randomUUID()
+      providerNumberId: randomUUID(),
+      providerVerifiedAt: options.verified ? now : null,
+      organisationId: options.organisationId,
+      status: options.status ?? 'AVAILABLE',
+      reservedAt: options.status === 'RESERVED' ? now : null,
+      readyAt: options.status === 'READY' ? now : null,
+      createdAt: options.createdAt
     })
     .returning({ id: smsNumberPool.id, e164Number: smsNumberPool.e164Number });
   if (number === undefined) throw new Error('number not created');
@@ -76,9 +87,16 @@ const seedOutbound = async (organisationId: string) => {
 };
 
 describe('PostgresSmsCommerceRepository', () => {
-  it('assigns one paid tenant number and resolves replies by destination', async () => {
+  it('skips older unverified numbers and assigns a verified Sinch number', async () => {
     const organisationId = await seedPaidOrganisation();
-    const poolNumber = await seedPoolNumber();
+    const earliest = -Date.now();
+    const unverified = await seedPoolNumber({
+      createdAt: new Date(earliest - 1_000)
+    });
+    const poolNumber = await seedPoolNumber({
+      verified: true,
+      createdAt: new Date(earliest)
+    });
     const reserved = await repository.reserveAvailableNumber(
       organisationId,
       now
@@ -88,6 +106,11 @@ describe('PostgresSmsCommerceRepository', () => {
       e164Number: poolNumber.e164Number,
       status: 'RESERVED'
     });
+    await expect(
+      client.db.query.smsNumberPool.findFirst({
+        where: (table, { eq }) => eq(table.id, unverified.id)
+      })
+    ).resolves.toMatchObject({ status: 'AVAILABLE', organisationId: null });
     await repository.markNumberReady(organisationId, poolNumber.id, now);
 
     await expect(
@@ -100,8 +123,8 @@ describe('PostgresSmsCommerceRepository', () => {
 
   it('reserves and commits final rendered parts idempotently per tenant', async () => {
     const organisationId = await seedPaidOrganisation();
-    const number = await seedPoolNumber();
-    await repository.reserveAvailableNumber(organisationId, now);
+    await seedPoolNumber({ verified: true, createdAt: new Date(-Date.now()) });
+    const number = await repository.reserveAvailableNumber(organisationId, now);
     await repository.markNumberReady(organisationId, number.id, now);
     const outboundId = await seedOutbound(organisationId);
 
@@ -136,5 +159,59 @@ describe('PostgresSmsCommerceRepository', () => {
       reason: 'SMS_ALLOWANCE_EXHAUSTED',
       projectedParts: 2_001
     });
+  });
+
+  it('fails closed when the organisation already has an unverified reservation', async () => {
+    const organisationId = await seedPaidOrganisation();
+    await seedPoolNumber({ organisationId, status: 'RESERVED' });
+
+    await expect(
+      repository.reserveAvailableNumber(organisationId, now)
+    ).rejects.toThrow('SMS_NUMBER_NOT_VERIFIED');
+  });
+
+  it('does not promote an unverified reserved number', async () => {
+    const organisationId = await seedPaidOrganisation();
+    const number = await seedPoolNumber({
+      organisationId,
+      status: 'RESERVED'
+    });
+
+    await expect(
+      repository.markNumberReady(organisationId, number.id, now)
+    ).rejects.toThrow('SMS_NUMBER_NOT_VERIFIED');
+  });
+
+  it('preserves same-customer verification during cooling and permits safe reactivation', async () => {
+    const organisationId = await seedPaidOrganisation();
+    const number = await seedPoolNumber({
+      verified: true,
+      organisationId,
+      status: 'READY'
+    });
+    await repository.quarantineNumber(
+      organisationId,
+      new Date('2026-12-10T00:00:00.000Z'),
+      now
+    );
+
+    await expect(
+      client.db.query.smsNumberPool.findFirst({
+        where: (table, { eq }) => eq(table.id, number.id)
+      })
+    ).resolves.toMatchObject({
+      status: 'QUARANTINED',
+      organisationId,
+      providerVerifiedAt: now
+    });
+    await expect(
+      repository.findOrganisationIdByDestinationNumber(number.e164Number)
+    ).resolves.toBe(organisationId);
+    await expect(
+      repository.reserveAvailableNumber(organisationId, now)
+    ).resolves.toMatchObject({ id: number.id, status: 'RESERVED' });
+    await expect(
+      repository.markNumberReady(organisationId, number.id, now)
+    ).resolves.toBeUndefined();
   });
 });

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -35,14 +35,28 @@ const ids = {
   gamma: randomUUID(),
   owner: randomUUID()
 };
+const runId = randomUUID();
+const phoneBase = randomInt(10_000_000, 90_000_000);
+const phone = (offset: number) => `+614${phoneBase + offset}`;
+const betaEmail = `owner-${runId}@beta.example`;
+const inviteEmail = `invited-${runId}@alpha.example`;
+const ownerEmail = `repairs+${runId}@motts.com.au`;
+const providerId = (suffix: string) => `sinch-${runId}-${suffix}`;
+const xeroConnectionId = `connection-alpha-${runId}`;
+const xeroTenantId = `tenant-alpha-${runId}`;
+const organisationNames = {
+  alpha: `Alpha Repairs ${runId}`,
+  beta: `Beta Services ${runId}`,
+  gamma: `Gamma Electrical ${runId}`
+};
 
 beforeAll(async () => {
   await migrateDatabase(client.db);
   await client.db.insert(organisations).values([
     {
       id: ids.alpha,
-      xeroOrganisationId: 'platform-admin-xero-alpha',
-      name: 'Alpha Repairs',
+      xeroOrganisationId: `platform-admin-xero-alpha-${runId}`,
+      name: organisationNames.alpha,
       timeZone: 'Australia/Sydney',
       baseCurrency: 'AUD',
       edition: 'SOLO',
@@ -50,8 +64,8 @@ beforeAll(async () => {
     },
     {
       id: ids.beta,
-      xeroOrganisationId: 'platform-admin-xero-beta',
-      name: 'Beta Services',
+      xeroOrganisationId: `platform-admin-xero-beta-${runId}`,
+      name: organisationNames.beta,
       timeZone: 'Australia/Sydney',
       baseCurrency: 'AUD',
       edition: 'SOLO',
@@ -62,8 +76,8 @@ beforeAll(async () => {
     },
     {
       id: ids.gamma,
-      xeroOrganisationId: 'platform-admin-xero-gamma',
-      name: 'Gamma Electrical',
+      xeroOrganisationId: `platform-admin-xero-gamma-${runId}`,
+      name: organisationNames.gamma,
       timeZone: 'Pacific/Auckland',
       baseCurrency: 'NZD',
       edition: 'SOLO'
@@ -100,19 +114,19 @@ beforeAll(async () => {
     {
       id: ids.owner,
       cognitoSubject: `subject-${ids.owner}`,
-      email: 'repairs@motts.com.au',
+      email: ownerEmail,
       displayName: 'AccountPulse Owner',
       platformRole: 'OWNER'
     },
     {
       id: randomUUID(),
       cognitoSubject: `subject-beta-${ids.beta}`,
-      email: 'owner@beta.example',
+      email: betaEmail,
       displayName: 'Beta Owner'
     }
   ]);
   const betaUser = await client.db.query.users.findFirst({
-    where: (table, { eq }) => eq(table.email, 'owner@beta.example')
+    where: (table, { eq }) => eq(table.email, betaEmail)
   });
   if (!betaUser) throw new Error('Beta test user missing');
   await client.db.insert(memberships).values({
@@ -122,15 +136,15 @@ beforeAll(async () => {
   });
   await client.db.insert(invitations).values({
     organisationId: ids.alpha,
-    email: 'invited@alpha.example',
+    email: inviteEmail,
     role: 'OPERATOR',
     expiresAt: new Date('2026-12-01T00:00:00.000Z'),
     invitedByUserId: ids.owner
   });
   await client.db.insert(xeroConnections).values({
     organisationId: ids.alpha,
-    connectionId: 'connection-alpha',
-    tenantId: 'tenant-alpha',
+    connectionId: xeroConnectionId,
+    tenantId: xeroTenantId,
     encryptedRefreshToken: {
       version: 1,
       keyId: 'secret-key-id',
@@ -146,9 +160,9 @@ beforeAll(async () => {
     secretArn: 'env:SINCH_API_CREDENTIALS'
   });
   await client.db.insert(smsNumberPool).values({
-    e164Number: '+61400000111',
+    e164Number: phone(1),
     provider: 'SINCH',
-    providerNumberId: 'sinch-number-alpha',
+    providerNumberId: providerId('alpha'),
     status: 'READY',
     organisationId: ids.alpha,
     reservedAt: new Date('2026-11-01T00:00:00.000Z'),
@@ -198,14 +212,14 @@ afterAll(async () => {
 describe('PostgresPlatformAdminRepository reads', () => {
   it('paginates and sorts organisations deterministically', async () => {
     const first = await repository.listOrganisations({
-      search: 'platform-admin-xero-',
+      search: runId,
       page: 1,
       pageSize: 2,
       sort: 'name',
       direction: 'asc'
     });
     const second = await repository.listOrganisations({
-      search: 'platform-admin-xero-',
+      search: runId,
       page: 2,
       pageSize: 2,
       sort: 'name',
@@ -214,17 +228,17 @@ describe('PostgresPlatformAdminRepository reads', () => {
 
     expect(first.total).toBe(3);
     expect(first.items.map((item) => item.name)).toEqual([
-      'Alpha Repairs',
-      'Beta Services'
+      organisationNames.alpha,
+      organisationNames.beta
     ]);
-    expect(second.items.map((item) => item.name)).toEqual(['Gamma Electrical']);
+    expect(second.items.map((item) => item.name)).toEqual([organisationNames.gamma]);
   });
 
   it.each([
-    ['owner@beta.example', 'Beta Services'],
-    ['tenant-alpha', 'Alpha Repairs'],
-    ['+61400000111', 'Alpha Repairs'],
-    ['xero-gamma', 'Gamma Electrical']
+    [betaEmail, organisationNames.beta],
+    [xeroTenantId, organisationNames.alpha],
+    [phone(1), organisationNames.alpha],
+    [`platform-admin-xero-gamma-${runId}`, organisationNames.gamma]
   ])('searches by customer and connected identifiers: %s', async (search, name) => {
     const result = await repository.listOrganisations({ search });
     expect(result.items.map((item) => item.name)).toEqual([name]);
@@ -232,7 +246,7 @@ describe('PostgresPlatformAdminRepository reads', () => {
 
   it('aggregates current-period SMS usage and sorts by total use', async () => {
     const result = await repository.listOrganisations({
-      search: 'platform-admin-xero-',
+      search: runId,
       sort: 'usage',
       direction: 'desc'
     });
@@ -251,11 +265,11 @@ describe('PostgresPlatformAdminRepository reads', () => {
     const detail = await repository.getOrganisationDetail(ids.alpha);
     expect(detail).toMatchObject({
       id: ids.alpha,
-      xero: { tenantId: 'tenant-alpha', status: 'CONNECTED' },
-      smsNumber: { e164Number: '+61400000111', status: 'READY' }
+      xero: { tenantId: xeroTenantId, status: 'CONNECTED' },
+      smsNumber: { e164Number: phone(1), status: 'READY' }
     });
     expect(detail?.invitations[0]).toMatchObject({
-      email: 'invited@alpha.example',
+      email: inviteEmail,
       role: 'OPERATOR'
     });
     const serialized = JSON.stringify(detail);
@@ -265,18 +279,18 @@ describe('PostgresPlatformAdminRepository reads', () => {
   });
 
   it('lists number inventory and audited owner actions without secrets', async () => {
-    const numbers = await repository.listSmsNumbers({ search: 'Alpha' });
+    const numbers = await repository.listSmsNumbers({ search: phone(1) });
     const audit = await repository.listAuditEvents({
       organisationId: ids.beta
     });
 
     expect(numbers.items[0]).toMatchObject({
-      e164Number: '+61400000111',
-      organisationName: 'Alpha Repairs'
+      e164Number: phone(1),
+      organisationName: organisationNames.alpha
     });
     expect(audit.items[0]).toMatchObject({
-      actorEmail: 'repairs@motts.com.au',
-      organisationName: 'Beta Services',
+      actorEmail: ownerEmail,
+      organisationName: organisationNames.beta,
       reason: 'Owner review'
     });
   });
@@ -467,35 +481,80 @@ describe('PostgresPlatformAdminRepository mutations', () => {
 
     const created = await repository.registerSmsNumber({
       actorUserId: ids.owner,
-      e164Number: '+61400000222',
+      e164Number: phone(2),
       provider: 'SINCH',
-      providerNumberId: 'sinch-platform-222',
+      providerNumberId: providerId('222'),
       reason: 'Add purchased number',
       now
     });
     const duplicateNumber = await repository.registerSmsNumber({
       actorUserId: ids.owner,
-      e164Number: '+61400000222',
+      e164Number: phone(2),
       provider: 'SINCH',
-      providerNumberId: 'sinch-platform-other',
+      providerNumberId: providerId('other'),
       reason: 'Duplicate check',
       now
     });
     const duplicateProviderId = await repository.registerSmsNumber({
       actorUserId: ids.owner,
-      e164Number: '+61400000333',
+      e164Number: phone(3),
       provider: 'SINCH',
-      providerNumberId: 'sinch-platform-222',
+      providerNumberId: providerId('222'),
       reason: 'Duplicate provider check',
       now
     });
 
     expect(created).toMatchObject({
       ok: true,
-      value: { e164Number: '+61400000222', status: 'AVAILABLE' }
+      value: {
+        e164Number: phone(2),
+        status: 'AVAILABLE',
+        providerVerifiedAt: null
+      }
     });
     expect(duplicateNumber).toEqual({ ok: false, code: 'CONFLICT' });
     expect(duplicateProviderId).toEqual({ ok: false, code: 'CONFLICT' });
+  });
+
+  it('records owner verification while leaving a number available for automatic allocation', async () => {
+    const now = new Date('2026-11-11T06:05:00.000Z');
+    const verifiedAt = new Date('2026-11-11T06:05:01.000Z');
+    const registered = await repository.registerSmsNumber({
+      actorUserId: ids.owner,
+      e164Number: phone(8),
+      provider: 'SINCH',
+      providerNumberId: null,
+      reason: 'Add number for verification',
+      now
+    });
+    if (!registered.ok) throw new Error('NUMBER_SETUP_FAILED');
+
+    const verified = await repository.verifySmsNumberForPool({
+      actorUserId: ids.owner,
+      numberId: registered.value.id,
+      expectedUpdatedAt: registered.value.updatedAt,
+      providerNumberId: providerId('888'),
+      reason: 'Ownership, outbound and inbound checks passed',
+      now: verifiedAt
+    });
+
+    expect(verified).toMatchObject({
+      ok: true,
+      value: {
+        status: 'AVAILABLE',
+        organisationId: null,
+        providerNumberId: providerId('888'),
+        providerVerifiedAt: verifiedAt
+      }
+    });
+    await expect(repository.verifySmsNumberForPool({
+      actorUserId: ids.owner,
+      numberId: registered.value.id,
+      expectedUpdatedAt: registered.value.updatedAt,
+      providerNumberId: providerId('888'),
+      reason: 'Stale verification attempt',
+      now: verifiedAt
+    })).resolves.toEqual({ ok: false, code: 'CONFLICT' });
   });
 
   it('serializes assignment and permits only one active number per organisation', async () => {
@@ -520,7 +579,7 @@ describe('PostgresPlatformAdminRepository mutations', () => {
     ]);
     const registered = await repository.registerSmsNumber({
       actorUserId: ids.owner,
-      e164Number: '+61400000444',
+      e164Number: phone(4),
       provider: 'SINCH',
       providerNumberId: null,
       reason: 'Concurrent assignment test',
@@ -570,7 +629,7 @@ describe('PostgresPlatformAdminRepository mutations', () => {
     }
     const secondNumber = await repository.registerSmsNumber({
       actorUserId: ids.owner,
-      e164Number: '+61400000555',
+      e164Number: phone(5),
       provider: 'SINCH',
       providerNumberId: null,
       reason: 'Second assignment test',
@@ -600,7 +659,7 @@ describe('PostgresPlatformAdminRepository mutations', () => {
     });
     const registered = await repository.registerSmsNumber({
       actorUserId: ids.owner,
-      e164Number: '+61400000666',
+      e164Number: phone(6),
       provider: 'SINCH',
       providerNumberId: null,
       reason: 'Lifecycle test',
@@ -634,11 +693,14 @@ describe('PostgresPlatformAdminRepository mutations', () => {
       organisationId,
       expectedStatus: 'RESERVED',
       expectedUpdatedAt: assigned.value.updatedAt,
-      providerNumberId: 'sinch-platform-666',
+      providerNumberId: providerId('666'),
       reason: 'Verified in Sinch',
       now
     });
-    expect(ready).toMatchObject({ ok: true, value: { status: 'READY' } });
+    expect(ready).toMatchObject({
+      ok: true,
+      value: { status: 'READY', providerVerifiedAt: now }
+    });
     if (!ready.ok) throw new Error('NUMBER_READY_FAILED');
 
     await expect(repository.quarantineSmsNumber({
@@ -664,6 +726,7 @@ describe('PostgresPlatformAdminRepository mutations', () => {
       value: {
         status: 'QUARANTINED',
         organisationId,
+        providerVerifiedAt: null,
         quarantineUntil: new Date('2026-12-11T07:00:00.000Z')
       }
     });
@@ -685,7 +748,11 @@ describe('PostgresPlatformAdminRepository mutations', () => {
       now: new Date('2026-12-11T07:00:00.000Z')
     })).resolves.toMatchObject({
       ok: true,
-      value: { status: 'AVAILABLE', organisationId: null }
+      value: {
+        status: 'AVAILABLE',
+        organisationId: null,
+        providerVerifiedAt: null
+      }
     });
   });
 

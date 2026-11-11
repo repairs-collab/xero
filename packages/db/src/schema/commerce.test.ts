@@ -34,6 +34,7 @@ describe('Solo commerce schema contract', () => {
         'e164_number',
         'provider',
         'provider_number_id',
+        'provider_verified_at',
         'status',
         'organisation_id',
         'quarantine_until'
@@ -44,6 +45,9 @@ describe('Solo commerce schema contract', () => {
         'sms_number_pool_e164_uq',
         'sms_number_pool_active_org_uq'
       ])
+    );
+    expect(numbers.checks.map((constraint) => constraint.name)).toContain(
+      'sms_number_pool_provider_verification_ck'
     );
     expect(settings.columns.map((column) => column.name)).toEqual(
       expect.arrayContaining([

@@ -197,6 +197,9 @@ export const smsNumberPool = pgTable(
     e164Number: varchar('e164_number', { length: 16 }).notNull(),
     provider: varchar('provider', { length: 32 }).notNull(),
     providerNumberId: varchar('provider_number_id', { length: 128 }),
+    providerVerifiedAt: timestamp('provider_verified_at', {
+      withTimezone: true
+    }),
     status: varchar('status', { length: 24 })
       .$type<SmsNumberStatus>()
       .notNull()
@@ -234,6 +237,10 @@ export const smsNumberPool = pgTable(
     check(
       'sms_number_pool_status_ck',
       sql`${table.status} in ('AVAILABLE', 'RESERVED', 'READY', 'QUARANTINED', 'RELEASED')`
+    ),
+    check(
+      'sms_number_pool_provider_verification_ck',
+      sql`${table.providerVerifiedAt} is null or ${table.providerNumberId} is not null`
     ),
     check(
       'sms_number_pool_assignment_ck',

@@ -9,7 +9,8 @@ import {
   quarantineSmsNumberAction,
   registerSmsNumberAction,
   releaseSmsNumberAction,
-  returnSmsNumberToPoolAction
+  returnSmsNumberToPoolAction,
+  verifySmsNumberForPoolAction
 } from './actions.js';
 
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
@@ -56,6 +57,7 @@ export default async function PlatformSmsPage({
       {...(feedbackCode ? { feedbackCode } : {})}
       actions={{
         register: registerSmsNumberAction,
+        verify: verifySmsNumberForPoolAction,
         assign: assignSmsNumberAction,
         ready: markSmsNumberReadyAction,
         quarantine: quarantineSmsNumberAction,

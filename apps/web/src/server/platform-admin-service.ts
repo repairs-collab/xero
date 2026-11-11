@@ -179,6 +179,36 @@ export const createPlatformAdminService = (
     });
   },
 
+  async verifySmsNumberForPool(
+    actorUserId: string,
+    input: {
+      numberId: string;
+      expectedUpdatedAt: Date;
+      providerNumberId: string;
+      reason: string;
+      verificationConfirmed: boolean;
+    }
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    const providerNumberId = input.providerNumberId.trim();
+    if (
+      !input.verificationConfirmed ||
+      !validReason(input.reason) ||
+      providerNumberId.length === 0 ||
+      providerNumberId.length > 128
+    ) {
+      return { ok: false, code: 'VALIDATION' } as const;
+    }
+    return dependencies.repository.verifySmsNumberForPool({
+      actorUserId,
+      numberId: input.numberId,
+      expectedUpdatedAt: input.expectedUpdatedAt,
+      providerNumberId,
+      reason: input.reason.trim(),
+      now: now()
+    });
+  },
+
   async assignSmsNumber(
     actorUserId: string,
     input: {

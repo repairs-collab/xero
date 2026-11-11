@@ -25,6 +25,7 @@ export function PlatformSmsAdministration({
   feedbackCode?: string;
   actions: {
     register: FormAction;
+    verify: FormAction;
     assign: FormAction;
     ready: FormAction;
     quarantine: FormAction;
@@ -81,8 +82,19 @@ export function PlatformSmsAdministration({
           {page.items.map((item) => (
             <article key={item.id}>
               <header><div><strong>{item.e164Number}</strong><span>{item.provider} · {item.providerNumberId ?? 'Provider ID pending'}</span></div><span className={`platform-status platform-status--${item.status.toLowerCase()}`}>{title(item.status)}</span></header>
-              <dl><div><dt>Customer</dt><dd>{item.organisationName ?? 'Unassigned'}</dd></div><div><dt>Ready at</dt><dd>{dateTime(item.readyAt)}</dd></div><div><dt>Cooling until</dt><dd>{dateTime(item.quarantineUntil)}</dd></div></dl>
+              <dl><div><dt>Customer</dt><dd>{item.organisationName ?? 'Unassigned'}</dd></div><div><dt>Pool verification</dt><dd>{item.providerVerifiedAt ? `Verified for automatic allocation · ${dateTime(item.providerVerifiedAt)}` : 'Not verified for automatic allocation'}</dd></div><div><dt>Ready at</dt><dd>{dateTime(item.readyAt)}</dd></div><div><dt>Cooling until</dt><dd>{dateTime(item.quarantineUntil)}</dd></div></dl>
               <div className="platform-number-actions">
+                {item.status === 'AVAILABLE' && item.organisationId === null && item.providerVerifiedAt === null ? (
+                  <form action={actions.verify as never}>
+                    <input type="hidden" name="numberId" value={item.id} />
+                    <input type="hidden" name="expectedUpdatedAt" value={item.updatedAt.toISOString()} />
+                    <input name="providerNumberId" defaultValue={item.providerNumberId ?? ''} placeholder="Verified Sinch provider ID" required />
+                    <input name="reason" placeholder="Verification evidence / reason" required />
+                    <label className="platform-confirm"><input type="checkbox" name="verificationConfirmed" required />I confirmed ownership, outbound sending and inbound replies</label>
+                    <small>Only verified pool numbers can be assigned automatically.</small>
+                    <button className="button button--primary" type="submit">Verify for automatic allocation</button>
+                  </form>
+                ) : null}
                 {item.status === 'AVAILABLE' || item.status === 'RELEASED' ? (
                   <form action={actions.assign as never}>
                     <input type="hidden" name="numberId" value={item.id} /><input type="hidden" name="expectedStatus" value={item.status} />

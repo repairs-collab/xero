@@ -17,6 +17,7 @@ export interface SmsAdminActionDependencies {
   service: Pick<
     PlatformAdminService,
     | 'registerSmsNumber'
+    | 'verifySmsNumberForPool'
     | 'assignSmsNumber'
     | 'markSmsNumberReady'
     | 'quarantineSmsNumber'
@@ -67,6 +68,9 @@ const positiveInteger = (formData: FormData, name: string): number => {
   return value;
 };
 
+const checked = (formData: FormData, name: string): boolean =>
+  formData.get(name) === 'on';
+
 const resultState = (result: {
   ok: boolean;
   code?: SmsAdminActionState['code'];
@@ -92,6 +96,19 @@ export const createSmsAdminActions = (
         e164Number: text(formData, 'e164Number'),
         providerNumberId: optionalText(formData, 'providerNumberId'),
         reason: text(formData, 'reason')
+      });
+      if (result.ok) finish();
+      return resultState(result);
+    },
+
+    async verifySmsNumberForPoolAction(formData: FormData): Promise<SmsAdminActionState> {
+      const session = await dependencies.getOwnerSession();
+      const result = await dependencies.service.verifySmsNumberForPool(session.userId, {
+        numberId: text(formData, 'numberId'),
+        expectedUpdatedAt: date(formData, 'expectedUpdatedAt'),
+        providerNumberId: text(formData, 'providerNumberId'),
+        reason: text(formData, 'reason'),
+        verificationConfirmed: checked(formData, 'verificationConfirmed')
       });
       if (result.ok) finish();
       return resultState(result);
@@ -212,6 +229,10 @@ const run = async (
 export async function registerSmsNumberAction(formData: FormData) {
   'use server';
   return run(formData, (data) => actions.registerSmsNumberAction(data));
+}
+export async function verifySmsNumberForPoolAction(formData: FormData) {
+  'use server';
+  return run(formData, (data) => actions.verifySmsNumberForPoolAction(data));
 }
 export async function assignSmsNumberAction(formData: FormData) {
   'use server';
