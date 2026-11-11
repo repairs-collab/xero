@@ -14,9 +14,13 @@ import {
   organisationVoiceSettings,
   pauses,
   suppressions,
+  smsAllowanceSettings,
+  subscriptions,
   tasks,
+  users,
   voiceCallEvents,
-  voiceCallRequests
+  voiceCallRequests,
+  xeroConnections
 } from '@bc5000/db';
 import { fixedVoiceCallCopy } from '@bc5000/domain';
 import {
@@ -358,6 +362,92 @@ export async function loginAs(
           ? launchScenario.adminSubject
           : launchScenario.operatorSubject
     },
+    { secret: sessionSecret }
+  );
+  const token = decodeURIComponent(
+    cookie.slice(cookie.indexOf('=') + 1, cookie.indexOf(';'))
+  );
+  await page.context().addCookies([
+    {
+      name: 'bc5000_session',
+      value: token,
+      domain: '127.0.0.1',
+      path: '/',
+      httpOnly: true,
+      secure: false,
+      sameSite: 'Lax'
+    }
+  ]);
+}
+
+export const platformOwnerScenario = {
+  userId: '10000000-0000-4000-8000-000000000020',
+  subject: 'e2e-platform-owner',
+  customerName: 'AccountPulse Beta'
+} as const;
+
+export async function seedPlatformAdminScenario(): Promise<void> {
+  await resetLaunchScenario();
+  const client = createDatabase(databaseUrl);
+  const now = new Date('2026-11-10T00:00:00.000Z');
+  try {
+    await client.db
+      .update(organisations)
+      .set({
+        name: platformOwnerScenario.customerName,
+        edition: 'SOLO',
+        platformStatus: 'ACTIVE',
+        platformStatusVersion: 0,
+        suspendedAt: null,
+        suspensionReason: null,
+        updatedAt: now
+      })
+      .where(eq(organisations.id, launchScenario.organisationId));
+    await client.db.insert(users).values({
+      id: platformOwnerScenario.userId,
+      cognitoSubject: platformOwnerScenario.subject,
+      email: 'repairs@motts.com.au',
+      displayName: 'AccountPulse Owner',
+      platformRole: 'OWNER'
+    });
+    await client.db.insert(subscriptions).values({
+      organisationId: launchScenario.organisationId,
+      planCode: 'SOLO_AU_2000',
+      status: 'TRIALING',
+      currentPeriodStart: new Date('2026-11-01T00:00:00.000Z'),
+      currentPeriodEnd: new Date('2026-11-20T00:00:00.000Z'),
+      trialEndsAt: new Date('2026-11-20T00:00:00.000Z'),
+      lastStripeEventCreatedAt: now,
+      updatedAt: now
+    });
+    await client.db.insert(smsAllowanceSettings).values({
+      organisationId: launchScenario.organisationId,
+      includedParts: 2_000,
+      warningPercent: 80
+    });
+    await client.db.insert(xeroConnections).values({
+      organisationId: launchScenario.organisationId,
+      connectionId: 'connection-platform-beta',
+      tenantId: 'xero-tenant-platform-beta',
+      encryptedRefreshToken: {
+        version: 1,
+        keyId: 'e2e-key-reference',
+        iv: 'e2e-iv',
+        ciphertext: 'e2e-ciphertext-never-render',
+        tag: 'e2e-tag'
+      },
+      grantedScopes: ['accounting.transactions'],
+      connectedAt: now,
+      lastRefreshedAt: now
+    });
+  } finally {
+    await client.pool.end();
+  }
+}
+
+export async function loginAsPlatformOwner(page: Page): Promise<void> {
+  const cookie = await createSessionCookie(
+    { cognitoSubject: platformOwnerScenario.subject },
     { secret: sessionSecret }
   );
   const token = decodeURIComponent(

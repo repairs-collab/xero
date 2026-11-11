@@ -91,8 +91,41 @@ jobs:
           SSH=(ssh -i ~/.ssh/id_accountpulse -p "$OVH_PORT" "$OVH_USER@$OVH_HOST")
           SCP=(scp -i ~/.ssh/id_accountpulse -P "$OVH_PORT")
           "${SSH[@]}" "mkdir -p '$OVH_DEPLOY_PATH/artifacts/$IMAGE_TAG'"
-          "${SCP[@]}" deploy/ovh/docker-compose.yml deploy/ovh/release.sh deploy/ovh/rollback.sh deploy/ovh/install-public-hostname.sh deploy/ovh/accountpulse-site.caddy "$OVH_USER@$OVH_HOST:$OVH_DEPLOY_PATH/"
+          "${SCP[@]}" deploy/ovh/docker-compose.yml deploy/ovh/release.sh deploy/ovh/rollback.sh deploy/ovh/install-protected-environment.sh deploy/ovh/install-public-hostname.sh deploy/ovh/accountpulse-site.caddy "$OVH_USER@$OVH_HOST:$OVH_DEPLOY_PATH/"
           "${SCP[@]}" accountpulse-web.tar.zst accountpulse-worker.tar.zst "$OVH_USER@$OVH_HOST:$OVH_DEPLOY_PATH/artifacts/$IMAGE_TAG/"
+      - name: Install protected production environment
+        env:
+          ACCOUNT_PULSE_LEGAL_ENTITY: ${{ vars.ACCOUNT_PULSE_LEGAL_ENTITY }}
+          ACCOUNT_PULSE_SUPPORT_EMAIL: ${{ vars.ACCOUNT_PULSE_SUPPORT_EMAIL }}
+          SMS_NUMBER_QUARANTINE_DAYS: ${{ vars.SMS_NUMBER_QUARANTINE_DAYS }}
+          XERO_OAUTH_CLIENT_ID: ${{ secrets.XERO_OAUTH_CLIENT_ID }}
+          XERO_OAUTH_CLIENT_SECRET: ${{ secrets.XERO_OAUTH_CLIENT_SECRET }}
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          STRIPE_SOLO_PRICE_ID: ${{ secrets.STRIPE_SOLO_PRICE_ID }}
+          STRIPE_PORTAL_CONFIGURATION_ID: ${{ secrets.STRIPE_PORTAL_CONFIGURATION_ID }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          overlay=$(mktemp "$RUNNER_TEMP/accountpulse-commercial.XXXXXX")
+          cleanup() { rm -f "$overlay"; }
+          trap cleanup EXIT
+          for name in ACCOUNT_PULSE_LEGAL_ENTITY ACCOUNT_PULSE_SUPPORT_EMAIL SMS_NUMBER_QUARANTINE_DAYS XERO_OAUTH_CLIENT_ID XERO_OAUTH_CLIENT_SECRET STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET STRIPE_SOLO_PRICE_ID STRIPE_PORTAL_CONFIGURATION_ID; do
+            value=${!name:-}
+            [[ -n "$value" && "$value" != *$'\n'* && "$value" != *$'\r'* ]] || {
+              echo "Protected production secret $name is missing or invalid." >&2
+              exit 65
+            }
+            printf '%s=%s\n' "$name" "$value" >> "$overlay"
+          done
+          SSH=(ssh -i ~/.ssh/id_accountpulse -p "$OVH_PORT" "$OVH_USER@$OVH_HOST")
+          "${SSH[@]}" "umask 077; cat > '$OVH_DEPLOY_PATH/.protected-commercial.env'" < "$overlay"
+          "${SSH[@]}" "cd '$OVH_DEPLOY_PATH' && chmod 700 install-protected-environment.sh && ./install-protected-environment.sh '$OVH_DEPLOY_PATH/.protected-commercial.env'"
+      - name: Install and verify public hostname
+        run: |
+          set -Eeuo pipefail
+          ssh -i ~/.ssh/id_accountpulse -p "$OVH_PORT" "$OVH_USER@$OVH_HOST" \
+            "cd '$OVH_DEPLOY_PATH' && chmod 700 install-public-hostname.sh && ./install-public-hostname.sh '$HOSTNAME'"
       - name: Run migration and health-checked release
         run: |
           set -Eeuo pipefail

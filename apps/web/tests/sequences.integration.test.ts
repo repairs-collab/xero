@@ -21,7 +21,7 @@ async function seedSequence() {
   await client.db.insert(users).values({ id: userId, cognitoSubject: randomUUID(), email: `${userId}@example.invalid`, displayName: 'Admin' });
   await client.db.insert(reminderSequences).values({ id: sequenceId, organisationId, name: 'Standard', mode: 'REVIEW' });
   await client.db.insert(reminderSequenceVersions).values({ organisationId, sequenceId, versionNumber: 1, status: 'ACTIVE', activatedAt: new Date('2026-09-01T00:00:00Z') });
-  const session = (role: 'ADMIN' | 'OPERATOR'): AppSession => ({ userId, cognitoSubject: randomUUID(), displayName: 'User', expiresAt: '2026-09-18T10:00:00Z', memberships: [{ organisationId, role, active: true }] });
+  const session = (role: 'ADMIN' | 'OPERATOR'): AppSession => ({ userId, cognitoSubject: randomUUID(), displayName: 'User', expiresAt: '2026-09-18T10:00:00Z', memberships: [{ organisationId, role, active: true, organisationStatus: 'ACTIVE' }] });
   return { organisationId, sequenceId, session };
 }
 
@@ -67,7 +67,7 @@ describe('sequence administration', () => {
     const userId = randomUUID();
     await client.db.insert(organisations).values({ id: organisationId, xeroOrganisationId: randomUUID(), name: 'Standard sequence test', timeZone: 'Australia/Sydney', baseCurrency: 'AUD' });
     await client.db.insert(users).values({ id: userId, cognitoSubject: randomUUID(), email: `${userId}@example.invalid`, displayName: 'Admin' });
-    const session: AppSession = { userId, cognitoSubject: randomUUID(), displayName: 'Admin', expiresAt: '2026-09-18T10:00:00Z', memberships: [{ organisationId, role: 'ADMIN', active: true }] };
+    const session: AppSession = { userId, cognitoSubject: randomUUID(), displayName: 'Admin', expiresAt: '2026-09-18T10:00:00Z', memberships: [{ organisationId, role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }] };
     const service = createSequenceService({ database: client.db, clock: { now: () => now } });
 
     const first = await service.createStandardSequence(session, { organisationId });
@@ -100,7 +100,7 @@ describe('sequence administration', () => {
     const userId = randomUUID();
     await client.db.insert(organisations).values({ id: organisationId, xeroOrganisationId: randomUUID(), name: 'Operator sequence test', timeZone: 'Australia/Sydney', baseCurrency: 'AUD' });
     await client.db.insert(users).values({ id: userId, cognitoSubject: randomUUID(), email: `${userId}@example.invalid`, displayName: 'Operator' });
-    const session: AppSession = { userId, cognitoSubject: randomUUID(), displayName: 'Operator', expiresAt: '2026-09-18T10:00:00Z', memberships: [{ organisationId, role: 'OPERATOR', active: true }] };
+    const session: AppSession = { userId, cognitoSubject: randomUUID(), displayName: 'Operator', expiresAt: '2026-09-18T10:00:00Z', memberships: [{ organisationId, role: 'OPERATOR', active: true, organisationStatus: 'ACTIVE' }] };
     const service = createSequenceService({ database: client.db, clock: { now: () => now } });
 
     await expect(service.createStandardSequence(session, { organisationId })).rejects.toThrow('FORBIDDEN');
@@ -133,7 +133,7 @@ describe('sequence administration', () => {
     const userId = randomUUID();
     await client.db.insert(organisations).values({ id: organisationId, xeroOrganisationId: randomUUID(), name: 'Voice sequence test', timeZone: 'Australia/Sydney', baseCurrency: 'AUD' });
     await client.db.insert(users).values({ id: userId, cognitoSubject: randomUUID(), email: `${userId}@example.invalid`, displayName: 'Admin' });
-    const session: AppSession = { userId, cognitoSubject: randomUUID(), displayName: 'Admin', expiresAt: '2026-09-18T10:00:00Z', memberships: [{ organisationId, role: 'ADMIN', active: true }] };
+    const session: AppSession = { userId, cognitoSubject: randomUUID(), displayName: 'Admin', expiresAt: '2026-09-18T10:00:00Z', memberships: [{ organisationId, role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }] };
     const service = createSequenceService({ database: client.db, clock: { now: () => now } });
 
     const result = await service.createStandardVoiceSequence(session, { organisationId });

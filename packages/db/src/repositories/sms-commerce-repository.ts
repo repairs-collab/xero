@@ -154,8 +154,7 @@ export class PostgresSmsCommerceRepository {
           eq(
             smsUsageLedger.billingPeriodStart,
             subscription.currentPeriodStart
-          ),
-          eq(smsUsageLedger.billingPeriodEnd, subscription.currentPeriodEnd)
+          )
         )
       );
     const usage = summariseSmsUsage(entries);
@@ -346,8 +345,7 @@ export class PostgresSmsCommerceRepository {
           eq(
             smsUsageLedger.billingPeriodStart,
             subscription.currentPeriodStart
-          ),
-          eq(smsUsageLedger.billingPeriodEnd, subscription.currentPeriodEnd)
+          )
         )
       );
     const usage = summariseSmsUsage(entries);

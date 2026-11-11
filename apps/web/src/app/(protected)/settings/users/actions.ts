@@ -41,6 +41,14 @@ const roleFrom = (formData: FormData): Role => {
   return role;
 };
 
+const versionFrom = (formData: FormData): number => {
+  const value = Number(requiredText(formData, 'expectedVersion'));
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error('The page is out of date. Refresh it and try again.');
+  }
+  return value;
+};
+
 const errorMessage = (error: unknown): string => {
   const message = error instanceof Error ? error.message : '';
   if (message === 'USER_EMAIL_EXISTS') {
@@ -48,6 +56,9 @@ const errorMessage = (error: unknown): string => {
   }
   if (message === 'LAST_ADMIN_REQUIRED') {
     return 'At least one active administrator must remain.';
+  }
+  if (message === 'CONFLICT') {
+    return 'This user changed since the page loaded. Refresh the page and try again.';
   }
   if (message === 'Invitation was not found') {
     return 'This invitation is no longer available to resend.';
@@ -87,7 +98,8 @@ export async function resendInvitationAction(formData: FormData): Promise<void> 
   try {
     await service().resendInvitation(await session(), {
       organisationId: requiredText(formData, 'organisationId'),
-      invitationId: requiredText(formData, 'invitationId')
+      invitationId: requiredText(formData, 'invitationId'),
+      expectedVersion: versionFrom(formData)
     });
   } catch (error) {
     fail(error);
@@ -100,7 +112,8 @@ export async function changeMemberRoleAction(formData: FormData): Promise<void> 
     await service().changeRole(await session(), {
       organisationId: requiredText(formData, 'organisationId'),
       userId: requiredText(formData, 'userId'),
-      role: roleFrom(formData)
+      role: roleFrom(formData),
+      expectedVersion: versionFrom(formData)
     });
   } catch (error) {
     fail(error);
@@ -112,7 +125,8 @@ export async function disableMemberAction(formData: FormData): Promise<void> {
   try {
     await service().disableMember(await session(), {
       organisationId: requiredText(formData, 'organisationId'),
-      userId: requiredText(formData, 'userId')
+      userId: requiredText(formData, 'userId'),
+      expectedVersion: versionFrom(formData)
     });
   } catch (error) {
     fail(error);

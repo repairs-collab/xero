@@ -91,6 +91,7 @@ export async function dispatchDueVoiceReminders(
       if (
         organisation === undefined ||
         settings === undefined ||
+        organisation.platformStatus !== 'ACTIVE' ||
         organisation.maintenanceMode ||
         !['READY', 'RECONCILED'].includes(organisation.operationalState) ||
         organisation.sendMode !== 'live' ||

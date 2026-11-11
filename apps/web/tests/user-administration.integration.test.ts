@@ -17,7 +17,8 @@ import {
 import {
   acceptPendingInvitations,
   createUserAdministration,
-  LastAdminRequired
+  LastAdminRequired,
+  UserAdministrationConflict
 } from '../src/app/(protected)/settings/users/user-administration.js';
 
 const databaseUrl =
@@ -61,7 +62,7 @@ const seedAdmin = async () => {
     cognitoSubject,
     displayName: 'Admin User',
     expiresAt: '2026-09-18T08:00:00.000Z',
-    memberships: [{ organisationId, role: 'ADMIN', active: true }]
+    memberships: [{ organisationId, role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }]
   };
   return { organisationId, userId, cognitoSubject, session };
 };
@@ -198,7 +199,7 @@ describe('user administration', () => {
         {
           organisationId: seeded.organisationId,
           role: 'OPERATOR',
-          active: true
+          active: true, organisationStatus: 'ACTIVE'
         }
       ]
     };
@@ -331,7 +332,7 @@ describe('user administration', () => {
       displayName: 'Second Admin',
       expiresAt: first.session.expiresAt,
       memberships: [
-        { organisationId: first.organisationId, role: 'ADMIN', active: true }
+        { organisationId: first.organisationId, role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }
       ]
     };
     const service = createUserAdministration({
@@ -392,7 +393,7 @@ describe('user administration', () => {
       displayName: 'Second Disable Admin',
       expiresAt: first.session.expiresAt,
       memberships: [
-        { organisationId: first.organisationId, role: 'ADMIN', active: true }
+        { organisationId: first.organisationId, role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }
       ]
     };
     const service = createUserAdministration({
@@ -491,5 +492,127 @@ describe('user administration', () => {
         (membership) => membership.organisationId === secondOrganisationId
       )?.disabledAt
     ).toBeNull();
+  });
+
+  it('rolls back the customer mutation when its platform audit cannot be written', async () => {
+    const admin = await seedAdmin();
+    const targetUserId = randomUUID();
+    await client.db.insert(users).values({
+      id: targetUserId,
+      cognitoSubject: randomUUID(),
+      email: `atomic-audit-${targetUserId}@example.invalid`,
+      displayName: 'Atomic Audit User'
+    });
+    await client.db.insert(memberships).values({
+      organisationId: admin.organisationId,
+      userId: targetUserId,
+      role: 'OPERATOR'
+    });
+    const service = createUserAdministration({
+      database: client.db,
+      cognito: {
+        createUser: vi.fn(),
+        resendInvitation: vi.fn(),
+        disableUser: vi.fn()
+      },
+      clock: { now: () => now }
+    });
+
+    await expect(
+      service.changeRole(admin.session, {
+        organisationId: admin.organisationId,
+        userId: targetUserId,
+        role: 'ADMIN',
+        expectedVersion: 0,
+        atomicAudit: () => Promise.reject(new Error('PLATFORM_AUDIT_FAILED'))
+      })
+    ).rejects.toThrow('PLATFORM_AUDIT_FAILED');
+
+    const [membership] = await client.db
+      .select()
+      .from(memberships)
+      .where(
+        and(
+          eq(memberships.organisationId, admin.organisationId),
+          eq(memberships.userId, targetUserId)
+        )
+      );
+    expect(membership).toMatchObject({ role: 'OPERATOR', version: 0 });
+  });
+
+  it('rejects a stale customer-user edit', async () => {
+    const admin = await seedAdmin();
+    const targetUserId = randomUUID();
+    await client.db.insert(users).values({
+      id: targetUserId,
+      cognitoSubject: randomUUID(),
+      email: `stale-user-${targetUserId}@example.invalid`,
+      displayName: 'Stale User'
+    });
+    await client.db.insert(memberships).values({
+      organisationId: admin.organisationId,
+      userId: targetUserId,
+      role: 'OPERATOR'
+    });
+    const service = createUserAdministration({
+      database: client.db,
+      cognito: {
+        createUser: vi.fn(),
+        resendInvitation: vi.fn(),
+        disableUser: vi.fn()
+      },
+      clock: { now: () => now }
+    });
+
+    await service.changeRole(admin.session, {
+      organisationId: admin.organisationId,
+      userId: targetUserId,
+      role: 'ADMIN',
+      expectedVersion: 0
+    });
+    await expect(
+      service.changeRole(admin.session, {
+        organisationId: admin.organisationId,
+        userId: targetUserId,
+        role: 'OPERATOR',
+        expectedVersion: 0
+      })
+    ).rejects.toThrow(UserAdministrationConflict);
+  });
+
+  it('does not disable the global owner identity after its final customer membership is disabled', async () => {
+    const admin = await seedAdmin();
+    const ownerUserId = randomUUID();
+    const ownerSubject = randomUUID();
+    await client.db.insert(users).values({
+      id: ownerUserId,
+      cognitoSubject: ownerSubject,
+      email: `platform-owner-${ownerUserId}@example.invalid`,
+      displayName: 'Platform Owner',
+      platformRole: 'OWNER'
+    });
+    await client.db.insert(memberships).values({
+      organisationId: admin.organisationId,
+      userId: ownerUserId,
+      role: 'OPERATOR'
+    });
+    const disableUser = vi.fn(() => Promise.resolve());
+    const service = createUserAdministration({
+      database: client.db,
+      cognito: {
+        createUser: vi.fn(),
+        resendInvitation: vi.fn(),
+        disableUser
+      },
+      clock: { now: () => now }
+    });
+
+    await service.disableMember(admin.session, {
+      organisationId: admin.organisationId,
+      userId: ownerUserId,
+      expectedVersion: 0
+    });
+
+    expect(disableUser).not.toHaveBeenCalled();
   });
 });

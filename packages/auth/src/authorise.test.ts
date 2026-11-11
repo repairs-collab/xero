@@ -21,7 +21,8 @@ const sessionFixture = (options: {
     {
       organisationId: options.organisationId ?? 'org-1',
       role: options.role,
-      active: options.disabled !== true
+      active: options.disabled !== true,
+      organisationStatus: 'ACTIVE'
     }
   ]
 });
@@ -33,6 +34,8 @@ describe('authorise', () => {
     ['OPERATOR', 'reminder.approve', true],
     ['OPERATOR', 'provider.configure', false],
     ['ADMIN', 'user.manage', true],
+    ['ADMIN', 'user.read', true],
+    ['OPERATOR', 'user.read', false],
     ['ADMIN', 'billing.manage', true],
     ['OPERATOR', 'billing.manage', false],
     ['OPERATOR', 'chase.operate', true],
@@ -88,5 +91,22 @@ describe('authorise', () => {
     expect(permissions.OPERATOR).not.toContain('voice-suppression.clear');
     expect(permissions.OPERATOR).not.toContain('voice-settings.manage');
     expect(permissions.OPERATOR).not.toContain('billing.manage');
+  });
+
+  it('keeps suspended organisations read-only while preserving billing access', () => {
+    const suspended = sessionFixture({ role: 'ADMIN' });
+    suspended.memberships[0]!.organisationStatus = 'SUSPENDED';
+    const allowed = new Set([
+      'audit.read',
+      'outbox.read',
+      'billing.manage',
+      'user.read'
+    ]);
+
+    for (const action of permissions.ADMIN) {
+      const attempt = () => authorise(suspended, action, 'org-1');
+      if (allowed.has(action)) expect(attempt, action).not.toThrow();
+      else expect(attempt, action).toThrow(AuthorizationFailure);
+    }
   });
 });

@@ -23,7 +23,7 @@ const adminSession: AppSession = {
   displayName: 'Admin',
   expiresAt: '2026-11-10T00:00:00.000Z',
   memberships: [
-    { organisationId: 'organisation-one', role: 'ADMIN', active: true }
+    { organisationId: 'organisation-one', role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }
   ]
 };
 
@@ -31,7 +31,7 @@ const operatorSession: AppSession = {
   ...adminSession,
   userId: 'operator-user',
   memberships: [
-    { organisationId: 'organisation-one', role: 'OPERATOR', active: true }
+    { organisationId: 'organisation-one', role: 'OPERATOR', active: true, organisationStatus: 'ACTIVE' }
   ]
 };
 

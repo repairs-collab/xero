@@ -9,6 +9,7 @@ export type AccountSubscriptionStatus =
   | 'INCOMPLETE';
 
 export type AccountEntitlementBlocker =
+  | 'ACCOUNT_SUSPENDED'
   | 'SUBSCRIPTION_REQUIRED'
   | 'TRIAL_EXPIRED'
   | 'PAYMENT_PAST_DUE'
@@ -17,6 +18,7 @@ export type AccountEntitlementBlocker =
 
 export interface AccountEntitlementInput {
   edition: AccountEdition;
+  platformStatus: 'ACTIVE' | 'SUSPENDED';
   subscriptionStatus: AccountSubscriptionStatus | null;
   trialEndsAt: Date | null;
   onboardingCompletedVersion: number | null;
@@ -57,6 +59,9 @@ const readOnly = (
 export const decideAccountEntitlements = (
   input: AccountEntitlementInput
 ): AccountEntitlements => {
+  if (input.platformStatus === 'SUSPENDED') {
+    return readOnly('ACCOUNT_SUSPENDED');
+  }
   if (input.edition === 'INTERNAL_LEGACY') {
     return {
       canRead: true,

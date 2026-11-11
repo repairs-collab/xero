@@ -8,6 +8,12 @@ const repositoryFile = (path: string): string => {
 };
 
 describe('OVH release pipeline', () => {
+  it('keeps Linux deployment scripts executable across Windows checkouts', () => {
+    const attributes = repositoryFile('.gitattributes');
+
+    expect(attributes).toContain('*.sh text eol=lf');
+  });
+
   it('builds once and deploys immutable artifacts through protected OVH production', () => {
     const workflow = repositoryFile('.github/workflows/deploy.yml');
 
@@ -46,6 +52,59 @@ describe('OVH release pipeline', () => {
     expect(workflow).not.toContain('CERTIFICATE_ARN');
   });
 
+  it('installs commercial credentials through protected production secrets', () => {
+    const workflow = repositoryFile('.github/workflows/deploy.yml');
+    const installer = repositoryFile(
+      'deploy/ovh/install-protected-environment.sh'
+    );
+
+    for (const name of [
+      'XERO_OAUTH_CLIENT_ID',
+      'XERO_OAUTH_CLIENT_SECRET',
+      'STRIPE_SECRET_KEY',
+      'STRIPE_WEBHOOK_SECRET',
+      'STRIPE_SOLO_PRICE_ID',
+      'STRIPE_PORTAL_CONFIGURATION_ID'
+    ]) {
+      expect(workflow).toContain(`secrets.${name}`);
+      expect(installer).toContain(name);
+    }
+    for (const name of [
+      'ACCOUNT_PULSE_LEGAL_ENTITY',
+      'ACCOUNT_PULSE_SUPPORT_EMAIL',
+      'SMS_NUMBER_QUARANTINE_DAYS'
+    ]) {
+      expect(workflow).toContain(`vars.${name}`);
+      expect(installer).toContain(name);
+    }
+    expect(workflow).toContain('install-protected-environment.sh');
+    expect(workflow).toContain('Install protected production environment');
+    expect(installer).toContain('docker inspect');
+    expect(installer).toContain('umask 077');
+    expect(installer).toContain('install -m 0600');
+    expect(installer).toContain('current-images.env');
+    expect(installer).toContain(
+      'capture_optional_container_environment bc5000-asterisk'
+    );
+    expect(installer).toContain(
+      'capture_optional_container_environment bc5000-voice-gateway'
+    );
+    expect(installer).toContain(
+      'capture_optional_container_image bc5000-asterisk ACCOUNT_PULSE_ASTERISK_IMAGE'
+    );
+    expect(installer).toContain(
+      'capture_optional_container_image bc5000-voice-gateway ACCOUNT_PULSE_VOICE_GATEWAY_IMAGE'
+    );
+    expect(installer).toContain(
+      'capture_optional_container_port_bind_ip bc5000-asterisk 5060/tcp VOICE_SIP_BIND_IP'
+    );
+    expect(installer).toContain(
+      'capture_optional_container_port_bind_ip bc5000-asterisk 10000/udp VOICE_RTP_BIND_IP'
+    );
+    expect(installer).toContain('XERO_TOKEN_ENCRYPTION_KEYS_JSON');
+    expect(installer).not.toContain('set -x');
+  });
+
   it('locks, backs up, migrates, checks health and restores images on failure', () => {
     const release = repositoryFile('deploy/ovh/release.sh');
 
@@ -56,6 +115,7 @@ describe('OVH release pipeline', () => {
     expect(release).toContain('accountpulse-worker:${RELEASE_SHA}');
     expect(release).toContain('worker.mjs migrate');
     expect(release).toContain('/health/ready');
+    expect(release).toContain('--retry-all-errors');
     expect(release).toContain('rollback_images');
     expect(release).toContain('previous-images.env');
     expect(release).toContain('release-metadata.json');
@@ -75,6 +135,7 @@ describe('OVH release pipeline', () => {
   it('adds the commercial hostname without replacing the existing Motts site', () => {
     const installer = repositoryFile('deploy/ovh/install-public-hostname.sh');
     const site = repositoryFile('deploy/ovh/accountpulse-site.caddy');
+    const compose = repositoryFile('deploy/ovh/docker-compose.yml');
 
     expect(site).toContain('ap.motts.com.au');
     expect(site).toContain('reverse_proxy web:3000');
@@ -84,6 +145,14 @@ describe('OVH release pipeline', () => {
     expect(installer).toContain('ERR trap');
     expect(installer).toContain('openssl s_client');
     expect(installer).toContain('curl --fail');
+    expect(installer).toContain('--retry-all-errors');
+    expect(installer).toContain('cat "$candidate" > "$CADDYFILE"');
+    expect(installer).toContain('--force-recreate caddy');
+    expect(installer).not.toContain(
+      'install -m 0644 "$candidate" "$CADDYFILE"'
+    );
+    expect(installer).toContain('already serves valid HTTPS');
     expect(installer).not.toMatch(/^\s*rm\s+.*Caddyfile/m);
+    expect(compose).toContain('name: mott-marketing-proxy');
   });
 });

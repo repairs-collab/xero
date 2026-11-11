@@ -16,6 +16,9 @@ import {
 
 export type RolloutScope = 'CONTROLLED' | 'CUSTOMER';
 
+export type PlatformRole = 'OWNER';
+export type PlatformAccountStatus = 'ACTIVE' | 'SUSPENDED';
+
 export type OperationalState =
   | 'READY'
   | 'RESET_PREPARING'
@@ -65,6 +68,15 @@ export const organisations = pgTable(
     operationalStateVersion: integer('operational_state_version')
       .notNull()
       .default(0),
+    platformStatus: varchar('platform_status', { length: 16 })
+      .$type<PlatformAccountStatus>()
+      .notNull()
+      .default('ACTIVE'),
+    suspendedAt: timestamp('suspended_at', { withTimezone: true }),
+    suspensionReason: text('suspension_reason'),
+    platformStatusVersion: integer('platform_status_version')
+      .notNull()
+      .default(0),
     xeroSyncCursor: text('xero_sync_cursor'),
     lastSuccessfulSyncAt: timestamp('last_successful_sync_at', {
       withTimezone: true
@@ -99,6 +111,19 @@ export const organisations = pgTable(
     check(
       'organisations_operational_state_version_ck',
       sql`${table.operationalStateVersion} >= 0`
+    ),
+    check(
+      'organisations_platform_status_ck',
+      sql`${table.platformStatus} in ('ACTIVE', 'SUSPENDED')`
+    ),
+    check(
+      'organisations_platform_status_version_ck',
+      sql`${table.platformStatusVersion} >= 0`
+    ),
+    check(
+      'organisations_platform_suspension_metadata_ck',
+      sql`(${table.platformStatus} = 'ACTIVE' and ${table.suspendedAt} is null and ${table.suspensionReason} is null)
+          or (${table.platformStatus} = 'SUSPENDED' and ${table.suspendedAt} is not null and nullif(btrim(${table.suspensionReason}), '') is not null)`
     )
   ]
 );
@@ -110,6 +135,7 @@ export const users = pgTable('users', {
     .unique(),
   email: text('email').notNull().unique(),
   displayName: text('display_name').notNull(),
+  platformRole: varchar('platform_role', { length: 16 }).$type<PlatformRole>(),
   disabledAt: timestamp('disabled_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true })
     .notNull()
@@ -128,6 +154,7 @@ export const memberships = pgTable(
     role: varchar('role', { length: 16 })
       .$type<'ADMIN' | 'OPERATOR'>()
       .notNull(),
+    version: integer('version').notNull().default(0),
     disabledAt: timestamp('disabled_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
@@ -155,6 +182,7 @@ export const invitations = pgTable(
       .notNull()
       .default('PENDING'),
     invitedByUserId: uuid('invited_by_user_id').references(() => users.id),
+    version: integer('version').notNull().default(0),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     acceptedAt: timestamp('accepted_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true })

@@ -1,0 +1,188 @@
+import { revalidatePath } from 'next/cache';
+import { headers } from 'next/headers';
+import { redirect } from 'next/navigation';
+
+import type { AppSession, Role } from '@bc5000/auth';
+
+import { requirePlatformOwner } from '../../../../server/platform-authorization.js';
+import {
+  getPlatformUserAdministration,
+  type createPlatformUserAdministration
+} from '../../../../server/platform-user-administration.js';
+
+type PlatformUserService = ReturnType<typeof createPlatformUserAdministration>;
+
+export interface PlatformUserActionDependencies {
+  getOwnerSession(): Promise<AppSession>;
+  service: Pick<
+    PlatformUserService,
+    'inviteMember' | 'resendInvitation' | 'changeRole' | 'disableMember'
+  >;
+  revalidate(path: string): void;
+}
+
+export interface PlatformUserActionState {
+  ok: boolean;
+  code: 'UPDATED' | 'VALIDATION' | 'LAST_ADMIN_REQUIRED' | 'CONFLICT' | 'FAILED';
+}
+
+const text = (formData: FormData, name: string): string => {
+  const value = formData.get(name);
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(`${name} is required`);
+  }
+  return value.trim();
+};
+
+const role = (formData: FormData): Role => {
+  const value = text(formData, 'role');
+  if (value !== 'ADMIN' && value !== 'OPERATOR') {
+    throw new Error('role is invalid');
+  }
+  return value;
+};
+
+const version = (formData: FormData): number => {
+  const value = Number(text(formData, 'expectedVersion'));
+  if (!Number.isInteger(value) || value < 0) throw new Error('expectedVersion is invalid');
+  return value;
+};
+
+const failure = (error: unknown): PlatformUserActionState => {
+  const message = error instanceof Error ? error.message : '';
+  if (message === 'LAST_ADMIN_REQUIRED') {
+    return { ok: false, code: 'LAST_ADMIN_REQUIRED' };
+  }
+  if (message === 'CONFLICT') return { ok: false, code: 'CONFLICT' };
+  if (message === 'VALIDATION' || message.includes('required') || message.includes('invalid')) {
+    return { ok: false, code: 'VALIDATION' };
+  }
+  return { ok: false, code: 'FAILED' };
+};
+
+export const createPlatformUserActions = (
+  dependencies: PlatformUserActionDependencies
+) => {
+  const finish = (organisationId: string) => {
+    dependencies.revalidate(`/platform-admin/organisations/${organisationId}`);
+    dependencies.revalidate('/platform-admin');
+  };
+  return {
+    async inviteMemberAction(formData: FormData): Promise<PlatformUserActionState> {
+      try {
+        const organisationId = text(formData, 'organisationId');
+        await dependencies.service.inviteMember(
+          await dependencies.getOwnerSession(),
+          {
+            organisationId,
+            email: text(formData, 'email'),
+            displayName: text(formData, 'displayName'),
+            role: role(formData),
+            reason: text(formData, 'reason')
+          }
+        );
+        finish(organisationId);
+        return { ok: true, code: 'UPDATED' };
+      } catch (error) {
+        return failure(error);
+      }
+    },
+
+    async resendInvitationAction(formData: FormData): Promise<PlatformUserActionState> {
+      try {
+        const organisationId = text(formData, 'organisationId');
+        await dependencies.service.resendInvitation(
+          await dependencies.getOwnerSession(),
+          {
+            organisationId,
+            invitationId: text(formData, 'invitationId'),
+            expectedVersion: version(formData),
+            reason: text(formData, 'reason')
+          }
+        );
+        finish(organisationId);
+        return { ok: true, code: 'UPDATED' };
+      } catch (error) {
+        return failure(error);
+      }
+    },
+
+    async changeMemberRoleAction(formData: FormData): Promise<PlatformUserActionState> {
+      try {
+        const organisationId = text(formData, 'organisationId');
+        await dependencies.service.changeRole(
+          await dependencies.getOwnerSession(),
+          {
+            organisationId,
+            userId: text(formData, 'userId'),
+            role: role(formData),
+            expectedVersion: version(formData),
+            reason: text(formData, 'reason')
+          }
+        );
+        finish(organisationId);
+        return { ok: true, code: 'UPDATED' };
+      } catch (error) {
+        return failure(error);
+      }
+    },
+
+    async disableMemberAction(formData: FormData): Promise<PlatformUserActionState> {
+      try {
+        const organisationId = text(formData, 'organisationId');
+        await dependencies.service.disableMember(
+          await dependencies.getOwnerSession(),
+          {
+            organisationId,
+            userId: text(formData, 'userId'),
+            expectedVersion: version(formData),
+            reason: text(formData, 'reason')
+          }
+        );
+        finish(organisationId);
+        return { ok: true, code: 'UPDATED' };
+      } catch (error) {
+        return failure(error);
+      }
+    }
+  };
+};
+
+const actions = createPlatformUserActions({
+  getOwnerSession: async () =>
+    requirePlatformOwner(
+      new Request('http://localhost/platform-admin', {
+        headers: await headers()
+      })
+    ),
+  service: getPlatformUserAdministration(),
+  revalidate: revalidatePath
+});
+
+const run = async (
+  formData: FormData,
+  action: (data: FormData) => Promise<PlatformUserActionState>
+): Promise<never> => {
+  const organisationId = text(formData, 'organisationId');
+  const result = await action(formData);
+  redirect(
+    `/platform-admin/organisations/${encodeURIComponent(organisationId)}?result=${result.code}`
+  );
+};
+
+export async function inviteMemberAction(formData: FormData) {
+  'use server';
+  return run(formData, (data) => actions.inviteMemberAction(data));
+}
+export async function resendInvitationAction(formData: FormData) {
+  'use server';
+  return run(formData, (data) => actions.resendInvitationAction(data));
+}
+export async function changeMemberRoleAction(formData: FormData) {
+  'use server';
+  return run(formData, (data) => actions.changeMemberRoleAction(data));
+}
+export async function disableMemberAction(formData: FormData) {
+  'use server';
+  return run(formData, (data) => actions.disableMemberAction(data));
+}

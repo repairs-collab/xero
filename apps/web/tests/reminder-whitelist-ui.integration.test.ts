@@ -92,7 +92,7 @@ async function seed() {
     cognitoSubject: randomUUID(),
     displayName: 'Alex Operator',
     expiresAt: '2026-09-29T00:00:00.000Z',
-    memberships: [{ organisationId, role, active: true }]
+    memberships: [{ organisationId, role, active: true, organisationStatus: 'ACTIVE' }]
   });
   return {
     organisationId,
@@ -202,7 +202,7 @@ describe('Reminder Whitelist interface', () => {
             {
               organisationId: seeded.foreignOrganisationId,
               role: 'ADMIN',
-              active: true
+              active: true, organisationStatus: 'ACTIVE'
             }
           ]
         },

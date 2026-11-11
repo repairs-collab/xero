@@ -25,7 +25,7 @@ async function seedEscalation() {
   await client.db.insert(invoiceChases).values({ id: chaseId, organisationId, invoiceId, sequenceId, customerId: contactId, status: 'ACTIVE' });
   await client.db.insert(stageInstances).values({ id: stageId, organisationId, invoiceChaseId: chaseId, sequenceVersionId: versionId, stageKey: 'daily-after-30', channel: 'SMS', status: 'SCHEDULED', scheduledAt: new Date('2026-09-19T00:00:00Z'), sourceVersion: 1 });
   await client.db.insert(tasks).values({ id: taskId, organisationId, kind: 'DEBT_ESCALATION', contactId, invoiceId, sequenceId, status: 'OPEN', dueAt: now, summary: 'Escalate overdue invoice INV-300' });
-  const session: AppSession = { userId, cognitoSubject: randomUUID(), displayName: 'Operator', expiresAt: '2026-09-18T10:00:00Z', memberships: [{ organisationId, role: 'OPERATOR', active: true }] };
+  const session: AppSession = { userId, cognitoSubject: randomUUID(), displayName: 'Operator', expiresAt: '2026-09-18T10:00:00Z', memberships: [{ organisationId, role: 'OPERATOR', active: true, organisationStatus: 'ACTIVE' }] };
   return { organisationId, userId, contactId, invoiceId, stageId, taskId, session };
 }
 
