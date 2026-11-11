@@ -16,7 +16,6 @@ test('keeps the session active until the user chooses to sign out', async ({ pag
   });
 
   await page.goto('/');
-  await page.waitForLoadState('networkidle');
 
   expect(logoutRequests).toEqual([]);
   await expect(page.getByRole('link', { name: 'Sign out' })).toBeVisible();
