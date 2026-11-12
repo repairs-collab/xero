@@ -1,21 +1,4 @@
 ALTER TABLE "reply_number_provisioning_requests" DROP CONSTRAINT "reply_number_requests_approval_ck";--> statement-breakpoint
-UPDATE "reply_number_provisioning_requests"
-SET "external_order_reference" = null,
-    "manual_order_recorded_at" = null,
-    "updated_at" = now()
-WHERE "status" = 'FAILED'
-  AND "external_order_reference" is not null
-  AND NOT (
-    "quote_setup_fee_minor" is not null and
-    "quote_monthly_fee_minor" is not null and
-    "quote_currency" = 'aud' and
-    "quote_expires_at" is not null and
-    "quoted_at" is not null and
-    "documentation_status" in ('NOT_REQUIRED', 'COMPLETE') and
-    "approved_by_user_id" is not null and
-    "approved_at" is not null and
-    nullif(btrim("approval_reason"), '') is not null
-  );--> statement-breakpoint
 ALTER TABLE "reply_number_provisioning_requests" ADD CONSTRAINT "reply_number_requests_failed_provenance_ck" CHECK ("reply_number_provisioning_requests"."status" <> 'FAILED' or
           "reply_number_provisioning_requests"."external_order_reference" is null or (
             "reply_number_provisioning_requests"."quote_setup_fee_minor" is not null and

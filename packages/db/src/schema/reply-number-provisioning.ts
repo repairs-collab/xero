@@ -193,17 +193,22 @@ export const replyNumberProvisioningRequests = pgTable(
     ),
     check(
       'reply_number_requests_failed_provenance_ck',
-      sql`${table.status} <> 'FAILED' or
-          ${table.externalOrderReference} is null or (
-            ${table.quoteSetupFeeMinor} is not null and
-            ${table.quoteMonthlyFeeMinor} is not null and
-            ${table.quoteCurrency} = 'aud' and
-            ${table.quoteExpiresAt} is not null and
-            ${table.quotedAt} is not null and
-            ${table.documentationStatus} in ('NOT_REQUIRED', 'COMPLETE') and
-            ${table.approvedByUserId} is not null and
-            ${table.approvedAt} is not null and
-            nullif(btrim(${table.approvalReason}), '') is not null
+      sql`${table.status} <> 'FAILED' or (
+            (
+              ${table.approvedByUserId} is null or (
+                ${table.quoteSetupFeeMinor} is not null and
+                ${table.quoteMonthlyFeeMinor} is not null and
+                ${table.quoteCurrency} = 'aud' and
+                ${table.quoteExpiresAt} is not null and
+                ${table.quotedAt} is not null and
+                ${table.documentationStatus} <> 'UNKNOWN'
+              )
+            ) and (
+              ${table.externalOrderReference} is null or (
+                ${table.approvedByUserId} is not null and
+                ${table.documentationStatus} in ('NOT_REQUIRED', 'COMPLETE')
+              )
+            )
           )`
     ),
     check(

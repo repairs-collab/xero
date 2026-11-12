@@ -218,6 +218,13 @@
       "when": 1794460000007,
       "tag": "0030_long_kylun",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1794460000008,
+      "tag": "0031_shallow_caretaker",
+      "breakpoints": true
     }
   ]
 }

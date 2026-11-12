@@ -816,6 +816,47 @@ describe('PostgresReplyNumberProvisioningRepository', () => {
       )
     ).rejects.toThrow();
 
+    const falseApprovalOrganisationId = await seedOrganisation();
+    await expect(
+      client.pool.query(
+        `insert into reply_number_provisioning_requests
+          (organisation_id, provider, request_key, attempt, version, status,
+           approved_by_user_id, approved_at, approval_reason,
+           failure_code, failed_at)
+         values ($1, 'SINCH', $2, 1, 1, 'FAILED', $3, $4, $5, $6, $4)`,
+        [
+          falseApprovalOrganisationId,
+          `failed-with-false-approval-${randomUUID()}`,
+          ownerId,
+          now,
+          'Approval without quote provenance',
+          'PROVIDER_REJECTED'
+        ]
+      )
+    ).rejects.toThrow();
+
+    const approvedOrganisationId = await seedOrganisation();
+    const approved = await approveRequest(approvedOrganisationId);
+    await expect(
+      repository.failRequest({
+        actorUserId: ownerId,
+        organisationId: approvedOrganisationId,
+        requestId: approved.id,
+        expectedVersion: approved.version,
+        failureCode: 'PROVIDER_REJECTED',
+        reason: 'Provider rejected the approved request before ordering',
+        now
+      })
+    ).resolves.toMatchObject({
+      ok: true,
+      value: {
+        status: 'FAILED',
+        externalOrderReference: null,
+        approvedByUserId: ownerId,
+        documentationStatus: 'NOT_REQUIRED'
+      }
+    });
+
     const orderedOrganisationId = await seedOrganisation();
     const ordered = await recordExternalOrder(orderedOrganisationId);
     await expect(
