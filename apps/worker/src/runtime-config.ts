@@ -80,6 +80,52 @@ const required = (environment: Environment, name: string): string => {
   return value;
 };
 
+const invalidDebtContactHolidayDates = (): Error =>
+  new Error(
+    'DEBT_CONTACT_HOLIDAY_DATES_JSON must be a JSON array of unique YYYY-MM-DD dates'
+  );
+
+export function parseDebtContactHolidayDates(
+  environment: Environment
+): readonly string[] {
+  const source = environment.DEBT_CONTACT_HOLIDAY_DATES_JSON?.trim();
+  if (!source) {
+    if (environment.NODE_ENV?.trim() === 'production') {
+      throw new Error(
+        'DEBT_CONTACT_HOLIDAY_DATES_JSON is required in production'
+      );
+    }
+    return [];
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(source) as unknown;
+  } catch {
+    throw invalidDebtContactHolidayDates();
+  }
+  if (!Array.isArray(parsed)) throw invalidDebtContactHolidayDates();
+
+  const dates: string[] = [];
+  const uniqueDates = new Set<string>();
+  for (const value of parsed) {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      throw invalidDebtContactHolidayDates();
+    }
+    const date = new Date(`${value}T00:00:00.000Z`);
+    if (
+      Number.isNaN(date.valueOf()) ||
+      date.toISOString().slice(0, 10) !== value ||
+      uniqueDates.has(value)
+    ) {
+      throw invalidDebtContactHolidayDates();
+    }
+    uniqueDates.add(value);
+    dates.push(value);
+  }
+  return Object.freeze(dates);
+}
+
 const field = (
   value: Record<string, unknown>,
   name: string,

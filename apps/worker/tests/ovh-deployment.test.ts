@@ -43,6 +43,7 @@ const composeEnvironment = {
   SINCH_WEBHOOK_TOKEN: 'test-sinch-token',
   SINCH_API_CREDENTIALS: '{}',
   SMS_NUMBER_QUARANTINE_DAYS: '1',
+  DEBT_CONTACT_HOLIDAY_DATES_JSON: '["2026-10-05"]',
   ASTERISK_ARI_USERNAME: 'accountpulse',
   ASTERISK_ARI_PASSWORD: 'test-ari-password',
   ASTERISK_EXTERNAL_ADDRESS: '203.0.113.10',
@@ -162,7 +163,9 @@ describe('OVH voice deployment', () => {
     expect(resolved.services.worker?.environment).toEqual(
       expect.objectContaining({
         ...sharedXeroEnvironment,
-        SINCH_API_CREDENTIALS: composeEnvironment.SINCH_API_CREDENTIALS
+        SINCH_API_CREDENTIALS: composeEnvironment.SINCH_API_CREDENTIALS,
+        DEBT_CONTACT_HOLIDAY_DATES_JSON:
+          composeEnvironment.DEBT_CONTACT_HOLIDAY_DATES_JSON
       })
     );
     expect(resolved.services.worker?.environment).not.toHaveProperty('STRIPE_SECRET_KEY');
@@ -174,6 +177,25 @@ describe('OVH voice deployment', () => {
       'SINCH_CALLBACK_PUBLIC_KEYS_JSON'
     );
     expect(resolved.services.worker?.environment).not.toHaveProperty('SINCH_WEBHOOK_TOKEN');
+  }, 15_000);
+
+  it('refuses to resolve the production worker without a debt-contact holiday calendar', () => {
+    const environment: NodeJS.ProcessEnv = { ...composeEnvironment };
+    delete environment.DEBT_CONTACT_HOLIDAY_DATES_JSON;
+    const composePath = resolve(
+      process.cwd(),
+      'deploy',
+      'ovh',
+      'docker-compose.yml'
+    );
+    const result = spawnSync(
+      'docker',
+      ['compose', '-f', composePath, 'config', '--format', 'json'],
+      { encoding: 'utf8', env: environment }
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('DEBT_CONTACT_HOLIDAY_DATES_JSON is required');
   }, 15_000);
 
   it('starts the customer OAuth worker without legacy Custom Connection credentials', () => {

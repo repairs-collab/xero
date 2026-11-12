@@ -66,6 +66,7 @@ import { processInboundReply } from './services/inbound-reply-service.js';
 import {
   databaseUrlFromEnvironment,
   parseApprovedSmsRecoveryCommand,
+  parseDebtContactHolidayDates,
   parseInboundReplyRecoveryCommand,
   parseOperationalResetCommand,
   parseProviderCredentials,
@@ -93,6 +94,8 @@ const requiredPositiveInteger = (name: string): number => {
 };
 
 async function main() {
+  const debtContactHolidayDates = parseDebtContactHolidayDates(process.env);
+  const debtContactHolidays = { list: () => debtContactHolidayDates };
   const databaseUrl = databaseUrlFromEnvironment(process.env);
   const voiceMonitorCommand = process.argv[2] === 'voice-monitor';
   const approvedSmsRecoveryCommand =
@@ -457,14 +460,18 @@ async function main() {
             database: databaseClient.db,
             clock,
             xero: await xeroFactory.forOrganisation(payload.organisationId),
-            holidays: { list: () => [] },
+            holidays: debtContactHolidays,
             publisher: queue
           },
           payload.organisationId
         ).then(() => undefined),
       [jobNames.voiceRemindersCalculate]: (payload) =>
         calculateVoiceReminderWork(
-          { database: databaseClient.db, clock, holidays: { list: () => [] } },
+          {
+            database: databaseClient.db,
+            clock,
+            holidays: debtContactHolidays
+          },
           payload.organisationId
         ).then(() => undefined),
       [jobNames.voiceRemindersDispatch]: (payload) =>
@@ -473,7 +480,7 @@ async function main() {
             database: databaseClient.db,
             repository: voiceCallRepository,
             clock,
-            holidays: { list: () => [] },
+            holidays: debtContactHolidays,
             publisher: queue,
             acceptCustomerVoiceCalls:
               process.env.VOICE_GATEWAY_ACCEPT_CALLS === 'true'
@@ -488,7 +495,7 @@ async function main() {
             xero: await xeroFactory.forOrganisation(payload.organisationId),
             sinch,
             callbackUrl,
-            holidays: { list: () => [] },
+            holidays: debtContactHolidays,
             xeroEmailAllowance: {
               hasSafeHeadroom: () => Promise.resolve(true)
             }
@@ -519,7 +526,7 @@ async function main() {
             gateway: voiceGateway,
             gatewayCallbackUrl: voiceGatewayCallbackUrl,
             publisher: queue,
-            holidays: { list: () => [] },
+            holidays: debtContactHolidays,
             acceptCustomerVoiceCalls:
               process.env.VOICE_GATEWAY_ACCEPT_CALLS === 'true'
           },

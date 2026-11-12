@@ -78,6 +78,7 @@ describe('OVH release pipeline', () => {
     const installer = repositoryFile(
       'deploy/ovh/install-protected-environment.sh'
     );
+    const environmentExample = repositoryFile('deploy/ovh/env.example');
 
     for (const name of [
       'XERO_OAUTH_CLIENT_ID',
@@ -93,6 +94,7 @@ describe('OVH release pipeline', () => {
     for (const name of [
       'ACCOUNT_PULSE_LEGAL_ENTITY',
       'ACCOUNT_PULSE_SUPPORT_EMAIL',
+      'DEBT_CONTACT_HOLIDAY_DATES_JSON',
       'SMS_NUMBER_QUARANTINE_DAYS'
     ]) {
       expect(workflow).toContain(`vars.${name}`);
@@ -124,6 +126,10 @@ describe('OVH release pipeline', () => {
     );
     expect(installer).toContain('XERO_TOKEN_ENCRYPTION_KEYS_JSON');
     expect(installer).not.toContain('set -x');
+    expect(environmentExample).toContain(
+      'DEBT_CONTACT_HOLIDAY_DATES_JSON=['
+    );
+    expect(environmentExample).toContain('Australia/Sydney');
   });
 
   it('locks, backs up, migrates, checks health and restores images on failure', () => {
