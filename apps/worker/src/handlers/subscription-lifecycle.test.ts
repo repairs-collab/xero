@@ -96,4 +96,30 @@ describe('processSubscriptionLifecycle', () => {
     expect(result).toBe('ALREADY_APPLIED');
     expect(disconnects).toBe(0);
   });
+
+  it('uses the last valid anniversary for a leap-day cancellation', async () => {
+    let deletionEligibleAt: Date | null = null;
+    await processSubscriptionLifecycle(
+      {
+        load: () =>
+          Promise.resolve({
+            status: 'CANCELLED',
+            cancelledAt: new Date('2028-02-29T09:30:00.000Z'),
+            retentionDeadlineRecorded: false
+          }),
+        disconnectXero: () => Promise.resolve(),
+        quarantineSmsNumber: () => Promise.resolve(),
+        recordRetentionDeadline: (input) => {
+          deletionEligibleAt = input.deletionEligibleAt;
+          return Promise.resolve();
+        },
+        clock: { now: () => new Date('2028-03-01T00:00:00.000Z') }
+      },
+      { organisationId: 'org_leap_day', status: 'CANCELLED' }
+    );
+
+    expect(deletionEligibleAt).toEqual(
+      new Date('2033-02-28T09:30:00.000Z')
+    );
+  });
 });

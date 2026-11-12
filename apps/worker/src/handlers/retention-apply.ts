@@ -16,6 +16,7 @@ import {
   approvals,
   auditEvents,
   conversations,
+  dataRequestCases,
   type Database,
   inboundMessages,
   invoiceChases,
@@ -27,6 +28,7 @@ import {
   stageInstances,
   webhookEvents
 } from '@bc5000/db';
+import { dataRequestReviewDecision } from '@bc5000/domain';
 import type { JobPayloads } from '@bc5000/jobs';
 
 const retained = '[RETAINED_METADATA_ONLY]';
@@ -80,6 +82,96 @@ export async function applyRetention(
       occurredAt: now
     });
   }
+
+  const dataRequestsReviewed = await dependencies.database.transaction(
+    async (transaction) => {
+      const [retentionCase] = await transaction
+        .select({
+          status: retentionCases.status,
+          deletionEligibleAt: retentionCases.deletionEligibleAt,
+          backupExpiryVerifiedAt: retentionCases.backupExpiryVerifiedAt
+        })
+        .from(retentionCases)
+        .where(eq(retentionCases.organisationId, payload.organisationId))
+        .for('update')
+        .limit(1);
+      const requests = await transaction
+        .select({
+          id: dataRequestCases.id,
+          requestType: dataRequestCases.requestType,
+          status: dataRequestCases.status,
+          blockReason: dataRequestCases.blockReason,
+          version: dataRequestCases.version
+        })
+        .from(dataRequestCases)
+        .where(
+          and(
+            eq(dataRequestCases.organisationId, payload.organisationId),
+            eq(dataRequestCases.status, 'VERIFIED'),
+            lte(dataRequestCases.targetAt, now)
+          )
+        )
+        .orderBy(dataRequestCases.targetAt, dataRequestCases.id)
+        .limit(batchSize);
+
+      let changed = 0;
+      for (const request of requests) {
+        const decision = dataRequestReviewDecision({
+          requestType: request.requestType,
+          legalHold: retentionCase?.status === 'LEGAL_HOLD',
+          deletionEligibleAt: retentionCase?.deletionEligibleAt ?? null,
+          backupExpiryVerifiedAt:
+            retentionCase?.backupExpiryVerifiedAt ?? null,
+          now
+        });
+        const { status, blockReason } = decision;
+        if (
+          request.status === status &&
+          request.blockReason === blockReason
+        ) {
+          continue;
+        }
+        const [updated] = await transaction
+          .update(dataRequestCases)
+          .set({
+            status,
+            blockReason,
+            version: request.version + 1,
+            lastReviewedAt: now,
+            updatedAt: now
+          })
+          .where(
+            and(
+              eq(dataRequestCases.organisationId, payload.organisationId),
+              eq(dataRequestCases.id, request.id),
+              eq(dataRequestCases.version, request.version)
+            )
+          )
+          .returning({ id: dataRequestCases.id });
+        if (updated === undefined) continue;
+        await transaction.insert(auditEvents).values({
+          organisationId: payload.organisationId,
+          eventType: 'DATA_REQUEST_REVIEW_STATE_CHANGED',
+          entityType: 'DATA_REQUEST',
+          entityId: request.id,
+          beforeValue: {
+            status: request.status,
+            blockReason: request.blockReason,
+            version: request.version
+          },
+          afterValue: {
+            status,
+            blockReason,
+            version: request.version + 1,
+            automaticDeletion: false
+          },
+          occurredAt: now
+        });
+        changed += 1;
+      }
+      return changed;
+    }
+  );
 
   const oldInvoices = await dependencies.database
     .select({ id: invoices.id, contactId: invoices.contactId })
@@ -336,6 +428,7 @@ export async function applyRetention(
 
   const result = {
     accountReviewRequired,
+    dataRequestsReviewed,
     approvalsRedacted,
     outboundRedacted,
     attemptsRedacted,

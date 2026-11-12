@@ -11,6 +11,7 @@ const tenantTables = [
   'subscriptions',
   'subscription_events',
   'retention_cases',
+  'data_request_cases',
   'sms_number_pool',
   'sms_allowance_settings',
   'sms_usage_ledger',

@@ -23,6 +23,19 @@ export type SubscriptionLifecycleResult =
   | 'ALREADY_APPLIED'
   | 'STALE';
 
+const fiveYearAnniversary = (value: Date): Date => {
+  const result = new Date(value);
+  const day = result.getUTCDate();
+  const month = result.getUTCMonth();
+  const year = result.getUTCFullYear() + 5;
+  result.setUTCDate(1);
+  result.setUTCFullYear(year);
+  result.setUTCMonth(month);
+  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  result.setUTCDate(Math.min(day, lastDay));
+  return result;
+};
+
 export const processSubscriptionLifecycle = async (
   dependencies: SubscriptionLifecycleDependencies,
   payload: JobPayloads['subscription.lifecycle']
@@ -43,15 +56,12 @@ export const processSubscriptionLifecycle = async (
   const deletionEligibleAt =
     current.cancelledAt === null
       ? null
-      : new Date(current.cancelledAt).setUTCFullYear(
-            current.cancelledAt.getUTCFullYear() + 5
-          );
+      : fiveYearAnniversary(current.cancelledAt);
   await dependencies.recordRetentionDeadline({
     organisationId: payload.organisationId,
     disconnectedAt,
     retentionDeadline,
-    deletionEligibleAt:
-      deletionEligibleAt === null ? null : new Date(deletionEligibleAt)
+    deletionEligibleAt
   });
   return 'DISCONNECTED';
 };

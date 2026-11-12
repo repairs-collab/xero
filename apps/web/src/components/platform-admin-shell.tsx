@@ -2,6 +2,7 @@
 
 import {
   ArrowRightStartOnRectangleIcon,
+  ArchiveBoxIcon,
   BanknotesIcon,
   BuildingOffice2Icon,
   ChatBubbleLeftRightIcon,
@@ -17,6 +18,7 @@ const navigation = [
   ['Overview', '/platform-admin', HomeIcon],
   ['Customers', '/platform-admin#customers', BuildingOffice2Icon],
   ['Billing operations', '/platform-admin/billing', BanknotesIcon],
+  ['Retention & privacy', '/platform-admin/retention', ArchiveBoxIcon],
   ['Sinch & SMS', '/platform-admin/sms', ChatBubbleLeftRightIcon],
   ['Audit', '/platform-admin/audit', ClipboardDocumentListIcon]
 ] as const;

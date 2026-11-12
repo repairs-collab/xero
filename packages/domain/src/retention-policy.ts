@@ -147,3 +147,39 @@ export const accountRetentionTransition = (input: {
   }
   return input.currentStatus;
 };
+
+export type DataRequestReviewDecision =
+  | { status: 'IN_REVIEW'; blockReason: null }
+  | {
+      status: 'BLOCKED';
+      blockReason:
+        | 'LEGAL_HOLD'
+        | 'RETENTION_PERIOD_ACTIVE'
+        | 'BACKUP_AGEING_UNVERIFIED';
+    }
+  | { status: 'MANUAL_REVIEW_REQUIRED'; blockReason: null };
+
+export const dataRequestReviewDecision = (input: {
+  requestType: 'EXPORT' | 'DELETION';
+  legalHold: boolean;
+  deletionEligibleAt: Date | null;
+  backupExpiryVerifiedAt: Date | null;
+  now: Date;
+}): DataRequestReviewDecision => {
+  if (input.requestType === 'EXPORT') {
+    return { status: 'IN_REVIEW', blockReason: null };
+  }
+  if (input.legalHold) {
+    return { status: 'BLOCKED', blockReason: 'LEGAL_HOLD' };
+  }
+  if (
+    input.deletionEligibleAt === null ||
+    input.deletionEligibleAt.getTime() > input.now.getTime()
+  ) {
+    return { status: 'BLOCKED', blockReason: 'RETENTION_PERIOD_ACTIVE' };
+  }
+  if (input.backupExpiryVerifiedAt === null) {
+    return { status: 'BLOCKED', blockReason: 'BACKUP_AGEING_UNVERIFIED' };
+  }
+  return { status: 'MANUAL_REVIEW_REQUIRED', blockReason: null };
+};

@@ -20,11 +20,45 @@ An expired trial or effective subscription cancellation immediately pauses
 customer sending, disconnects Xero and removes the encrypted Xero refresh
 token. AccountPulse records a review date 30 days later.
 
-The 30-day date is **not an automatic database purge**. The daily retention job
-atomically changes one SCHEDULED case to REVIEW_REQUIRED. Retries are
-idempotent, a LEGAL_HOLD remains unchanged, and an audit event records that
-automatic purge is disabled. This prevents an unresolved invoice, protected
-billing/audit record or backup copy from being silently destroyed.
+The 30-day date is **not an automatic database purge**. It remains an early
+account-closure review date. A subscription cancellation also records
+`deletion_eligible_at` as the trusted cancellation time plus five calendar
+years. Existing cases are not guessed or backfilled when no trusted
+cancellation time exists.
+
+The daily retention job atomically changes a due SCHEDULED case to
+REVIEW_REQUIRED. Retries are idempotent, a LEGAL_HOLD remains unchanged, and an
+audit event records that automatic purge is disabled. Reaching the five-year
+date does not delete anything: it only permits a separately authorised,
+tenant-scoped manual review after legal-hold, required-evidence and backup-ageing
+checks. This prevents an unresolved invoice, protected billing/audit record or
+backup copy from being silently destroyed.
+
+## Verified export and deletion requests
+
+The owner console records only verified requests and opaque support-case
+references. It sets `target_at = verified_at + 14 days`; the database rejects a
+different target. Reusing the same tenant/idempotency key returns the original
+request only when its verified facts match, and otherwise reports a conflict.
+
+At or before the target, an owner can re-evaluate the request. The recurring
+retention job also moves requests into review when the target becomes due:
+
+- export requests move to IN_REVIEW;
+- deletion requests under LEGAL_HOLD become BLOCKED with LEGAL_HOLD taking
+  precedence over every other condition;
+- requests before `deletion_eligible_at` remain BLOCKED;
+- eligible requests remain BLOCKED until approved backup-ageing evidence is
+  recorded; and
+- an otherwise eligible request becomes MANUAL_REVIEW_REQUIRED so protected
+  invoice, billing, mandate and audit evidence can be scoped before any
+  separately authorised deletion.
+
+Every select and mutation includes both request ID and organisation ID. A
+successful transition increments the request version and writes one audit
+event; retrying the same transition returns the existing state without another
+audit. There is no owner-console control or worker path that performs destructive
+tenant deletion.
 
 ## Record-category matrix
 
@@ -36,16 +70,19 @@ billing/audit record or backup copy from being silently destroyed.
 | Outbound message content and provider payload | Related invoice resolved | 24 months | Replace content with [RETAINED_METADATA_ONLY]; replace provider payload with a metadata-only marker | Hashes, timestamps, outcomes, provider IDs and audit metadata remain |
 | Inbound message and operator-reply content | Every invoice for the contact resolved | 24 months | Redact bodies and provider payloads; an unresolved or recently resolved invoice blocks redaction | Conversation metadata remains |
 | Raw webhook projection | Event successfully processed | 90 days | Delete in bounded batches | An unprocessed event is never deleted by age alone |
-| Audit metadata | Account closure | Five years | Preserve; automatic deletion is not yet coded | Implement the approved five-year eligibility date, legal-hold exclusion and reviewed deletion |
-| Subscription/billing record | Subscription/payment event | **Decision required** | Preserve; no automatic deletion duration is coded | Finance and Australian legal review must approve a period |
+| Customer, invoice, message, call and audit metadata | Account cancellation | Five years | Record deletion eligibility; preserve metadata after shorter content minimisation; never automatically delete | Legal holds and required evidence override eligibility; scoped manual review is mandatory |
+| Subscription/payment record | Subscription/payment event | **Decision required** | Preserve; no automatic deletion duration is coded | Finance and Australian legal review must approve a period |
+| Direct-debit mandate evidence | Provider-confirmed BECS mandate/service agreement | Up to seven years only where BECS or Stripe rules require it | Retain only the required mandate evidence through Stripe or securely | This narrow exception does not extend the period for other billing or account records |
 | Database and release backup | Backup creation/source deletion | **Hosting evidence required** | Pre-release database dumps are created before deployment; no expiry deletion is coded | Public policy must use the verified OVH/off-site expiry, not an assumed duration |
 
 The five-year account-record period is the owner-approved policy target. The
-24-month content-redaction and 90-day raw-webhook periods are shorter
+24-month content-redaction and 90-day raw-webhook periods remain shorter
 data-minimisation controls that retain required metadata without keeping every
-raw payload. Billing and backup durations remain deliberately unset. Do not
-copy the historical seven-year audit or 35-day backup statements into public
-policy until they have legal approval and matching OVH evidence.
+raw payload. Subscription/payment and backup durations remain deliberately
+unset. Seven years applies only to direct-debit mandate evidence when BECS or
+Stripe rules require it; it is not an audit, invoice, customer, message, call,
+general billing or backup period. Do not copy the historical seven-year audit
+or 35-day backup statements into public policy.
 
 ## Isolation, idempotency and retry safeguards
 
@@ -53,6 +90,11 @@ policy until they have legal approval and matching OVH evidence.
   selected IDs are rechecked with the same tenant before a mutation.
 - Account review transition requires the same organisation, SCHEDULED status
   and a due date. A second run cannot create a second transition audit.
+- Verified-request intake uses a tenant-scoped idempotency key and rejects a
+  conflicting replay. Owner review requires the same organisation, request ID
+  and expected version; a repeated completed transition is a no-op.
+- LEGAL_HOLD is evaluated before eligibility or backup evidence for every
+  deletion request. Export review does not create deletion authority.
 - Content redaction is idempotent because rows already containing the retained
   marker are excluded.
 - Webhook cleanup requires processed_at and tenant ownership.

@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { approvals, auditEvents, contacts, conversations, createDatabase, inboundMessages, invoiceChases, invoices, messageAttempts, migrateDatabase, operatorReplies, organisations, outboundMessages, reminderSequenceVersions, reminderSequences, retentionCases, stageInstances, users, webhookEvents } from '@bc5000/db';
+import { approvals, auditEvents, contacts, conversations, createDatabase, dataRequestCases, inboundMessages, invoiceChases, invoices, messageAttempts, migrateDatabase, operatorReplies, organisations, outboundMessages, reminderSequenceVersions, reminderSequences, retentionCases, stageInstances, users, webhookEvents } from '@bc5000/db';
 
 import { applyRetention } from '../src/handlers/retention-apply.js';
 
@@ -13,6 +13,358 @@ beforeAll(async () => migrateDatabase(client.db));
 afterAll(async () => client.pool.end());
 
 describe('retention', () => {
+  it('blocks a due deletion request under legal hold without crossing tenants or duplicating its audit', async () => {
+    const organisationId = randomUUID();
+    const otherOrganisationId = randomUUID();
+    const requestId = randomUUID();
+    const otherRequestId = randomUUID();
+    for (const [id, name] of [
+      [organisationId, 'Held retention tenant'],
+      [otherOrganisationId, 'Other retention tenant']
+    ] as const) {
+      await client.db.insert(organisations).values({
+        id,
+        xeroOrganisationId: randomUUID(),
+        name,
+        timeZone: 'Australia/Sydney',
+        baseCurrency: 'AUD'
+      });
+    }
+    await client.db.insert(retentionCases).values({
+      organisationId,
+      source: 'SUBSCRIPTION_CANCELLED',
+      status: 'LEGAL_HOLD',
+      disconnectedAt: new Date('2021-08-01T00:00:00.000Z'),
+      reviewAfter: new Date('2021-09-01T00:00:00.000Z'),
+      deletionEligibleAt: new Date('2026-08-01T00:00:00.000Z'),
+      backupExpiryVerifiedAt: new Date('2026-08-15T00:00:00.000Z'),
+      backupExpiryEvidenceReference: 'backup-review-held-tenant'
+    });
+    await client.db.insert(dataRequestCases).values([
+      {
+        id: requestId,
+        organisationId,
+        requestType: 'DELETION',
+        verificationReference: 'privacy-case-held',
+        idempotencyKey: 'verified-request-held',
+        verifiedAt: new Date('2026-08-17T00:00:00.000Z'),
+        targetAt: new Date('2026-08-31T00:00:00.000Z')
+      },
+      {
+        id: otherRequestId,
+        organisationId: otherOrganisationId,
+        requestType: 'DELETION',
+        verificationReference: 'privacy-case-other',
+        idempotencyKey: 'verified-request-other',
+        verifiedAt: new Date('2026-08-17T00:00:00.000Z'),
+        targetAt: new Date('2026-08-31T00:00:00.000Z')
+      }
+    ]);
+
+    await applyRetention(
+      { database: client.db, clock: { now: () => now }, batchSize: 100 },
+      { organisationId }
+    );
+    await applyRetention(
+      { database: client.db, clock: { now: () => now }, batchSize: 100 },
+      { organisationId }
+    );
+
+    expect(
+      (
+        await client.db
+          .select()
+          .from(dataRequestCases)
+          .where(eq(dataRequestCases.id, requestId))
+      )[0]
+    ).toMatchObject({
+      status: 'BLOCKED',
+      blockReason: 'LEGAL_HOLD',
+      version: 1
+    });
+    expect(
+      (
+        await client.db
+          .select()
+          .from(dataRequestCases)
+          .where(eq(dataRequestCases.id, otherRequestId))
+      )[0]
+    ).toMatchObject({ status: 'VERIFIED', version: 0 });
+    expect(
+      (
+        await client.db
+          .select()
+          .from(retentionCases)
+          .where(eq(retentionCases.organisationId, organisationId))
+      )[0]?.status
+    ).toBe('LEGAL_HOLD');
+    expect(
+      await client.db
+        .select()
+        .from(auditEvents)
+        .where(
+          and(
+            eq(auditEvents.organisationId, organisationId),
+            eq(auditEvents.eventType, 'DATA_REQUEST_REVIEW_STATE_CHANGED'),
+            eq(auditEvents.entityId, requestId)
+          )
+        )
+    ).toHaveLength(1);
+  });
+
+  it('keeps a due deletion request blocked until the five-year eligibility date', async () => {
+    const organisationId = randomUUID();
+    const requestId = randomUUID();
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: randomUUID(),
+      name: 'Active retention period tenant',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await client.db.insert(retentionCases).values({
+      organisationId,
+      source: 'SUBSCRIPTION_CANCELLED',
+      status: 'SCHEDULED',
+      disconnectedAt: new Date('2026-08-01T00:00:00.000Z'),
+      reviewAfter: new Date('2026-10-01T00:00:00.000Z'),
+      deletionEligibleAt: new Date('2031-08-01T00:00:00.000Z')
+    });
+    await client.db.insert(dataRequestCases).values({
+      id: requestId,
+      organisationId,
+      requestType: 'DELETION',
+      verificationReference: 'privacy-case-active-period',
+      idempotencyKey: 'verified-request-active-period',
+      verifiedAt: new Date('2026-08-17T00:00:00.000Z'),
+      targetAt: new Date('2026-08-31T00:00:00.000Z')
+    });
+
+    await applyRetention(
+      { database: client.db, clock: { now: () => now }, batchSize: 100 },
+      { organisationId }
+    );
+
+    expect(
+      (
+        await client.db
+          .select()
+          .from(dataRequestCases)
+          .where(eq(dataRequestCases.id, requestId))
+      )[0]
+    ).toMatchObject({
+      status: 'BLOCKED',
+      blockReason: 'RETENTION_PERIOD_ACTIVE',
+      version: 1
+    });
+  });
+
+  it('blocks an eligible deletion request while backup ageing is unverified', async () => {
+    const organisationId = randomUUID();
+    const requestId = randomUUID();
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: randomUUID(),
+      name: 'Unverified backup ageing tenant',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await client.db.insert(retentionCases).values({
+      organisationId,
+      source: 'SUBSCRIPTION_CANCELLED',
+      status: 'REVIEW_REQUIRED',
+      disconnectedAt: new Date('2021-08-01T00:00:00.000Z'),
+      reviewAfter: new Date('2021-09-01T00:00:00.000Z'),
+      deletionEligibleAt: new Date('2026-08-01T00:00:00.000Z')
+    });
+    await client.db.insert(dataRequestCases).values({
+      id: requestId,
+      organisationId,
+      requestType: 'DELETION',
+      verificationReference: 'privacy-case-backup-review',
+      idempotencyKey: 'verified-request-backup-review',
+      verifiedAt: new Date('2026-08-17T00:00:00.000Z'),
+      targetAt: new Date('2026-08-31T00:00:00.000Z')
+    });
+
+    await applyRetention(
+      { database: client.db, clock: { now: () => now }, batchSize: 100 },
+      { organisationId }
+    );
+
+    expect(
+      (
+        await client.db
+          .select()
+          .from(dataRequestCases)
+          .where(eq(dataRequestCases.id, requestId))
+      )[0]
+    ).toMatchObject({
+      status: 'BLOCKED',
+      blockReason: 'BACKUP_AGEING_UNVERIFIED',
+      version: 1
+    });
+  });
+
+  it('routes an eligible deletion request to manual review after backup evidence without deleting records', async () => {
+    const organisationId = randomUUID();
+    const requestId = randomUUID();
+    const preservedAuditId = randomUUID();
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: randomUUID(),
+      name: 'Manual deletion review tenant',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await client.db.insert(retentionCases).values({
+      organisationId,
+      source: 'SUBSCRIPTION_CANCELLED',
+      status: 'REVIEW_REQUIRED',
+      disconnectedAt: new Date('2021-08-01T00:00:00.000Z'),
+      reviewAfter: new Date('2021-09-01T00:00:00.000Z'),
+      deletionEligibleAt: new Date('2026-08-01T00:00:00.000Z'),
+      backupExpiryVerifiedAt: new Date('2026-08-15T00:00:00.000Z'),
+      backupExpiryEvidenceReference: 'backup-review-complete'
+    });
+    await client.db.insert(dataRequestCases).values({
+      id: requestId,
+      organisationId,
+      requestType: 'DELETION',
+      verificationReference: 'privacy-case-manual-review',
+      idempotencyKey: 'verified-request-manual-review',
+      verifiedAt: new Date('2026-08-17T00:00:00.000Z'),
+      targetAt: new Date('2026-08-31T00:00:00.000Z')
+    });
+    await client.db.insert(auditEvents).values({
+      id: preservedAuditId,
+      organisationId,
+      eventType: 'STATUTORY_EVIDENCE',
+      entityType: 'ORGANISATION',
+      entityId: organisationId,
+      occurredAt: new Date('2021-08-01T00:00:00.000Z')
+    });
+
+    await applyRetention(
+      { database: client.db, clock: { now: () => now }, batchSize: 100 },
+      { organisationId }
+    );
+
+    expect(
+      (
+        await client.db
+          .select()
+          .from(dataRequestCases)
+          .where(eq(dataRequestCases.id, requestId))
+      )[0]
+    ).toMatchObject({
+      status: 'MANUAL_REVIEW_REQUIRED',
+      blockReason: null,
+      version: 1
+    });
+    expect(
+      await client.db
+        .select()
+        .from(auditEvents)
+        .where(eq(auditEvents.id, preservedAuditId))
+    ).toHaveLength(1);
+  });
+
+  it('moves a verified export into review at its 14-day target without treating legal hold as deletion authority', async () => {
+    const organisationId = randomUUID();
+    const dueRequestId = randomUUID();
+    const futureRequestId = randomUUID();
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: randomUUID(),
+      name: 'Export request tenant',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await client.db.insert(retentionCases).values({
+      organisationId,
+      source: 'SUBSCRIPTION_CANCELLED',
+      status: 'LEGAL_HOLD',
+      disconnectedAt: new Date('2026-08-01T00:00:00.000Z'),
+      reviewAfter: new Date('2026-09-01T00:00:00.000Z')
+    });
+    await client.db.insert(dataRequestCases).values([
+      {
+        id: dueRequestId,
+        organisationId,
+        requestType: 'EXPORT',
+        verificationReference: 'privacy-export-due',
+        idempotencyKey: 'verified-export-due',
+        verifiedAt: new Date('2026-08-17T00:00:00.000Z'),
+        targetAt: new Date('2026-08-31T00:00:00.000Z')
+      },
+      {
+        id: futureRequestId,
+        organisationId,
+        requestType: 'EXPORT',
+        verificationReference: 'privacy-export-future',
+        idempotencyKey: 'verified-export-future',
+        verifiedAt: new Date('2026-09-10T00:00:00.000Z'),
+        targetAt: new Date('2026-09-24T00:00:00.000Z')
+      }
+    ]);
+
+    await applyRetention(
+      { database: client.db, clock: { now: () => now }, batchSize: 100 },
+      { organisationId }
+    );
+
+    expect(
+      (
+        await client.db
+          .select()
+          .from(dataRequestCases)
+          .where(eq(dataRequestCases.id, dueRequestId))
+      )[0]
+    ).toMatchObject({ status: 'IN_REVIEW', version: 1 });
+    expect(
+      (
+        await client.db
+          .select()
+          .from(dataRequestCases)
+          .where(eq(dataRequestCases.id, futureRequestId))
+      )[0]
+    ).toMatchObject({ status: 'VERIFIED', version: 0 });
+  });
+
+  it('bounds due data-request review batches', async () => {
+    const organisationId = randomUUID();
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: randomUUID(),
+      name: 'Bounded request review tenant',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await client.db.insert(dataRequestCases).values(
+      ['first', 'second'].map((suffix) => ({
+        organisationId,
+        requestType: 'EXPORT' as const,
+        verificationReference: `privacy-export-${suffix}`,
+        idempotencyKey: `verified-export-${suffix}`,
+        verifiedAt: new Date('2026-08-17T00:00:00.000Z'),
+        targetAt: new Date('2026-08-31T00:00:00.000Z')
+      }))
+    );
+
+    await applyRetention(
+      { database: client.db, clock: { now: () => now }, batchSize: 1 },
+      { organisationId }
+    );
+
+    const requests = await client.db
+      .select({ status: dataRequestCases.status })
+      .from(dataRequestCases)
+      .where(eq(dataRequestCases.organisationId, organisationId));
+    expect(requests.filter((request) => request.status === 'IN_REVIEW')).toHaveLength(1);
+    expect(requests.filter((request) => request.status === 'VERIFIED')).toHaveLength(1);
+  });
+
   it('removes message bodies after 24 months while preserving metadata and audit', async () => {
     const organisationId = randomUUID(); const contactId = randomUUID(); const invoiceId = randomUUID(); const sequenceId = randomUUID(); const versionId = randomUUID(); const chaseId = randomUUID(); const stageId = randomUUID(); const approvalId = randomUUID(); const conversationId = randomUUID(); const inboundId = randomUUID(); const replyId = randomUUID(); const userId = randomUUID(); const webhookId = randomUUID(); const unprocessedWebhookId = randomUUID(); const outboundId = randomUUID(); const attemptId = randomUUID(); const auditId = randomUUID();
     await client.db.insert(organisations).values({ id: organisationId, xeroOrganisationId: randomUUID(), name: 'Retention test', timeZone: 'Australia/Sydney', baseCurrency: 'AUD' });
@@ -48,6 +400,16 @@ describe('retention', () => {
     expect(await client.db.select().from(auditEvents).where(eq(auditEvents.id, auditId))).toHaveLength(1);
 
     await applyRetention({ database: client.db, clock: { now: () => now }, batchSize: 100 }, { organisationId });
-    expect((await client.db.select().from(auditEvents).where(eq(auditEvents.eventType, 'ACCOUNT_RETENTION_REVIEW_REQUIRED')))).toHaveLength(1);
+    expect(
+      await client.db
+        .select()
+        .from(auditEvents)
+        .where(
+          and(
+            eq(auditEvents.organisationId, organisationId),
+            eq(auditEvents.eventType, 'ACCOUNT_RETENTION_REVIEW_REQUIRED')
+          )
+        )
+    ).toHaveLength(1);
   });
 });
