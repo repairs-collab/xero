@@ -45,7 +45,7 @@ export interface ReminderExecutionClock {
 }
 
 export interface ReminderExecutionXero extends RevalidationXeroClient {
-  emailInvoice(invoiceId: string): Promise<{ kind: 'accepted' }>;
+  emailInvoice(invoiceId: string, beforeRequest?: () => Promise<void>): Promise<{ kind: 'accepted' }>;
 }
 
 export interface XeroEmailAllowance {
@@ -351,7 +351,8 @@ export async function executeReminder(
         automatic:
           reminder.sequenceMode === 'AUTOMATIC' &&
           reminder.stageOrigin === 'AUTOMATION',
-        now
+        now,
+        clock: dependencies.clock
       },
       async (transaction, sendContext) => {
         const scheduleValidation = await revalidateAutomaticReminderSchedule(
@@ -374,6 +375,7 @@ export async function executeReminder(
           };
         }
         if (reminder.channel === 'SMS') {
+          await sendContext.assertEntitlement();
           const accepted = await dependencies.sinch.sendSms({
             destinationNumber: reminder.destination,
             ...(sendContext.smsSourceNumber === null
@@ -394,7 +396,7 @@ export async function executeReminder(
           };
         }
 
-        await dependencies.xero.emailInvoice(reminder.xeroInvoiceId);
+        await dependencies.xero.emailInvoice(reminder.xeroInvoiceId, () => sendContext.assertEntitlement());
         return {
           kind: 'accepted' as const,
           provider: 'XERO' as const,

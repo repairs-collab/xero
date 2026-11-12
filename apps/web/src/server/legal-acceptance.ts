@@ -7,7 +7,7 @@ import {
 } from '@bc5000/db/web';
 
 export const currentLegalVersions = {
-  terms: '2026-11-11',
+  terms: '2026-11-12',
   privacy: '2026-11-11',
   acceptableUse: '2026-11-11'
 } as const;

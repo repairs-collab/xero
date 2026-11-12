@@ -13,6 +13,9 @@ const solo = (
   edition: 'SOLO',
   platformStatus: 'ACTIVE',
   subscriptionStatus: 'ACTIVE',
+  stripeProviderStatus: 'active',
+  currentPeriodEnd: new Date('2026-11-11T00:00:00Z'),
+  cancelAt: null,
   trialEndsAt: null,
   onboardingCompletedVersion: 1,
   requiredOnboardingVersion: 1,
@@ -81,6 +84,23 @@ describe('AccountPulse account entitlements', () => {
       canAutomaticDispatch: true,
       blocker
     });
+  });
+
+  it.each([
+    ['before the period end', 'active', '2026-11-10T00:00:00.001Z', null, true],
+    ['at the period end', 'active', '2026-11-10T00:00:00.000Z', null, false],
+    ['before an earlier cancellation', 'active', '2026-11-11T00:00:00.000Z', '2026-11-10T00:00:00.001Z', true],
+    ['at an earlier cancellation', 'active', '2026-11-11T00:00:00.000Z', '2026-11-10T00:00:00.000Z', false],
+    ['without provenance', null, '2026-11-11T00:00:00.000Z', null, false],
+    ['with failed payment provenance', 'past_due', '2026-11-11T00:00:00.000Z', null, false],
+    ['without a period end', 'active', null, null, false]
+  ])('scheduled cancellation %s', (_label, providerStatus, periodEnd, cancelAt, allowed) => {
+    expect(decideAccountEntitlements(solo({
+      subscriptionStatus: 'CANCEL_AT_PERIOD_END',
+      stripeProviderStatus: providerStatus,
+      currentPeriodEnd: periodEnd === null ? null : new Date(periodEnd),
+      cancelAt: cancelAt === null ? null : new Date(cancelAt)
+    }))).toMatchObject({ canCustomerSend: allowed, canAutomaticDispatch: allowed });
   });
 
   it('allows only verified-admin tests during a current trial', () => {

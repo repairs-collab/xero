@@ -24,6 +24,29 @@ beforeAll(() => migrateDatabase(client.db));
 afterAll(() => client.pool.end());
 
 describe('legal acceptance', () => {
+  it('rejects the previous Terms version while retaining unchanged document versions', async () => {
+    const userId = randomUUID();
+    await client.db.insert(users).values({
+      id: userId,
+      cognitoSubject: randomUUID(),
+      email: `${userId}@example.invalid`,
+      displayName: 'Previous Terms Customer'
+    });
+    await client.db.insert(userLegalAcceptances).values({
+      userId,
+      termsVersion: '2026-11-11',
+      privacyVersion: '2026-11-11',
+      acceptableUseVersion: '2026-11-11',
+      acceptedAt: new Date('2026-11-11T01:00:00.000Z')
+    });
+
+    expect(currentLegalVersions.privacy).toBe('2026-11-11');
+    expect(currentLegalVersions.acceptableUse).toBe('2026-11-11');
+    await expect(hasCurrentLegalAcceptance(client.db, userId)).resolves.toBe(
+      false
+    );
+  });
+
   it('blocks a customer until every current document version is accepted', async () => {
     const userId = randomUUID();
     await client.db.insert(users).values({

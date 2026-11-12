@@ -1,6 +1,7 @@
 import { and, eq, inArray } from 'drizzle-orm';
 
 import { authorise, type AppSession } from '@bc5000/auth';
+import { hasPaidSubscriptionAccess } from '@bc5000/domain';
 import {
   auditEvents,
   type Database,
@@ -39,6 +40,9 @@ export interface OnboardingEvidence {
   allSequencesInReview: boolean;
   sequenceReviewedAt: Date | null;
   subscriptionStatus: SubscriptionStatus;
+  stripeProviderStatus?: string | null;
+  currentPeriodEnd?: Date | null;
+  cancelAt?: Date | null;
   trialEndsAt: Date | null;
   replyNumberStatus: 'READY' | null;
 }
@@ -95,6 +99,9 @@ export const createPostgresOnboardingRepository = (
         adminMobileVerifiedAt: organisationOnboarding.adminMobileVerifiedAt,
         sequenceReviewedAt: organisationOnboarding.sequenceReviewedAt,
         subscriptionStatus: subscriptions.status,
+        stripeProviderStatus: subscriptions.trustedStripeProviderStatus,
+        currentPeriodEnd: subscriptions.currentPeriodEnd,
+        cancelAt: subscriptions.cancelAt,
         trialEndsAt: subscriptions.trialEndsAt
       })
       .from(organisations)
@@ -159,6 +166,9 @@ export const createPostgresOnboardingRepository = (
         sequences.length > 0 && sequences.every((row) => row.mode === 'REVIEW'),
       sequenceReviewedAt: base.sequenceReviewedAt,
       subscriptionStatus: base.subscriptionStatus,
+      stripeProviderStatus: base.stripeProviderStatus,
+      currentPeriodEnd: base.currentPeriodEnd,
+      cancelAt: base.cancelAt,
       trialEndsAt: base.trialEndsAt,
       replyNumberStatus
     };
@@ -265,7 +275,8 @@ const verifiedAustralianMobile = (input: OnboardingEvidence): boolean =>
   /^\+614\d{8}$/.test(input.adminMobile);
 
 export const deriveOnboardingStatus = (
-  input: OnboardingEvidence
+  input: OnboardingEvidence,
+  now: Date = new Date()
 ): {
   steps: OnboardingStep[];
   completedCount: number;
@@ -329,8 +340,7 @@ export const deriveOnboardingStatus = (
       description: 'Subscribe through Stripe when the trial is ready.',
       href: '/settings/billing',
       complete:
-        input.subscriptionStatus === 'ACTIVE' ||
-        input.subscriptionStatus === 'CANCEL_AT_PERIOD_END'
+        hasPaidSubscriptionAccess({ ...input, now })
     },
     {
       key: 'REPLY_NUMBER_READY',
@@ -358,7 +368,7 @@ export const createOnboardingService = (dependencies: {
     authorise(session, 'audit.read', organisationId);
     const now = dependencies.clock.now();
     const evidence = await dependencies.repository.load(organisationId);
-    const status = deriveOnboardingStatus(evidence);
+    const status = deriveOnboardingStatus(evidence, now);
     if (status.complete) {
       await dependencies.repository.markCompleted({
         organisationId,
@@ -372,6 +382,9 @@ export const createOnboardingService = (dependencies: {
       trial: deriveSoloTrialExperience(
         {
           subscriptionStatus: evidence.subscriptionStatus,
+          stripeProviderStatus: evidence.stripeProviderStatus ?? null,
+          currentPeriodEnd: evidence.currentPeriodEnd ?? null,
+          cancelAt: evidence.cancelAt ?? null,
           trialEndsAt: evidence.trialEndsAt,
           verifiedAdminMobile: verifiedAustralianMobile(evidence)
             ? evidence.adminMobile
@@ -417,6 +430,9 @@ export const createOnboardingService = (dependencies: {
 
 export interface SoloTrialInput {
   subscriptionStatus: SubscriptionStatus;
+  stripeProviderStatus?: string | null;
+  currentPeriodEnd?: Date | null;
+  cancelAt?: Date | null;
   trialEndsAt: Date | null;
   verifiedAdminMobile: string | null;
 }
@@ -460,8 +476,7 @@ export const deriveSoloTrialExperience = (
     };
   }
   const paid =
-    input.subscriptionStatus === 'ACTIVE' ||
-    input.subscriptionStatus === 'CANCEL_AT_PERIOD_END';
+    hasPaidSubscriptionAccess({ ...input, now });
   if (paid) {
     return {
       readOnly: false,

@@ -1,5 +1,6 @@
 import { randomInt, randomUUID } from 'node:crypto';
 
+import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createDatabase, migrateDatabase } from '../client.js';
@@ -7,7 +8,9 @@ import {
   organisationOnboarding,
   organisations,
   outboundMessages,
+  smsAllowanceSettings,
   smsNumberPool,
+  smsUsageLedger,
   subscriptions
 } from '../schema/index.js';
 import { PostgresSmsCommerceRepository } from './sms-commerce-repository.js';
@@ -16,7 +19,8 @@ const client = createDatabase(
   process.env.DATABASE_URL ??
     'postgres://bc5000:bc5000@localhost:5432/bc5000'
 );
-const repository = new PostgresSmsCommerceRepository(client.db);
+let clockTime = new Date('2026-11-10T00:00:00.000Z');
+const repository = new PostgresSmsCommerceRepository(client.db, { now: () => clockTime });
 const periodStart = new Date('2026-11-01T00:00:00.000Z');
 const periodEnd = new Date('2026-12-01T00:00:00.000Z');
 const now = new Date('2026-11-10T00:00:00.000Z');
@@ -87,6 +91,37 @@ const seedOutbound = async (organisationId: string) => {
 };
 
 describe('PostgresSmsCommerceRepository', () => {
+  it('enforces the cancellation boundary and clears trust on old status-only writes', async () => {
+    const organisationId = await seedPaidOrganisation();
+    await client.db.update(subscriptions).set({ status: 'CANCEL_AT_PERIOD_END', stripeProviderStatus: 'active', currentPeriodEnd: now }).where(eq(subscriptions.organisationId, organisationId));
+    await expect(client.db.query.subscriptions.findFirst({ where: (table, { eq }) => eq(table.organisationId, organisationId) })).resolves.toMatchObject({ status: 'CANCEL_AT_PERIOD_END', trustedStripeProviderStatus: 'active' });
+    await seedPoolNumber({ verified: true, createdAt: new Date(-Date.now()) });
+    clockTime = new Date(now.getTime() - 1);
+    await expect(repository.reserveAvailableNumber(organisationId, clockTime)).resolves.toMatchObject({ status: 'RESERVED' });
+    clockTime = now;
+    await expect(repository.reserveAvailableNumber(organisationId, new Date(now.getTime() - 1))).rejects.toThrow('PAID_SUBSCRIPTION_REQUIRED');
+    await client.db.update(subscriptions).set({ status: 'CANCEL_AT_PERIOD_END', currentPeriodEnd: periodEnd }).where(eq(subscriptions.organisationId, organisationId));
+    await expect(client.db.query.subscriptions.findFirst({ where: (table, { eq }) => eq(table.organisationId, organisationId) })).resolves.toMatchObject({ status: 'INCOMPLETE', trustedStripeProviderStatus: null });
+    await expect(repository.reserveAvailableNumber(organisationId, now)).rejects.toThrow('PAID_SUBSCRIPTION_REQUIRED');
+  });
+
+  it('does not mark a reserved number ready when the caller time predates the cutoff', async () => {
+    const organisationId = await seedPaidOrganisation();
+    const number = await seedPoolNumber({ verified: true, organisationId, status: 'RESERVED' });
+    await client.db.update(subscriptions).set({ status: 'CANCEL_AT_PERIOD_END', stripeProviderStatus: 'active', currentPeriodEnd: now }).where(eq(subscriptions.organisationId, organisationId));
+    clockTime = now;
+    await expect(repository.markNumberReady(organisationId, number.id, new Date(now.getTime() - 1))).rejects.toThrow('PAID_SUBSCRIPTION_REQUIRED');
+    await expect(client.db.query.smsNumberPool.findFirst({ where: (table, { eq }) => eq(table.id, number.id) })).resolves.toMatchObject({ status: 'RESERVED' });
+  });
+
+  it('does not mark a reserved number ready after a billing downgrade', async () => {
+    const organisationId = await seedPaidOrganisation();
+    const number = await seedPoolNumber({ verified: true, organisationId, status: 'RESERVED' });
+    await client.db.update(subscriptions).set({ status: 'PAST_DUE' }).where(eq(subscriptions.organisationId, organisationId));
+    await expect(repository.markNumberReady(organisationId, number.id, now)).rejects.toThrow('PAID_SUBSCRIPTION_REQUIRED');
+    await expect(client.db.query.smsNumberPool.findFirst({ where: (table, { eq }) => eq(table.id, number.id) })).resolves.toMatchObject({ status: 'RESERVED' });
+  });
+
   it('skips older unverified numbers and assigns a verified Sinch number', async () => {
     const organisationId = await seedPaidOrganisation();
     const earliest = -Date.now();
@@ -159,6 +194,120 @@ describe('PostgresSmsCommerceRepository', () => {
       reason: 'SMS_ALLOWANCE_EXHAUSTED',
       projectedParts: 2_001
     });
+  });
+
+  it('hard-caps persisted legacy overage settings at the exact multipart boundary', async () => {
+    const organisationId = await seedPaidOrganisation();
+    await client.db.insert(smsAllowanceSettings).values({
+      organisationId,
+      includedParts: 3,
+      warningPercent: 80,
+      overageEnabled: true,
+      overageCapCents: 10_000,
+      overageCentsPerPart: 1
+    });
+    await seedPoolNumber({ verified: true, createdAt: new Date(-Date.now()) });
+    const number = await repository.reserveAvailableNumber(organisationId, now);
+    await repository.markNumberReady(organisationId, number.id, now);
+
+    const firstOutboundId = await seedOutbound(organisationId);
+    await expect(
+      repository.reserveUsage({
+        organisationId,
+        outboundMessageId: firstOutboundId,
+        source: 'MANUAL_REMINDER',
+        partCount: 1,
+        now
+      })
+    ).resolves.toMatchObject({ kind: 'reserved', alreadyReserved: false });
+
+    const exactBoundaryOutboundId = await seedOutbound(organisationId);
+    await expect(
+      repository.reserveUsage({
+        organisationId,
+        outboundMessageId: exactBoundaryOutboundId,
+        source: 'MANUAL_REMINDER',
+        partCount: 2,
+        now
+      })
+    ).resolves.toMatchObject({ kind: 'reserved', alreadyReserved: false });
+
+    const crossingOutboundId = await seedOutbound(organisationId);
+    await expect(
+      repository.reserveUsage({
+        organisationId,
+        outboundMessageId: crossingOutboundId,
+        source: 'MANUAL_REMINDER',
+        partCount: 2,
+        now
+      })
+    ).resolves.toEqual({
+      kind: 'blocked',
+      reason: 'SMS_ALLOWANCE_EXHAUSTED',
+      projectedParts: 5
+    });
+    await expect(
+      client.db
+        .select()
+        .from(smsUsageLedger)
+        .where(eq(smsUsageLedger.outboundMessageId, crossingOutboundId))
+    ).resolves.toEqual([]);
+    await expect(repository.loadUsage(organisationId)).resolves.toEqual({
+      billingPeriodStart: periodStart,
+      billingPeriodEnd: periodEnd,
+      includedParts: 3,
+      warningPercent: 80,
+      committedParts: 0,
+      reservedParts: 3,
+      remainingParts: 0
+    });
+  });
+
+  it('blocks a retry of a legacy over-limit reservation', async () => {
+    const organisationId = await seedPaidOrganisation();
+    await client.db.insert(smsAllowanceSettings).values({
+      organisationId,
+      includedParts: 2,
+      warningPercent: 80,
+      overageEnabled: true,
+      overageCapCents: 10_000,
+      overageCentsPerPart: 1
+    });
+    await seedPoolNumber({ verified: true, createdAt: new Date(-Date.now()) });
+    const number = await repository.reserveAvailableNumber(organisationId, now);
+    await repository.markNumberReady(organisationId, number.id, now);
+    const outboundMessageId = await seedOutbound(organisationId);
+    await client.db.insert(smsUsageLedger).values({
+      organisationId,
+      billingPeriodStart: periodStart,
+      billingPeriodEnd: periodEnd,
+      outboundMessageId,
+      source: 'MANUAL_REMINDER',
+      entryType: 'RESERVE',
+      partDelta: 3,
+      idempotencyKey: `${outboundMessageId}:reserve`,
+      occurredAt: now
+    });
+
+    await expect(
+      repository.reserveUsage({
+        organisationId,
+        outboundMessageId,
+        source: 'MANUAL_REMINDER',
+        partCount: 3,
+        now
+      })
+    ).resolves.toEqual({
+      kind: 'blocked',
+      reason: 'SMS_ALLOWANCE_EXHAUSTED',
+      projectedParts: 3
+    });
+    await expect(
+      client.db
+        .select()
+        .from(smsUsageLedger)
+        .where(eq(smsUsageLedger.outboundMessageId, outboundMessageId))
+    ).resolves.toHaveLength(1);
   });
 
   it('fails closed when the organisation already has an unverified reservation', async () => {

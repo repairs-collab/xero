@@ -20,7 +20,7 @@ export const provisionPaidSmsNumber = async (
   await dependencies.repository.markNumberReady(
     payload.organisationId,
     number.id,
-    now
+    dependencies.clock.now()
   );
   return 'READY';
 };

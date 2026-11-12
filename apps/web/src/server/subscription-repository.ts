@@ -1,10 +1,11 @@
-import { and, eq, isNull, or } from 'drizzle-orm';
+import { and, desc, eq, isNull, or } from 'drizzle-orm';
 
 import {
   auditEvents,
   type Database,
   type DbTransaction,
   organisations,
+  retiredStripeSubscriptions,
   subscriptionEvents,
   subscriptions,
   users
@@ -12,6 +13,8 @@ import {
 
 import {
   decideStripeEventApplication,
+  retainedTrialEnd,
+  shouldRetireIgnoredReplacementCandidate,
   type BillingAccount,
   type StripeCheckoutCompletedInput,
   type StripeEventApplicationOutcome,
@@ -56,9 +59,27 @@ const insertEvent = async (
   });
 };
 
+const latestAppliedCheckoutAt = async (
+  transaction: DbTransaction,
+  organisationId: string
+): Promise<Date | null> => {
+  const [latestCheckout] = await transaction
+    .select({ createdAt: subscriptionEvents.stripeEventCreatedAt })
+    .from(subscriptionEvents)
+    .where(
+      and(
+        eq(subscriptionEvents.organisationId, organisationId),
+        eq(subscriptionEvents.eventType, 'checkout.session.completed'),
+        eq(subscriptionEvents.outcome, 'APPLIED')
+      )
+    )
+    .orderBy(desc(subscriptionEvents.stripeEventCreatedAt))
+    .limit(1);
+  return latestCheckout?.createdAt ?? null;
+};
+
 const unsafeForSending = new Set([
   'PAST_DUE',
-  'CANCEL_AT_PERIOD_END',
   'CANCELLED',
   'INCOMPLETE'
 ]);
@@ -78,6 +99,7 @@ export const createPostgresSubscriptionRepository = (
         edition: organisations.edition,
         planCode: subscriptions.planCode,
         status: subscriptions.status,
+        stripeProviderStatus: subscriptions.trustedStripeProviderStatus,
         stripeCustomerId: subscriptions.stripeCustomerId,
         stripeSubscriptionId: subscriptions.stripeSubscriptionId,
         currentPeriodStart: subscriptions.currentPeriodStart,
@@ -145,16 +167,45 @@ export const createPostgresSubscriptionRepository = (
           return 'REJECTED';
         }
 
+        const [retired] = await transaction.select({ id: retiredStripeSubscriptions.stripeSubscriptionId })
+          .from(retiredStripeSubscriptions)
+          .where(eq(retiredStripeSubscriptions.stripeSubscriptionId, input.stripeSubscriptionId)).limit(1);
+        const latestCheckoutAt = await latestAppliedCheckoutAt(
+          transaction,
+          input.organisationId
+        );
         const decision = decideStripeEventApplication({
           eventAlreadyProcessed: false,
           eventCreatedAt: input.eventCreatedAt,
-          lastAppliedAt: null,
+          lastAppliedAt: subscription.stripeSubscriptionId !== input.stripeSubscriptionId ? subscription.lastStripeEventCreatedAt : null,
+          lastAppliedCheckoutAt: latestCheckoutAt,
           existingCustomerId: subscription.stripeCustomerId,
           incomingCustomerId: input.stripeCustomerId,
           existingSubscriptionId: subscription.stripeSubscriptionId,
-          incomingSubscriptionId: input.stripeSubscriptionId
+          incomingSubscriptionId: input.stripeSubscriptionId,
+          existingStatus: subscription.status,
+          allowReplacement: true,
+          isRetired: retired !== undefined
         });
         if (decision !== 'APPLIED') {
+          if (
+            shouldRetireIgnoredReplacementCandidate({
+              outcome: decision,
+              existingStatus: subscription.status,
+              existingCustomerId: subscription.stripeCustomerId,
+              incomingCustomerId: input.stripeCustomerId,
+              existingSubscriptionId: subscription.stripeSubscriptionId,
+              incomingSubscriptionId: input.stripeSubscriptionId
+            })
+          ) {
+            await transaction
+              .insert(retiredStripeSubscriptions)
+              .values({
+                stripeSubscriptionId: input.stripeSubscriptionId,
+                organisationId: input.organisationId
+              })
+              .onConflictDoNothing();
+          }
           await insertEvent(transaction, input, eventOutcome(decision));
           return decision;
         }
@@ -180,6 +231,9 @@ export const createPostgresSubscriptionRepository = (
           return 'REJECTED';
         }
 
+        if (subscription.stripeSubscriptionId !== null && subscription.stripeSubscriptionId !== input.stripeSubscriptionId) {
+          await transaction.insert(retiredStripeSubscriptions).values({ stripeSubscriptionId: subscription.stripeSubscriptionId, organisationId: input.organisationId });
+        }
         await transaction
           .update(subscriptions)
           .set({
@@ -252,6 +306,13 @@ export const createPostgresSubscriptionRepository = (
             )
           )
           .limit(1);
+        const [retired] = await transaction.select({ id: retiredStripeSubscriptions.stripeSubscriptionId })
+          .from(retiredStripeSubscriptions)
+          .where(eq(retiredStripeSubscriptions.stripeSubscriptionId, input.stripeSubscriptionId)).limit(1);
+        const latestCheckoutAt = await latestAppliedCheckoutAt(
+          transaction,
+          input.organisationId
+        );
         const ownershipMismatch =
           ownedElsewhere !== undefined &&
           ownedElsewhere.organisationId !== input.organisationId;
@@ -261,26 +322,53 @@ export const createPostgresSubscriptionRepository = (
               eventAlreadyProcessed: false,
               eventCreatedAt: input.eventCreatedAt,
               lastAppliedAt: subscription.lastStripeEventCreatedAt,
+              lastAppliedCheckoutAt: latestCheckoutAt,
+              existingCustomerId: subscription.stripeCustomerId,
+              incomingCustomerId: input.stripeCustomerId,
+              existingSubscriptionId: subscription.stripeSubscriptionId,
+              incomingSubscriptionId: input.stripeSubscriptionId,
+              existingStatus: subscription.status,
+              incomingStatus: input.status,
+              allowReplacement: true,
+              isRetired: retired !== undefined
+            });
+        if (decision !== 'APPLIED') {
+          if (
+            shouldRetireIgnoredReplacementCandidate({
+              outcome: decision,
+              existingStatus: subscription.status,
               existingCustomerId: subscription.stripeCustomerId,
               incomingCustomerId: input.stripeCustomerId,
               existingSubscriptionId: subscription.stripeSubscriptionId,
               incomingSubscriptionId: input.stripeSubscriptionId
-            });
-        if (decision !== 'APPLIED') {
+            })
+          ) {
+            await transaction
+              .insert(retiredStripeSubscriptions)
+              .values({
+                stripeSubscriptionId: input.stripeSubscriptionId,
+                organisationId: input.organisationId
+              })
+              .onConflictDoNothing();
+          }
           await insertEvent(transaction, input, eventOutcome(decision));
           return decision;
         }
 
+        if (subscription.stripeSubscriptionId !== null && subscription.stripeSubscriptionId !== input.stripeSubscriptionId) {
+          await transaction.insert(retiredStripeSubscriptions).values({ stripeSubscriptionId: subscription.stripeSubscriptionId, organisationId: input.organisationId });
+        }
         const now = clock.now();
         await transaction
           .update(subscriptions)
           .set({
             status: input.status,
+            stripeProviderStatus: input.stripeProviderStatus,
             stripeCustomerId: input.stripeCustomerId,
             stripeSubscriptionId: input.stripeSubscriptionId,
             currentPeriodStart: input.currentPeriodStart,
             currentPeriodEnd: input.currentPeriodEnd,
-            trialEndsAt: input.trialEndsAt,
+            trialEndsAt: retainedTrialEnd(subscription.trialEndsAt, input.trialEndsAt),
             cancelAt: input.cancelAt,
             cancelledAt: input.cancelledAt,
             lastStripeEventCreatedAt: input.eventCreatedAt,

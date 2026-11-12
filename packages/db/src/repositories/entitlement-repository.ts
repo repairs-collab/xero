@@ -21,7 +21,7 @@ export class PostgresEntitlementRepository {
 
   async decide(
     organisationId: string,
-    now: Date,
+    now: Date | (() => Date),
     executor: Executor = this.database
   ): Promise<AccountEntitlements> {
     const [account] = await executor
@@ -29,6 +29,9 @@ export class PostgresEntitlementRepository {
         edition: organisations.edition,
         platformStatus: organisations.platformStatus,
         subscriptionStatus: subscriptions.status,
+        stripeProviderStatus: subscriptions.trustedStripeProviderStatus,
+        currentPeriodEnd: subscriptions.currentPeriodEnd,
+        cancelAt: subscriptions.cancelAt,
         trialEndsAt: subscriptions.trialEndsAt,
         onboardingVersion: organisationOnboarding.version,
         onboardingCompletedVersion: organisationOnboarding.completedVersion,
@@ -60,7 +63,7 @@ export class PostgresEntitlementRepository {
         replyNumberReady: false,
         verifiedAdminMobile: null,
         acceptedTrialTestSmsParts: 0,
-        now
+        now: typeof now === 'function' ? now() : now
       });
     }
     if (
@@ -99,6 +102,9 @@ export class PostgresEntitlementRepository {
       edition: account.edition,
       platformStatus: account.platformStatus,
       subscriptionStatus: account.subscriptionStatus,
+      stripeProviderStatus: account.stripeProviderStatus,
+      currentPeriodEnd: account.currentPeriodEnd,
+      cancelAt: account.cancelAt,
       trialEndsAt: account.trialEndsAt,
       onboardingCompletedVersion: account.onboardingCompletedVersion,
       requiredOnboardingVersion: account.onboardingVersion,
@@ -106,7 +112,7 @@ export class PostgresEntitlementRepository {
       verifiedAdminMobile:
         account.adminMobileVerifiedAt === null ? null : account.adminMobile,
       acceptedTrialTestSmsParts,
-      now
+      now: typeof now === 'function' ? now() : now
     });
   }
 }

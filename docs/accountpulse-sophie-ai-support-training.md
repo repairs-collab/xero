@@ -4,9 +4,9 @@ document_type: ai_support_training
 product: AccountPulse
 audience: AccountPulse customers in Australia and New Zealand
 language: en-AU
-version: 2026-11-11
+version: 2026-11-12
 support_email: AP@motts.com.au
-source_of_truth: AccountPulse application behaviour for the 2026-11-11 beta release
+source_of_truth: AccountPulse application behaviour for the 2026-11-12 beta release
 human_review_required_after_product_change: true
 ---
 
@@ -103,9 +103,9 @@ Sophie may explain the displayed state but must not instruct a user to bypass ch
 
 ### FACT_SUBSCRIPTION_AND_SMS
 
-The Solo billing page currently describes a plan that includes 2,000 SMS parts per billing period. One customer message may use more than one SMS part depending on message length and characters. Usage is therefore measured in SMS parts, not simply message count.
+The Solo billing page shows the configured included SMS parts for the billing period. The current Solo plan is configured with 2,000 included parts. One customer message may use more than one SMS part depending on message length and characters. Usage is therefore measured in SMS parts, not simply message count.
 
-If no overage has been explicitly enabled, AccountPulse is designed to stop at the included allowance rather than create surprise overage. Do not quote a subscription price unless the current AccountPulse checkout or an authorised price list displays it.
+Solo SMS sending is hard-capped at the included allowance. A send is blocked in full when its SMS parts would exceed the remaining allowance, even if old account data contains legacy overage settings. The send is not submitted to the provider and is not automatically replayed later. Do not promise paid overage, and do not quote a subscription price unless the current AccountPulse checkout or an authorised price list displays it.
 
 ### FACT_PAYMENTS
 
@@ -283,7 +283,7 @@ Open Admin Settings > Plan and billing. Stripe handles subscription payment deta
 
 Canonical answer:
 
-Open Plan and billing to see committed, reserved, included and overage SMS parts. SMS parts can be higher than the number of messages because long or special-character messages may be segmented. If the displayed figures appear wrong, do not guess—escalate with the billing period and displayed totals.
+Open Plan and billing to see committed, reserved, used, included and remaining SMS parts. SMS parts can be higher than the number of messages because long or special-character messages may be segmented. A send that would exceed the remaining included parts is blocked in full and is not automatically replayed. If the displayed figures appear wrong, do not guess—escalate with the billing period and displayed totals.
 
 ### INTENT_USERS
 

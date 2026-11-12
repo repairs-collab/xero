@@ -1,5 +1,6 @@
 import { headers } from 'next/headers';
 import Link from 'next/link';
+import { billingStatus } from './billing-status.js';
 
 import {
   getBillingAccountSnapshot,
@@ -36,20 +37,30 @@ export default async function BillingSettingsPage() {
     session,
     membership.organisationId
   );
+  const billing = billingStatus(account, new Date());
+  const effectiveStatus = billing.status;
   const stripeConfigured = isStripeBillingConfigured();
-  const smsUsage = await getSmsCommerceRepository().loadUsage(
+  const smsCommerce = getSmsCommerceRepository();
+  const smsUsage = await smsCommerce.loadUsage(
     membership.organisationId
   );
+  const smsAllowance =
+    smsUsage ?? (await smsCommerce.loadAllowance(membership.organisationId));
   const admin = membership.role === 'ADMIN';
+  const legacySmsExempt = account.edition === 'INTERNAL_LEGACY';
   const usedSmsParts =
     smsUsage === null
       ? 0
       : smsUsage.committedParts + smsUsage.reservedParts;
+  const includedSmsParts = smsAllowance.includedParts;
+  const remainingSmsParts = smsUsage?.remainingParts ?? includedSmsParts;
 
   return (
     <div className="page-stack">
       <header className="page-heading">
-        <span className="eyebrow">AccountPulse Solo</span>
+        <span className="eyebrow">
+          {legacySmsExempt ? 'AccountPulse' : 'AccountPulse Solo'}
+        </span>
         <h1>Plan and billing</h1>
         <p>
           Manage the subscription in Stripe. AccountPulse never receives or
@@ -61,14 +72,21 @@ export default async function BillingSettingsPage() {
         <div className="panel__header">
           <div>
             <span className="eyebrow">Current plan</span>
-            <h2>Solo — 2,000 SMS parts per month</h2>
+            {legacySmsExempt ? (
+              <h2>Internal legacy account</h2>
+            ) : (
+              <h2>
+                Solo — {includedSmsParts.toLocaleString('en-AU')} SMS parts per
+                billing period
+              </h2>
+            )}
           </div>
-          <span className="status-pill">{statusLabels[account.status]}</span>
+          <span className="status-pill">{statusLabels[effectiveStatus]}</span>
         </div>
         <dl className="detail-grid">
           <div>
             <dt>Status</dt>
-            <dd>{statusLabels[account.status]}</dd>
+            <dd>{statusLabels[effectiveStatus]}</dd>
           </div>
           <div>
             <dt>Trial ends</dt>
@@ -85,24 +103,49 @@ export default async function BillingSettingsPage() {
         </dl>
       </section>
 
+      {legacySmsExempt ? (
+        <section className="panel">
+          <div className="panel__header">
+            <div>
+              <span className="eyebrow">SMS usage</span>
+              <h2>{usedSmsParts.toLocaleString('en-AU')} parts recorded</h2>
+            </div>
+            <span className="status-pill">Allowance exempt</span>
+          </div>
+          <dl className="detail-grid">
+            <div>
+              <dt>Sent or accepted</dt>
+              <dd>{(smsUsage?.committedParts ?? 0).toLocaleString('en-AU')}</dd>
+            </div>
+            <div>
+              <dt>Reserved while provider outcome is checked</dt>
+              <dd>{(smsUsage?.reservedParts ?? 0).toLocaleString('en-AU')}</dd>
+            </div>
+            <div>
+              <dt>Used this billing period</dt>
+              <dd>{usedSmsParts.toLocaleString('en-AU')}</dd>
+            </div>
+          </dl>
+          <p className="muted-copy">
+            This internal legacy account is not subject to the Solo SMS
+            allowance. Usage is shown for monitoring only.
+          </p>
+        </section>
+      ) : (
       <section className="panel">
         <div className="panel__header">
           <div>
             <span className="eyebrow">Included SMS</span>
-            <h2>{usedSmsParts.toLocaleString('en-AU')} of 2,000 parts used</h2>
+            <h2>
+              {usedSmsParts.toLocaleString('en-AU')} of{' '}
+              {includedSmsParts.toLocaleString('en-AU')} parts used
+            </h2>
           </div>
-          <span className="status-pill">
-            {smsUsage?.overageEnabled === true
-              ? 'Capped overage enabled'
-              : 'No surprise overage'}
-          </span>
+          <span className="status-pill">Hard allowance</span>
         </div>
         <progress
-          max={smsUsage?.includedParts ?? 2_000}
-          value={Math.min(
-            usedSmsParts,
-            smsUsage?.includedParts ?? 2_000
-          )}
+          max={includedSmsParts}
+          value={Math.min(usedSmsParts, includedSmsParts)}
           aria-label="Monthly SMS parts used"
         />
         <dl className="detail-grid">
@@ -115,30 +158,43 @@ export default async function BillingSettingsPage() {
             <dd>{(smsUsage?.reservedParts ?? 0).toLocaleString('en-AU')}</dd>
           </div>
           <div>
-            <dt>Included each billing period</dt>
-            <dd>{(smsUsage?.includedParts ?? 2_000).toLocaleString('en-AU')}</dd>
+            <dt>Used this billing period</dt>
+            <dd>{usedSmsParts.toLocaleString('en-AU')}</dd>
           </div>
           <div>
-            <dt>Overage parts</dt>
-            <dd>{(smsUsage?.overageParts ?? 0).toLocaleString('en-AU')}</dd>
+            <dt>Included each billing period</dt>
+            <dd>{includedSmsParts.toLocaleString('en-AU')}</dd>
+          </div>
+          <div>
+            <dt>Remaining this billing period</dt>
+            <dd>{remainingSmsParts.toLocaleString('en-AU')}</dd>
           </div>
         </dl>
+        <p className="muted-copy">
+          Sends that would exceed the included allowance are blocked and are
+          not submitted to the SMS provider. Blocked sends are not automatically
+          replayed.
+        </p>
         {smsUsage !== null &&
         usedSmsParts * 100 >=
           smsUsage.includedParts * smsUsage.warningPercent ? (
           <div className="callout callout--warning">
             <strong>SMS allowance is running low</strong>
             <p>
-              Sending stops at the included limit unless an Administrator has
-              explicitly enabled a priced overage cap.
+              A message is blocked when its full SMS part count would exceed
+              the remaining included allowance.
             </p>
           </div>
         ) : null}
       </section>
+      )}
 
-      {account.status === 'PAST_DUE' ||
-      account.status === 'CANCEL_AT_PERIOD_END' ||
-      account.status === 'INCOMPLETE' ? (
+      {billing.warning === 'ended' ? (
+        <section className="callout callout--warning">
+          <strong>Subscription ended</strong>
+          <p>Customer sending is paused. Manage your subscription in Stripe or contact support to renew or resubscribe.</p>
+        </section>
+      ) : billing.warning === 'payment' ? (
         <section className="callout callout--warning">
           <strong>Customer sending is paused</strong>
           <p>
@@ -151,7 +207,14 @@ export default async function BillingSettingsPage() {
 
       <section className="panel">
         <h2>Billing actions</h2>
-        {!stripeConfigured ? (
+        {legacySmsExempt ? (
+          <div className="button-row">
+            <p>This internal legacy account does not use customer Stripe billing.</p>
+            <Link href="/settings/sending" className="button">
+              Sending controls
+            </Link>
+          </div>
+        ) : !stripeConfigured ? (
           <div className="callout callout--warning" role="status">
             <strong>Online billing setup is temporarily unavailable</strong>
             <p>

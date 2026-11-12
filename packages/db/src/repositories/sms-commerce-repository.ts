@@ -2,6 +2,7 @@ import { and, asc, eq, inArray, isNotNull } from 'drizzle-orm';
 
 import {
   decideSmsAllowance,
+  hasPaidSubscriptionAccess,
   summariseSmsUsage,
   type SmsAllowanceBlocker
 } from '@bc5000/domain';
@@ -27,14 +28,18 @@ export interface SmsUsageView {
   warningPercent: number;
   committedParts: number;
   reservedParts: number;
-  overageParts: number;
-  overageEnabled: boolean;
-  overageCapCents: number | null;
+  remainingParts: number;
+}
+
+export interface SmsAllowanceView {
+  includedParts: number;
+  warningPercent: number;
 }
 
 export type SmsUsageReservation =
   | { kind: 'bypassed'; sourceNumber: null }
-  | { kind: 'blocked'; reason: SmsAllowanceBlocker | 'REPLY_NUMBER_NOT_READY' }
+  | { kind: 'blocked'; reason: SmsAllowanceBlocker; projectedParts: number }
+  | { kind: 'blocked'; reason: 'REPLY_NUMBER_NOT_READY' }
   | {
       kind: 'reserved';
       sourceNumber: string;
@@ -50,7 +55,10 @@ const releaseKey = (outboundMessageId: string): string =>
   `${outboundMessageId}:release`;
 
 export class PostgresSmsCommerceRepository {
-  constructor(private readonly database: Database) {}
+  constructor(
+    private readonly database: Database,
+    private readonly clock: { now(): Date } = { now: () => new Date() }
+  ) {}
 
   async reserveUsage(
     input: {
@@ -116,7 +124,10 @@ export class PostgresSmsCommerceRepository {
       .values({ organisationId: input.organisationId })
       .onConflictDoNothing({ target: smsAllowanceSettings.organisationId });
     const [settings] = await executor
-      .select()
+      .select({
+        includedParts: smsAllowanceSettings.includedParts,
+        warningPercent: smsAllowanceSettings.warningPercent
+      })
       .from(smsAllowanceSettings)
       .where(eq(smsAllowanceSettings.organisationId, input.organisationId))
       .for('update')
@@ -124,7 +135,12 @@ export class PostgresSmsCommerceRepository {
     if (settings === undefined) throw new Error('SMS_ALLOWANCE_SETTINGS_MISSING');
 
     const [existing] = await executor
-      .select({ id: smsUsageLedger.id })
+      .select({
+        id: smsUsageLedger.id,
+        partDelta: smsUsageLedger.partDelta,
+        billingPeriodStart: smsUsageLedger.billingPeriodStart,
+        billingPeriodEnd: smsUsageLedger.billingPeriodEnd
+      })
       .from(smsUsageLedger)
       .where(
         and(
@@ -133,15 +149,6 @@ export class PostgresSmsCommerceRepository {
         )
       )
       .limit(1);
-    if (existing !== undefined) {
-      return {
-        kind: 'reserved',
-        sourceNumber: number.e164Number,
-        warningThresholdReached: false,
-        alreadyReserved: true
-      };
-    }
-
     const entries = await executor
       .select({
         entryType: smsUsageLedger.entryType,
@@ -158,16 +165,36 @@ export class PostgresSmsCommerceRepository {
         )
       );
     const usage = summariseSmsUsage(entries);
+    const existingReservationMatches =
+      existing !== undefined &&
+      existing.partDelta === input.partCount &&
+      existing.billingPeriodStart.getTime() ===
+        subscription.currentPeriodStart.getTime() &&
+      existing.billingPeriodEnd.getTime() ===
+        subscription.currentPeriodEnd.getTime();
     const decision = decideSmsAllowance({
       ...usage,
       requestedParts: input.partCount,
+      requestedPartsAlreadyReserved: existingReservationMatches,
       includedParts: settings.includedParts,
-      warningPercent: settings.warningPercent,
-      overageEnabled: settings.overageEnabled,
-      overageCapCents: settings.overageCapCents,
-      overageCentsPerPart: settings.overageCentsPerPart
+      warningPercent: settings.warningPercent
     });
     if (decision.kind === 'blocked') return decision;
+    if (existing !== undefined && !existingReservationMatches) {
+      return {
+        kind: 'blocked',
+        reason: 'SMS_ALLOWANCE_EXHAUSTED',
+        projectedParts: decision.projectedParts
+      };
+    }
+    if (existing !== undefined) {
+      return {
+        kind: 'reserved',
+        sourceNumber: number.e164Number,
+        warningThresholdReached: false,
+        alreadyReserved: true
+      };
+    }
 
     await executor.insert(smsUsageLedger).values({
       organisationId: input.organisationId,
@@ -322,17 +349,7 @@ export class PostgresSmsCommerceRepository {
     ) {
       return null;
     }
-    const [settings] = await executor
-      .select()
-      .from(smsAllowanceSettings)
-      .where(eq(smsAllowanceSettings.organisationId, organisationId))
-      .limit(1);
-    const effective = settings ?? {
-      includedParts: 2_000,
-      warningPercent: 80,
-      overageEnabled: false,
-      overageCapCents: null
-    };
+    const effective = await this.loadAllowance(organisationId, executor);
     const entries = await executor
       .select({
         entryType: smsUsageLedger.entryType,
@@ -356,13 +373,31 @@ export class PostgresSmsCommerceRepository {
       warningPercent: effective.warningPercent,
       committedParts: usage.committedParts,
       reservedParts: usage.reservedParts,
-      overageParts: Math.max(
+      remainingParts: Math.max(
         0,
-        usage.committedParts + usage.reservedParts - effective.includedParts
-      ),
-      overageEnabled: effective.overageEnabled,
-      overageCapCents: effective.overageCapCents
+        effective.includedParts - usage.committedParts - usage.reservedParts
+      )
     };
+  }
+
+  async loadAllowance(
+    organisationId: string,
+    executor: Executor = this.database
+  ): Promise<SmsAllowanceView> {
+    const [settings] = await executor
+      .select({
+        includedParts: smsAllowanceSettings.includedParts,
+        warningPercent: smsAllowanceSettings.warningPercent
+      })
+      .from(smsAllowanceSettings)
+      .where(eq(smsAllowanceSettings.organisationId, organisationId))
+      .limit(1);
+    return settings === undefined
+      ? { includedParts: 2_000, warningPercent: 80 }
+      : {
+          includedParts: settings.includedParts,
+          warningPercent: settings.warningPercent
+        };
   }
 
   async reserveAvailableNumber(
@@ -370,15 +405,16 @@ export class PostgresSmsCommerceRepository {
     now: Date
   ): Promise<{ id: string; e164Number: string; status: 'RESERVED' | 'READY' }> {
     return this.database.transaction(async (transaction) => {
+      await transaction.select({ id: organisations.id }).from(organisations).where(eq(organisations.id, organisationId)).for('update').limit(1);
       const [subscription] = await transaction
-        .select({ status: subscriptions.status })
+        .select({ status: subscriptions.status, stripeProviderStatus: subscriptions.trustedStripeProviderStatus, currentPeriodEnd: subscriptions.currentPeriodEnd, cancelAt: subscriptions.cancelAt })
         .from(subscriptions)
         .where(eq(subscriptions.organisationId, organisationId))
         .for('update')
         .limit(1);
       if (
         subscription === undefined ||
-        !['ACTIVE', 'CANCEL_AT_PERIOD_END'].includes(subscription.status)
+        !hasPaidSubscriptionAccess({ subscriptionStatus: subscription.status, stripeProviderStatus: subscription.stripeProviderStatus, currentPeriodEnd: subscription.currentPeriodEnd, cancelAt: subscription.cancelAt, now: new Date(Math.max(now.getTime(), this.clock.now().getTime())) })
       ) {
         throw new Error('PAID_SUBSCRIPTION_REQUIRED');
       }
@@ -402,8 +438,10 @@ export class PostgresSmsCommerceRepository {
             ])
           )
         )
+        .for('update')
         .limit(1);
       if (existing !== undefined) {
+        if (!hasPaidSubscriptionAccess({ subscriptionStatus: subscription.status, stripeProviderStatus: subscription.stripeProviderStatus, currentPeriodEnd: subscription.currentPeriodEnd, cancelAt: subscription.cancelAt, now: new Date(Math.max(now.getTime(), this.clock.now().getTime())) })) throw new Error('PAID_SUBSCRIPTION_REQUIRED');
         if (
           existing.status !== 'READY' &&
           (existing.provider !== 'SINCH' ||
@@ -458,6 +496,7 @@ export class PostgresSmsCommerceRepository {
         .for('update')
         .limit(1);
       if (available === undefined) throw new Error('SMS_NUMBER_POOL_EXHAUSTED');
+      if (!hasPaidSubscriptionAccess({ subscriptionStatus: subscription.status, stripeProviderStatus: subscription.stripeProviderStatus, currentPeriodEnd: subscription.currentPeriodEnd, cancelAt: subscription.cancelAt, now: new Date(Math.max(now.getTime(), this.clock.now().getTime())) })) throw new Error('PAID_SUBSCRIPTION_REQUIRED');
       await transaction
         .update(smsNumberPool)
         .set({
@@ -488,6 +527,9 @@ export class PostgresSmsCommerceRepository {
     now: Date
   ): Promise<void> {
     await this.database.transaction(async (transaction) => {
+      await transaction.select({ id: organisations.id }).from(organisations).where(eq(organisations.id, organisationId)).for('update').limit(1);
+      const [subscription] = await transaction.select({ status: subscriptions.status, stripeProviderStatus: subscriptions.trustedStripeProviderStatus, currentPeriodEnd: subscriptions.currentPeriodEnd, cancelAt: subscriptions.cancelAt }).from(subscriptions).where(eq(subscriptions.organisationId, organisationId)).for('update').limit(1);
+      if (subscription === undefined || !hasPaidSubscriptionAccess({ subscriptionStatus: subscription.status, stripeProviderStatus: subscription.stripeProviderStatus, currentPeriodEnd: subscription.currentPeriodEnd, cancelAt: subscription.cancelAt, now: new Date(Math.max(now.getTime(), this.clock.now().getTime())) })) throw new Error('PAID_SUBSCRIPTION_REQUIRED');
       const [reserved] = await transaction
         .select({
           provider: smsNumberPool.provider,
@@ -507,6 +549,7 @@ export class PostgresSmsCommerceRepository {
       if (reserved === undefined) {
         throw new Error('SMS_NUMBER_RESERVATION_NOT_FOUND');
       }
+      if (!hasPaidSubscriptionAccess({ subscriptionStatus: subscription.status, stripeProviderStatus: subscription.stripeProviderStatus, currentPeriodEnd: subscription.currentPeriodEnd, cancelAt: subscription.cancelAt, now: new Date(Math.max(now.getTime(), this.clock.now().getTime())) })) throw new Error('PAID_SUBSCRIPTION_REQUIRED');
       if (
         reserved.provider !== 'SINCH' ||
         reserved.providerNumberId === null ||
@@ -556,6 +599,8 @@ export class PostgresSmsCommerceRepository {
       throw new Error('SMS_NUMBER_QUARANTINE_INVALID');
     }
     await this.database.transaction(async (transaction) => {
+      await transaction.select({ id: organisations.id }).from(organisations).where(eq(organisations.id, organisationId)).for('update').limit(1);
+      await transaction.select({ organisationId: subscriptions.organisationId }).from(subscriptions).where(eq(subscriptions.organisationId, organisationId)).for('update').limit(1);
       const quarantined = await transaction
         .update(smsNumberPool)
         .set({

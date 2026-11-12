@@ -6,6 +6,13 @@
 
 **Release:** AccountPulse Solo, Australia
 
+> **Superseded rule — 12 November 2026:** The paid SMS overage proposal in this
+> historical design, including its customer-controlled cap, metered billing and
+> related customer copy, is superseded by the approved commercial billing safety
+> design. Solo sends are now hard-capped at the configured included allowance;
+> legacy overage database columns remain only for compatibility. The original
+> narrative below is retained as the record of the 9 November decision.
+
 ## 1. Intent
 
 Turn the existing internal AccountPulse installation into a self-service Australian software product that can be certified and listed in the Xero App Store.

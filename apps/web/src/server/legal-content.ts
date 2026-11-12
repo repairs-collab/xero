@@ -20,3 +20,4 @@ export const legalIdentity = () => ({
 });
 
 export const legalLastUpdated = '11 November 2026';
+export const termsLastUpdated = '12 November 2026';

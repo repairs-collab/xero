@@ -38,6 +38,8 @@ export const subscriptions = pgTable(
     status: varchar('status', { length: 32 })
       .$type<SubscriptionStatus>()
       .notNull(),
+    stripeProviderStatus: varchar('stripe_provider_status', { length: 32 }),
+    trustedStripeProviderStatus: varchar('trusted_stripe_provider_status', { length: 32 }),
     stripeCustomerId: varchar('stripe_customer_id', { length: 128 }),
     stripeSubscriptionId: varchar('stripe_subscription_id', { length: 128 }),
     currentPeriodStart: timestamp('current_period_start', {
@@ -77,6 +79,11 @@ export const subscriptions = pgTable(
     )
   ]
 );
+
+export const retiredStripeSubscriptions = pgTable('retired_stripe_subscriptions', {
+  stripeSubscriptionId: varchar('stripe_subscription_id', { length: 128 }).primaryKey(),
+  organisationId: uuid('organisation_id').notNull().references(() => organisations.id, { onDelete: 'cascade' })
+});
 
 export type SubscriptionEventOutcome =
   | 'APPLIED'

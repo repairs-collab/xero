@@ -260,11 +260,14 @@ export class XeroClient {
   }
 
   async emailInvoice(
-    invoiceId: string
+    invoiceId: string,
+    beforeRequest?: () => Promise<void>
   ): Promise<{ kind: 'accepted' }> {
     const response = await this.request(
       'POST',
-      `/Invoices/${encodeURIComponent(invoiceId)}/Email`
+      `/Invoices/${encodeURIComponent(invoiceId)}/Email`,
+      {},
+      beforeRequest
     );
     if (response.status === 204) return { kind: 'accepted' };
     if (response.status === 400) {
@@ -300,7 +303,8 @@ export class XeroClient {
   private async request(
     method: HttpRequest['method'],
     path: string,
-    headers: Record<string, string> = {}
+    headers: Record<string, string> = {},
+    beforeRequest?: () => Promise<void>
   ): Promise<HttpResponse> {
     const now = (this.options.clock?.now() ?? new Date()).getTime();
     if (this.rateLimitBlock !== undefined) {
@@ -324,6 +328,7 @@ export class XeroClient {
           name.toLowerCase() !== 'xero-tenant-id'
       )
     );
+    await beforeRequest?.();
     const response = await this.options.http.request({
       method,
       url: `${this.baseUrl}${path}`,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AppSession } from '@bc5000/auth';
+import { decideAccountEntitlements } from '@bc5000/domain';
 import type {
   SoloCheckoutRequest,
   StripeHostedSession,
@@ -10,7 +11,9 @@ import type {
 import {
   createSubscriptionService,
   decideStripeEventApplication,
+  shouldRetireIgnoredReplacementCandidate,
   SubscriptionFailure,
+  retainedTrialEnd,
   type BillingAccount,
   type StripeBillingGateway,
   type SubscriptionRepository
@@ -277,6 +280,9 @@ describe('subscription webhooks', () => {
   it.each([
     ['active', false, 'ACTIVE'],
     ['past_due', false, 'PAST_DUE'],
+    ['past_due', true, 'PAST_DUE'],
+    ['unpaid', true, 'PAST_DUE'],
+    ['incomplete', true, 'INCOMPLETE'],
     ['active', true, 'CANCEL_AT_PERIOD_END'],
     ['canceled', false, 'CANCELLED']
   ] as const)('applies %s / cancel=%s as %s', async (status, cancel, expected) => {
@@ -304,6 +310,16 @@ describe('subscription webhooks', () => {
       service.handleWebhook(Buffer.from('{}'), 'valid-signature')
     ).resolves.toBe('APPLIED');
     expect(repository.lifecycleInputs.at(-1)?.status).toBe(expected);
+    expect(repository.lifecycleInputs.at(-1)?.stripeProviderStatus).toBe(status);
+    if (cancel && (status === 'past_due' || status === 'unpaid' || status === 'incomplete')) {
+      expect(decideAccountEntitlements({
+        edition: 'SOLO', platformStatus: 'ACTIVE',
+        subscriptionStatus: repository.currentAccount!.status, trialEndsAt: null,
+        onboardingCompletedVersion: 1, requiredOnboardingVersion: 1,
+        replyNumberReady: true, verifiedAdminMobile: '+61412345678',
+        acceptedTrialTestSmsParts: 0, now: new Date('2026-11-10T00:00:00Z')
+      })).toMatchObject({ canCustomerSend: false, canAutomaticDispatch: false });
+    }
     expect(lifecycleJobs).toEqual(
       expected === 'CANCELLED'
         ? [{ organisationId: 'org_solo', status: 'CANCELLED' }]
@@ -314,6 +330,20 @@ describe('subscription webhooks', () => {
         ? [{ organisationId: 'org_solo' }]
         : []
     );
+  });
+
+  it.each([
+    ['before', 1794225601, 1],
+    ['at', 1794225600, 0]
+  ])('only queues scheduled-cancellation provisioning %s the boundary', async (_label, end, count) => {
+    const { service, stripe, numberProvisionJobs } = createService();
+    stripe.event = subscriptionEvent({ data: { object: {
+      ...(subscriptionEvent().data.object as Record<string, unknown>),
+      status: 'active', cancel_at_period_end: true,
+      current_period_start: end - 1000, current_period_end: end, cancel_at: end
+    } } });
+    await expect(service.handleWebhook('{}', 'signed')).resolves.toBe('APPLIED');
+    expect(numberProvisionJobs).toHaveLength(count);
   });
 
   it('re-publishes an idempotent cancellation job when Stripe retries the event', async () => {
@@ -439,5 +469,107 @@ describe('decideStripeEventApplication', () => {
       })
     ).toBe('REJECTED');
     expect(decideStripeEventApplication(candidate)).toBe('APPLIED');
+  });
+});
+
+
+describe('one-time trial and event safety', () => {
+  it('passes only an eligible existing trial deadline to Checkout', async () => {
+    const {service, stripe, repository} = createService();
+    await service.createCheckout(adminSession, 'org_solo');
+    expect(stripe.checkoutRequests[0]).toHaveProperty('trialEnd', Math.floor(new Date('2026-11-23T00:00:00Z').getTime()/1000));
+    repository.currentAccount = account({ trialEndsAt: new Date('2026-11-09T12:30:00Z') });
+    await service.createCheckout(adminSession, 'org_solo');
+    expect(stripe.checkoutRequests[1]).not.toHaveProperty('trialEnd');
+    repository.currentAccount = account({trialEndsAt: null});
+    await service.createCheckout(adminSession, 'org_solo');
+    expect(stripe.checkoutRequests[2]).not.toHaveProperty('trialEnd');
+    repository.currentAccount = account({trialEndsAt: new Date('2026-11-11T12:05:00Z')});
+    await service.createCheckout(adminSession, 'org_solo');
+    expect(stripe.checkoutRequests[3]).toHaveProperty('trialEnd');
+  });
+  it('accepts item-level billing periods', async () => {
+    const {service, stripe, repository} = createService();
+    const event = subscriptionEvent();
+    const object = event.data.object as Record<string, unknown>;
+    delete object.current_period_start; delete object.current_period_end;
+    const item = ((object.items as {data: Record<string, unknown>[]}).data)[0]!;
+    item.current_period_start = 1794201600; item.current_period_end = 1796880000;
+    stripe.event = event;
+    await expect(service.handleWebhook('{}', 'sig')).resolves.toBe('APPLIED');
+    expect(repository.lifecycleInputs[0]?.currentPeriodEnd).toEqual(new Date(1796880000 * 1000));
+  });
+  it('rejects equal-time status improvements', () => {
+    const time = new Date('2026-11-09T12:00:00Z');
+    const decision = {eventAlreadyProcessed:false, eventCreatedAt:time, lastAppliedAt:time, existingCustomerId:'cus', incomingCustomerId:'cus', existingSubscriptionId:'sub', incomingSubscriptionId:'sub'};
+    expect(decideStripeEventApplication({...decision, existingStatus:'PAST_DUE', incomingStatus:'ACTIVE'})).toBe('IGNORED_OUT_OF_ORDER');
+    expect(decideStripeEventApplication({...decision, existingStatus:'ACTIVE', incomingStatus:'PAST_DUE'})).toBe('APPLIED');
+    expect(decideStripeEventApplication({...decision, existingStatus:'ACTIVE', incomingStatus:'TRIALING'})).toBe('APPLIED');
+    expect(decideStripeEventApplication({...decision, existingStatus:'CANCEL_AT_PERIOD_END', incomingStatus:'TRIALING'})).toBe('APPLIED');
+    expect(decideStripeEventApplication({...decision, existingStatus:'TRIALING', incomingStatus:'ACTIVE'})).toBe('IGNORED_OUT_OF_ORDER');
+    expect(decideStripeEventApplication({...decision, existingStatus:'TRIALING', incomingStatus:'CANCEL_AT_PERIOD_END'})).toBe('IGNORED_OUT_OF_ORDER');
+    expect(decideStripeEventApplication({...decision, existingStatus:'ACTIVE', incomingStatus:'CANCEL_AT_PERIOD_END'})).toBe('APPLIED');
+  });
+});
+
+
+describe('replacement and trial decisions', () => {
+  it('never erases or extends the local trial', () => {
+    const local = new Date('2026-11-23T00:00:00Z');
+    expect(retainedTrialEnd(local, null)).toEqual(local);
+    expect(retainedTrialEnd(local, new Date('2026-12-01T00:00:00Z'))).toEqual(local);
+    expect(retainedTrialEnd(local, new Date('2026-11-20T00:00:00Z'))).toEqual(new Date('2026-11-20T00:00:00Z'));
+    expect(retainedTrialEnd(null, local)).toBeNull();
+  });
+  it('allows replacement only for a cancelled same-customer account and never a retired ID', () => {
+    const input = {eventAlreadyProcessed:false, eventCreatedAt:new Date('2026-11-10T00:00:00Z'), lastAppliedAt:new Date('2026-11-09T00:00:00Z'), existingCustomerId:'cus', incomingCustomerId:'cus', existingSubscriptionId:'old', incomingSubscriptionId:'new', existingStatus:'CANCELLED' as const, allowReplacement:true};
+    expect(decideStripeEventApplication(input)).toBe('APPLIED');
+    expect(decideStripeEventApplication({...input, isRetired:true})).toBe('REJECTED');
+    expect(decideStripeEventApplication({...input, incomingCustomerId:'other'})).toBe('REJECTED');
+    expect(decideStripeEventApplication({...input, existingCustomerId:null})).toBe('REJECTED');
+    expect(decideStripeEventApplication({...input, existingStatus:'ACTIVE'})).toBe('REJECTED');
+  });
+});
+
+
+describe('checkout replacement ordering', () => {
+  it('ignores older and equal-time distinct replacements but permits a repeat binding', () => {
+    const latest = new Date('2026-11-09T11:00:00Z');
+    const input = {eventAlreadyProcessed:false, eventCreatedAt:latest, lastAppliedAt:new Date('2026-11-09T10:00:00Z'), lastAppliedCheckoutAt:latest, existingCustomerId:'cus', incomingCustomerId:'cus', existingSubscriptionId:'sub_b', incomingSubscriptionId:'sub_a', existingStatus:'CANCELLED' as const, allowReplacement:true};
+    expect(decideStripeEventApplication(input)).toBe('IGNORED_OUT_OF_ORDER');
+    expect(decideStripeEventApplication({...input, eventCreatedAt:new Date('2026-11-09T10:30:00Z')})).toBe('IGNORED_OUT_OF_ORDER');
+    expect(decideStripeEventApplication({...input, eventCreatedAt:new Date('2026-11-09T12:00:00Z')})).toBe('APPLIED');
+    expect(decideStripeEventApplication({...input, incomingSubscriptionId:'sub_b'})).toBe('APPLIED');
+  });
+
+  it('retires only ignored same-customer replacement candidates', () => {
+    const candidate = {
+      outcome: 'IGNORED_OUT_OF_ORDER' as const,
+      existingStatus: 'CANCELLED' as const,
+      existingCustomerId: 'cus_same',
+      incomingCustomerId: 'cus_same',
+      existingSubscriptionId: 'sub_bound',
+      incomingSubscriptionId: 'sub_stale'
+    };
+
+    expect(shouldRetireIgnoredReplacementCandidate(candidate)).toBe(true);
+    expect(
+      shouldRetireIgnoredReplacementCandidate({
+        ...candidate,
+        outcome: 'REJECTED'
+      })
+    ).toBe(false);
+    expect(
+      shouldRetireIgnoredReplacementCandidate({
+        ...candidate,
+        incomingCustomerId: 'cus_other'
+      })
+    ).toBe(false);
+    expect(
+      shouldRetireIgnoredReplacementCandidate({
+        ...candidate,
+        incomingSubscriptionId: 'sub_bound'
+      })
+    ).toBe(false);
   });
 });
