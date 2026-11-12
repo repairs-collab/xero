@@ -42,6 +42,7 @@ describe('SMS number readiness billing cutoff', () => {
           limit: () => {
             if (table === 'organisations') return Promise.resolve([{ id: 'org' }]);
             if (table === 'subscriptions') return Promise.resolve([{ status: 'CANCEL_AT_PERIOD_END', stripeProviderStatus: 'active', currentPeriodEnd: boundary, cancelAt: null }]);
+            if (table === 'reply_number_provisioning_requests') return Promise.resolve([]);
             if (operation === 'reserve-available' && ++numberReads === 1) return Promise.resolve([]);
             current = boundary;
             return Promise.resolve([{ id: 'number', e164Number: '+61400000009', status: 'RESERVED', provider: 'SINCH', providerNumberId: 'p', providerVerifiedAt: before }]);
