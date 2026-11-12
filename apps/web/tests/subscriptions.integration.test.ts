@@ -42,6 +42,10 @@ class FakeStripe implements StripeBillingGateway {
     return Promise.resolve({ id: 'bps_test', url: 'https://billing.stripe.test' });
   }
 
+  loadChargeOwnership() {
+    return Promise.reject(new Error('Charge ownership is not used by lifecycle tests'));
+  }
+
   verifyWebhook(): StripeWebhookEvent {
     if (this.event === undefined) throw new Error('No event configured');
     return this.event;

@@ -1,13 +1,18 @@
+import { createHash } from 'node:crypto';
+
 import { and, desc, eq, isNull, or } from 'drizzle-orm';
 
 import {
   auditEvents,
+  billingCases,
   type Database,
   type DbTransaction,
+  memberships,
   organisations,
   retiredStripeSubscriptions,
   subscriptionEvents,
   subscriptions,
+  transactionalEmailOutbox,
   users
 } from '@bc5000/db/web';
 
@@ -19,6 +24,7 @@ import {
   type StripeCheckoutCompletedInput,
   type StripeEventApplicationOutcome,
   type StripeLifecycleEventInput,
+  type StripeOperationalEventInput,
   type SubscriptionRepository
 } from './subscription-service.js';
 
@@ -83,6 +89,34 @@ const unsafeForSending = new Set([
   'CANCELLED',
   'INCOMPLETE'
 ]);
+
+const operationalEventBlocksSending = (
+  input: StripeOperationalEventInput,
+  relation: 'CURRENT' | 'RETIRED'
+): boolean =>
+  input.suspensionPolicy === 'ALWAYS' ||
+  (input.suspensionPolicy === 'CURRENT_ONLY' && relation === 'CURRENT');
+
+const operationalRiskRank = (input: {
+  status: 'OPEN' | 'RESOLVED' | 'REVIEW_REQUIRED';
+  blocksSending: boolean;
+}): number => {
+  if (input.blocksSending && input.status === 'OPEN') return 5;
+  if (input.blocksSending && input.status === 'REVIEW_REQUIRED') return 4;
+  if (input.status === 'OPEN') return 3;
+  if (input.status === 'REVIEW_REQUIRED') return 2;
+  return 1;
+};
+
+const normalizedEmail = (value: string): string =>
+  value.trim().toLocaleLowerCase('en-AU');
+
+const noticeIdempotencyKey = (
+  eventId: string,
+  template: StripeOperationalEventInput['heldTemplate'],
+  recipient: string
+): string =>
+  `stripe:${eventId}:${template}:v1:${createHash('sha256').update(recipient).digest('hex')}`;
 
 export const createPostgresSubscriptionRepository = (
   database: Database,
@@ -410,6 +444,323 @@ export const createPostgresSubscriptionRepository = (
     }
   };
 
+  const applyOperationalEvent = async (
+    input: StripeOperationalEventInput
+  ): Promise<StripeEventApplicationOutcome> => {
+    try {
+      return await database.transaction(async (transaction) => {
+        const [duplicate] = await transaction
+          .select({ id: subscriptionEvents.id })
+          .from(subscriptionEvents)
+          .where(eq(subscriptionEvents.stripeEventId, input.eventId))
+          .limit(1);
+        if (duplicate !== undefined) return 'DUPLICATE';
+
+        const [currentCandidate] = await transaction
+          .select({
+            organisationId: subscriptions.organisationId,
+            stripeCustomerId: subscriptions.stripeCustomerId
+          })
+          .from(subscriptions)
+          .where(
+            eq(subscriptions.stripeSubscriptionId, input.stripeSubscriptionId)
+          )
+          .limit(1);
+        const [retiredCandidate] = await transaction
+          .select({
+            organisationId: retiredStripeSubscriptions.organisationId,
+            stripeCustomerId: subscriptions.stripeCustomerId
+          })
+          .from(retiredStripeSubscriptions)
+          .innerJoin(
+            subscriptions,
+            eq(
+              subscriptions.organisationId,
+              retiredStripeSubscriptions.organisationId
+            )
+          )
+          .where(
+            eq(
+              retiredStripeSubscriptions.stripeSubscriptionId,
+              input.stripeSubscriptionId
+            )
+          )
+          .limit(1);
+        if (
+          (currentCandidate === undefined && retiredCandidate === undefined) ||
+          (currentCandidate !== undefined && retiredCandidate !== undefined)
+        ) {
+          return 'REJECTED';
+        }
+        const relation =
+          currentCandidate !== undefined ? ('CURRENT' as const) : ('RETIRED' as const);
+        const candidate = currentCandidate ?? retiredCandidate!;
+        if (candidate.stripeCustomerId !== input.stripeCustomerId) {
+          return 'REJECTED';
+        }
+
+        const [organisation] = await transaction
+          .select({
+            id: organisations.id,
+            edition: organisations.edition,
+            platformStatus: organisations.platformStatus,
+            platformStatusVersion: organisations.platformStatusVersion,
+            suspendedAt: organisations.suspendedAt,
+            suspensionReason: organisations.suspensionReason
+          })
+          .from(organisations)
+          .where(eq(organisations.id, candidate.organisationId))
+          .for('update')
+          .limit(1);
+        const [subscription] = await transaction
+          .select({
+            organisationId: subscriptions.organisationId,
+            stripeCustomerId: subscriptions.stripeCustomerId,
+            stripeSubscriptionId: subscriptions.stripeSubscriptionId
+          })
+          .from(subscriptions)
+          .where(eq(subscriptions.organisationId, candidate.organisationId))
+          .for('update')
+          .limit(1);
+        if (
+          organisation === undefined ||
+          subscription === undefined ||
+          organisation.edition !== 'SOLO' ||
+          subscription.stripeCustomerId !== input.stripeCustomerId ||
+          (relation === 'CURRENT' &&
+            subscription.stripeSubscriptionId !== input.stripeSubscriptionId)
+        ) {
+          return 'REJECTED';
+        }
+        if (relation === 'RETIRED') {
+          const [retired] = await transaction
+            .select({ organisationId: retiredStripeSubscriptions.organisationId })
+            .from(retiredStripeSubscriptions)
+            .where(
+              eq(
+                retiredStripeSubscriptions.stripeSubscriptionId,
+                input.stripeSubscriptionId
+              )
+            )
+            .for('update')
+            .limit(1);
+          if (retired?.organisationId !== organisation.id) return 'REJECTED';
+        }
+
+        const [existingCase] = await transaction
+          .select()
+          .from(billingCases)
+          .where(
+            and(
+              eq(billingCases.organisationId, organisation.id),
+              eq(billingCases.kind, input.caseKind),
+              eq(billingCases.providerObjectType, input.providerObjectType),
+              eq(billingCases.providerObjectId, input.providerObjectId)
+            )
+          )
+          .for('update')
+          .limit(1);
+        const blocksSending = operationalEventBlocksSending(input, relation);
+        if (existingCase !== undefined) {
+          const incomingTime = input.eventCreatedAt.getTime();
+          const existingTime = existingCase.latestProviderEventCreatedAt.getTime();
+          const lowerOrEqualRiskAtSameTime =
+            incomingTime === existingTime &&
+            operationalRiskRank({
+              status: input.targetStatus,
+              blocksSending
+            }) <=
+              operationalRiskRank({
+                status: existingCase.status,
+                blocksSending: existingCase.blocksSending
+              });
+          if (incomingTime < existingTime || lowerOrEqualRiskAtSameTime) {
+            await insertEvent(
+              transaction,
+              { ...input, organisationId: organisation.id },
+              'IGNORED_OUT_OF_ORDER'
+            );
+            return 'IGNORED_OUT_OF_ORDER';
+          }
+        }
+
+        if (existingCase === undefined && input.resolveExistingOnly) {
+          await insertEvent(
+            transaction,
+            { ...input, organisationId: organisation.id },
+            'APPLIED'
+          );
+          return 'APPLIED';
+        }
+
+        const actionNow = clock.now();
+        const resolvedAt =
+          input.targetStatus === 'RESOLVED' ? input.eventCreatedAt : null;
+        const [billingCase] =
+          existingCase === undefined
+            ? await transaction
+                .insert(billingCases)
+                .values({
+                  organisationId: organisation.id,
+                  kind: input.caseKind,
+                  status: input.targetStatus,
+                  providerObjectType: input.providerObjectType,
+                  providerObjectId: input.providerObjectId,
+                  providerStatus: input.providerStatus,
+                  stripeSubscriptionId: input.stripeSubscriptionId,
+                  subscriptionRelation: relation,
+                  amountMinor: input.amountMinor,
+                  currency: input.currency,
+                  blocksSending,
+                  latestProviderEventId: input.eventId,
+                  latestProviderEventCreatedAt: input.eventCreatedAt,
+                  openedAt: input.eventCreatedAt,
+                  resolvedAt,
+                  createdAt: actionNow,
+                  updatedAt: actionNow
+                })
+                .returning()
+            : await transaction
+                .update(billingCases)
+                .set({
+                  status: input.targetStatus,
+                  providerStatus: input.providerStatus,
+                  stripeSubscriptionId: input.stripeSubscriptionId,
+                  subscriptionRelation: relation,
+                  amountMinor: input.amountMinor,
+                  currency: input.currency,
+                  blocksSending,
+                  latestProviderEventId: input.eventId,
+                  latestProviderEventCreatedAt: input.eventCreatedAt,
+                  resolvedAt,
+                  updatedAt: actionNow
+                })
+                .where(eq(billingCases.id, existingCase.id))
+                .returning();
+        if (billingCase === undefined) throw new Error('BILLING_CASE_WRITE_FAILED');
+
+        if (blocksSending && organisation.platformStatus === 'ACTIVE') {
+          await transaction
+            .update(organisations)
+            .set({
+              platformStatus: 'SUSPENDED',
+              platformStatusVersion: organisation.platformStatusVersion + 1,
+              suspendedAt: actionNow,
+              suspensionReason: 'Stripe billing risk requires owner review',
+              updatedAt: actionNow
+            })
+            .where(eq(organisations.id, organisation.id));
+          await transaction.insert(auditEvents).values({
+            organisationId: organisation.id,
+            eventType: 'BILLING_RISK_SUSPENDED',
+            entityType: 'ORGANISATION',
+            entityId: organisation.id,
+            correlationId: input.eventId,
+            beforeValue: { platformStatus: 'ACTIVE' },
+            afterValue: {
+              platformStatus: 'SUSPENDED',
+              reason: 'Stripe billing risk requires owner review'
+            },
+            occurredAt: actionNow
+          });
+        }
+
+        const createNotice = !(
+          input.resolveExistingOnly && existingCase?.status === 'RESOLVED'
+        );
+        if (createNotice) {
+          const administrators = await transaction
+            .select({ userId: users.id, email: users.email })
+            .from(memberships)
+            .innerJoin(users, eq(users.id, memberships.userId))
+            .where(
+              and(
+                eq(memberships.organisationId, organisation.id),
+                eq(memberships.role, 'ADMIN'),
+                isNull(memberships.disabledAt),
+                isNull(users.disabledAt)
+              )
+            )
+            .orderBy(users.id);
+          if (administrators.length === 0) {
+            await transaction.insert(auditEvents).values({
+              organisationId: organisation.id,
+              eventType: 'BILLING_NOTICE_RECIPIENT_MISSING',
+              entityType: 'BILLING_CASE',
+              entityId: billingCase.id,
+              correlationId: input.eventId,
+              afterValue: { template: input.heldTemplate },
+              occurredAt: actionNow
+            });
+          } else {
+            for (const administrator of administrators) {
+              const recipient = normalizedEmail(administrator.email);
+              await transaction.insert(transactionalEmailOutbox).values({
+                organisationId: organisation.id,
+                billingCaseId: billingCase.id,
+                recipient,
+                template: input.heldTemplate,
+                templateVersion: 1,
+                renderData: {
+                  caseKind: input.caseKind,
+                  providerObjectId: input.providerObjectId,
+                  providerStatus: input.providerStatus,
+                  amountMinor: input.amountMinor,
+                  currency: input.currency
+                },
+                idempotencyKey: noticeIdempotencyKey(
+                  input.eventId,
+                  input.heldTemplate,
+                  recipient
+                ),
+                status: 'HELD',
+                attempts: 0,
+                createdAt: actionNow,
+                updatedAt: actionNow
+              });
+            }
+          }
+        }
+
+        await transaction.insert(auditEvents).values({
+          organisationId: organisation.id,
+          eventType: 'BILLING_CASE_APPLIED',
+          entityType: 'BILLING_CASE',
+          entityId: billingCase.id,
+          correlationId: input.eventId,
+          beforeValue:
+            existingCase === undefined
+              ? null
+              : {
+                  status: existingCase.status,
+                  blocksSending: existingCase.blocksSending
+                },
+          afterValue: {
+            kind: input.caseKind,
+            status: input.targetStatus,
+            blocksSending,
+            subscriptionRelation: relation
+          },
+          occurredAt: actionNow
+        });
+        await insertEvent(
+          transaction,
+          { ...input, organisationId: organisation.id },
+          'APPLIED'
+        );
+        return 'APPLIED';
+      });
+    } catch (error) {
+      if (
+        postgresErrorCode(error) === '23505' &&
+        (await eventExists(input.eventId))
+      ) {
+        return 'DUPLICATE';
+      }
+      throw error;
+    }
+  };
+
   const recordBillingAudit: SubscriptionRepository['recordBillingAudit'] =
     async (input) => {
       await database.insert(auditEvents).values({
@@ -459,6 +810,7 @@ export const createPostgresSubscriptionRepository = (
     loadBillingAccount,
     applyLifecycleEvent,
     applyCheckoutCompleted,
+    applyOperationalEvent,
     recordRejectedEvent,
     recordBillingAudit
   };

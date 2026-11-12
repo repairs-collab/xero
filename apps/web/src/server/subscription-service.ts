@@ -5,6 +5,7 @@ import { hasPaidSubscriptionAccess } from '@bc5000/domain';
 import type {
   AccountPulseSubscriptionStatus,
   SoloCheckoutRequest,
+  StripeChargeOwnership,
   StripeHostedSession,
   StripeWebhookEvent
 } from '@bc5000/integrations/stripe';
@@ -31,6 +32,7 @@ export interface BillingAccount {
 export interface StripeBillingGateway {
   createSoloCheckout(request: SoloCheckoutRequest): Promise<StripeHostedSession>;
   createBillingPortal(customerId: string): Promise<StripeHostedSession>;
+  loadChargeOwnership(chargeId: string): Promise<StripeChargeOwnership>;
   verifyWebhook(rawBody: string | Buffer, signature: string): StripeWebhookEvent;
 }
 
@@ -68,6 +70,35 @@ export interface StripeCheckoutCompletedInput {
   stripeSubscriptionId: string;
 }
 
+export interface StripeOperationalEventInput {
+  eventId: string;
+  eventType:
+    | 'invoice.payment_failed'
+    | 'invoice.paid'
+    | 'charge.refunded'
+    | 'charge.dispute.created'
+    | 'charge.dispute.closed';
+  eventCreatedAt: Date;
+  payloadHash: string;
+  stripeCustomerId: string;
+  stripeSubscriptionId: string;
+  providerObjectType: 'INVOICE' | 'CHARGE' | 'DISPUTE';
+  providerObjectId: string;
+  providerStatus: string;
+  amountMinor: number;
+  currency: 'aud';
+  caseKind: 'PAYMENT_FAILURE' | 'REFUND' | 'DISPUTE';
+  targetStatus: 'OPEN' | 'RESOLVED' | 'REVIEW_REQUIRED';
+  suspensionPolicy: 'CURRENT_ONLY' | 'ALWAYS' | 'NEVER';
+  heldTemplate:
+    | 'PAYMENT_FAILED'
+    | 'PAYMENT_RECOVERED'
+    | 'REFUND_RECORDED'
+    | 'DISPUTE_OPENED'
+    | 'DISPUTE_CLOSED';
+  resolveExistingOnly: boolean;
+}
+
 export interface SubscriptionRepository {
   loadBillingAccount(
     organisationId: string,
@@ -78,6 +109,9 @@ export interface SubscriptionRepository {
   ): Promise<StripeEventApplicationOutcome>;
   applyCheckoutCompleted(
     input: StripeCheckoutCompletedInput
+  ): Promise<StripeEventApplicationOutcome>;
+  applyOperationalEvent(
+    input: StripeOperationalEventInput
   ): Promise<StripeEventApplicationOutcome>;
   recordRejectedEvent(input: {
     organisationId: string;
@@ -302,6 +336,165 @@ const parseLifecycleEvent = (
   };
 };
 
+const requiredAud = (value: unknown): 'aud' => {
+  if (value !== 'aud') throw new SubscriptionFailure('STRIPE_PLAN_MISMATCH');
+  return 'aud';
+};
+
+const nonNegativeMinorAmount = (value: unknown): number => {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
+  }
+  return value as number;
+};
+
+const invoiceSubscriptionId = (invoice: Record<string, unknown>): string => {
+  const direct =
+    invoice.subscription === undefined || invoice.subscription === null
+      ? null
+      : requiredString(invoice.subscription);
+  let parentSubscription: string | null = null;
+  if (invoice.parent !== undefined && invoice.parent !== null) {
+    const parent = objectValue(invoice.parent);
+    if (parent.type !== 'subscription_details') {
+      throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
+    }
+    const details = objectValue(parent.subscription_details);
+    parentSubscription = requiredString(details.subscription);
+  }
+  if (
+    direct === null &&
+    parentSubscription === null
+  ) {
+    throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
+  }
+  if (
+    direct !== null &&
+    parentSubscription !== null &&
+    direct !== parentSubscription
+  ) {
+    throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
+  }
+  return direct ?? parentSubscription!;
+};
+
+const operationalEventTypes = new Set<StripeOperationalEventInput['eventType']>([
+  'invoice.payment_failed',
+  'invoice.paid',
+  'charge.refunded',
+  'charge.dispute.created',
+  'charge.dispute.closed'
+]);
+
+const isOperationalEventType = (
+  value: string
+): value is StripeOperationalEventInput['eventType'] =>
+  operationalEventTypes.has(value as StripeOperationalEventInput['eventType']);
+
+const parseOperationalEvent = async (
+  event: StripeWebhookEvent & { type: StripeOperationalEventInput['eventType'] },
+  hash: string,
+  stripe: StripeBillingGateway
+): Promise<StripeOperationalEventInput> => {
+  const object = objectValue(event.data.object);
+  const common = {
+    eventId: event.id,
+    eventType: event.type,
+    eventCreatedAt: eventDate(event.created),
+    payloadHash: hash,
+    currency: requiredAud(object.currency)
+  } as const;
+
+  if (event.type === 'invoice.payment_failed' || event.type === 'invoice.paid') {
+    const failed = event.type === 'invoice.payment_failed';
+    return {
+      ...common,
+      stripeCustomerId: requiredString(object.customer),
+      stripeSubscriptionId: invoiceSubscriptionId(object),
+      providerObjectType: 'INVOICE',
+      providerObjectId: requiredString(object.id),
+      providerStatus: requiredString(object.status),
+      amountMinor: nonNegativeMinorAmount(object.amount_remaining),
+      caseKind: 'PAYMENT_FAILURE',
+      targetStatus: failed ? 'OPEN' : 'RESOLVED',
+      suspensionPolicy: failed ? 'CURRENT_ONLY' : 'NEVER',
+      heldTemplate: failed ? 'PAYMENT_FAILED' : 'PAYMENT_RECOVERED',
+      resolveExistingOnly: !failed
+    };
+  }
+
+  if (event.type === 'charge.refunded') {
+    if (typeof object.refunded !== 'boolean') {
+      throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
+    }
+    const providerObjectId = requiredString(object.id);
+    const eventCustomerId = requiredString(object.customer);
+    const ownership = await stripe.loadChargeOwnership(providerObjectId);
+    if (ownership.stripeCustomerId !== eventCustomerId) {
+      throw new SubscriptionFailure('STRIPE_ORGANISATION_MISMATCH');
+    }
+    return {
+      ...common,
+      stripeCustomerId: ownership.stripeCustomerId,
+      stripeSubscriptionId: ownership.stripeSubscriptionId,
+      providerObjectType: 'CHARGE',
+      providerObjectId,
+      providerStatus: object.refunded ? 'refunded' : 'partially_refunded',
+      amountMinor: nonNegativeMinorAmount(object.amount_refunded),
+      caseKind: 'REFUND',
+      targetStatus: 'REVIEW_REQUIRED',
+      suspensionPolicy: 'NEVER',
+      heldTemplate: 'REFUND_RECORDED',
+      resolveExistingOnly: false
+    };
+  }
+
+  const providerStatus = requiredString(object.status);
+  const createdStatuses = new Set([
+    'needs_response',
+    'under_review',
+    'warning_needs_response',
+    'warning_under_review'
+  ]);
+  const wonStatuses = new Set(['won', 'prevented']);
+  const lostStatuses = new Set(['lost', 'warning_closed']);
+  if (
+    (event.type === 'charge.dispute.created' &&
+      !createdStatuses.has(providerStatus)) ||
+    (event.type === 'charge.dispute.closed' &&
+      !wonStatuses.has(providerStatus) &&
+      !lostStatuses.has(providerStatus))
+  ) {
+    throw new SubscriptionFailure('STRIPE_STATUS_UNSUPPORTED');
+  }
+  const chargeId = requiredString(object.charge);
+  const ownership = await stripe.loadChargeOwnership(chargeId);
+  const won = wonStatuses.has(providerStatus);
+  return {
+    ...common,
+    stripeCustomerId: ownership.stripeCustomerId,
+    stripeSubscriptionId: ownership.stripeSubscriptionId,
+    providerObjectType: 'DISPUTE',
+    providerObjectId: requiredString(object.id),
+    providerStatus,
+    amountMinor: nonNegativeMinorAmount(object.amount),
+    caseKind: 'DISPUTE',
+    targetStatus:
+      event.type === 'charge.dispute.created'
+        ? 'OPEN'
+        : won
+          ? 'RESOLVED'
+          : 'REVIEW_REQUIRED',
+    suspensionPolicy:
+      event.type === 'charge.dispute.created' || !won ? 'ALWAYS' : 'NEVER',
+    heldTemplate:
+      event.type === 'charge.dispute.created'
+        ? 'DISPUTE_OPENED'
+        : 'DISPUTE_CLOSED',
+    resolveExistingOnly: false
+  };
+};
+
 const requireSoloAccount = (
   account: BillingAccount | null
 ): BillingAccount => {
@@ -398,6 +591,17 @@ export const createSubscriptionService = (dependencies: {
     if (event.type === 'checkout.session.completed') {
       return dependencies.repository.applyCheckoutCompleted(
         parseCheckoutCompleted(event, hash)
+      );
+    }
+    if (isOperationalEventType(event.type)) {
+      return dependencies.repository.applyOperationalEvent(
+        await parseOperationalEvent(
+          event as StripeWebhookEvent & {
+            type: StripeOperationalEventInput['eventType'];
+          },
+          hash,
+          dependencies.stripe
+        )
       );
     }
     if (!event.type.startsWith('customer.subscription.')) {

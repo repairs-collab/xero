@@ -4,6 +4,7 @@ import type { AppSession } from '@bc5000/auth';
 import { decideAccountEntitlements } from '@bc5000/domain';
 import type {
   SoloCheckoutRequest,
+  StripeChargeOwnership,
   StripeHostedSession,
   StripeWebhookEvent
 } from '@bc5000/integrations/stripe';
@@ -54,6 +55,8 @@ const account = (overrides: Partial<BillingAccount> = {}): BillingAccount => ({
 class FakeStripe implements StripeBillingGateway {
   checkoutRequests: SoloCheckoutRequest[] = [];
   portalCustomers: string[] = [];
+  chargeOwnershipRequests: string[] = [];
+  chargeOwnership = new Map<string, StripeChargeOwnership>();
   event: StripeWebhookEvent | undefined;
 
   createSoloCheckout(request: SoloCheckoutRequest): Promise<StripeHostedSession> {
@@ -72,6 +75,13 @@ class FakeStripe implements StripeBillingGateway {
     });
   }
 
+  loadChargeOwnership(chargeId: string): Promise<StripeChargeOwnership> {
+    this.chargeOwnershipRequests.push(chargeId);
+    const ownership = this.chargeOwnership.get(chargeId);
+    if (!ownership) return Promise.reject(new Error('Missing charge ownership'));
+    return Promise.resolve(ownership);
+  }
+
   verifyWebhook(): StripeWebhookEvent {
     if (this.event === undefined) throw new Error('No event configured');
     return this.event;
@@ -84,6 +94,7 @@ class FakeRepository implements SubscriptionRepository {
   checkoutInputs: Parameters<SubscriptionRepository['applyCheckoutCompleted']>[0][] = [];
   auditInputs: Parameters<SubscriptionRepository['recordBillingAudit']>[0][] = [];
   rejectedInputs: Parameters<SubscriptionRepository['recordRejectedEvent']>[0][] = [];
+  operationalInputs: Parameters<SubscriptionRepository['applyOperationalEvent']>[0][] = [];
   applyOutcome: Awaited<ReturnType<SubscriptionRepository['applyLifecycleEvent']>> =
     'APPLIED';
 
@@ -122,6 +133,13 @@ class FakeRepository implements SubscriptionRepository {
     input: Parameters<SubscriptionRepository['applyCheckoutCompleted']>[0]
   ): ReturnType<SubscriptionRepository['applyCheckoutCompleted']> {
     this.checkoutInputs.push(input);
+    return Promise.resolve(this.applyOutcome);
+  }
+
+  applyOperationalEvent(
+    input: Parameters<SubscriptionRepository['applyOperationalEvent']>[0]
+  ): ReturnType<SubscriptionRepository['applyOperationalEvent']> {
+    this.operationalInputs.push(input);
     return Promise.resolve(this.applyOutcome);
   }
 
@@ -203,6 +221,67 @@ const subscriptionEvent = (
     }
   },
   ...overrides
+});
+
+const invoiceEvent = (
+  type: 'invoice.payment_failed' | 'invoice.paid',
+  overrides: Record<string, unknown> = {}
+): StripeWebhookEvent => ({
+  id: `evt_${type.replaceAll('.', '_')}`,
+  type,
+  created: 1_794_201_600,
+  data: {
+    object: {
+      id: 'in_solo',
+      customer: 'cus_solo',
+      currency: 'aud',
+      amount_remaining: type === 'invoice.paid' ? 0 : 12_345,
+      status: type === 'invoice.paid' ? 'paid' : 'open',
+      parent: {
+        type: 'subscription_details',
+        subscription_details: { subscription: 'sub_solo' }
+      },
+      ...overrides
+    }
+  }
+});
+
+const refundEvent = (
+  overrides: Record<string, unknown> = {}
+): StripeWebhookEvent => ({
+  id: 'evt_charge_refunded',
+  type: 'charge.refunded',
+  created: 1_794_201_600,
+  data: {
+    object: {
+      id: 'ch_solo',
+      customer: 'cus_solo',
+      currency: 'aud',
+      amount_refunded: 5_000,
+      refunded: false,
+      ...overrides
+    }
+  }
+});
+
+const disputeEvent = (
+  type: 'charge.dispute.created' | 'charge.dispute.closed',
+  status: string,
+  overrides: Record<string, unknown> = {}
+): StripeWebhookEvent => ({
+  id: `evt_${type.replaceAll('.', '_')}_${status}`,
+  type,
+  created: 1_794_201_600,
+  data: {
+    object: {
+      id: 'dp_solo',
+      charge: 'ch_solo',
+      currency: 'aud',
+      amount: 12_345,
+      status,
+      ...overrides
+    }
+  }
 });
 
 describe('subscription checkout and portal', () => {
@@ -421,13 +500,168 @@ describe('subscription webhooks', () => {
     expect(repository.currentAccount?.status).toBe('TRIALING');
   });
 
-  it('acknowledges unrelated signed Stripe events without retrying them', async () => {
+  it.each([
+    [
+      'invoice.payment_failed',
+      invoiceEvent('invoice.payment_failed'),
+      {
+        providerObjectType: 'INVOICE',
+        providerObjectId: 'in_solo',
+        caseKind: 'PAYMENT_FAILURE',
+        targetStatus: 'OPEN',
+        suspensionPolicy: 'CURRENT_ONLY',
+        heldTemplate: 'PAYMENT_FAILED',
+        resolveExistingOnly: false,
+        amountMinor: 12_345
+      }
+    ],
+    [
+      'invoice.paid',
+      invoiceEvent('invoice.paid'),
+      {
+        providerObjectType: 'INVOICE',
+        providerObjectId: 'in_solo',
+        caseKind: 'PAYMENT_FAILURE',
+        targetStatus: 'RESOLVED',
+        suspensionPolicy: 'NEVER',
+        heldTemplate: 'PAYMENT_RECOVERED',
+        resolveExistingOnly: true,
+        amountMinor: 0
+      }
+    ],
+    [
+      'charge.refunded',
+      refundEvent(),
+      {
+        providerObjectType: 'CHARGE',
+        providerObjectId: 'ch_solo',
+        caseKind: 'REFUND',
+        targetStatus: 'REVIEW_REQUIRED',
+        suspensionPolicy: 'NEVER',
+        heldTemplate: 'REFUND_RECORDED',
+        resolveExistingOnly: false,
+        amountMinor: 5_000
+      }
+    ],
+    [
+      'charge.dispute.created',
+      disputeEvent('charge.dispute.created', 'needs_response'),
+      {
+        providerObjectType: 'DISPUTE',
+        providerObjectId: 'dp_solo',
+        caseKind: 'DISPUTE',
+        targetStatus: 'OPEN',
+        suspensionPolicy: 'ALWAYS',
+        heldTemplate: 'DISPUTE_OPENED',
+        resolveExistingOnly: false,
+        amountMinor: 12_345
+      }
+    ],
+    [
+      'charge.dispute.closed won',
+      disputeEvent('charge.dispute.closed', 'won'),
+      {
+        providerObjectType: 'DISPUTE',
+        providerObjectId: 'dp_solo',
+        caseKind: 'DISPUTE',
+        targetStatus: 'RESOLVED',
+        suspensionPolicy: 'NEVER',
+        heldTemplate: 'DISPUTE_CLOSED',
+        resolveExistingOnly: false,
+        amountMinor: 12_345
+      }
+    ],
+    [
+      'charge.dispute.closed lost',
+      disputeEvent('charge.dispute.closed', 'lost'),
+      {
+        providerObjectType: 'DISPUTE',
+        providerObjectId: 'dp_solo',
+        caseKind: 'DISPUTE',
+        targetStatus: 'REVIEW_REQUIRED',
+        suspensionPolicy: 'ALWAYS',
+        heldTemplate: 'DISPUTE_CLOSED',
+        resolveExistingOnly: false,
+        amountMinor: 12_345
+      }
+    ]
+  ] as const)('parses operational Stripe event %s without granting access', async (_label, event, expected) => {
+    const { service, stripe, repository, lifecycleJobs, numberProvisionJobs } = createService();
+    stripe.event = event;
+    stripe.chargeOwnership.set('ch_solo', {
+      stripeCustomerId: 'cus_solo',
+      stripeSubscriptionId: 'sub_solo'
+    });
+
+    await expect(service.handleWebhook('{}', 'signed')).resolves.toBe('APPLIED');
+    expect(repository.operationalInputs).toHaveLength(1);
+    expect(repository.operationalInputs[0]).toMatchObject({
+      ...expected,
+      stripeCustomerId: 'cus_solo',
+      stripeSubscriptionId: 'sub_solo',
+      currency: 'aud'
+    });
+    expect(lifecycleJobs).toEqual([]);
+    expect(numberProvisionJobs).toEqual([]);
+  });
+
+  it('accepts the legacy invoice subscription field and rejects conflicting identities', async () => {
+    const legacy = createService();
+    legacy.stripe.event = invoiceEvent('invoice.payment_failed', {
+      parent: null,
+      subscription: 'sub_legacy'
+    });
+    await expect(legacy.service.handleWebhook('{}', 'signed')).resolves.toBe('APPLIED');
+    expect(legacy.repository.operationalInputs[0]?.stripeSubscriptionId).toBe('sub_legacy');
+
+    const conflict = createService();
+    conflict.stripe.event = invoiceEvent('invoice.payment_failed', {
+      subscription: 'sub_other'
+    });
+    await expect(conflict.service.handleWebhook('{}', 'signed')).rejects.toMatchObject({
+      code: 'STRIPE_EVENT_INVALID'
+    });
+    expect(conflict.repository.operationalInputs).toEqual([]);
+  });
+
+  it.each([
+    ['currency', invoiceEvent('invoice.payment_failed', { currency: 'usd' })],
+    ['negative amount', invoiceEvent('invoice.payment_failed', { amount_remaining: -1 })],
+    ['fractional amount', refundEvent({ amount_refunded: 1.5 })],
+    ['created dispute status', disputeEvent('charge.dispute.created', 'won')],
+    ['closed dispute status', disputeEvent('charge.dispute.closed', 'under_review')]
+  ])('rejects malformed operational event %s', async (_label, event) => {
+    const { service, stripe, repository } = createService();
+    stripe.event = event;
+    stripe.chargeOwnership.set('ch_solo', {
+      stripeCustomerId: 'cus_solo',
+      stripeSubscriptionId: 'sub_solo'
+    });
+    await expect(service.handleWebhook('{}', 'signed')).rejects.toBeInstanceOf(SubscriptionFailure);
+    expect(repository.operationalInputs).toEqual([]);
+  });
+
+  it('uses charge ownership for refunds and disputes and rejects a customer mismatch', async () => {
+    const { service, stripe, repository } = createService();
+    stripe.event = refundEvent();
+    stripe.chargeOwnership.set('ch_solo', {
+      stripeCustomerId: 'cus_other',
+      stripeSubscriptionId: 'sub_solo'
+    });
+    await expect(service.handleWebhook('{}', 'signed')).rejects.toMatchObject({
+      code: 'STRIPE_ORGANISATION_MISMATCH'
+    });
+    expect(stripe.chargeOwnershipRequests).toEqual(['ch_solo']);
+    expect(repository.operationalInputs).toEqual([]);
+  });
+
+  it('acknowledges genuinely unrelated signed Stripe events without retrying them', async () => {
     const { service, stripe, repository } = createService();
     stripe.event = {
-      id: 'evt_invoice_paid',
-      type: 'invoice.paid',
+      id: 'evt_product_updated',
+      type: 'product.updated',
       created: 1_794_201_600,
-      data: { object: { id: 'in_invoice' } }
+      data: { object: { id: 'prod_unrelated' } }
     };
 
     await expect(service.handleWebhook('{}', 'valid-signature')).resolves.toBe(
@@ -435,6 +669,7 @@ describe('subscription webhooks', () => {
     );
     expect(repository.lifecycleInputs).toEqual([]);
     expect(repository.checkoutInputs).toEqual([]);
+    expect(repository.operationalInputs).toEqual([]);
   });
 });
 
