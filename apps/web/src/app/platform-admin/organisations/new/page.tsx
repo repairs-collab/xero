@@ -51,14 +51,12 @@ export default async function NewPlatformCustomerPage({
                 <option value="Australia/Sydney">Australia — Eastern</option>
                 <option value="Australia/Adelaide">Australia — Central</option>
                 <option value="Australia/Perth">Australia — Western</option>
-                <option value="Pacific/Auckland">New Zealand</option>
               </select>
             </label>
             <label>
               Base currency
               <select name="baseCurrency" defaultValue="AUD">
                 <option value="AUD">AUD</option>
-                <option value="NZD">NZD</option>
               </select>
             </label>
           </div>

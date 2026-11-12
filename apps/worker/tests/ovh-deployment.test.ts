@@ -21,7 +21,7 @@ const composeEnvironment = {
   NODE_ENV: 'production',
   PUBLIC_BASE_URL: 'https://accountpulse.example.test',
   ACCOUNT_PULSE_LEGAL_ENTITY: 'Swan Hill Appliance Repairs Pty Ltd',
-  ACCOUNT_PULSE_SUPPORT_EMAIL: 'repairs@motts.com.au',
+  ACCOUNT_PULSE_SUPPORT_EMAIL: 'ap@motts.com.au',
   COGNITO_DOMAIN: 'https://auth.example.test',
   COGNITO_REDIRECT_URI: 'https://accountpulse.example.test/auth/callback',
   COGNITO_ISSUER: 'https://cognito-idp.ap-southeast-2.amazonaws.com/example',

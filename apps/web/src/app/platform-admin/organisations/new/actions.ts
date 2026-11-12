@@ -37,9 +37,8 @@ export async function createCustomerAction(formData: FormData): Promise<never> {
         timeZone: text(formData, 'timeZone') as
           | 'Australia/Sydney'
           | 'Australia/Adelaide'
-          | 'Australia/Perth'
-          | 'Pacific/Auckland',
-        baseCurrency: text(formData, 'baseCurrency') as 'AUD' | 'NZD',
+          | 'Australia/Perth',
+        baseCurrency: text(formData, 'baseCurrency') as 'AUD',
         trialDays: integer(formData, 'trialDays'),
         includedSmsParts: integer(formData, 'includedSmsParts'),
         warningPercent: integer(formData, 'warningPercent'),

@@ -13,7 +13,7 @@ const model: DashboardModel = {
   lastXeroSync: '11 Nov 2026, 9:00 am',
   xeroHealthy: true,
   messagingHealthy: true,
-  supportEmail: 'AP@motts.com.au',
+  supportEmail: 'ap@motts.com.au',
   supportChatUrl: 'https://sophie.example/chat'
 };
 
@@ -30,7 +30,7 @@ describe('dashboard support', () => {
 
     expect(markup).toContain('Chat with Sophie');
     expect(markup).toContain('https://sophie.example/chat');
-    expect(markup).toContain('mailto:AP@motts.com.au');
+    expect(markup).toContain('mailto:ap@motts.com.au');
     expect(markup).toContain('AI support assistant');
   });
 });

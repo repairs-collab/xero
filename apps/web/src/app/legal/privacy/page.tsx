@@ -9,7 +9,7 @@ export default function PrivacyPage() {
       <p className="muted-copy">Last updated: {legalLastUpdated}</p>
       <p>
         {legal.entity} operates AccountPulse. This policy explains how we handle
-        personal information in Australia and New Zealand.
+        personal information in Australia for our Australian service.
       </p>
       <h2>Information we collect</h2>
       <p>
@@ -30,26 +30,37 @@ export default function PrivacyPage() {
       <p>
         We use contracted providers for hosting, identity, accounting
         integration, billing and communications. This may involve processing in
-        Australia, New Zealand, Canada, the United States, Europe or other
-        locations used by those providers. We apply access controls and
-        contractual or technical safeguards appropriate to the service.
+        Australia, Canada, the United States, Europe or other locations used by
+        those providers. We apply access controls and contractual or technical
+        safeguards appropriate to the service.
+      </p>
+      <p>
+        Where an enabled AccountPulse feature uses Sophiie or OpenAI, only the
+        minimum customer information needed to operate that feature or address
+        the support request should be provided. We use non-retention or limited-
+        retention controls where they are available and do not deliberately
+        provide customer information for unrelated external use.
       </p>
       <h2>Storage, security and retention</h2>
       <p>
         We use encryption, least-privilege access, audit records and operational
-        monitoring. No internet service is risk-free. We retain data while an
-        account is active and as reasonably needed for support, security,
-        accounting, disputes and legal obligations. Cancellation starts a
-        controlled retention review rather than an unsafe immediate deletion.
+        monitoring. No internet service is risk-free. Invoice, customer, message,
+        call and audit records are retained for five years after account
+        cancellation for support, security, accounting, disputes and legal
+        obligations. Unnecessary raw provider payloads may be removed or redacted
+        earlier while required records and evidence are preserved. A legal hold
+        may require longer retention.
       </p>
       <h2>Access, correction and complaints</h2>
       <p>
         You may ask to access or correct personal information, request an account
         export, or raise a privacy complaint by emailing{' '}
-        <a href={`mailto:${legal.supportEmail}`}>{legal.supportEmail}</a>. We
-        will verify the requester and respond within a reasonable period. You may
-        also contact the Office of the Australian Information Commissioner or
-        the Office of the Privacy Commissioner in New Zealand.
+        <a href={`mailto:${legal.supportEmail}`}>{legal.supportEmail}</a>. K
+        Heaton is the AccountPulse Privacy Officer. Once authority and scope have
+        been verified, we target completion of an export or deletion request
+        within 14 days. Deletion may exclude information that must be retained by
+        law or under a legal hold. You may also contact the Office of the
+        Australian Information Commissioner.
       </p>
       <h2>Changes</h2>
       <p>

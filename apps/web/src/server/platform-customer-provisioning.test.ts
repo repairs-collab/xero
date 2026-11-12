@@ -106,4 +106,26 @@ describe('platform customer provisioning', () => {
     ).rejects.toThrow('VALIDATION');
     expect(dependencies.repository.createWorkspace).not.toHaveBeenCalled();
   });
+
+  it('rejects New Zealand provisioning while the commercial release is Australia-only', async () => {
+    const dependencies = {
+      verifyOwner: vi.fn().mockResolvedValue(true),
+      repository: {
+        createWorkspace: vi.fn(),
+        removeFailedWorkspace: vi.fn()
+      },
+      inviteMember: vi.fn(),
+      clock: { now: () => new Date('2026-11-11T00:00:00.000Z') }
+    };
+    const service = createPlatformCustomerProvisioningService(dependencies);
+
+    await expect(
+      service.createCustomer(session, {
+        ...input,
+        timeZone: 'Pacific/Auckland' as never,
+        baseCurrency: 'NZD' as never
+      })
+    ).rejects.toThrow('VALIDATION');
+    expect(dependencies.repository.createWorkspace).not.toHaveBeenCalled();
+  });
 });

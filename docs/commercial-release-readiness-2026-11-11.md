@@ -1,7 +1,7 @@
 # AccountPulse commercial release readiness
 
 - Assessment date: 11 November 2026
-- Market: Australia and New Zealand
+- Market: Australia initially; New Zealand is deferred
 - Current Xero tier: Starter, maximum five connected Xero organisations
 
 ## Decision
@@ -85,10 +85,19 @@ owner approves a spend ceiling. No number has been purchased by this release.
    identifiers are retired, cross-tenant ownership is rejected, and both
    webhook orderings pass against PostgreSQL. This item is closed for the
    current release.
-3. **Finish the legal/commercial identity.** Confirm legal entity, ABN, GST
-   registration, business address, tax treatment, refund policy, subprocessors,
-   security contact and incident-notification terms with Australian legal and
-   accounting review.
+3. **Finish the legal/commercial identity.** Swan Hill Appliance Repairs Pty
+   Ltd (ABN 86 633 952 333; ACN 633 952 333) is the GST-registered seller and
+   owner of AccountPulse. The initial market and currency are Australia and AUD.
+   The owner has selected `ap@motts.com.au` for support, billing, privacy and
+   legal notices. The commercial product has no free trial; payment is due on
+   signup; monthly and annual terms are offered with a 5% annual discount;
+   cancellation takes effect at period end; unused SMS expires monthly; incurred
+   number fees are non-refundable subject to law; failed payment starts a 30-day
+   recovery period; and account records are retained for five years after
+   cancellation. Confirm the business address, GST price presentation,
+   subprocessors, security contact and incident-notification terms with
+   Australian legal and accounting review. Track decisions in
+   `docs/commercial-legal-inputs.md`.
 4. **Complete numeric SMS supply.** Branded Sender ID and EMSP participation are
    deferred because the beta uses Australian phone numbers as the visible
    sender. Obtain Sinch's written per-number price, ordering/API requirements,
@@ -117,9 +126,12 @@ owner approves a spend ceiling. No number has been purchased by this release.
    disk/provider alerts with human delivery; maintain an off-host encrypted
    backup; replace the obsolete AWS restore instructions; complete and record a
    restore drill.
-9. **Approve data lifecycle procedures.** Define retention periods and provide a
-   verified export/deletion request and fulfilment process, including legal hold
-   and customer notification.
+9. **Implement the approved data lifecycle.** K Heaton is the Privacy Officer;
+   invoice, customer, message, call and audit records use a five-year
+   post-cancellation policy target; and verified export/deletion requests have a
+   14-day service target. Implement and test category-based retention, legal
+   holds, customer notifications and backup ageing without promising deletion
+   of records that must legally be retained.
 10. **Prove the real customer journey.** Run a staging journey using actual
     Cognito invitation, MFA, legal acceptance, Xero OAuth, Stripe, one
     owner-approved Australian numeric number, outbound SMS and inbound reply.

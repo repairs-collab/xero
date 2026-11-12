@@ -21,8 +21,8 @@ export interface CreatePlatformCustomerInput {
   name: string;
   adminEmail: string;
   adminDisplayName: string;
-  timeZone: 'Australia/Sydney' | 'Australia/Adelaide' | 'Australia/Perth' | 'Pacific/Auckland';
-  baseCurrency: 'AUD' | 'NZD';
+  timeZone: 'Australia/Sydney' | 'Australia/Adelaide' | 'Australia/Perth';
+  baseCurrency: 'AUD';
   trialDays: number;
   includedSmsParts: number;
   warningPercent: number;
@@ -123,8 +123,7 @@ const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const allowedTimeZones = new Set<CreatePlatformCustomerInput['timeZone']>([
   'Australia/Sydney',
   'Australia/Adelaide',
-  'Australia/Perth',
-  'Pacific/Auckland'
+  'Australia/Perth'
 ]);
 
 export const createPlatformCustomerProvisioningService = (dependencies: {
@@ -151,7 +150,7 @@ export const createPlatformCustomerProvisioningService = (dependencies: {
       input.adminDisplayName.length < 2 ||
       input.adminDisplayName.length > 160 ||
       !allowedTimeZones.has(input.timeZone) ||
-      !['AUD', 'NZD'].includes(input.baseCurrency) ||
+      input.baseCurrency !== 'AUD' ||
       !Number.isSafeInteger(input.trialDays) ||
       input.trialDays < 1 ||
       input.trialDays > 90 ||

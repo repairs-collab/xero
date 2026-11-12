@@ -18,7 +18,7 @@ describe('DashboardView', () => {
           lastXeroSync: '18 Sep 2026, 10:05 am',
           xeroHealthy: true,
           messagingHealthy: true,
-          supportEmail: 'AP@motts.com.au',
+          supportEmail: 'ap@motts.com.au',
           supportChatUrl: null
         }
       })

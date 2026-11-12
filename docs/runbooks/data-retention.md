@@ -2,7 +2,17 @@
 
 This runbook is the implementation record for AccountPulse Solo. It is not
 legal advice and is not yet approved public policy. Support, security and
-privacy enquiries go to repairs@motts.com.au.
+privacy enquiries go to ap@motts.com.au.
+
+## Owner-approved policy target — 12 November 2026
+
+K Heaton is the AccountPulse Privacy Officer. The owner selected five years
+after account cancellation as the retention period for invoice, customer,
+message, call and audit records, and a 14-day service target for verified data
+export or deletion requests. Legally required records and legal holds are
+excluded from deletion until the obligation ends. This is the approved policy
+target; the implementation gaps identified below must be closed and tested
+before the product promises automated deletion.
 
 ## Account closure
 
@@ -26,14 +36,16 @@ billing/audit record or backup copy from being silently destroyed.
 | Outbound message content and provider payload | Related invoice resolved | 24 months | Replace content with [RETAINED_METADATA_ONLY]; replace provider payload with a metadata-only marker | Hashes, timestamps, outcomes, provider IDs and audit metadata remain |
 | Inbound message and operator-reply content | Every invoice for the contact resolved | 24 months | Redact bodies and provider payloads; an unresolved or recently resolved invoice blocks redaction | Conversation metadata remains |
 | Raw webhook projection | Event successfully processed | 90 days | Delete in bounded batches | An unprocessed event is never deleted by age alone |
-| Audit metadata | Account closure | **Decision required** | Preserve; no automatic deletion duration is coded | Australian legal review must approve a period before public wording or deletion |
+| Audit metadata | Account closure | Five years | Preserve; automatic deletion is not yet coded | Implement the approved five-year eligibility date, legal-hold exclusion and reviewed deletion |
 | Subscription/billing record | Subscription/payment event | **Decision required** | Preserve; no automatic deletion duration is coded | Finance and Australian legal review must approve a period |
 | Database and release backup | Backup creation/source deletion | **Hosting evidence required** | Pre-release database dumps are created before deployment; no expiry deletion is coded | Public policy must use the verified OVH/off-site expiry, not an assumed duration |
 
-The 24-month and 90-day periods are existing AccountPulse product decisions.
-The audit, billing and backup durations are deliberately unset. Do not copy the
-historical seven-year audit or 35-day backup statements into public policy
-until they have legal approval and matching OVH evidence.
+The five-year account-record period is the owner-approved policy target. The
+24-month content-redaction and 90-day raw-webhook periods are shorter
+data-minimisation controls that retain required metadata without keeping every
+raw payload. Billing and backup durations remain deliberately unset. Do not
+copy the historical seven-year audit or 35-day backup statements into public
+policy until they have legal approval and matching OVH evidence.
 
 ## Isolation, idempotency and retry safeguards
 
@@ -91,7 +103,8 @@ Cognito remains an external identity provider.
 
 ## Decisions required before automatic deletion can be built
 
-- Australian legal period for audit metadata.
+- Australian legal confirmation that the selected five-year audit period is
+  appropriate for AccountPulse records and obligations.
 - Australian tax/finance period for subscription and payment records.
 - Approved backup expiry and how deletions age out of every backup tier.
 - Whether customers receive an export and final deletion notice.

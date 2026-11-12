@@ -11,7 +11,7 @@ describe('AccountPulse Solo start page', () => {
       'href="/auth/login?returnTo=%2Fonboarding"'
     );
     expect(markup).toContain('Request beta access');
-    expect(markup).toContain('mailto:AP@motts.com.au');
+    expect(markup).toContain('mailto:ap@motts.com.au');
     expect(markup).not.toContain('mode=signup');
   });
 

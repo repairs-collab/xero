@@ -12,6 +12,14 @@
 > design. Solo sends are now hard-capped at the configured included allowance;
 > legacy overage database columns remain only for compatibility. The original
 > narrative below is retained as the record of the 9 November decision.
+>
+> **Commercial-rule update — 12 November 2026:** The public free-trial proposal
+> below is also superseded. The owner selected payment on signup, monthly and
+> annual billing with a 5% annual discount, cancellation at period end, no SMS
+> rollover, a 30-day failed-payment recovery period and five-year
+> post-cancellation retention. Annual customers still receive a monthly 2,000
+> SMS-part allowance cycle. Any manually granted beta access is a controlled
+> beta licence, not a public free trial.
 
 ## 1. Intent
 
@@ -50,7 +58,14 @@ AccountPulse already has several strong foundations:
 
 The existing release was deliberately built for one Xero organisation using a Custom Connection. The Xero token is obtained with the client-credentials grant, Xero requests omit a tenant header, provider configuration is represented as AWS secret references, the user is bootstrapped manually, and there is no subscription or entitlement model. Those are appropriate for the existing bespoke installation but not for an App Store product.
 
-The owner has confirmed the commercial identity inputs used by the build: **Swan Hill Appliance Repairs Pty Ltd** is the legal entity, `repairs@motts.com.au` is the customer-support address, and `https://ap.motts.com.au` is the intended public AccountPulse origin. These confirmations do not by themselves prove DNS, HTTPS, mailbox operations or Xero portal registration; those remain release-readiness checks.
+The owner has confirmed the commercial identity inputs used by the build:
+**Swan Hill Appliance Repairs Pty Ltd** (ABN 86 633 952 333; ACN 633 952 333)
+is the GST-registered legal seller and owner of AccountPulse,
+`ap@motts.com.au` is the public support, billing, privacy and legal-notice
+address, Australia is the initial market, AUD is the customer currency, and
+`https://ap.motts.com.au` is the intended public AccountPulse origin. These
+confirmations do not by themselves prove DNS, HTTPS, mailbox operations or
+Xero portal registration; those remain release-readiness checks.
 
 ## 3. Chosen approach
 
