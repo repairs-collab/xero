@@ -22,6 +22,7 @@ import {
   organisationVoiceSettings,
   pauses,
   paymentPromises,
+  PostgresDebtContactRepository,
   type PostgresVoiceCallRepository,
   reminderSequences,
   reminderSequenceVersions,
@@ -32,6 +33,10 @@ import {
   voiceCallRequests
 } from '@bc5000/db';
 import {
+  debtContactTimeZone,
+  debtContactWindowEndLocal,
+  debtContactWindowStartLocal,
+  decideDebtContactWindow,
   evaluateVoiceContactPolicy,
   fixedVoiceCallCopy,
   normaliseVoiceAmount,
@@ -78,6 +83,7 @@ export type VoiceCallCancellationCode =
   | 'VOICE_CALL_NOT_FOUND'
   | 'DEPLOYMENT_DISABLED'
   | 'INITIATING_USER_DISABLED'
+  | 'DAILY_CONTACT_LIMIT'
   | 'UNKNOWN_OUTCOME'
   | 'STALE_ACCOUNT_DATA';
 
@@ -690,10 +696,10 @@ const revalidate = async (
   });
   const policy = evaluateVoiceContactPolicy({
     now,
-    timezone: settings.timezone,
+    timezone: debtContactTimeZone,
     holidays: [...dependencies.holidays.list(payload.organisationId)],
-    weekdayStartLocal: settings.weekdayStartLocal.slice(0, 5),
-    weekdayEndLocal: settings.weekdayEndLocal.slice(0, 5),
+    weekdayStartLocal: debtContactWindowStartLocal,
+    weekdayEndLocal: debtContactWindowEndLocal,
     featureEnabled: settings.enabled,
     permissionAllowed: true,
     destinationValid: destinationIsCurrent,
@@ -843,6 +849,43 @@ export async function executeVoiceCall(
     call.gatewayFlowVersion === null
   ) {
     throw new Error('VOICE_SETTINGS_NOT_CONFIGURED');
+  }
+  if (call.purpose === 'CUSTOMER') {
+    const contactAt = dependencies.clock.now();
+    const contactWindow = decideDebtContactWindow(
+      contactAt,
+      dependencies.holidays.list(payload.organisationId)
+    );
+    if (!contactWindow.allowed) {
+      return cancel(
+        dependencies,
+        payload,
+        call.actorUserId,
+        'CALLING_WINDOW_CLOSED',
+        contactAt,
+        'SUBMITTING'
+      );
+    }
+    const debtContactClaim = await new PostgresDebtContactRepository(
+      dependencies.database
+    ).claimDebtContact({
+      organisationId: payload.organisationId,
+      contactId: call.contactId,
+      localDate: contactWindow.localDate,
+      channel: 'VOICE',
+      sourceId: call.id,
+      claimedAt: contactAt
+    });
+    if (debtContactClaim.kind === 'already-claimed') {
+      return cancel(
+        dependencies,
+        payload,
+        call.actorUserId,
+        'DAILY_CONTACT_LIMIT',
+        contactAt,
+        'SUBMITTING'
+      );
+    }
   }
   try {
     const result = await dependencies.gateway.createCall({

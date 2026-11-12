@@ -2,6 +2,7 @@ export * from './client.js';
 export * from './repositories/approval-repository.js';
 export * from './repositories/chase-repository.js';
 export * from './repositories/conversation-repository.js';
+export * from './repositories/debt-contact-repository.js';
 export * from './repositories/entitlement-repository.js';
 export * from './repositories/entitlement-repository.js';
 export * from './repositories/activity-repository.js';

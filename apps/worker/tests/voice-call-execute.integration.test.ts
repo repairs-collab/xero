@@ -8,6 +8,7 @@ import {
   contactChannels,
   contacts,
   createDatabase,
+  debtContactClaims,
   disputes,
   invoiceChases,
   invoices,
@@ -55,6 +56,9 @@ async function seedApprovedCall(
     voiceEnabled?: boolean;
     destinationNumber?: string;
     scheduledAutomatic?: boolean;
+    timezone?: string;
+    weekdayStartLocal?: string;
+    weekdayEndLocal?: string;
   } = {}
 ) {
   const organisationId = randomUUID();
@@ -117,9 +121,9 @@ async function seedApprovedCall(
     transferSipUri: 'sip:accounts@voipline.example',
     fallbackOfficeNumber: '+61255504321',
     officeDestinationLabel: 'Main office accounts queue',
-    timezone: 'Australia/Sydney',
-    weekdayStartLocal: '09:00',
-    weekdayEndLocal: '17:00',
+    timezone: options.timezone ?? 'Australia/Sydney',
+    weekdayStartLocal: options.weekdayStartLocal ?? '09:00',
+    weekdayEndLocal: options.weekdayEndLocal ?? '17:00',
     lastConnectionTestedAt: now,
     lastConnectionTestSucceeded: true,
     lastGatewayTestedAt: now,
@@ -436,6 +440,85 @@ describe('voice call execution', () => {
       organisationId: seeded.organisationId,
       voiceCallId: seeded.voiceCallId
     })).resolves.toEqual({ kind: 'cancelled', reason: 'STALE_ACCOUNT_DATA' });
+    expect(createPhoneCall).not.toHaveBeenCalled();
+  });
+
+  it('opens automatic debt-contact calling at 08:30 Sydney', async () => {
+    const executionTime = new Date('2026-10-07T21:30:00.000Z');
+    const seeded = await seedApprovedCall({ scheduledAutomatic: true });
+    const createPhoneCall = vi.fn(() =>
+      Promise.resolve({
+        callId: 'voice-at-legal-opening',
+        callStatus: 'registered'
+      })
+    );
+    const runtime = executionDependencies(seeded.repository, createPhoneCall, {
+      executionTime
+    });
+
+    await expect(
+      executeVoiceCall(runtime.dependencies, {
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId
+      })
+    ).resolves.toEqual({
+      kind: 'accepted',
+      providerCallId: 'voice-at-legal-opening'
+    });
+    expect(createPhoneCall).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses Sydney legal hours instead of a wider configured voice window', async () => {
+    const executionTime = new Date('2026-10-08T07:00:00.000Z');
+    const seeded = await seedApprovedCall({
+      scheduledAutomatic: true,
+      timezone: 'Australia/Perth',
+      weekdayStartLocal: '00:00',
+      weekdayEndLocal: '23:59'
+    });
+    const createPhoneCall = vi.fn(() =>
+      Promise.resolve({ callId: 'not-used', callStatus: 'registered' })
+    );
+    const runtime = executionDependencies(seeded.repository, createPhoneCall, {
+      executionTime
+    });
+
+    await expect(
+      executeVoiceCall(runtime.dependencies, {
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId
+      })
+    ).resolves.toEqual({
+      kind: 'cancelled',
+      reason: 'CALLING_WINDOW_CLOSED'
+    });
+    expect(createPhoneCall).not.toHaveBeenCalled();
+  });
+
+  it('blocks voice when SMS already owns the customer local-day claim', async () => {
+    const seeded = await seedApprovedCall({ scheduledAutomatic: true });
+    await client.db.insert(debtContactClaims).values({
+      organisationId: seeded.organisationId,
+      contactId: seeded.contactId,
+      localDate: '2026-10-08',
+      channel: 'SMS',
+      sourceId: randomUUID(),
+      claimedAt: now
+    });
+    const createPhoneCall = vi.fn(() =>
+      Promise.resolve({ callId: 'not-used', callStatus: 'registered' })
+    );
+    const runtime = executionDependencies(seeded.repository, createPhoneCall);
+
+    await expect(
+      executeVoiceCall(runtime.dependencies, {
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId
+      })
+    ).resolves.toEqual({
+      kind: 'cancelled',
+      reason: 'DAILY_CONTACT_LIMIT'
+    });
     expect(createPhoneCall).not.toHaveBeenCalled();
   });
 

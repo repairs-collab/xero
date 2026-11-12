@@ -38,6 +38,7 @@ const unusedXero = {
   getOnlineInvoiceUrl: () =>
     Promise.reject(new Error('Online invoice URL was not expected'))
 };
+const noHolidays = { list: () => [] as string[] };
 
 beforeAll(async () => {
   await migrateDatabase(client.db);
@@ -450,6 +451,7 @@ describe('calculateReminderWork', () => {
         database: client.db,
         clock: { now: () => now },
         xero: unusedXero,
+        holidays: noHolidays,
         publisher: { publish }
       },
       seeded.organisationId
@@ -459,6 +461,7 @@ describe('calculateReminderWork', () => {
         database: client.db,
         clock: { now: () => now },
         xero: unusedXero,
+        holidays: noHolidays,
         publisher: { publish }
       },
       seeded.organisationId
@@ -513,6 +516,60 @@ describe('calculateReminderWork', () => {
     expect(chase?.sequenceId).toBe(seeded.sequenceId);
   });
 
+  it.each([
+    {
+      label: 'after the Sydney legal window',
+      executionTime: new Date('2026-09-18T07:30:00.000Z'),
+      sendTime: '18:00:00',
+      holidays: [] as string[]
+    },
+    {
+      label: 'on a configured Sydney public holiday',
+      executionTime: now,
+      sendTime: '11:00:00',
+      holidays: ['2026-09-18']
+    }
+  ])(
+    'leaves an automatic SMS scheduled $label',
+    async ({ executionTime, sendTime, holidays }) => {
+      const seeded = await seedInvoiceAndSequence({
+        mode: 'AUTOMATIC',
+        dueDate: '2026-09-18',
+        offsetDays: 0,
+        channel: 'SMS',
+        sendTime,
+        socialWindowStart: '00:00:00',
+        socialWindowEnd: '23:59:59'
+      });
+      const publish = vi.fn<JobPublisher['publish']>(() =>
+        Promise.resolve('unexpected-job')
+      );
+
+      const summary = await runReminderCycle(
+        {
+          database: client.db,
+          clock: { now: () => executionTime },
+          xero: unusedXero,
+          holidays: { list: () => holidays },
+          publisher: { publish }
+        },
+        seeded.organisationId
+      );
+
+      expect(summary.dispatch).toMatchObject({
+        candidateCount: 0,
+        queuedCount: 0,
+        publishedCount: 0
+      });
+      expect(publish).not.toHaveBeenCalled();
+      const [stage] = await client.db
+        .select({ status: stageInstances.status })
+        .from(stageInstances)
+        .where(eq(stageInstances.organisationId, seeded.organisationId));
+      expect(stage?.status).toBe('SCHEDULED');
+    }
+  );
+
   it('retries a current automatic reminder after an uncertain queue result', async () => {
     const seeded = await seedInvoiceAndSequence({
       mode: 'AUTOMATIC',
@@ -533,6 +590,7 @@ describe('calculateReminderWork', () => {
         {
           database: client.db,
           clock: { now: () => now },
+          holidays: noHolidays,
           publisher: { publish: failedPublish }
         },
         seeded.organisationId
@@ -549,6 +607,7 @@ describe('calculateReminderWork', () => {
       {
         database: client.db,
         clock: { now: () => now },
+        holidays: noHolidays,
         publisher: { publish: successfulPublish }
       },
       seeded.organisationId
@@ -613,6 +672,7 @@ describe('calculateReminderWork', () => {
       {
         database: client.db,
         clock: { now: () => now },
+        holidays: noHolidays,
         publisher: { publish }
       },
       seeded.organisationId
@@ -647,6 +707,7 @@ describe('calculateReminderWork', () => {
       {
         database: client.db,
         clock: { now: () => afterWindow },
+        holidays: noHolidays,
         publisher: { publish }
       },
       seeded.organisationId
@@ -677,6 +738,7 @@ describe('calculateReminderWork', () => {
         database: client.db,
         clock: { now: () => now },
         xero: unusedXero,
+        holidays: noHolidays,
         publisher: { publish }
       },
       seeded.organisationId

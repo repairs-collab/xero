@@ -8,6 +8,7 @@ import {
   contactChannels,
   contacts,
   createDatabase,
+  debtContactClaims,
   disputes,
   invoiceChases,
   invoices,
@@ -67,15 +68,17 @@ class FakeXero {
   getInvoiceCalls = 0;
   getOnlineInvoiceUrlCalls = 0;
   emailCalls = 0;
+  beforeOnlineInvoiceUrl: (() => Promise<void>) | null = null;
 
   getInvoice(): Promise<XeroResult<XeroInvoice>> {
     this.getInvoiceCalls += 1;
     return Promise.resolve(result(this.invoice));
   }
 
-  getOnlineInvoiceUrl(): Promise<XeroResult<string>> {
+  async getOnlineInvoiceUrl(): Promise<XeroResult<string>> {
     this.getOnlineInvoiceUrlCalls += 1;
-    return Promise.resolve(result(this.onlineInvoiceUrl));
+    await this.beforeOnlineInvoiceUrl?.();
+    return result(this.onlineInvoiceUrl);
   }
 
   emailInvoice(): Promise<{ kind: 'accepted' }> {
@@ -270,13 +273,15 @@ const dependencies = (
   xero: FakeXero,
   sinch: FakeSinch,
   allowance = true,
-  executionTime = now
+  executionTime = now,
+  holidays: readonly string[] = []
 ): ReminderExecutionDependencies => ({
   database: client.db,
   clock: { now: () => executionTime },
   xero,
   sinch,
   callbackUrl: 'https://bill-chaser.test/webhooks/sinch',
+  holidays: { list: () => holidays },
   xeroEmailAllowance: {
     hasSafeHeadroom: () => Promise.resolve(allowance)
   }
@@ -380,6 +385,88 @@ describe('executeReminder', () => {
       providerMessageId: 'sinch-message-1'
     });
     expect(sinch.sendCalls).toHaveLength(1);
+  });
+
+  it.each([
+    {
+      label: 'before 08:30 Sydney',
+      executionTime: new Date('2026-09-17T22:29:59.000Z'),
+      holidays: [] as string[]
+    },
+    {
+      label: 'at 17:00 Sydney',
+      executionTime: new Date('2026-09-18T07:00:00.000Z'),
+      holidays: [] as string[]
+    },
+    {
+      label: 'on a Sydney weekend',
+      executionTime: new Date('2026-09-19T00:00:00.000Z'),
+      holidays: [] as string[]
+    },
+    {
+      label: 'on a configured public holiday',
+      executionTime: new Date('2026-10-04T21:30:00.000Z'),
+      holidays: ['2026-10-05']
+    }
+  ])(
+    'blocks an automatic SMS debt contact $label',
+    async ({ executionTime, holidays }) => {
+      const seeded = await seedApprovedReminder({
+        sequenceMode: 'AUTOMATIC',
+        createApproval: false,
+        rolloutScope: 'CUSTOMER',
+        allowlisted: false,
+        stageScheduledAt: executionTime,
+        socialWindowStart: '00:00:00',
+        socialWindowEnd: '23:59:59'
+      });
+      const xero = new FakeXero();
+      xero.invoice = xeroInvoice(seeded);
+      const sinch = new FakeSinch();
+
+      await expect(
+        executeReminder(
+          dependencies(xero, sinch, true, executionTime, holidays),
+          {
+            organisationId: seeded.organisationId,
+            stageInstanceId: seeded.stageInstanceId
+          }
+        )
+      ).resolves.toEqual({
+        kind: 'cancelled',
+        reason: 'CONTACT_WINDOW_CLOSED'
+      });
+      expect(sinch.sendCalls).toHaveLength(0);
+    }
+  );
+
+  it('blocks SMS when voice already owns the customer local-day claim', async () => {
+    const seeded = await seedApprovedReminder({
+      rolloutScope: 'CUSTOMER',
+      allowlisted: false
+    });
+    await client.db.insert(debtContactClaims).values({
+      organisationId: seeded.organisationId,
+      contactId: seeded.contactId,
+      localDate: '2026-09-18',
+      channel: 'VOICE',
+      sourceId: randomUUID(),
+      claimedAt: now
+    });
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    const sinch = new FakeSinch();
+
+    await expect(
+      executeReminder(dependencies(xero, sinch), {
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId
+      })
+    ).resolves.toEqual({
+      kind: 'cancelled',
+      reason: 'DAILY_CONTACT_LIMIT'
+    });
+    expect(sinch.sendCalls).toHaveLength(0);
   });
 
   it.each([
@@ -1093,6 +1180,33 @@ describe('executeReminder', () => {
     });
     const xero = new FakeXero();
     xero.invoice = xeroInvoice(seeded);
+    const sinch = new FakeSinch();
+
+    await expect(
+      executeReminder(dependencies(xero, sinch), {
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId
+      })
+    ).resolves.toEqual({ kind: 'cancelled', reason: 'DISPUTE_OPEN' });
+    expect(sinch.sendCalls).toHaveLength(0);
+  });
+
+  it('stops when an operator marks a dispute during final SMS preparation', async () => {
+    const seeded = await seedApprovedReminder({
+      rolloutScope: 'CUSTOMER',
+      allowlisted: false
+    });
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    xero.beforeOnlineInvoiceUrl = async () => {
+      await client.db.insert(disputes).values({
+        organisationId: seeded.organisationId,
+        contactId: seeded.contactId,
+        invoiceId: seeded.invoiceId,
+        status: 'OPEN',
+        reason: 'Operator marked the account as disputed'
+      });
+    };
     const sinch = new FakeSinch();
 
     await expect(

@@ -457,6 +457,7 @@ async function main() {
             database: databaseClient.db,
             clock,
             xero: await xeroFactory.forOrganisation(payload.organisationId),
+            holidays: { list: () => [] },
             publisher: queue
           },
           payload.organisationId

@@ -16,6 +16,16 @@ export interface LocalDateInterval {
   before: Date;
 }
 
+export interface DebtContactWindowDecision {
+  allowed: boolean;
+  localDate: string;
+  reason: 'CONTACT_WINDOW_CLOSED' | null;
+}
+
+export const debtContactTimeZone = 'Australia/Sydney';
+export const debtContactWindowStartLocal = '08:30';
+export const debtContactWindowEndLocal = '17:00';
+
 const parseLocalDate = (localDate: string, zone: string): DateTime => {
   const parsed = DateTime.fromISO(localDate, { zone });
   if (!parsed.isValid || parsed.toISODate() !== localDate) {
@@ -55,5 +65,26 @@ export function createBusinessCalendar(
       }
       return candidate.toISODate() ?? '';
     }
+  };
+}
+
+export function decideDebtContactWindow(
+  now: Date,
+  holidays: readonly string[]
+): DebtContactWindowDecision {
+  const local = DateTime.fromJSDate(now, { zone: debtContactTimeZone });
+  const localDate = local.toISODate() ?? '';
+  const calendar = createBusinessCalendar({
+    zone: debtContactTimeZone,
+    holidays: [...holidays]
+  });
+  const localMinute = local.hour * 60 + local.minute;
+  const allowed =
+    calendar.isBusinessDate(localDate) &&
+    localMinute >= 8 * 60 + 30 && localMinute < 17 * 60;
+  return {
+    allowed,
+    localDate,
+    reason: allowed ? null : 'CONTACT_WINDOW_CLOSED'
   };
 }

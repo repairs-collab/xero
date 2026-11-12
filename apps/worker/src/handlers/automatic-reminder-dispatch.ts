@@ -11,7 +11,7 @@ import {
   reminderSequenceVersions,
   stageInstances
 } from '@bc5000/db';
-import { localDateInterval } from '@bc5000/domain';
+import { decideDebtContactWindow, localDateInterval } from '@bc5000/domain';
 import { jobNames, type JobPublisher } from '@bc5000/jobs';
 
 import {
@@ -23,6 +23,7 @@ import {
 export interface AutomaticReminderDispatchDependencies {
   database: Database;
   clock: { now(): Date };
+  holidays: { list(organisationId: string): readonly string[] };
   publisher: JobPublisher;
 }
 
@@ -34,6 +35,7 @@ export interface AutomaticReminderDispatchSummary {
 
 export interface ReminderCycleDependencies
   extends ReminderCalculationDependencies {
+  holidays: { list(organisationId: string): readonly string[] };
   publisher: JobPublisher;
 }
 
@@ -93,6 +95,7 @@ export async function dispatchAutomaticReminderWork(
   const rows = await dependencies.database
     .select({
       id: stageInstances.id,
+      channel: stageInstances.channel,
       scheduledAt: stageInstances.scheduledAt,
       sourceVersion: stageInstances.sourceVersion,
       socialWindowStart: reminderSequenceVersions.socialWindowStart,
@@ -161,6 +164,15 @@ export async function dispatchAutomaticReminderWork(
   const candidates = rows.filter((row) => {
     if (publishedStageIds.has(row.id)) return false;
     const dispatchAt = row.scheduledAt > now ? row.scheduledAt : now;
+    if (
+      row.channel === 'SMS' &&
+      !decideDebtContactWindow(
+        dispatchAt,
+        dependencies.holidays.list(organisationId)
+      ).allowed
+    ) {
+      return false;
+    }
     const time = localTime(dispatchAt, organisation.timeZone);
     return time >= row.socialWindowStart && time < row.socialWindowEnd;
   });
@@ -262,6 +274,7 @@ export async function runReminderCycle(
     {
       database: dependencies.database,
       clock: dependencies.clock,
+      holidays: dependencies.holidays,
       publisher: dependencies.publisher
     },
     organisationId

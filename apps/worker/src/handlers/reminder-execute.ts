@@ -1,12 +1,14 @@
 import { createHash } from 'node:crypto';
 
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, or } from 'drizzle-orm';
 
-import { renderSms } from '@bc5000/domain';
+import { decideDebtContactWindow, renderSms } from '@bc5000/domain';
 
 import {
   approvals,
   type Database,
+  disputes,
+  PostgresDebtContactRepository,
   PostgresMessageRepository,
   stageInstances,
   tasks
@@ -58,6 +60,7 @@ export interface ReminderExecutionDependencies {
   xero: ReminderExecutionXero;
   sinch: SmsProvider;
   callbackUrl: string;
+  holidays: { list(organisationId: string): readonly string[] };
   xeroEmailAllowance: XeroEmailAllowance;
 }
 
@@ -74,6 +77,8 @@ export type ExecutionOutcome =
         | StopReason
         | EntitlementSendBlocker
         | 'XERO_EMAIL_ALLOWANCE'
+        | 'CONTACT_WINDOW_CLOSED'
+        | 'DAILY_CONTACT_LIMIT'
         | 'OPERATIONAL_MAINTENANCE'
         | 'UNSUPPORTED_SENDING_STATE';
     }
@@ -376,6 +381,61 @@ export async function executeReminder(
         }
         if (reminder.channel === 'SMS') {
           await sendContext.assertEntitlement();
+          const contactAt = dependencies.clock.now();
+          const [openDispute] = await transaction
+            .select({ id: disputes.id })
+            .from(disputes)
+            .where(
+              and(
+                eq(disputes.organisationId, payload.organisationId),
+                eq(disputes.contactId, reminder.contactId),
+                eq(disputes.status, 'OPEN'),
+                or(
+                  isNull(disputes.invoiceId),
+                  eq(disputes.invoiceId, reminder.invoiceId)
+                )
+              )
+            )
+            .limit(1);
+          if (openDispute !== undefined) {
+            return {
+              kind: 'schedule-blocked' as const,
+              reason: 'DISPUTE_OPEN' as const,
+              blockedAt: contactAt
+            };
+          }
+          const contactWindow = decideDebtContactWindow(
+            contactAt,
+            dependencies.holidays.list(payload.organisationId)
+          );
+          if (!contactWindow.allowed) {
+            return {
+              kind: 'schedule-blocked' as const,
+              reason: 'CONTACT_WINDOW_CLOSED' as const,
+              blockedAt: contactAt
+            };
+          }
+          const debtContactClaim =
+            await new PostgresDebtContactRepository(
+              dependencies.database
+            ).claimDebtContact(
+              {
+                organisationId: payload.organisationId,
+                contactId: reminder.contactId,
+                localDate: contactWindow.localDate,
+                channel: 'SMS',
+                sourceId: payload.stageInstanceId,
+                claimedAt: contactAt
+              },
+              transaction
+            );
+          if (debtContactClaim.kind === 'already-claimed') {
+            return {
+              kind: 'schedule-blocked' as const,
+              reason: 'DAILY_CONTACT_LIMIT' as const,
+              blockedAt: contactAt
+            };
+          }
           const accepted = await dependencies.sinch.sendSms({
             destinationNumber: reminder.destination,
             ...(sendContext.smsSourceNumber === null

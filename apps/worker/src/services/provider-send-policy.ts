@@ -245,6 +245,9 @@ export async function markProviderSendBlocked(
     reason:
       | Extract<ProviderSendPolicyDecision, { kind: 'blocked' }>['reason']
       | 'CHANNEL_SUPPRESSED'
+      | 'CONTACT_WINDOW_CLOSED'
+      | 'DAILY_CONTACT_LIMIT'
+      | 'DISPUTE_OPEN'
       | 'OUTSIDE_SCHEDULE_WINDOW'
       | 'SOURCE_CHANGED'
       | EntitlementSendBlocker
