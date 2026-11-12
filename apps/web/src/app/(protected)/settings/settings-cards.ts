@@ -24,7 +24,7 @@ const settingsCards: SettingsCard[] = [
   },
   {
     eyebrow: 'Testing',
-    title: 'Test SMS',
+    title: 'Test sending',
     description: 'Safely test a number and follow its status in Outbox',
     href: '/settings/test-sms',
     adminOnly: true
@@ -37,9 +37,10 @@ const settingsCards: SettingsCard[] = [
   },
   {
     eyebrow: 'Connections',
-    title: 'Integrations',
-    description: 'Xero, Sinch, webhooks, and secret references',
-    href: '/settings/integrations'
+    title: 'Xero connection',
+    description: 'Connect, reconnect and sync your Xero organisation',
+    href: '/settings/integrations',
+    adminOnly: true
   },
   {
     eyebrow: 'Voice integration',

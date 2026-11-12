@@ -141,9 +141,9 @@ export const liveActivationFeedback = (
     case 'PROVIDERS_UNHEALTHY':
       return {
         tone: 'error',
-        title: 'Provider checks are out of date',
+        title: 'Connection checks are out of date',
         detail:
-          'Run successful Xero and Sinch connection tests, then try again within 24 hours.'
+          'Reconnect Xero if needed. AccountPulse checks the messaging service automatically; contact support if this remains blocked.'
       };
     case 'XERO_SYNC_STALE':
       return {

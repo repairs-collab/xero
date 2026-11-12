@@ -90,8 +90,9 @@ describe('final rollout controls', () => {
     );
 
     expect(html).toContain('Controlled live is active');
-    expect(html).toContain('Xero and Sinch checks are current');
-    expect(html).toContain('Run both connection tests in Integrations');
+    expect(html).toContain('Xero and messaging checks are current');
+    expect(html).toContain('AccountPulse checks the messaging service automatically');
+    expect(html).not.toContain('Sinch');
     expect(html).toContain('Fresh Xero sync');
     expect(html).toContain('Imported receivables are present');
     expect(html).toContain('Controlled Test SMS');
@@ -199,7 +200,7 @@ describe('final rollout controls', () => {
     };
     expect(
       rolloutFeedback('provider-sending-disabled', dryRunState)?.title
-    ).toBe('All provider sending disabled');
+    ).toBe('All message sending disabled');
   });
 
   it('keeps reconciliation and final-customer acknowledgements distinct', () => {

@@ -12,12 +12,19 @@ const model: DashboardModel = {
   paidAfterReminders: '$500',
   lastXeroSync: '11 Nov 2026, 9:00 am',
   xeroHealthy: true,
-  sinchHealthy: true,
+  messagingHealthy: true,
   supportEmail: 'AP@motts.com.au',
   supportChatUrl: 'https://sophie.example/chat'
 };
 
 describe('dashboard support', () => {
+  it('shows provider-neutral AccountPulse messaging health', () => {
+    const markup = renderToStaticMarkup(<DashboardView model={model} />);
+
+    expect(markup).toContain('AccountPulse messaging ready');
+    expect(markup).not.toContain('Sinch');
+  });
+
   it('offers Sophie chat and a human support email', () => {
     const markup = renderToStaticMarkup(<DashboardView model={model} />);
 

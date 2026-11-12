@@ -1,15 +1,16 @@
 import { authorise } from '@bc5000/auth';
 import {
   organisations,
+  smsNumberPool,
   type OutboundSource,
   type OutboundStatus
 } from '@bc5000/db/web';
-import { eq } from 'drizzle-orm';
-import { PaperAirplaneIcon } from '@heroicons/react/24/outline';
+import { and, eq, inArray } from 'drizzle-orm';
 import { headers } from 'next/headers';
 import Link from 'next/link';
 
 import { OutboxTable } from '../../../components/outbox-table.js';
+import { CustomerReplyNumber } from '../../../components/customer-reply-number.js';
 import { getDatabaseClient, requireWebSession } from '../../../server/runtime.js';
 import {
   queryOutbox,
@@ -78,11 +79,27 @@ export default async function OutboxPage({
     throw new Error('No active organisation membership');
   }
   authorise(session, 'outbox.read', organisationId);
-  const [organisation] = await getDatabaseClient()
-    .db.select({ timeZone: organisations.timeZone })
-    .from(organisations)
-    .where(eq(organisations.id, organisationId))
-    .limit(1);
+  const database = getDatabaseClient().db;
+  const [[organisation], [replyNumber]] = await Promise.all([
+    database
+      .select({ timeZone: organisations.timeZone })
+      .from(organisations)
+      .where(eq(organisations.id, organisationId))
+      .limit(1),
+    database
+      .select({
+        e164Number: smsNumberPool.e164Number,
+        status: smsNumberPool.status
+      })
+      .from(smsNumberPool)
+      .where(
+        and(
+          eq(smsNumberPool.organisationId, organisationId),
+          inArray(smsNumberPool.status, ['RESERVED', 'READY', 'QUARANTINED'])
+        )
+      )
+      .limit(1)
+  ]);
   if (organisation === undefined) throw new Error('Organisation not found');
   const parameters = await searchParams;
   const search = first(parameters.search);
@@ -97,7 +114,7 @@ export default async function OutboxPage({
     ...(to === undefined ? {} : { to }),
     timeZone: organisation.timeZone
   });
-  const result = await queryOutbox(getDatabaseClient().db, {
+  const result = await queryOutbox(database, {
     organisationId,
     limit: 25,
     ...(search?.trim() ? { search } : {}),
@@ -116,9 +133,7 @@ export default async function OutboxPage({
           <h1>Outbox</h1>
           <p>See every reminder, reply, test and Xero email request in one place.</p>
         </div>
-        <span className="page-heading__icon" aria-hidden="true">
-          <PaperAirplaneIcon />
-        </span>
+        <CustomerReplyNumber number={replyNumber ?? null} />
       </header>
 
       <form className="filter-bar outbox-filters" method="get" aria-label="Outbox filters">

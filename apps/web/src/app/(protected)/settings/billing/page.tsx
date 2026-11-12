@@ -118,7 +118,7 @@ export default async function BillingSettingsPage() {
               <dd>{(smsUsage?.committedParts ?? 0).toLocaleString('en-AU')}</dd>
             </div>
             <div>
-              <dt>Reserved while provider outcome is checked</dt>
+              <dt>Reserved while delivery outcome is checked</dt>
               <dd>{(smsUsage?.reservedParts ?? 0).toLocaleString('en-AU')}</dd>
             </div>
             <div>
@@ -154,7 +154,7 @@ export default async function BillingSettingsPage() {
             <dd>{(smsUsage?.committedParts ?? 0).toLocaleString('en-AU')}</dd>
           </div>
           <div>
-            <dt>Reserved while provider outcome is checked</dt>
+            <dt>Reserved while delivery outcome is checked</dt>
             <dd>{(smsUsage?.reservedParts ?? 0).toLocaleString('en-AU')}</dd>
           </div>
           <div>
@@ -172,7 +172,7 @@ export default async function BillingSettingsPage() {
         </dl>
         <p className="muted-copy">
           Sends that would exceed the included allowance are blocked and are
-          not submitted to the SMS provider. Blocked sends are not automatically
+          not submitted for delivery. Blocked sends are not automatically
           replayed.
         </p>
         {smsUsage !== null &&

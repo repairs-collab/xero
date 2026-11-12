@@ -16,7 +16,7 @@ export interface DashboardSnapshot {
   paidAfterReminders: string;
   lastXeroSync: Date | null;
   xeroHealthy: boolean;
-  sinchHealthy: boolean;
+  messagingHealthy: boolean;
 }
 
 export class DashboardRepository {
@@ -43,7 +43,7 @@ export class DashboardRepository {
       paidAfterReminders: paid[0]?.total ?? '0',
       lastXeroSync: organisation[0]?.lastSuccessfulSyncAt ?? null,
       xeroHealthy: health.get('XERO') ?? false,
-      sinchHealthy: health.get('SINCH') ?? false
+      messagingHealthy: health.get('SINCH') ?? false
     };
   }
 }

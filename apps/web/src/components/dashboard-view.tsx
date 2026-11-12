@@ -21,7 +21,7 @@ export interface DashboardModel {
   paidAfterReminders: string;
   lastXeroSync: string;
   xeroHealthy: boolean;
-  sinchHealthy: boolean;
+  messagingHealthy: boolean;
   supportEmail: string;
   supportChatUrl: string | null;
 }
@@ -39,9 +39,9 @@ export function DashboardView({ model }: { model: DashboardModel }) {
           <h1>Overview</h1>
           <p>Keep receivables moving without losing the human touch.</p>
         </div>
-        <div className="provider-health" aria-label="Provider health">
+        <div className="provider-health" aria-label="Connection health">
           <span><StatusDot healthy={model.xeroHealthy} />Xero {model.xeroHealthy ? 'connected' : 'needs attention'}</span>
-          <span><StatusDot healthy={model.sinchHealthy} />Sinch {model.sinchHealthy ? 'connected' : 'needs attention'}</span>
+          <span><StatusDot healthy={model.messagingHealthy} />AccountPulse messaging {model.messagingHealthy ? 'ready' : 'needs attention'}</span>
         </div>
       </header>
 

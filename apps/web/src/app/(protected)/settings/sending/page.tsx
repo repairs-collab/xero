@@ -185,9 +185,9 @@ export default async function SendingSettingsPage({
           <h2>{mode}</h2>
           <p>
             {mode === 'Dry run'
-              ? 'Outbound records may be prepared, but no provider call can be made.'
+              ? 'Outbound records may be prepared, but no message is delivered.'
               : mode === 'Controlled live'
-                ? 'Provider calls are limited to the technical recipient allowlist.'
+                ? 'Message delivery is limited to the technical recipient allowlist.'
                 : 'Approved reminders may reach eligible customers, subject to every normal safeguard.'}
           </p>
         </div>
@@ -345,10 +345,10 @@ export default async function SendingSettingsPage({
 
       <div className="settings-grid rollout-controls-grid">
         <section className="panel">
-          <span className="eyebrow">Technical recipient allowlist</span>
+          <span className="eyebrow">Technical test destinations</span>
           <h2>Controlled testing destinations</h2>
           <p className="settings-copy">
-            This list limits provider calls in Controlled live and always
+            This list limits AccountPulse delivery in Controlled live and always
             limits the Test SMS tool. It is not a customer contact list.
           </p>
           <form className="settings-form" action={updateAllowlist}>
@@ -373,7 +373,7 @@ export default async function SendingSettingsPage({
 
         <section className="panel">
           <span className="eyebrow">Sending controls</span>
-          <h2>Provider-call safety</h2>
+          <h2>Emergency sending controls</h2>
           {organisation.sendMode === 'dry-run' && (
             <form className="settings-form" action={activateLive}>
               <HiddenOrganisationState
@@ -420,17 +420,17 @@ export default async function SendingSettingsPage({
                 version={organisation.operationalStateVersion}
               />
               <label>
-                Reason for disabling all provider sending
+                Reason for disabling all sending
                 <input name="reason" maxLength={500} required />
               </label>
               <button className="button button--danger">
-                Disable all provider sending
+                Disable all sending
               </button>
             </form>
           )}
           {organisation.sendMode === 'dry-run' && (
             <p className="settings-copy">
-              Provider calls are disabled. Enable Controlled live only after
+              Message delivery is disabled. Enable Controlled live only after
               the technical allowlist and connection checks are ready.
             </p>
           )}

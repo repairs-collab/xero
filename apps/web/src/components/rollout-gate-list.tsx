@@ -63,7 +63,7 @@ export const rolloutFeedback = (
         tone: 'success',
         title: 'Controlled live is active',
         detail:
-          'Only destinations on the technical recipient allowlist can reach providers.'
+          'Only destinations on the technical recipient allowlist can receive messages.'
       };
     case 'reconciled':
       return {
@@ -91,12 +91,12 @@ export const rolloutFeedback = (
         tone: 'success',
         title: 'Returned to controlled live',
         detail:
-          'Provider calls remain live, but only technical allowlist destinations can be reached.'
+          'Message delivery remains live, but only technical allowlist destinations can be reached.'
       };
     case 'provider-sending-disabled':
       return {
         tone: 'success',
-        title: 'All provider sending disabled',
+        title: 'All message sending disabled',
         detail:
           'AccountPulse is in Dry run and customer rollout will require the full approval flow again.'
       };
@@ -182,8 +182,9 @@ const gateCopy = {
       'Enable controlled live only after the technical recipient allowlist is ready.'
   },
   providersHealthy: {
-    title: 'Xero and Sinch checks are current',
-    correction: 'Run both connection tests in Integrations within 24 hours.'
+    title: 'Xero and messaging checks are current',
+    correction:
+      'Reconnect Xero if needed. AccountPulse checks the messaging service automatically; contact support if this remains blocked.'
   },
   syncFresh: {
     title: 'Fresh Xero sync',
