@@ -218,8 +218,8 @@ export default async function BillingSettingsPage() {
           <div className="callout callout--warning" role="status">
             <strong>Online billing setup is temporarily unavailable</strong>
             <p>
-              Your trial and AccountPulse data are safe. Contact support before
-              the trial ends; no card details can be entered on this page while
+              Your AccountPulse data remains safe. Contact support for billing
+              help; no card details can be entered on this page while online
               billing is unavailable.
             </p>
           </div>

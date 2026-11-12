@@ -17,8 +17,9 @@ export default async function NewPlatformCustomerPage({
           <span className="eyebrow">Customer onboarding</span>
           <h1>Create a new AccountPulse customer</h1>
           <p>
-            Creates a safe Solo trial, emails the first Administrator and sends
-            them through legal acceptance, Xero connection and guided setup.
+            Creates a controlled Solo beta workspace, emails the first
+            Administrator and sends them through legal acceptance, Xero
+            connection and guided setup.
           </p>
         </div>
         <Link className="button button--quiet" href="/platform-admin">
@@ -83,13 +84,9 @@ export default async function NewPlatformCustomerPage({
         </section>
 
         <section>
-          <span className="eyebrow">Trial and usage</span>
+          <span className="eyebrow">Activation and usage</span>
           <h2>Commercial settings</h2>
           <div className="form-grid">
-            <label>
-              Trial length (days)
-              <input name="trialDays" type="number" min={1} max={90} defaultValue={14} required />
-            </label>
             <label>
               Included SMS parts
               <input name="includedSmsParts" type="number" min={1} max={1_000_000} defaultValue={2_000} required />
@@ -121,8 +118,8 @@ export default async function NewPlatformCustomerPage({
           <strong>Safe defaults</strong>
           <p>
             The workspace begins in dry-run review mode with customer sending
-            disabled until Xero is connected, data is reconciled and setup is
-            completed.
+            disabled until Xero is connected, data is reconciled, setup is
+            completed and a paid subscription is activated.
           </p>
         </div>
         <button className="button button--primary" type="submit">

@@ -564,9 +564,6 @@ export const createSubscriptionService = (dependencies: {
       organisationId,
       userId: session.userId,
       customerEmail: account.billingEmail,
-      ...(account.trialEndsAt !== null && Math.floor(account.trialEndsAt.getTime() / 1000) >= Math.ceil(dependencies.clock.now().getTime() / 1000) + 48 * 60 * 60 + 300
-        ? { trialEnd: Math.floor(account.trialEndsAt.getTime() / 1000) }
-        : {}),
       ...(account.stripeCustomerId === null
         ? {}
         : { stripeCustomerId: account.stripeCustomerId }),

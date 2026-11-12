@@ -18,7 +18,6 @@ const input = {
   adminDisplayName: 'Alex Admin',
   timeZone: 'Australia/Sydney' as const,
   baseCurrency: 'AUD' as const,
-  trialDays: 14,
   includedSmsParts: 2_000,
   warningPercent: 80,
   reason: 'Approved beta customer'
@@ -51,7 +50,6 @@ describe('platform customer provisioning', () => {
       name: 'Acme Repairs',
       timeZone: 'Australia/Sydney',
       baseCurrency: 'AUD',
-      trialEndsAt: new Date('2026-11-25T00:00:00.000Z'),
       includedSmsParts: 2_000,
       warningPercent: 80,
       reason: 'Approved beta customer',

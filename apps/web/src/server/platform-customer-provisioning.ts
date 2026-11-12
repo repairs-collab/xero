@@ -23,15 +23,13 @@ export interface CreatePlatformCustomerInput {
   adminDisplayName: string;
   timeZone: 'Australia/Sydney' | 'Australia/Adelaide' | 'Australia/Perth';
   baseCurrency: 'AUD';
-  trialDays: number;
   includedSmsParts: number;
   warningPercent: number;
   reason: string;
 }
 
-interface WorkspaceInput extends Omit<CreatePlatformCustomerInput, 'adminEmail' | 'adminDisplayName' | 'trialDays'> {
+interface WorkspaceInput extends Omit<CreatePlatformCustomerInput, 'adminEmail' | 'adminDisplayName'> {
   actorUserId: string;
-  trialEndsAt: Date;
   now: Date;
 }
 
@@ -63,8 +61,8 @@ export const createPostgresPlatformCustomerProvisioningRepository = (
       await transaction.insert(subscriptions).values({
         organisationId: organisation.id,
         planCode: 'SOLO_AU_2000',
-        status: 'TRIALING',
-        trialEndsAt: input.trialEndsAt
+        status: 'INCOMPLETE',
+        trialEndsAt: null
       });
       await transaction.insert(organisationOnboarding).values({
         organisationId: organisation.id,
@@ -82,7 +80,8 @@ export const createPostgresPlatformCustomerProvisioningRepository = (
         sendMode: 'dry-run',
         rolloutScope: 'CONTROLLED',
         operationalState: 'SYNC_REQUIRED',
-        trialEndsAt: input.trialEndsAt.toISOString(),
+        subscriptionStatus: 'INCOMPLETE',
+        trialEndsAt: null,
         includedSmsParts: input.includedSmsParts
       };
       await transaction.insert(auditEvents).values({
@@ -151,9 +150,6 @@ export const createPlatformCustomerProvisioningService = (dependencies: {
       input.adminDisplayName.length > 160 ||
       !allowedTimeZones.has(input.timeZone) ||
       input.baseCurrency !== 'AUD' ||
-      !Number.isSafeInteger(input.trialDays) ||
-      input.trialDays < 1 ||
-      input.trialDays > 90 ||
       !Number.isSafeInteger(input.includedSmsParts) ||
       input.includedSmsParts < 1 ||
       input.includedSmsParts > 1_000_000 ||
@@ -171,9 +167,6 @@ export const createPlatformCustomerProvisioningService = (dependencies: {
       name: input.name,
       timeZone: input.timeZone,
       baseCurrency: input.baseCurrency,
-      trialEndsAt: new Date(
-        now.getTime() + input.trialDays * 24 * 60 * 60 * 1000
-      ),
       includedSmsParts: input.includedSmsParts,
       warningPercent: input.warningPercent,
       reason: input.reason,

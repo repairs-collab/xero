@@ -753,10 +753,10 @@ describe('decideStripeEventApplication', () => {
 
 
 describe('one-time trial and event safety', () => {
-  it('passes only an eligible existing trial deadline to Checkout', async () => {
+  it('never forwards a historical trial deadline to paid Checkout', async () => {
     const {service, stripe, repository} = createService();
     await service.createCheckout(adminSession, 'org_solo');
-    expect(stripe.checkoutRequests[0]).toHaveProperty('trialEnd', Math.floor(new Date('2026-11-23T00:00:00Z').getTime()/1000));
+    expect(stripe.checkoutRequests[0]).not.toHaveProperty('trialEnd');
     repository.currentAccount = account({ trialEndsAt: new Date('2026-11-09T12:30:00Z') });
     await service.createCheckout(adminSession, 'org_solo');
     expect(stripe.checkoutRequests[1]).not.toHaveProperty('trialEnd');
@@ -765,7 +765,7 @@ describe('one-time trial and event safety', () => {
     expect(stripe.checkoutRequests[2]).not.toHaveProperty('trialEnd');
     repository.currentAccount = account({trialEndsAt: new Date('2026-11-11T12:05:00Z')});
     await service.createCheckout(adminSession, 'org_solo');
-    expect(stripe.checkoutRequests[3]).toHaveProperty('trialEnd');
+    expect(stripe.checkoutRequests[3]).not.toHaveProperty('trialEnd');
   });
   it('accepts item-level billing periods', async () => {
     const {service, stripe, repository} = createService();

@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { AppSession } from '@bc5000/auth';
+import { decideAccountEntitlements } from '@bc5000/domain';
 import {
   createDatabase,
   memberships,
@@ -68,7 +69,6 @@ describe('platform customer lifecycle', () => {
       adminDisplayName: 'Lifecycle Administrator',
       timeZone: 'Australia/Sydney',
       baseCurrency: 'AUD',
-      trialDays: 14,
       includedSmsParts: 2_000,
       warningPercent: 80,
       reason: 'Lifecycle integration test'
@@ -98,7 +98,28 @@ describe('platform customer lifecycle', () => {
       operationalState: 'SYNC_REQUIRED',
       liveSendAcknowledged: false
     });
-    expect(subscription).toMatchObject({ status: 'TRIALING' });
+    expect(subscription).toMatchObject({
+      status: 'INCOMPLETE',
+      trialEndsAt: null
+    });
+    expect(
+      decideAccountEntitlements({
+        edition: 'SOLO',
+        platformStatus: 'ACTIVE',
+        subscriptionStatus: subscription!.status,
+        trialEndsAt: subscription!.trialEndsAt,
+        onboardingCompletedVersion: 1,
+        requiredOnboardingVersion: 1,
+        replyNumberReady: true,
+        verifiedAdminMobile: '+61412345678',
+        acceptedTrialTestSmsParts: 0,
+        now: new Date('2026-11-11T00:00:00.000Z')
+      })
+    ).toMatchObject({
+      canCustomerSend: false,
+      canAutomaticDispatch: false,
+      blocker: 'SUBSCRIPTION_REQUIRED'
+    });
     expect(onboarding).toMatchObject({ version: 1 });
     expect(allowance).toMatchObject({
       includedParts: 2_000,
@@ -111,6 +132,8 @@ describe('platform customer lifecycle', () => {
     const owner = await seedOwner();
     const organisationId = randomUUID();
     const customerUserId = randomUUID();
+    const customerCognitoSubject = `must-not-be-exported-${randomUUID()}`;
+    const customerEmail = `backup-customer-${customerUserId}@example.invalid`;
     await client.db.insert(organisations).values({
       id: organisationId,
       xeroOrganisationId: randomUUID(),
@@ -120,8 +143,8 @@ describe('platform customer lifecycle', () => {
     });
     await client.db.insert(users).values({
       id: customerUserId,
-      cognitoSubject: 'must-not-be-exported',
-      email: 'backup-customer@example.invalid',
+      cognitoSubject: customerCognitoSubject,
+      email: customerEmail,
       displayName: 'Backup Customer'
     });
     await client.db.insert(memberships).values({
@@ -139,8 +162,8 @@ describe('platform customer lifecycle', () => {
     const encoded = JSON.stringify(backup);
 
     expect(encoded).toContain('Backup Test Customer');
-    expect(encoded).toContain('backup-customer@example.invalid');
-    expect(encoded).not.toContain('must-not-be-exported');
+    expect(encoded).toContain(customerEmail);
+    expect(encoded).not.toContain(customerCognitoSubject);
     await expect(
       service.createBackup(customerUserId, organisationId)
     ).rejects.toThrow('FORBIDDEN');

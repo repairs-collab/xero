@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import type { AppSession } from '@bc5000/auth';
+import { decideAccountEntitlements } from '@bc5000/domain';
 import {
   auditEvents,
   createDatabase,
@@ -95,7 +96,7 @@ const seedProvisionalIdentity = async (): Promise<{
 };
 
 describe('AccountPulse Solo provisioning', () => {
-  it('atomically creates one safe trial workspace and remains idempotent on retry', async () => {
+  it('atomically creates one unpaid workspace and remains idempotent on retry', async () => {
     const seeded = await seedProvisionalIdentity();
     const published = new Set<string>();
     const service = createSoloProvisioningService({
@@ -159,8 +160,26 @@ describe('AccountPulse Solo provisioning', () => {
     expect(storedSubscriptions).toHaveLength(1);
     expect(storedSubscriptions[0]).toMatchObject({
       planCode: 'SOLO_AU_2000',
-      status: 'TRIALING',
-      trialEndsAt: new Date('2026-11-24T00:00:00.000Z')
+      status: 'INCOMPLETE',
+      trialEndsAt: null
+    });
+    expect(
+      decideAccountEntitlements({
+        edition: 'SOLO',
+        platformStatus: 'ACTIVE',
+        subscriptionStatus: storedSubscriptions[0]!.status,
+        trialEndsAt: storedSubscriptions[0]!.trialEndsAt,
+        onboardingCompletedVersion: 1,
+        requiredOnboardingVersion: 1,
+        replyNumberReady: true,
+        verifiedAdminMobile: '+61412345678',
+        acceptedTrialTestSmsParts: 0,
+        now
+      })
+    ).toMatchObject({
+      canCustomerSend: false,
+      canAutomaticDispatch: false,
+      blocker: 'SUBSCRIPTION_REQUIRED'
     });
 
     const storedOnboarding = await client.db
@@ -218,8 +237,7 @@ describe('AccountPulse Solo provisioning', () => {
       pendingAuthorisationId: first.pendingAuthorisationId,
       connectionId: first.connectionId,
       tenantId: first.tenantId,
-      now,
-      trialEndsAt: new Date('2026-11-24T00:00:00.000Z')
+      now
     });
     const second = await seedProvisionalIdentity();
     await client.db
@@ -247,8 +265,7 @@ describe('AccountPulse Solo provisioning', () => {
         pendingAuthorisationId: second.pendingAuthorisationId,
         connectionId: first.connectionId,
         tenantId: first.tenantId,
-        now,
-        trialEndsAt: new Date('2026-11-24T00:00:00.000Z')
+        now
       });
     } catch (error) {
       message = error instanceof Error ? error.message : String(error);

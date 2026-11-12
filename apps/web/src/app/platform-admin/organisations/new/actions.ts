@@ -39,7 +39,6 @@ export async function createCustomerAction(formData: FormData): Promise<never> {
           | 'Australia/Adelaide'
           | 'Australia/Perth',
         baseCurrency: text(formData, 'baseCurrency') as 'AUD',
-        trialDays: integer(formData, 'trialDays'),
         includedSmsParts: integer(formData, 'includedSmsParts'),
         warningPercent: integer(formData, 'warningPercent'),
         reason: text(formData, 'reason')

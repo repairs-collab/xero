@@ -19,7 +19,6 @@ export interface SoloProvisioningInput {
   connectionId: string;
   tenantId: string;
   now: Date;
-  trialEndsAt: Date;
 }
 
 export interface SoloProvisioningRepository {
@@ -203,8 +202,8 @@ export const createPostgresSoloProvisioningRepository = (
         await transaction.insert(subscriptions).values({
           organisationId: organisation.id,
           planCode: 'SOLO_AU_2000',
-          status: 'TRIALING',
-          trialEndsAt: input.trialEndsAt
+          status: 'INCOMPLETE',
+          trialEndsAt: null
         });
         await transaction.insert(organisationOnboarding).values({
           organisationId: organisation.id,
@@ -233,7 +232,8 @@ export const createPostgresSoloProvisioningRepository = (
             sendMode: 'dry-run',
             rolloutScope: 'CONTROLLED',
             operationalState: 'SYNC_REQUIRED',
-            trialEndsAt: input.trialEndsAt.toISOString()
+            subscriptionStatus: 'INCOMPLETE',
+            trialEndsAt: null
           },
           occurredAt: input.now
         });
@@ -276,8 +276,7 @@ export const createSoloProvisioningService = (dependencies: {
     const provisioned = await dependencies.repository.provision({
       userId: session.userId,
       ...input,
-      now,
-      trialEndsAt: new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000)
+      now
     });
     let initialSyncQueued = true;
     try {

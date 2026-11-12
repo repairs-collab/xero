@@ -312,7 +312,7 @@ export const deriveOnboardingStatus = (
     {
       key: 'ADMIN_MOBILE_VERIFIED',
       label: 'Verify the Administrator mobile',
-      description: 'Verify an Australian mobile before sending trial tests.',
+      description: 'Verify an Australian mobile for test messages.',
       href: '/settings/test-sms',
       complete: verifiedAustralianMobile(input)
     },
@@ -337,7 +337,7 @@ export const deriveOnboardingStatus = (
     {
       key: 'SUBSCRIPTION_ACTIVE',
       label: 'Activate the subscription',
-      description: 'Subscribe through Stripe when the trial is ready.',
+      description: 'Pay securely through Stripe to activate AccountPulse.',
       href: '/settings/billing',
       complete:
         hasPaidSubscriptionAccess({ ...input, now })

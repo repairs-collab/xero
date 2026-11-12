@@ -78,8 +78,7 @@ describe('SoloProvisioningService', () => {
         pendingAuthorisationId: 'pending_solo',
         connectionId: 'connection_solo',
         tenantId: 'tenant_solo',
-        now: new Date('2026-11-09T12:00:00.000Z'),
-        trialEndsAt: new Date('2026-11-23T12:00:00.000Z')
+        now: new Date('2026-11-09T12:00:00.000Z')
       }
     ]);
     expect(published).toEqual([

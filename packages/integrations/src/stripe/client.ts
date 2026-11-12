@@ -59,7 +59,6 @@ export interface SoloCheckoutRequest {
   readonly customerEmail: string;
   readonly stripeCustomerId?: string;
   readonly idempotencyKey: string;
-  readonly trialEnd?: number;
 }
 
 export interface StripeHostedSession {
@@ -345,7 +344,6 @@ export class StripeBillingClient {
           ...customerParameters,
           metadata,
           subscription_data: {
-            ...(request.trialEnd === undefined ? {} : { trial_end: request.trialEnd }),
             metadata
           },
           success_url: `${this.#publicOrigin}/settings/billing?checkout=success&session_id={CHECKOUT_SESSION_ID}`,

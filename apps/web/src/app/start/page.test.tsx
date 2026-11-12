@@ -12,6 +12,10 @@ describe('AccountPulse Solo start page', () => {
     );
     expect(markup).toContain('Request beta access');
     expect(markup).toContain('mailto:ap@motts.com.au');
+    expect(markup).toContain('card payment is due during signup');
+    expect(markup).toContain('does not include a free trial');
+    expect(markup).not.toContain('14-day free trial');
+    expect(markup).not.toContain('No card is required');
     expect(markup).not.toContain('mode=signup');
   });
 

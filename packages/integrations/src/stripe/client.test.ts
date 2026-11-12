@@ -184,10 +184,21 @@ describe('StripeBillingClient checkout', () => {
     ]);
   });
 
-  it('passes the exact eligible local trial deadline to Stripe', async () => {
+  it('never forwards a legacy trial deadline into paid Checkout', async () => {
     const api = new FakeStripeApi();
-    await createClient(api).createSoloCheckout({organisationId:'org_solo', userId:'user_owner', customerEmail:'owner@example.com', idempotencyKey:'trial', trialEnd:1795392000});
-    expect(api.checkoutCalls[0]?.parameters.subscription_data).toMatchObject({trial_end:1795392000});
+    const legacyRequest = {
+      organisationId: 'org_solo',
+      userId: 'user_owner',
+      customerEmail: 'owner@example.com',
+      idempotencyKey: 'paid-checkout',
+      trialEnd: 1_795_392_000
+    };
+
+    await createClient(api).createSoloCheckout(legacyRequest);
+
+    expect(api.checkoutCalls[0]?.parameters.subscription_data).not.toHaveProperty(
+      'trial_end'
+    );
   });
 
   it('uses a stored Stripe customer instead of accepting caller-controlled customer details', async () => {
