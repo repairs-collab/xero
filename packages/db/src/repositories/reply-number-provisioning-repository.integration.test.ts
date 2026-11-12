@@ -1,11 +1,13 @@
 import { randomInt, randomUUID } from 'node:crypto';
 
+import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createDatabase, migrateDatabase } from '../client.js';
 import {
   billingCases,
   organisations,
+  platformAdminAuditEvents,
   smsNumberPool,
   subscriptions,
   users
@@ -460,6 +462,111 @@ describe('PostgresReplyNumberProvisioningRepository', () => {
       ok: true,
       value: { status: 'MANUAL_ORDER_RECORDED' }
     });
+    const [orderAudit] = await client.db
+      .select({ afterValue: platformAdminAuditEvents.afterValue })
+      .from(platformAdminAuditEvents)
+      .where(
+        and(
+          eq(platformAdminAuditEvents.targetOrganisationId, organisationId),
+          eq(
+            platformAdminAuditEvents.eventType,
+            'REPLY_NUMBER_MANUAL_ORDER_RECORDED'
+          )
+        )
+      );
+    expect(orderAudit?.afterValue).toMatchObject({
+      externalOrderReferencePresent: true
+    });
+    expect(JSON.stringify(orderAudit?.afterValue)).not.toContain(
+      orderInput.externalOrderReference
+    );
+  });
+
+  it('rejects non-opaque documentation and external order references', async () => {
+    const quoteOrganisationId = await seedOrganisation();
+    const ensured = await repository.ensureRequestForPaidOrganisation({
+      organisationId: quoteOrganisationId,
+      provider: 'SINCH',
+      now
+    });
+    if (!ensured.ok) throw new Error('request missing');
+    await expect(
+      repository.recordQuote({
+        actorUserId: ownerId,
+        organisationId: quoteOrganisationId,
+        requestId: ensured.value.id,
+        expectedVersion: ensured.value.version,
+        setupFeeMinor: 1_135,
+        monthlyFeeMinor: 1_530,
+        currency: 'aud',
+        quoteExpiresAt: new Date('2026-11-20T00:00:00.000Z'),
+        documentationStatus: 'COMPLETE',
+        documentationEvidenceReference:
+          'https://provider.example/document?token=secret',
+        reason: 'Unsafe evidence reference',
+        now
+      })
+    ).resolves.toEqual({ ok: false, code: 'VALIDATION' });
+
+    const documentationOrganisationId = await seedOrganisation();
+    const documentationRequest =
+      await repository.ensureRequestForPaidOrganisation({
+        organisationId: documentationOrganisationId,
+        provider: 'SINCH',
+        now
+      });
+    if (!documentationRequest.ok) throw new Error('request missing');
+    const documentationQuote = await repository.recordQuote({
+      actorUserId: ownerId,
+      organisationId: documentationOrganisationId,
+      requestId: documentationRequest.value.id,
+      expectedVersion: documentationRequest.value.version,
+      setupFeeMinor: 1_135,
+      monthlyFeeMinor: 1_530,
+      currency: 'aud',
+      quoteExpiresAt: new Date('2026-11-20T00:00:00.000Z'),
+      documentationStatus: 'REQUIRED',
+      documentationEvidenceReference: null,
+      reason: 'Documentation required',
+      now
+    });
+    if (!documentationQuote.ok) throw new Error('quote missing');
+    await expect(
+      repository.recordDocumentationComplete({
+        actorUserId: ownerId,
+        organisationId: documentationOrganisationId,
+        requestId: documentationQuote.value.id,
+        expectedVersion: documentationQuote.value.version,
+        documentationEvidenceReference: 'customer identity document 1234',
+        reason: 'Unsafe documentation reference',
+        now
+      })
+    ).resolves.toEqual({ ok: false, code: 'VALIDATION' });
+
+    const orderOrganisationId = await seedOrganisation();
+    const approved = await approveRequest(orderOrganisationId);
+    await expect(
+      repository.recordManualOrderReference({
+        actorUserId: ownerId,
+        organisationId: orderOrganisationId,
+        requestId: approved.id,
+        expectedVersion: approved.version,
+        externalOrderReference: 'provider order reference with customer data',
+        reason: 'Unsafe order reference',
+        now
+      })
+    ).resolves.toEqual({ ok: false, code: 'VALIDATION' });
+    await expect(
+      repository.recordManualOrderReference({
+        actorUserId: ownerId,
+        organisationId: orderOrganisationId,
+        requestId: approved.id,
+        expectedVersion: approved.version,
+        externalOrderReference: `ORDER-${'A'.repeat(129)}`,
+        reason: 'Oversized order reference',
+        now
+      })
+    ).resolves.toEqual({ ok: false, code: 'VALIDATION' });
   });
 
   it('fulfils directly into an assigned RESERVED number and rejects collisions', async () => {
@@ -495,6 +602,23 @@ describe('PostgresReplyNumberProvisioningRepository', () => {
       providerVerifiedAt: null,
       status: 'RESERVED'
     });
+    const [fulfilmentAudit] = await client.db
+      .select({ afterValue: platformAdminAuditEvents.afterValue })
+      .from(platformAdminAuditEvents)
+      .where(
+        and(
+          eq(platformAdminAuditEvents.targetOrganisationId, organisationId),
+          eq(
+            platformAdminAuditEvents.eventType,
+            'REPLY_NUMBER_MANUAL_ORDER_FULFILLED'
+          )
+        )
+      );
+    expect(fulfilmentAudit?.afterValue).toMatchObject({
+      numberLast4: e164Number.slice(-4),
+      providerNumberIdPresent: true
+    });
+    expect(JSON.stringify(fulfilmentAudit?.afterValue)).not.toContain(e164Number);
 
     const collisionOrganisationId = await seedOrganisation();
     const collisionOrder = await recordExternalOrder(collisionOrganisationId);
@@ -600,6 +724,41 @@ describe('PostgresReplyNumberProvisioningRepository', () => {
     });
   });
 
+  it('expires an approved request after its quote lapses and permits a new attempt', async () => {
+    const organisationId = await seedOrganisation();
+    const approved = await approveRequest(organisationId);
+    const retryTime = new Date('2026-11-20T00:00:01.000Z');
+
+    await expect(
+      repository.expireRequest({
+        actorUserId: ownerId,
+        organisationId,
+        requestId: approved.id,
+        expectedVersion: approved.version,
+        reason: 'Approved quote expired before the manual provider order',
+        now: retryTime
+      })
+    ).resolves.toMatchObject({
+      ok: true,
+      value: {
+        status: 'EXPIRED',
+        approvedByUserId: ownerId,
+        approvedAt: now
+      }
+    });
+
+    await expect(
+      repository.ensureRequestForPaidOrganisation({
+        organisationId,
+        provider: 'SINCH',
+        now: retryTime
+      })
+    ).resolves.toMatchObject({
+      ok: true,
+      value: { attempt: 2, status: 'AWAITING_QUOTE' }
+    });
+  });
+
   it('records only a redacted failure code before allowing a retry', async () => {
     const organisationId = await seedOrganisation();
     const ensured = await repository.ensureRequestForPaidOrganisation({
@@ -635,6 +794,48 @@ describe('PostgresReplyNumberProvisioningRepository', () => {
     ).resolves.toMatchObject({
       ok: true,
       value: { attempt: 2, status: 'AWAITING_QUOTE' }
+    });
+  });
+
+  it('requires full provenance when a failed request retains external order metadata', async () => {
+    const invalidOrganisationId = await seedOrganisation();
+    await expect(
+      client.pool.query(
+        `insert into reply_number_provisioning_requests
+          (organisation_id, provider, request_key, attempt, version, status,
+           external_order_reference, manual_order_recorded_at,
+           failure_code, failed_at)
+         values ($1, 'SINCH', $2, 1, 1, 'FAILED', $3, $4, $5, $4)`,
+        [
+          invalidOrganisationId,
+          `failed-without-provenance-${randomUUID()}`,
+          `ORDER-${randomUUID()}`,
+          now,
+          'PROVIDER_REJECTED'
+        ]
+      )
+    ).rejects.toThrow();
+
+    const orderedOrganisationId = await seedOrganisation();
+    const ordered = await recordExternalOrder(orderedOrganisationId);
+    await expect(
+      repository.failRequest({
+        actorUserId: ownerId,
+        organisationId: orderedOrganisationId,
+        requestId: ordered.id,
+        expectedVersion: ordered.version,
+        failureCode: 'PROVIDER_REJECTED',
+        reason: 'Provider rejected the manually recorded order',
+        now
+      })
+    ).resolves.toMatchObject({
+      ok: true,
+      value: {
+        status: 'FAILED',
+        externalOrderReference: ordered.externalOrderReference,
+        approvedByUserId: ownerId,
+        documentationStatus: 'NOT_REQUIRED'
+      }
     });
   });
 

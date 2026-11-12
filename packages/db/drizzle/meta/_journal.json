@@ -211,6 +211,13 @@
       "when": 1794460000006,
       "tag": "0029_productive_rocket_racer",
       "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1794460000007,
+      "tag": "0030_long_kylun",
+      "breakpoints": true
     }
   ]
 }

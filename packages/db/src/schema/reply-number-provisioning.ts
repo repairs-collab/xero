@@ -176,7 +176,7 @@ export const replyNumberProvisioningRequests = pgTable(
             ${table.approvedByUserId} is not null and
             ${table.approvedAt} is not null and
             nullif(btrim(${table.approvalReason}), '') is not null and
-            ${table.status} not in ('AWAITING_QUOTE', 'AWAITING_OWNER_APPROVAL', 'EXPIRED')
+            ${table.status} not in ('AWAITING_QUOTE', 'AWAITING_OWNER_APPROVAL')
           )`
     ),
     check(
@@ -189,6 +189,21 @@ export const replyNumberProvisioningRequests = pgTable(
             nullif(btrim(${table.externalOrderReference}), '') is not null and
             ${table.manualOrderRecordedAt} is not null and
             ${table.status} not in ('AWAITING_QUOTE', 'AWAITING_OWNER_APPROVAL', 'APPROVED_FOR_MANUAL_ORDER', 'EXPIRED')
+          )`
+    ),
+    check(
+      'reply_number_requests_failed_provenance_ck',
+      sql`${table.status} <> 'FAILED' or
+          ${table.externalOrderReference} is null or (
+            ${table.quoteSetupFeeMinor} is not null and
+            ${table.quoteMonthlyFeeMinor} is not null and
+            ${table.quoteCurrency} = 'aud' and
+            ${table.quoteExpiresAt} is not null and
+            ${table.quotedAt} is not null and
+            ${table.documentationStatus} in ('NOT_REQUIRED', 'COMPLETE') and
+            ${table.approvedByUserId} is not null and
+            ${table.approvedAt} is not null and
+            nullif(btrim(${table.approvalReason}), '') is not null
           )`
     ),
     check(

@@ -155,6 +155,18 @@ const cleanReference = (reference: string, maximumLength: number): string | null
     : null;
 };
 
+const cleanOpaqueReference = (
+  reference: string,
+  maximumLength: number
+): string | null => {
+  const value = reference.trim();
+  return value.length > 0 &&
+    value.length <= maximumLength &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(value)
+    ? value
+    : null;
+};
+
 const validDate = (value: Date): boolean => Number.isFinite(value.getTime());
 
 const isOwner = async (
@@ -421,7 +433,7 @@ export class PostgresReplyNumberProvisioningRepository {
   ): Promise<ReplyNumberProvisioningResult> {
     const reason = cleanReason(input.reason);
     const evidenceReference = input.documentationEvidenceReference
-      ? cleanReference(input.documentationEvidenceReference, 256)
+      ? cleanOpaqueReference(input.documentationEvidenceReference, 128)
       : null;
     if (
       !reason ||
@@ -505,9 +517,9 @@ export class PostgresReplyNumberProvisioningRepository {
     input: RecordReplyNumberDocumentationInput
   ): Promise<ReplyNumberProvisioningResult> {
     const reason = cleanReason(input.reason);
-    const evidenceReference = cleanReference(
+    const evidenceReference = cleanOpaqueReference(
       input.documentationEvidenceReference,
-      256
+      128
     );
     if (
       !reason ||
@@ -705,9 +717,9 @@ export class PostgresReplyNumberProvisioningRepository {
     input: RecordManualReplyNumberOrderInput
   ): Promise<ReplyNumberProvisioningResult> {
     const reason = cleanReason(input.reason);
-    const externalOrderReference = cleanReference(
+    const externalOrderReference = cleanOpaqueReference(
       input.externalOrderReference,
-      256
+      128
     );
     if (
       !reason ||
@@ -777,7 +789,7 @@ export class PostgresReplyNumberProvisioningRepository {
         afterValue: {
           status: updated.status,
           version: updated.version,
-          externalOrderReference
+          externalOrderReferencePresent: true
         },
         occurredAt: input.now
       });
@@ -864,7 +876,7 @@ export class PostgresReplyNumberProvisioningRepository {
             status: updated.status,
             version: updated.version,
             numberId: number.id,
-            e164Number: input.e164Number,
+            numberLast4: input.e164Number.slice(-4),
             provider: request.provider,
             providerNumberIdPresent: true,
             numberStatus: 'RESERVED'
@@ -951,7 +963,9 @@ export class PostgresReplyNumberProvisioningRepository {
       }
       if (
         input.targetStatus === 'EXPIRED' &&
-        (request.status !== 'AWAITING_OWNER_APPROVAL' ||
+        (!['AWAITING_OWNER_APPROVAL', 'APPROVED_FOR_MANUAL_ORDER'].includes(
+          request.status
+        ) ||
           !request.quoteExpiresAt ||
           request.quoteExpiresAt.getTime() > input.now.getTime())
       ) {

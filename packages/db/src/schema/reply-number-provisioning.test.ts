@@ -52,6 +52,7 @@ describe('reply-number provisioning schema', () => {
         'reply_number_requests_documentation_ck',
         'reply_number_requests_approval_ck',
         'reply_number_requests_external_order_ck',
+        'reply_number_requests_failed_provenance_ck',
         'reply_number_requests_fulfilment_ck',
         'reply_number_requests_failure_ck',
         'reply_number_requests_expiry_ck'
