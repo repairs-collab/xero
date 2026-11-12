@@ -47,6 +47,19 @@ describe('AccountPulse OVH deployment workflow', () => {
     );
   });
 
+  it('requires the approved debt-contact calendar version and coverage variables', () => {
+    for (const name of [
+      'DEBT_CONTACT_HOLIDAY_DATES_JSON',
+      'DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION',
+      'DEBT_CONTACT_HOLIDAY_COVERAGE_END'
+    ]) {
+      expect(workflow).toContain(`vars.${name}`);
+      expect(workflow).toMatch(
+        new RegExp(`for name in [^\\n]*${name}`)
+      );
+    }
+  });
+
   it('cannot invoke reset or customer activation from a normal deployment', () => {
     expect(workflow).not.toContain('operational-reset');
     expect(workflow).not.toContain('CUSTOMER_ROLLOUT');

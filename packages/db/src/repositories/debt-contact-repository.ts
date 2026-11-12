@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
 import type { Database, DbTransaction } from '../connection.js';
 import {
@@ -7,6 +7,16 @@ import {
 } from '../schema/debt-contact.js';
 
 type Executor = Database | DbTransaction;
+
+export async function lockDebtContactProvider(
+  executor: Executor,
+  input: { organisationId: string; contactId: string }
+): Promise<void> {
+  const lockKey = `debt-contact-provider:${input.organisationId}:${input.contactId}`;
+  await executor.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0::bigint))`
+  );
+}
 
 export interface DebtContactClaimInput {
   organisationId: string;

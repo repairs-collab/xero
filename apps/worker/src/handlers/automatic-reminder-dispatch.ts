@@ -11,7 +11,11 @@ import {
   reminderSequenceVersions,
   stageInstances
 } from '@bc5000/db';
-import { decideDebtContactWindow, localDateInterval } from '@bc5000/domain';
+import {
+  decideDebtContactWindow,
+  localDateInterval,
+  nextDebtContactOpening
+} from '@bc5000/domain';
 import { jobNames, type JobPublisher } from '@bc5000/jobs';
 
 import {
@@ -161,8 +165,62 @@ export async function dispatchAutomaticReminderWork(
   const publishedStageIds = new Set(
     publishedRows.map((row) => row.stageInstanceId)
   );
+  const closedSmsRows = rows.filter((row) => {
+    if (publishedStageIds.has(row.id) || row.channel !== 'SMS') return false;
+    const dispatchAt = row.scheduledAt > now ? row.scheduledAt : now;
+    return !decideDebtContactWindow(
+      dispatchAt,
+      dependencies.holidays.list(organisationId)
+    ).allowed;
+  });
+  for (const row of closedSmsRows) {
+    const dispatchAt = row.scheduledAt > now ? row.scheduledAt : now;
+    const nextOpening = nextDebtContactOpening(
+      dispatchAt,
+      dependencies.holidays.list(organisationId)
+    );
+    await dependencies.database.transaction(async (transaction) => {
+      const [current] = await transaction
+        .select({ status: stageInstances.status })
+        .from(stageInstances)
+        .where(
+          and(
+            eq(stageInstances.organisationId, organisationId),
+            eq(stageInstances.id, row.id),
+            inArray(stageInstances.status, ['SCHEDULED', 'QUEUED'])
+          )
+        )
+        .for('update')
+        .limit(1);
+      if (current === undefined) return;
+      await transaction
+        .update(stageInstances)
+        .set({
+          status: 'SCHEDULED',
+          scheduledAt: nextOpening,
+          updatedAt: now
+        })
+        .where(
+          and(
+            eq(stageInstances.organisationId, organisationId),
+            eq(stageInstances.id, row.id),
+            inArray(stageInstances.status, ['SCHEDULED', 'QUEUED'])
+          )
+        );
+      await transaction.insert(auditEvents).values({
+        organisationId,
+        eventType: 'AUTOMATIC_REMINDER_CONTACT_WINDOW_RESCHEDULED',
+        entityType: 'STAGE_INSTANCE',
+        entityId: row.id,
+        beforeValue: { scheduledAt: row.scheduledAt.toISOString() },
+        afterValue: { scheduledAt: nextOpening.toISOString() },
+        occurredAt: now
+      });
+    });
+  }
   const candidates = rows.filter((row) => {
     if (publishedStageIds.has(row.id)) return false;
+    if (closedSmsRows.some((closed) => closed.id === row.id)) return false;
     const dispatchAt = row.scheduledAt > now ? row.scheduledAt : now;
     if (
       row.channel === 'SMS' &&

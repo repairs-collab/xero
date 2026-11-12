@@ -95,6 +95,8 @@ describe('OVH release pipeline', () => {
     for (const name of [
       'ACCOUNT_PULSE_LEGAL_ENTITY',
       'ACCOUNT_PULSE_SUPPORT_EMAIL',
+      'DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION',
+      'DEBT_CONTACT_HOLIDAY_COVERAGE_END',
       'DEBT_CONTACT_HOLIDAY_DATES_JSON',
       'SMS_NUMBER_QUARANTINE_DAYS'
     ]) {
@@ -130,6 +132,14 @@ describe('OVH release pipeline', () => {
     expect(environmentExample).toContain(
       'DEBT_CONTACT_HOLIDAY_DATES_JSON=['
     );
+    expect(environmentExample).toContain(
+      'DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION='
+    );
+    expect(environmentExample).toContain(
+      'DEBT_CONTACT_HOLIDAY_COVERAGE_END='
+    );
+    expect(installer).toContain('minimum_holiday_coverage_end');
+    expect(installer).toContain('jq -e');
     expect(environmentExample).toContain('Australia/Sydney');
   });
 

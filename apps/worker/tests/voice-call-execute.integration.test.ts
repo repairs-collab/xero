@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -100,7 +100,14 @@ async function seedApprovedCall(
       trialEndsAt:
         options.subscriptionStatus === 'TRIALING'
           ? new Date('2026-10-20T00:00:00.000Z')
-          : null
+          : null,
+      ...(options.subscriptionStatus === 'ACTIVE'
+        ? {
+            trustedStripeProviderStatus: 'active',
+            currentPeriodStart: new Date('2026-10-01T00:00:00.000Z'),
+            currentPeriodEnd: new Date('2026-11-01T00:00:00.000Z')
+          }
+        : {})
     });
   }
   await client.db.insert(users).values({
@@ -321,6 +328,37 @@ const executionDependencies = (
     gateway,
     publish
   };
+};
+
+const deferred = <T = void>() => {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+};
+
+const waitForVoiceState = async (
+  organisationId: string,
+  voiceCallId: string,
+  expectedState: string
+): Promise<void> => {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const [call] = await client.db
+      .select({ state: voiceCallRequests.state })
+      .from(voiceCallRequests)
+      .where(
+        and(
+          eq(voiceCallRequests.organisationId, organisationId),
+          eq(voiceCallRequests.id, voiceCallId)
+        )
+      )
+      .limit(1);
+    if (call?.state === expectedState) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`Timed out waiting for voice state ${expectedState}`);
 };
 
 async function insertAcceptedAttempt(
@@ -572,6 +610,60 @@ describe('voice call execution', () => {
     expect(createPhoneCall).not.toHaveBeenCalled();
   });
 
+  it('waits for a concurrent dispute commit before the final customer provider boundary', async () => {
+    const seeded = await seedApprovedCall({ scheduledAutomatic: true });
+    const lockAcquired = deferred();
+    const allowDisputeCommit = deferred();
+    const disputeWrite = client.db.transaction(async (transaction) => {
+      await transaction.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`debt-contact-provider:${seeded.organisationId}:${seeded.contactId}`}, 0::bigint))`
+      );
+      lockAcquired.resolve();
+      await allowDisputeCommit.promise;
+      await transaction.insert(disputes).values({
+        organisationId: seeded.organisationId,
+        contactId: seeded.contactId,
+        invoiceId: seeded.invoiceId,
+        status: 'OPEN',
+        reason: 'Concurrent customer dispute'
+      });
+    });
+    await lockAcquired.promise;
+
+    const gatewayStarted = deferred();
+    const allowGatewayReturn = deferred();
+    const createPhoneCall = vi.fn(async () => {
+      gatewayStarted.resolve();
+      await allowGatewayReturn.promise;
+      return { callId: 'must-not-submit', callStatus: 'registered' };
+    });
+    const runtime = executionDependencies(seeded.repository, createPhoneCall);
+    const execution = executeVoiceCall(runtime.dependencies, {
+      organisationId: seeded.organisationId,
+      voiceCallId: seeded.voiceCallId
+    });
+    await waitForVoiceState(
+      seeded.organisationId,
+      seeded.voiceCallId,
+      'SUBMITTING'
+    );
+
+    const providerBoundary = await Promise.race([
+      gatewayStarted.promise.then(() => 'provider-called' as const),
+      new Promise<'shared-lock-held'>((resolve) =>
+        setTimeout(() => resolve('shared-lock-held'), 500)
+      )
+    ]);
+    allowDisputeCommit.resolve();
+    await disputeWrite;
+    allowGatewayReturn.resolve();
+    const outcome = await execution;
+
+    expect(providerBoundary).toBe('shared-lock-held');
+    expect(outcome).toEqual({ kind: 'cancelled', reason: 'DISPUTE_OPEN' });
+    expect(createPhoneCall).not.toHaveBeenCalled();
+  });
+
   it('cancels queued customer calls when the deployment gate closes', async () => {
     const seeded = await seedApprovedCall({ scheduledAutomatic: true });
     const createPhoneCall = vi.fn(() => Promise.resolve({
@@ -680,6 +772,60 @@ describe('voice call execution', () => {
       reason: 'SUBSCRIPTION_REQUIRED'
     });
     expect(createPhoneCall).not.toHaveBeenCalled();
+  });
+
+  it('holds paid entitlement rows through the actual customer provider boundary', async () => {
+    const seeded = await seedApprovedCall({ subscriptionStatus: 'ACTIVE' });
+    let lifecycleSettled = false;
+    let lifecycleSettledBeforeProviderReturn: boolean | undefined;
+    let lifecycleUpdate: Promise<void> | undefined;
+    const createPhoneCall = vi.fn(async () => {
+      lifecycleUpdate = client.db
+        .transaction(async (transaction) => {
+          await transaction
+            .select({ id: organisations.id })
+            .from(organisations)
+            .where(eq(organisations.id, seeded.organisationId))
+            .for('update')
+            .limit(1);
+          await transaction
+            .select({ organisationId: subscriptions.organisationId })
+            .from(subscriptions)
+            .where(eq(subscriptions.organisationId, seeded.organisationId))
+            .for('update')
+            .limit(1);
+          await transaction
+            .update(subscriptions)
+            .set({ status: 'PAST_DUE' })
+            .where(eq(subscriptions.organisationId, seeded.organisationId));
+        })
+        .then(() => {
+          lifecycleSettled = true;
+        });
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+      lifecycleSettledBeforeProviderReturn = lifecycleSettled;
+      return { callId: 'voice-before-past-due', callStatus: 'registered' };
+    });
+    const runtime = executionDependencies(seeded.repository, createPhoneCall);
+
+    await expect(
+      executeVoiceCall(runtime.dependencies, {
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId
+      })
+    ).resolves.toEqual({
+      kind: 'accepted',
+      providerCallId: 'voice-before-past-due'
+    });
+    expect(lifecycleSettledBeforeProviderReturn).toBe(false);
+    await lifecycleUpdate;
+    await expect(
+      client.db
+        .select({ status: subscriptions.status })
+        .from(subscriptions)
+        .where(eq(subscriptions.organisationId, seeded.organisationId))
+        .limit(1)
+    ).resolves.toEqual([{ status: 'PAST_DUE' }]);
   });
 
   it('executes a TEST call while customer voice is disabled and does not require the staff number on the customer', async () => {
@@ -1033,7 +1179,7 @@ describe('voice call execution', () => {
       kind: 'cancelled',
       reason: 'CALLING_WINDOW_CLOSED'
     });
-    expect(clockNow).toHaveBeenCalledTimes(2);
+    expect(clockNow).toHaveBeenCalledTimes(3);
     expect(createPhoneCall).not.toHaveBeenCalled();
     const [stored] = await client.db
       .select()
@@ -1357,9 +1503,26 @@ describe('voice call execution', () => {
 
   it('records an uncertain dispatch as unknown and queues reconciliation only', async () => {
     const seeded = await seedApprovedCall();
-    const createPhoneCall = vi.fn(() =>
-      Promise.reject(new VoiceGatewayUnknownDispatchError())
-    );
+    let claimVisibleAtGateway: Array<{
+      channel: string;
+      sourceId: string;
+    }> = [];
+    const createPhoneCall = vi.fn(async () => {
+      claimVisibleAtGateway = await client.db
+        .select({
+          channel: debtContactClaims.channel,
+          sourceId: debtContactClaims.sourceId
+        })
+        .from(debtContactClaims)
+        .where(
+          and(
+            eq(debtContactClaims.organisationId, seeded.organisationId),
+            eq(debtContactClaims.contactId, seeded.contactId),
+            eq(debtContactClaims.localDate, '2026-10-08')
+          )
+        );
+      throw new VoiceGatewayUnknownDispatchError();
+    });
     const runtime = executionDependencies(seeded.repository, createPhoneCall);
 
     await expect(
@@ -1370,6 +1533,9 @@ describe('voice call execution', () => {
       })
     ).resolves.toEqual({ kind: 'unknown' });
     expect(createPhoneCall).toHaveBeenCalledTimes(1);
+    expect(claimVisibleAtGateway).toEqual([
+      { channel: 'VOICE', sourceId: seeded.voiceCallId }
+    ]);
     expect(runtime.publish).toHaveBeenCalledTimes(1);
     expect(runtime.publish).toHaveBeenCalledWith(
       'voice-call.reconcile',
@@ -1396,6 +1562,23 @@ describe('voice call execution', () => {
       failureCode: 'DISPATCH_OUTCOME_UNKNOWN'
     });
     expect(JSON.stringify(stored)).not.toContain('unsafe network detail');
+    await expect(
+      client.db
+        .select({
+          channel: debtContactClaims.channel,
+          sourceId: debtContactClaims.sourceId
+        })
+        .from(debtContactClaims)
+        .where(
+          and(
+            eq(debtContactClaims.organisationId, seeded.organisationId),
+            eq(debtContactClaims.contactId, seeded.contactId),
+            eq(debtContactClaims.localDate, '2026-10-08')
+          )
+        )
+    ).resolves.toEqual([
+      { channel: 'VOICE', sourceId: seeded.voiceCallId }
+    ]);
 
     runtime.publish.mockClear();
     await expect(

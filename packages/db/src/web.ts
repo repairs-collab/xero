@@ -6,6 +6,7 @@ export * from './repositories/entitlement-repository.js';
 export * from './repositories/entitlement-repository.js';
 export * from './repositories/conversation-repository.js';
 export * from './repositories/sms-commerce-repository.js';
+export * from './repositories/debt-contact-repository.js';
 export * from './repositories/activity-repository.js';
 export * from './repositories/task-repository.js';
 export * from './repositories/reminder-whitelist-repository.js';

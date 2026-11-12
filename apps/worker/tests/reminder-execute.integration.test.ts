@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
-import { eq } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { eq, sql } from 'drizzle-orm';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
   approvals,
@@ -19,11 +19,13 @@ import {
   outboundMessages,
   pauses,
   paymentPromises,
+  PostgresSmsCommerceRepository,
   reminderSequences,
   reminderSequenceVersions,
   reminderWhitelistEntries,
   PostgresReminderWhitelistRepository,
   sequenceStages,
+  smsNumberPool,
   stageInstances,
   suppressions,
   subscriptions,
@@ -385,6 +387,74 @@ describe('executeReminder', () => {
       providerMessageId: 'sinch-message-1'
     });
     expect(sinch.sendCalls).toHaveLength(1);
+  });
+
+  it('keeps the daily contact claim when Sinch accepts before a later database failure', async () => {
+    const seeded = await seedApprovedReminder({
+      sequenceMode: 'AUTOMATIC',
+      createApproval: false,
+      rolloutScope: 'CUSTOMER',
+      allowlisted: false,
+      stageScheduledAt: now
+    });
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    const sinch = new FakeSinch();
+    await client.db
+      .update(organisations)
+      .set({ edition: 'SOLO' })
+      .where(eq(organisations.id, seeded.organisationId));
+    await client.db.insert(subscriptions).values({
+      organisationId: seeded.organisationId,
+      planCode: 'SOLO_AU_2000',
+      status: 'ACTIVE',
+      trustedStripeProviderStatus: 'active',
+      currentPeriodStart: new Date('2026-09-01T00:00:00.000Z'),
+      currentPeriodEnd: new Date('2026-10-01T00:00:00.000Z')
+    });
+    await client.db.insert(organisationOnboarding).values({
+      organisationId: seeded.organisationId,
+      completedVersion: 1,
+      completedAt: now,
+      replyNumberReadyAt: now
+    });
+    await client.db.insert(smsNumberPool).values({
+      organisationId: seeded.organisationId,
+      e164Number: `+614${seeded.organisationId.replace(/\D/g, '').padEnd(8, '0').slice(0, 8)}`,
+      provider: 'SINCH',
+      providerNumberId: randomUUID(),
+      providerVerifiedAt: now,
+      status: 'READY',
+      readyAt: now
+    });
+    const commitFailure = vi
+      .spyOn(PostgresSmsCommerceRepository.prototype, 'commitUsage')
+      .mockImplementationOnce(async (_organisationId, _outboundId, _now, executor) => {
+        if (executor === undefined) throw new Error('Expected transactional usage commit');
+        await executor.execute(sql`select 1 / 0`);
+      });
+
+    await expect(
+      executeReminder(dependencies(xero, sinch), {
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId
+      })
+    ).resolves.toEqual({ kind: 'unknown' });
+    commitFailure.mockRestore();
+
+    expect(sinch.sendCalls).toHaveLength(1);
+    const claims = await client.db
+      .select()
+      .from(debtContactClaims)
+      .where(eq(debtContactClaims.organisationId, seeded.organisationId));
+    expect(claims).toMatchObject([
+      {
+        contactId: seeded.contactId,
+        localDate: '2026-09-18',
+        channel: 'SMS',
+        sourceId: seeded.stageInstanceId
+      }
+    ]);
   });
 
   it.each([

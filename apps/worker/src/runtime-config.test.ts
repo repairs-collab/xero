@@ -16,9 +16,11 @@ describe('worker runtime configuration', () => {
     expect(
       parseDebtContactHolidayDates({
         NODE_ENV: 'production',
-        DEBT_CONTACT_HOLIDAY_DATES_JSON: '["2026-01-01","2026-12-25"]'
-      })
-    ).toEqual(['2026-01-01', '2026-12-25']);
+        DEBT_CONTACT_HOLIDAY_DATES_JSON: '["2027-01-01","2027-12-25"]',
+        DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION: 'nsw-2027-v1',
+        DEBT_CONTACT_HOLIDAY_COVERAGE_END: '2027-12-31'
+      }, new Date('2026-11-12T00:00:00.000Z'))
+    ).toEqual(['2027-01-01', '2027-12-25']);
   });
 
   it('requires an explicit debt-contact holiday calendar in production', () => {
@@ -37,6 +39,7 @@ describe('worker runtime configuration', () => {
   it.each([
     ['malformed JSON', '["2026-01-01"'],
     ['a non-array value', '{"date":"2026-01-01"}'],
+    ['an empty calendar', '[]'],
     ['a non-string item', '[20260101]'],
     ['a non-canonical date', '["2026-1-01"]'],
     ['an impossible date', '["2026-02-29"]'],
@@ -45,9 +48,39 @@ describe('worker runtime configuration', () => {
     expect(() =>
       parseDebtContactHolidayDates({
         NODE_ENV: 'production',
-        DEBT_CONTACT_HOLIDAY_DATES_JSON: source
-      })
-    ).toThrow('DEBT_CONTACT_HOLIDAY_DATES_JSON must be a JSON array of unique YYYY-MM-DD dates');
+        DEBT_CONTACT_HOLIDAY_DATES_JSON: source,
+        DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION: 'nsw-2027-v1',
+        DEBT_CONTACT_HOLIDAY_COVERAGE_END: '2027-12-31'
+      }, new Date('2026-11-12T00:00:00.000Z'))
+    ).toThrow('DEBT_CONTACT_HOLIDAY_DATES_JSON must be a non-empty JSON array of unique YYYY-MM-DD dates');
+  });
+
+  it('requires an approved calendar version and safe future coverage', () => {
+    const dates = '["2027-01-01","2027-12-25"]';
+    const current = new Date('2026-11-12T00:00:00.000Z');
+
+    expect(() =>
+      parseDebtContactHolidayDates({
+        NODE_ENV: 'production',
+        DEBT_CONTACT_HOLIDAY_DATES_JSON: dates,
+        DEBT_CONTACT_HOLIDAY_COVERAGE_END: '2027-12-31'
+      }, current)
+    ).toThrow('DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION is required in production');
+    expect(() =>
+      parseDebtContactHolidayDates({
+        NODE_ENV: 'production',
+        DEBT_CONTACT_HOLIDAY_DATES_JSON: dates,
+        DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION: 'nsw-2027-v1'
+      }, current)
+    ).toThrow('DEBT_CONTACT_HOLIDAY_COVERAGE_END is required in production');
+    expect(() =>
+      parseDebtContactHolidayDates({
+        NODE_ENV: 'production',
+        DEBT_CONTACT_HOLIDAY_DATES_JSON: dates,
+        DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION: 'nsw-2027-v1',
+        DEBT_CONTACT_HOLIDAY_COVERAGE_END: '2027-01-01'
+      }, current)
+    ).toThrow('DEBT_CONTACT_HOLIDAY_COVERAGE_END must cover at least 366 days');
   });
 
   it('resolves a hosting-neutral environment secret reference', async () => {

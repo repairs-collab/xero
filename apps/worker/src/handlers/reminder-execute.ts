@@ -338,11 +338,89 @@ export async function executeReminder(
     });
   }
 
+  let claimedDebtContactLocalDate: string | null = null;
+  if (reminder.channel === 'SMS') {
+    const contactAt = dependencies.clock.now();
+    const scheduleValidation = await dependencies.database.transaction(
+      (transaction) =>
+        revalidateAutomaticReminderSchedule(
+          { transaction, clock: dependencies.clock },
+          {
+            ...payload,
+            expectedAutomatic:
+              reminder.sequenceMode === 'AUTOMATIC' &&
+              reminder.stageOrigin === 'AUTOMATION'
+          }
+        )
+    );
+    const [openDispute] = await dependencies.database
+      .select({ id: disputes.id })
+      .from(disputes)
+      .where(
+        and(
+          eq(disputes.organisationId, payload.organisationId),
+          eq(disputes.contactId, reminder.contactId),
+          eq(disputes.status, 'OPEN'),
+          or(
+            isNull(disputes.invoiceId),
+            eq(disputes.invoiceId, reminder.invoiceId)
+          )
+        )
+      )
+      .limit(1);
+    const contactWindow = decideDebtContactWindow(
+      contactAt,
+      dependencies.holidays.list(payload.organisationId)
+    );
+    const blockBeforeProvider = async (
+      reason:
+        | 'DISPUTE_OPEN'
+        | 'CONTACT_WINDOW_CLOSED'
+        | 'DAILY_CONTACT_LIMIT'
+        | 'OUTSIDE_SCHEDULE_WINDOW'
+        | 'SOURCE_CHANGED'
+    ): Promise<ExecutionOutcome> => {
+      await markProviderSendBlocked(dependencies.database, {
+        organisationId: payload.organisationId,
+        outboundId: claim.outboundId,
+        attemptId: claim.attemptId,
+        stageInstanceId: payload.stageInstanceId,
+        reason,
+        now: contactAt
+      });
+      return { kind: 'cancelled', reason };
+    };
+    if (scheduleValidation.kind === 'blocked') {
+      return blockBeforeProvider(scheduleValidation.reason);
+    }
+    if (openDispute !== undefined) {
+      return blockBeforeProvider('DISPUTE_OPEN');
+    }
+    if (!contactWindow.allowed) {
+      return blockBeforeProvider('CONTACT_WINDOW_CLOSED');
+    }
+    const debtContactClaim = await new PostgresDebtContactRepository(
+      dependencies.database
+    ).claimDebtContact({
+      organisationId: payload.organisationId,
+      contactId: reminder.contactId,
+      localDate: contactWindow.localDate,
+      channel: 'SMS',
+      sourceId: payload.stageInstanceId,
+      claimedAt: contactAt
+    });
+    if (debtContactClaim.kind === 'already-claimed') {
+      return blockBeforeProvider('DAILY_CONTACT_LIMIT');
+    }
+    claimedDebtContactLocalDate = contactWindow.localDate;
+  }
+
   try {
     const sendResult = await dispatchWithProviderSendLock(
       dependencies.database,
       {
         organisationId: payload.organisationId,
+        contactId: reminder.contactId,
         source,
         channel: reminder.channel,
         destination: reminder.destination,
@@ -415,21 +493,7 @@ export async function executeReminder(
               blockedAt: contactAt
             };
           }
-          const debtContactClaim =
-            await new PostgresDebtContactRepository(
-              dependencies.database
-            ).claimDebtContact(
-              {
-                organisationId: payload.organisationId,
-                contactId: reminder.contactId,
-                localDate: contactWindow.localDate,
-                channel: 'SMS',
-                sourceId: payload.stageInstanceId,
-                claimedAt: contactAt
-              },
-              transaction
-            );
-          if (debtContactClaim.kind === 'already-claimed') {
+          if (contactWindow.localDate !== claimedDebtContactLocalDate) {
             return {
               kind: 'schedule-blocked' as const,
               reason: 'DAILY_CONTACT_LIMIT' as const,

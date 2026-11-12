@@ -82,11 +82,36 @@ const required = (environment: Environment, name: string): string => {
 
 const invalidDebtContactHolidayDates = (): Error =>
   new Error(
-    'DEBT_CONTACT_HOLIDAY_DATES_JSON must be a JSON array of unique YYYY-MM-DD dates'
+    'DEBT_CONTACT_HOLIDAY_DATES_JSON must be a non-empty JSON array of unique YYYY-MM-DD dates'
   );
 
+const canonicalDate = (value: string): boolean => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value;
+};
+
+const sydneyLocalDate = (instant: Date): string => {
+  const parts = new Intl.DateTimeFormat('en-AU', {
+    timeZone: 'Australia/Sydney',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(instant);
+  const part = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((value) => value.type === type)?.value ?? '';
+  return `${part('year')}-${part('month')}-${part('day')}`;
+};
+
+const minimumHolidayCoverageEnd = (now: Date): string => {
+  const minimum = new Date(`${sydneyLocalDate(now)}T00:00:00.000Z`);
+  minimum.setUTCDate(minimum.getUTCDate() + 366);
+  return minimum.toISOString().slice(0, 10);
+};
+
 export function parseDebtContactHolidayDates(
-  environment: Environment
+  environment: Environment,
+  now = new Date()
 ): readonly string[] {
   const source = environment.DEBT_CONTACT_HOLIDAY_DATES_JSON?.trim();
   if (!source) {
@@ -104,24 +129,56 @@ export function parseDebtContactHolidayDates(
   } catch {
     throw invalidDebtContactHolidayDates();
   }
-  if (!Array.isArray(parsed)) throw invalidDebtContactHolidayDates();
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw invalidDebtContactHolidayDates();
+  }
 
   const dates: string[] = [];
   const uniqueDates = new Set<string>();
   for (const value of parsed) {
-    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    if (typeof value !== 'string' || !canonicalDate(value)) {
       throw invalidDebtContactHolidayDates();
     }
-    const date = new Date(`${value}T00:00:00.000Z`);
-    if (
-      Number.isNaN(date.valueOf()) ||
-      date.toISOString().slice(0, 10) !== value ||
-      uniqueDates.has(value)
-    ) {
+    if (uniqueDates.has(value)) {
       throw invalidDebtContactHolidayDates();
     }
     uniqueDates.add(value);
     dates.push(value);
+  }
+
+  const version = environment.DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION?.trim();
+  if (!version) {
+    throw new Error(
+      'DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION is required in production'
+    );
+  }
+  if (
+    version === 'replace-me' ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(version)
+  ) {
+    throw new Error('DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION is invalid');
+  }
+
+  const coverageEnd = environment.DEBT_CONTACT_HOLIDAY_COVERAGE_END?.trim();
+  if (!coverageEnd) {
+    throw new Error(
+      'DEBT_CONTACT_HOLIDAY_COVERAGE_END is required in production'
+    );
+  }
+  if (!canonicalDate(coverageEnd)) {
+    throw new Error(
+      'DEBT_CONTACT_HOLIDAY_COVERAGE_END must be a YYYY-MM-DD date'
+    );
+  }
+  if (coverageEnd < minimumHolidayCoverageEnd(now)) {
+    throw new Error(
+      'DEBT_CONTACT_HOLIDAY_COVERAGE_END must cover at least 366 days from the current Australia/Sydney date'
+    );
+  }
+  if (dates.some((date) => date > coverageEnd)) {
+    throw new Error(
+      'DEBT_CONTACT_HOLIDAY_DATES_JSON contains a date after DEBT_CONTACT_HOLIDAY_COVERAGE_END'
+    );
   }
   return Object.freeze(dates);
 }

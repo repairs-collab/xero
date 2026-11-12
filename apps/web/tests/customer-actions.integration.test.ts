@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { AppSession } from '@bc5000/auth';
-import { approvals, auditEvents, contactChannels, contacts, createDatabase, invoiceChases, invoices, migrateDatabase, organisations, pauses, paymentPromises, reminderSequenceVersions, reminderSequences, reminderWhitelistEntries, stageInstances, suppressions, tasks, users } from '@bc5000/db';
+import { approvals, auditEvents, contactChannels, contacts, createDatabase, disputes, invoiceChases, invoices, migrateDatabase, organisations, pauses, paymentPromises, reminderSequenceVersions, reminderSequences, reminderWhitelistEntries, stageInstances, suppressions, tasks, users } from '@bc5000/db';
 import type { JobPublisher } from '@bc5000/jobs';
 
 import { createCustomerOperations } from '../src/app/(protected)/customers/[customerId]/customer-operations.js';
@@ -33,6 +33,59 @@ async function seedCustomer() {
 const publisher = () => ({ publish: vi.fn(() => Promise.resolve(randomUUID())) }) satisfies JobPublisher;
 
 describe('customer chase controls', () => {
+  it('serializes a dispute write on the customer provider boundary lock', async () => {
+    const seeded = await seedCustomer();
+    let releaseLock!: () => void;
+    let lockAcquired!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    const acquired = new Promise<void>((resolve) => {
+      lockAcquired = resolve;
+    });
+    const lockHolder = client.db.transaction(async (transaction) => {
+      await transaction.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`debt-contact-provider:${seeded.organisationId}:${seeded.customerId}`}, 0::bigint))`
+      );
+      lockAcquired();
+      await release;
+    });
+    await acquired;
+    const service = createCustomerOperations({
+      database: client.db,
+      publisher: publisher(),
+      clock: { now: () => now }
+    });
+    const write = service.recordDispute(seeded.session, {
+      organisationId: seeded.organisationId,
+      customerId: seeded.customerId,
+      invoiceId: seeded.invoiceId,
+      reason: 'Customer disputes the amount'
+    });
+    const stateBeforeRelease = await Promise.race([
+      write.then(() => 'completed' as const),
+      new Promise<'waiting'>((resolve) =>
+        setTimeout(() => resolve('waiting'), 250)
+      )
+    ]);
+    releaseLock();
+    await lockHolder;
+    await write;
+
+    expect(stateBeforeRelease).toBe('waiting');
+    await expect(
+      client.db
+        .select()
+        .from(disputes)
+        .where(
+          and(
+            eq(disputes.organisationId, seeded.organisationId),
+            eq(disputes.contactId, seeded.customerId)
+          )
+        )
+    ).resolves.toHaveLength(1);
+  });
+
   it('expires pending approvals when an approved phone override changes', async () => {
     const seeded = await seedCustomer();
     const service = createCustomerOperations({ database: client.db, publisher: publisher(), clock: { now: () => now } });

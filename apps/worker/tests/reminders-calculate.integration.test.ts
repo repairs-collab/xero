@@ -530,7 +530,7 @@ describe('calculateReminderWork', () => {
       holidays: ['2026-09-18']
     }
   ])(
-    'leaves an automatic SMS scheduled $label',
+    'reschedules an automatic SMS to the next eligible Sydney opening $label',
     async ({ executionTime, sendTime, holidays }) => {
       const seeded = await seedInvoiceAndSequence({
         mode: 'AUTOMATIC',
@@ -563,10 +563,32 @@ describe('calculateReminderWork', () => {
       });
       expect(publish).not.toHaveBeenCalled();
       const [stage] = await client.db
-        .select({ status: stageInstances.status })
+        .select({
+          id: stageInstances.id,
+          status: stageInstances.status,
+          scheduledAt: stageInstances.scheduledAt
+        })
         .from(stageInstances)
         .where(eq(stageInstances.organisationId, seeded.organisationId));
       expect(stage?.status).toBe('SCHEDULED');
+      const nextOpening = new Date('2026-09-20T22:30:00.000Z');
+      expect(stage?.scheduledAt).toEqual(nextOpening);
+
+      const next = await dispatchAutomaticReminderWork(
+        {
+          database: client.db,
+          clock: { now: () => nextOpening },
+          holidays: { list: () => holidays },
+          publisher: { publish }
+        },
+        seeded.organisationId
+      );
+      expect(next).toMatchObject({
+        candidateCount: 1,
+        queuedCount: 1,
+        publishedCount: 1
+      });
+      expect(publish).toHaveBeenCalledOnce();
     }
   );
 

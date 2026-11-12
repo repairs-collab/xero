@@ -44,7 +44,9 @@ const composeEnvironment = {
   SINCH_WEBHOOK_TOKEN: 'test-sinch-token',
   SINCH_API_CREDENTIALS: '{}',
   SMS_NUMBER_QUARANTINE_DAYS: '1',
-  DEBT_CONTACT_HOLIDAY_DATES_JSON: '["2026-10-05"]',
+  DEBT_CONTACT_HOLIDAY_DATES_JSON: '["2027-01-01","2027-12-25"]',
+  DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION: 'nsw-2027-v1',
+  DEBT_CONTACT_HOLIDAY_COVERAGE_END: '2027-12-31',
   ASTERISK_ARI_USERNAME: 'accountpulse',
   ASTERISK_ARI_PASSWORD: 'test-ari-password',
   ASTERISK_EXTERNAL_ADDRESS: '203.0.113.10',
@@ -169,7 +171,11 @@ describe('OVH voice deployment', () => {
         ...sharedXeroEnvironment,
         SINCH_API_CREDENTIALS: composeEnvironment.SINCH_API_CREDENTIALS,
         DEBT_CONTACT_HOLIDAY_DATES_JSON:
-          composeEnvironment.DEBT_CONTACT_HOLIDAY_DATES_JSON
+          composeEnvironment.DEBT_CONTACT_HOLIDAY_DATES_JSON,
+        DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION:
+          composeEnvironment.DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION,
+        DEBT_CONTACT_HOLIDAY_COVERAGE_END:
+          composeEnvironment.DEBT_CONTACT_HOLIDAY_COVERAGE_END
       })
     );
     expect(resolved.services.worker?.environment).not.toHaveProperty('STRIPE_SECRET_KEY');
@@ -181,6 +187,28 @@ describe('OVH voice deployment', () => {
       'SINCH_CALLBACK_PUBLIC_KEYS_JSON'
     );
     expect(resolved.services.worker?.environment).not.toHaveProperty('SINCH_WEBHOOK_TOKEN');
+  }, 15_000);
+
+  it.each([
+    'DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION',
+    'DEBT_CONTACT_HOLIDAY_COVERAGE_END'
+  ])('refuses to resolve the production worker without %s', (name) => {
+    const environment: NodeJS.ProcessEnv = { ...composeEnvironment };
+    delete environment[name];
+    const composePath = resolve(
+      process.cwd(),
+      'deploy',
+      'ovh',
+      'docker-compose.yml'
+    );
+    const result = spawnSync(
+      'docker',
+      ['compose', '-f', composePath, 'config', '--format', 'json'],
+      { encoding: 'utf8', env: environment }
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(`${name} is required`);
   }, 15_000);
 
   it('refuses to resolve the production worker without a debt-contact holiday calendar', () => {

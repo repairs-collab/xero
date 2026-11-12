@@ -88,3 +88,26 @@ export function decideDebtContactWindow(
     reason: allowed ? null : 'CONTACT_WINDOW_CLOSED'
   };
 }
+
+export function nextDebtContactOpening(
+  after: Date,
+  holidays: readonly string[]
+): Date {
+  const local = DateTime.fromJSDate(after, { zone: debtContactTimeZone });
+  const localDate = local.toISODate() ?? '';
+  const calendar = createBusinessCalendar({
+    zone: debtContactTimeZone,
+    holidays: [...holidays]
+  });
+  const localMinute = local.hour * 60 + local.minute;
+  const openingDate =
+    calendar.isBusinessDate(localDate) && localMinute < 8 * 60 + 30
+      ? localDate
+      : calendar.nextBusinessDate(localDate);
+  const opening = DateTime.fromISO(
+    `${openingDate}T${debtContactWindowStartLocal}`,
+    { zone: debtContactTimeZone }
+  );
+  if (!opening.isValid) throw new Error('Next debt-contact opening is invalid');
+  return opening.toJSDate();
+}
