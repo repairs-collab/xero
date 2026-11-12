@@ -176,6 +176,13 @@
       "when": 1794460000001,
       "tag": "0024_lyrical_may_parker",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1794460000002,
+      "tag": "0025_orange_rattler",
+      "breakpoints": true
     }
   ]
 }

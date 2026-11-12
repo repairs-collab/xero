@@ -4,17 +4,91 @@ import { getTableConfig } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
 
 import {
+  billingCases,
   smsAllowanceSettings,
   smsNumberPool,
   smsUsageLedger,
   soloAu2000PlanCode,
   subscriptionEvents,
-  subscriptions
+  subscriptions,
+  transactionalEmailOutbox
 } from './commerce.js';
 import { organisationOnboarding } from './onboarding.js';
 import { organisationEditions, organisations } from './organisation.js';
 
 describe('Solo commerce schema contract', () => {
+  it('defines durable billing cases and held transactional email records', () => {
+    const cases = getTableConfig(billingCases);
+    const emails = getTableConfig(transactionalEmailOutbox);
+
+    expect(cases.columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        'organisation_id',
+        'kind',
+        'status',
+        'provider_object_type',
+        'provider_object_id',
+        'provider_status',
+        'stripe_subscription_id',
+        'subscription_relation',
+        'amount_minor',
+        'currency',
+        'blocks_sending',
+        'latest_provider_event_id',
+        'latest_provider_event_created_at',
+        'opened_at',
+        'resolved_at',
+        'created_at',
+        'updated_at'
+      ])
+    );
+    expect(cases.indexes.map((index) => index.config.name)).toContain(
+      'billing_cases_org_kind_provider_uq'
+    );
+    expect(cases.checks.map((constraint) => constraint.name)).toEqual(
+      expect.arrayContaining([
+        'billing_cases_kind_ck',
+        'billing_cases_status_ck',
+        'billing_cases_provider_object_type_ck',
+        'billing_cases_subscription_relation_ck',
+        'billing_cases_amount_ck',
+        'billing_cases_currency_ck',
+        'billing_cases_resolution_ck'
+      ])
+    );
+
+    expect(emails.columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        'organisation_id',
+        'billing_case_id',
+        'recipient',
+        'template',
+        'template_version',
+        'render_data',
+        'idempotency_key',
+        'status',
+        'attempts',
+        'last_failure_code',
+        'last_attempted_at',
+        'sent_at',
+        'created_at',
+        'updated_at'
+      ])
+    );
+    expect(emails.indexes.map((index) => index.config.name)).toContain(
+      'transactional_email_outbox_org_idempotency_uq'
+    );
+    expect(emails.checks.map((constraint) => constraint.name)).toEqual(
+      expect.arrayContaining([
+        'transactional_email_outbox_template_ck',
+        'transactional_email_outbox_status_ck',
+        'transactional_email_outbox_template_version_ck',
+        'transactional_email_outbox_attempts_ck',
+        'transactional_email_outbox_sent_ck'
+      ])
+    );
+  });
+
   it('keeps the Australian Solo plan and organisation editions stable', () => {
     expect(soloAu2000PlanCode).toBe('SOLO_AU_2000');
     expect(organisationEditions).toEqual([
@@ -131,14 +205,25 @@ describe('Solo commerce schema contract', () => {
     expect(migration).toMatch(/CREATE TRIGGER z_subscription_normalize_cancellation BEFORE INSERT OR UPDATE ON subscriptions/i);
   });
 
-  it('orders migration journal timestamps strictly through the retired subscription migration', async () => {
+  it('orders migration journal timestamps strictly through the billing operations migration', async () => {
     const journal = JSON.parse(await readFile(new URL('../../drizzle/meta/_journal.json', import.meta.url), 'utf8')) as { entries: Array<{ idx: number; when: number; tag: string }> };
-    const entries = journal.entries.filter((entry) => entry.idx <= 24);
-    expect(entries.map((entry) => entry.idx)).toEqual(Array.from({ length: 25 }, (_, index) => index));
-    expect(entries[24]?.tag).toBe('0024_lyrical_may_parker');
+    const entries = journal.entries.filter((entry) => entry.idx <= 25);
+    expect(entries.map((entry) => entry.idx)).toEqual(Array.from({ length: 26 }, (_, index) => index));
+    expect(entries[25]?.tag).toBe('0025_orange_rattler');
     for (let index = 1; index < entries.length; index += 1) {
       expect(entries[index]!.when).toBeGreaterThan(entries[index - 1]!.when);
     }
+  });
+
+  it('creates billing cases and held email storage in migration 0025', async () => {
+    const migration = await readFile(
+      new URL('../../drizzle/0025_orange_rattler.sql', import.meta.url),
+      'utf8'
+    );
+
+    expect(migration).toContain('CREATE TABLE "billing_cases"');
+    expect(migration).toContain('CREATE TABLE "transactional_email_outbox"');
+    expect(migration).toContain('ON DELETE restrict');
   });
 
   it('creates retired subscription storage and does not grant a future trial during backfill', async () => {

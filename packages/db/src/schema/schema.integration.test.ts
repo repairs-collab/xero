@@ -8,6 +8,7 @@ import { createDatabase, migrateDatabase } from '../client.js';
 import {
   approvals,
   auditEvents,
+  billingCases,
   contactChannels,
   contacts,
   invoiceChases,
@@ -23,6 +24,7 @@ import {
   subscriptionEvents,
   subscriptions,
   tasks,
+  transactionalEmailOutbox,
   voiceCallEvents,
   voiceGatewaySessions,
   voiceCallInvoices,
@@ -232,6 +234,140 @@ const seedVoiceCall = async (
 };
 
 describe('database invariants', () => {
+  it('persists billing incidents and held notices with fail-closed constraints', async () => {
+    expect('billingCases' in schema).toBe(true);
+    expect('transactionalEmailOutbox' in schema).toBe(true);
+    expect(await tableColumns('billing_cases')).toEqual(
+      expect.arrayContaining([
+        'organisation_id',
+        'kind',
+        'status',
+        'provider_object_type',
+        'provider_object_id',
+        'provider_status',
+        'stripe_subscription_id',
+        'subscription_relation',
+        'amount_minor',
+        'currency',
+        'blocks_sending',
+        'latest_provider_event_id',
+        'latest_provider_event_created_at',
+        'opened_at',
+        'resolved_at'
+      ])
+    );
+    expect(await tableColumns('transactional_email_outbox')).toEqual(
+      expect.arrayContaining([
+        'organisation_id',
+        'billing_case_id',
+        'recipient',
+        'template',
+        'template_version',
+        'render_data',
+        'idempotency_key',
+        'status',
+        'attempts',
+        'last_failure_code',
+        'last_attempted_at',
+        'sent_at'
+      ])
+    );
+
+    const organisationId = randomUUID();
+    await database.db.insert(organisations).values({
+      id: organisationId,
+      name: 'Billing operations schema test',
+      xeroOrganisationId: randomUUID(),
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    const [billingCase] = await database.db
+      .insert(billingCases)
+      .values({
+        organisationId,
+        kind: 'PAYMENT_FAILURE',
+        status: 'OPEN',
+        providerObjectType: 'INVOICE',
+        providerObjectId: `in_${randomUUID()}`,
+        providerStatus: 'payment_failed',
+        stripeSubscriptionId: `sub_${randomUUID()}`,
+        subscriptionRelation: 'CURRENT',
+        amountMinor: 12_345,
+        currency: 'aud',
+        blocksSending: true,
+        latestProviderEventId: `evt_${randomUUID()}`,
+        latestProviderEventCreatedAt: new Date('2026-11-12T00:00:00.000Z'),
+        openedAt: new Date('2026-11-12T00:00:00.000Z')
+      })
+      .returning({ id: billingCases.id });
+
+    expect(billingCase?.id).toBeDefined();
+    await database.db.insert(transactionalEmailOutbox).values({
+      organisationId,
+      billingCaseId: billingCase!.id,
+      recipient: 'billing@example.invalid',
+      template: 'PAYMENT_FAILED',
+      templateVersion: 1,
+      renderData: {
+        amountMinor: 12_345,
+        currency: 'aud'
+      },
+      idempotencyKey: `stripe:${randomUUID()}:PAYMENT_FAILED:v1`,
+      status: 'HELD'
+    });
+
+    const otherOrganisationId = randomUUID();
+    await database.db.insert(organisations).values({
+      id: otherOrganisationId,
+      name: 'Other billing operations tenant',
+      xeroOrganisationId: randomUUID(),
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await expect(
+      database.db.insert(transactionalEmailOutbox).values({
+        organisationId: otherOrganisationId,
+        billingCaseId: billingCase!.id,
+        recipient: 'other@example.invalid',
+        template: 'PAYMENT_FAILED',
+        templateVersion: 1,
+        renderData: {},
+        idempotencyKey: `stripe:${randomUUID()}:PAYMENT_FAILED:v1`,
+        status: 'HELD'
+      })
+    ).rejects.toMatchObject({ cause: { code: '23503' } });
+
+    await expect(
+      database.pool.query(
+        `insert into billing_cases (
+           organisation_id, kind, status, provider_object_type,
+           provider_object_id, provider_status, stripe_subscription_id,
+           subscription_relation, amount_minor, currency, blocks_sending,
+           latest_provider_event_id, latest_provider_event_created_at,
+           opened_at, resolved_at
+         ) values ($1, 'REFUND', 'RESOLVED', 'CHARGE', $2, 'refunded', $3,
+                   'CURRENT', 1, 'aud', false, $4, now(), now(), null)`,
+        [
+          organisationId,
+          `ch_${randomUUID()}`,
+          `sub_${randomUUID()}`,
+          `evt_${randomUUID()}`
+        ]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+
+    await expect(
+      database.pool.query(
+        `insert into transactional_email_outbox (
+           organisation_id, billing_case_id, recipient, template,
+           template_version, render_data, idempotency_key, status, attempts
+         ) values ($1, $2, 'billing@example.invalid', 'PAYMENT_FAILED',
+                   1, '{}'::jsonb, $3, 'HELD', -1)`,
+        [organisationId, billingCase!.id, `stripe:${randomUUID()}`]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+  });
+
   it('persists platform ownership and suspended-account metadata with safe defaults', async () => {
     expect(Object.keys(schema.users)).toContain('platformRole');
     expect(Object.keys(schema.organisations)).toEqual(

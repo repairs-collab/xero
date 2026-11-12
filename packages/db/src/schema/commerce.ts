@@ -3,11 +3,14 @@ import {
   boolean,
   char,
   check,
+  foreignKey,
   index,
   integer,
+  jsonb,
   pgTable,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
   varchar
@@ -123,6 +126,189 @@ export const subscriptionEvents = pgTable(
     check(
       'subscription_events_payload_hash_ck',
       sql`length(${table.payloadHash}) = 64`
+    )
+  ]
+);
+
+export type BillingCaseKind = 'PAYMENT_FAILURE' | 'REFUND' | 'DISPUTE';
+export type BillingCaseStatus = 'OPEN' | 'RESOLVED' | 'REVIEW_REQUIRED';
+export type BillingProviderObjectType = 'INVOICE' | 'CHARGE' | 'DISPUTE';
+export type BillingSubscriptionRelation = 'CURRENT' | 'RETIRED';
+
+export const billingCases = pgTable(
+  'billing_cases',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    organisationId: uuid('organisation_id')
+      .notNull()
+      .references(() => organisations.id, { onDelete: 'cascade' }),
+    kind: varchar('kind', { length: 32 }).$type<BillingCaseKind>().notNull(),
+    status: varchar('status', { length: 32 })
+      .$type<BillingCaseStatus>()
+      .notNull(),
+    providerObjectType: varchar('provider_object_type', { length: 16 })
+      .$type<BillingProviderObjectType>()
+      .notNull(),
+    providerObjectId: varchar('provider_object_id', { length: 128 }).notNull(),
+    providerStatus: varchar('provider_status', { length: 64 }).notNull(),
+    stripeSubscriptionId: varchar('stripe_subscription_id', {
+      length: 128
+    }).notNull(),
+    subscriptionRelation: varchar('subscription_relation', { length: 16 })
+      .$type<BillingSubscriptionRelation>()
+      .notNull(),
+    amountMinor: integer('amount_minor').notNull(),
+    currency: char('currency', { length: 3 }).notNull(),
+    blocksSending: boolean('blocks_sending').notNull().default(false),
+    latestProviderEventId: varchar('latest_provider_event_id', {
+      length: 128
+    }).notNull(),
+    latestProviderEventCreatedAt: timestamp(
+      'latest_provider_event_created_at',
+      { withTimezone: true }
+    ).notNull(),
+    openedAt: timestamp('opened_at', { withTimezone: true }).notNull(),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow()
+  },
+  (table) => [
+    unique('billing_cases_org_id_uq').on(table.organisationId, table.id),
+    uniqueIndex('billing_cases_org_kind_provider_uq').on(
+      table.organisationId,
+      table.kind,
+      table.providerObjectType,
+      table.providerObjectId
+    ),
+    index('billing_cases_org_status_created_idx').on(
+      table.organisationId,
+      table.status,
+      table.createdAt
+    ),
+    index('billing_cases_blocking_status_idx').on(
+      table.blocksSending,
+      table.status,
+      table.createdAt
+    ),
+    check(
+      'billing_cases_kind_ck',
+      sql`${table.kind} in ('PAYMENT_FAILURE', 'REFUND', 'DISPUTE')`
+    ),
+    check(
+      'billing_cases_status_ck',
+      sql`${table.status} in ('OPEN', 'RESOLVED', 'REVIEW_REQUIRED')`
+    ),
+    check(
+      'billing_cases_provider_object_type_ck',
+      sql`${table.providerObjectType} in ('INVOICE', 'CHARGE', 'DISPUTE')`
+    ),
+    check(
+      'billing_cases_subscription_relation_ck',
+      sql`${table.subscriptionRelation} in ('CURRENT', 'RETIRED')`
+    ),
+    check('billing_cases_amount_ck', sql`${table.amountMinor} >= 0`),
+    check('billing_cases_currency_ck', sql`${table.currency} = 'aud'`),
+    check(
+      'billing_cases_resolution_ck',
+      sql`(${table.status} = 'RESOLVED' and ${table.resolvedAt} is not null) or (${table.status} <> 'RESOLVED' and ${table.resolvedAt} is null)`
+    )
+  ]
+);
+
+export type TransactionalEmailTemplate =
+  | 'PAYMENT_FAILED'
+  | 'PAYMENT_RECOVERED'
+  | 'REFUND_RECORDED'
+  | 'DISPUTE_OPENED'
+  | 'DISPUTE_CLOSED';
+export type TransactionalEmailStatus =
+  | 'HELD'
+  | 'PENDING'
+  | 'SENT'
+  | 'FAILED';
+export type TransactionalEmailRenderData = Record<
+  string,
+  string | number | boolean | null
+>;
+
+export const transactionalEmailOutbox = pgTable(
+  'transactional_email_outbox',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    organisationId: uuid('organisation_id')
+      .notNull()
+      .references(() => organisations.id, { onDelete: 'cascade' }),
+    billingCaseId: uuid('billing_case_id').notNull(),
+    recipient: varchar('recipient', { length: 320 }).notNull(),
+    template: varchar('template', { length: 32 })
+      .$type<TransactionalEmailTemplate>()
+      .notNull(),
+    templateVersion: integer('template_version').notNull().default(1),
+    renderData: jsonb('render_data')
+      .$type<TransactionalEmailRenderData>()
+      .notNull(),
+    idempotencyKey: text('idempotency_key').notNull(),
+    status: varchar('status', { length: 16 })
+      .$type<TransactionalEmailStatus>()
+      .notNull()
+      .default('HELD'),
+    attempts: integer('attempts').notNull().default(0),
+    lastFailureCode: varchar('last_failure_code', { length: 64 }),
+    lastAttemptedAt: timestamp('last_attempted_at', { withTimezone: true }),
+    sentAt: timestamp('sent_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow()
+  },
+  (table) => [
+    uniqueIndex('transactional_email_outbox_org_idempotency_uq').on(
+      table.organisationId,
+      table.idempotencyKey
+    ),
+    index('transactional_email_outbox_org_status_created_idx').on(
+      table.organisationId,
+      table.status,
+      table.createdAt
+    ),
+    index('transactional_email_outbox_case_created_idx').on(
+      table.billingCaseId,
+      table.createdAt
+    ),
+    foreignKey({
+      name: 'transactional_email_outbox_org_case_fk',
+      columns: [table.organisationId, table.billingCaseId],
+      foreignColumns: [billingCases.organisationId, billingCases.id]
+    }).onDelete('restrict'),
+    check(
+      'transactional_email_outbox_template_ck',
+      sql`${table.template} in ('PAYMENT_FAILED', 'PAYMENT_RECOVERED', 'REFUND_RECORDED', 'DISPUTE_OPENED', 'DISPUTE_CLOSED')`
+    ),
+    check(
+      'transactional_email_outbox_status_ck',
+      sql`${table.status} in ('HELD', 'PENDING', 'SENT', 'FAILED')`
+    ),
+    check(
+      'transactional_email_outbox_template_version_ck',
+      sql`${table.templateVersion} >= 1`
+    ),
+    check(
+      'transactional_email_outbox_attempts_ck',
+      sql`${table.attempts} >= 0`
+    ),
+    check(
+      'transactional_email_outbox_render_data_ck',
+      sql`jsonb_typeof(${table.renderData}) = 'object'`
+    ),
+    check(
+      'transactional_email_outbox_sent_ck',
+      sql`(${table.status} = 'SENT' and ${table.sentAt} is not null) or (${table.status} <> 'SENT' and ${table.sentAt} is null)`
     )
   ]
 );
