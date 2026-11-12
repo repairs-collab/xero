@@ -69,7 +69,7 @@ describe('platform retention operations view', () => {
     expect(html).toContain('Record verified request');
     expect(html).toContain('Record backup-ageing evidence');
     expect(html).toContain('name="closureEpisodeId" value="33333333-3333-4333-8333-333333333333"');
-    expect(html).toContain('name="operationId" value="backup-33333333-3333-4333-8333-333333333333-v2"');
+    expect(html).toContain('name="operationId" value="backup-33333333-3333-4333-8333-333333333333-at1789689600000"');
     expect(html).toContain(
       'name="expectedUpdatedAt" value="2026-09-18T00:00:00.000Z"'
     );
@@ -80,5 +80,52 @@ describe('platform retention operations view', () => {
     expect(html).toContain('name="deliveryReference"');
     expect(html).not.toContain('Delete customer now');
     expect(html).not.toContain('idempotencyKey</');
+  });
+
+  it('uses retention updated state for a fresh backup-verification operation while exact rerenders stay stable', () => {
+    const render = (updatedAt: Date): string =>
+      renderToStaticMarkup(
+        <PlatformRetentionOperations
+          page={{
+            retentionCases: [
+              {
+                organisationId: '11111111-1111-4111-8111-111111111111',
+                organisationName: 'Alpha Repairs',
+                source: 'SUBSCRIPTION_CANCELLED',
+                status: 'REVIEW_REQUIRED',
+                reviewAfter: new Date('2026-10-01T00:00:00.000Z'),
+                deletionEligibleAt: new Date('2031-09-01T00:00:00.000Z'),
+                closureEpisodeId: '33333333-3333-4333-8333-333333333333',
+                closureVersion: 2,
+                backupExpiryVerifiedAt: null,
+                backupExpiryEvidenceReference: null,
+                updatedAt
+              }
+            ],
+            dataRequests: []
+          }}
+          organisationId=""
+          actions={{
+            recordVerifiedRequest: noAction,
+            reviewRequest: noAction,
+            recordBackupExpiryVerification: noAction,
+            completeExportRequest: noAction
+          }}
+        />
+      );
+
+    const first = render(new Date('2026-09-18T00:00:00.000Z'));
+    const exactRetry = render(new Date('2026-09-18T00:00:00.000Z'));
+    const refreshed = render(new Date('2026-09-19T00:00:00.000Z'));
+
+    expect(first).toContain(
+      'name="operationId" value="backup-33333333-3333-4333-8333-333333333333-at1789689600000"'
+    );
+    expect(exactRetry).toContain(
+      'name="operationId" value="backup-33333333-3333-4333-8333-333333333333-at1789689600000"'
+    );
+    expect(refreshed).toContain(
+      'name="operationId" value="backup-33333333-3333-4333-8333-333333333333-at1789776000000"'
+    );
   });
 });

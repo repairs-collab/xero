@@ -5,9 +5,10 @@ import { eq } from 'drizzle-orm';
 import {
   auditEvents,
   type Database,
-  organisations,
   retentionCases
 } from '@bc5000/db';
+
+import { lockRetentionOrganisation } from './retention-legal-hold.js';
 
 export interface SubscriptionRetentionDeadlineInput {
   organisationId: string;
@@ -27,21 +28,21 @@ export async function recordSubscriptionRetentionDeadline(
   input: SubscriptionRetentionDeadlineInput
 ): Promise<'RECORDED' | 'STALE'> {
   return database.transaction(async (transaction) => {
-    const [organisation] = await transaction
-      .select({ id: organisations.id })
-      .from(organisations)
-      .where(eq(organisations.id, input.organisationId))
-      .for('update')
-      .limit(1);
-    if (organisation === undefined) throw new Error('ORGANISATION_NOT_FOUND');
+    await lockRetentionOrganisation(transaction, input.organisationId);
 
     const [current] = await transaction
       .select()
       .from(retentionCases)
       .where(eq(retentionCases.organisationId, input.organisationId))
+      .for('update')
       .limit(1);
+    const currentIsUnboundLegalHold =
+      current?.status === 'LEGAL_HOLD' &&
+      current.source === 'CUSTOMER_REQUEST' &&
+      current.deletionEligibleAt === null;
     if (
       current !== undefined &&
+      !currentIsUnboundLegalHold &&
       current.closureEffectiveAt >= input.closureEffectiveAt
     ) {
       return 'STALE';

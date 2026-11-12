@@ -6,11 +6,42 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { approvals, auditEvents, contacts, conversations, createDatabase, dataRequestCases, inboundMessages, invoiceChases, invoices, messageAttempts, migrateDatabase, operatorReplies, organisations, outboundMessages, reminderSequenceVersions, reminderSequences, retentionCases, stageInstances, users, webhookEvents } from '@bc5000/db';
 
 import { applyRetention } from '../src/handlers/retention-apply.js';
+import { writeRetentionLegalHold } from '../src/services/retention-legal-hold.js';
 
 const client = createDatabase(process.env.DATABASE_URL ?? 'postgres://bc5000:bc5000@localhost:5432/bc5000');
 const now = new Date('2026-09-18T00:00:00.000Z');
 beforeAll(async () => migrateDatabase(client.db));
 afterAll(async () => client.pool.end());
+
+const deferred = <T>() => {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+};
+
+const waitForBlockedRetentionCleanup = async (): Promise<void> => {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const result = await client.pool.query<{ blocked: boolean }>(`
+      select exists (
+        select 1
+          from pg_stat_activity
+         where datname = current_database()
+           and pid <> pg_backend_pid()
+           and state = 'active'
+           and wait_event_type = 'Lock'
+           and (query like '%"approvals"%' or query like '%"organisations"%')
+      ) as blocked
+    `);
+    if (result.rows[0]?.blocked === true) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('retention cleanup did not reach the controlled lock');
+};
 
 describe('retention', () => {
   it('blocks a due deletion request under legal hold without crossing tenants or duplicating its audit', async () => {
@@ -147,6 +178,66 @@ describe('retention', () => {
     expect((await client.db.select().from(outboundMessages).where(eq(outboundMessages.id, outboundId)))[0]?.content).toBe('Held outbound content');
     expect(await client.db.select().from(webhookEvents).where(eq(webhookEvents.id, webhookId))).toHaveLength(1);
   });
+
+  it('honours a legal hold committed while cleanup is starting even when no retention row existed', async () => {
+    const organisationId = randomUUID();
+    const contactId = randomUUID();
+    const invoiceId = randomUUID();
+    const sequenceId = randomUUID();
+    const versionId = randomUUID();
+    const chaseId = randomUUID();
+    const stageId = randomUUID();
+    const approvalId = randomUUID();
+    const outboundId = randomUUID();
+    const webhookId = randomUUID();
+    await client.db.insert(organisations).values({ id: organisationId, xeroOrganisationId: randomUUID(), name: 'Concurrent legal hold tenant', timeZone: 'Australia/Sydney', baseCurrency: 'AUD' });
+    await client.db.insert(contacts).values({ id: contactId, organisationId, xeroContactId: randomUUID(), name: 'Held customer' });
+    await client.db.insert(invoices).values({ id: invoiceId, organisationId, xeroInvoiceId: randomUUID(), contactId, invoiceNumber: 'HOLD-RACE-1', type: 'ACCREC', status: 'PAID', issueDate: '2024-01-01', dueDate: '2024-02-01', amountDue: '0', currency: 'AUD', syncVersion: 1, resolvedAt: new Date('2024-08-01T00:00:00Z') });
+    await client.db.insert(reminderSequences).values({ id: sequenceId, organisationId, name: 'Concurrent hold sequence' });
+    await client.db.insert(reminderSequenceVersions).values({ id: versionId, organisationId, sequenceId, versionNumber: 1, status: 'RETIRED' });
+    await client.db.insert(invoiceChases).values({ id: chaseId, organisationId, invoiceId, sequenceId, customerId: contactId, status: 'CLOSED' });
+    await client.db.insert(stageInstances).values({ id: stageId, organisationId, invoiceChaseId: chaseId, sequenceVersionId: versionId, stageKey: 'held-race', channel: 'SMS', status: 'DELIVERED', scheduledAt: new Date('2024-02-01T00:00:00Z'), sourceVersion: 1 });
+    await client.db.insert(approvals).values({ id: approvalId, organisationId, stageInstanceId: stageId, renderedPreview: 'Concurrent held approval', sourceVersion: 1, status: 'APPROVED', expiresAt: new Date('2024-02-02T00:00:00Z') });
+    await client.db.insert(outboundMessages).values({ id: outboundId, organisationId, stageInstanceId: stageId, contactId, invoiceId, channel: 'SMS', source: 'AUTOMATED_REMINDER', recipientKey: '+61400000010', content: 'Concurrent held outbound', contentHash: 'held-race-outbound-hash', status: 'DELIVERED', idempotencyKey: randomUUID(), completedAt: new Date('2024-03-01T00:00:00Z') });
+    await client.db.insert(webhookEvents).values({ id: webhookId, organisationId, provider: 'SINCH', providerEventKey: randomUUID(), bodyHash: 'held-race-webhook-hash', signatureValid: true, providerPayload: { held: true }, receivedAt: new Date('2026-01-01T00:00:00Z'), processedAt: new Date('2026-01-01T00:00:01Z') });
+
+    const writerReady = deferred<void>();
+    const releaseWriter = deferred<void>();
+    const legalHoldWriter = client.db.transaction(async (transaction) => {
+      await writeRetentionLegalHold(transaction, {
+        organisationId,
+        recordedAt: now,
+        reason: 'Preserve records for concurrent legal review'
+      });
+      await transaction
+        .select({ id: approvals.id })
+        .from(approvals)
+        .where(eq(approvals.id, approvalId))
+        .for('update');
+      writerReady.resolve();
+      await releaseWriter.promise;
+    });
+    await writerReady.promise;
+
+    const cleanup = applyRetention(
+      { database: client.db, clock: { now: () => now }, batchSize: 100 },
+      { organisationId }
+    );
+    await waitForBlockedRetentionCleanup();
+    releaseWriter.resolve();
+    await legalHoldWriter;
+    const result = await cleanup;
+
+    expect(result).toMatchObject({
+      legalHoldActive: true,
+      approvalsRedacted: 0,
+      outboundRedacted: 0,
+      webhooksDeleted: 0
+    });
+    expect((await client.db.select().from(approvals).where(eq(approvals.id, approvalId)))[0]?.renderedPreview).toBe('Concurrent held approval');
+    expect((await client.db.select().from(outboundMessages).where(eq(outboundMessages.id, outboundId)))[0]?.content).toBe('Concurrent held outbound');
+    expect(await client.db.select().from(webhookEvents).where(eq(webhookEvents.id, webhookId))).toHaveLength(1);
+  }, 10_000);
 
   it('keeps a due deletion request blocked until the five-year eligibility date', async () => {
     const organisationId = randomUUID();

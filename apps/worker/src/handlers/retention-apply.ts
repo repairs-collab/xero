@@ -18,6 +18,7 @@ import {
   conversations,
   dataRequestCases,
   type Database,
+  type DbTransaction,
   inboundMessages,
   invoiceChases,
   invoices,
@@ -31,17 +32,23 @@ import {
 import { dataRequestReviewDecision } from '@bc5000/domain';
 import type { JobPayloads } from '@bc5000/jobs';
 
+import { lockRetentionOrganisation } from '../services/retention-legal-hold.js';
+
 const retained = '[RETAINED_METADATA_ONLY]';
 const retainedPayload = { retainedMetadataOnly: true } as const;
 
-export async function applyRetention(
+async function applyRetentionLocked(
   dependencies: {
-    database: Database;
+    database: DbTransaction;
     clock: { now(): Date };
     batchSize?: number;
   },
   payload: JobPayloads['retention.apply']
 ) {
+  await lockRetentionOrganisation(
+    dependencies.database,
+    payload.organisationId
+  );
   const now = dependencies.clock.now();
   const batchSize = dependencies.batchSize ?? 500;
   const contentCutoff = new Date(now);
@@ -83,8 +90,8 @@ export async function applyRetention(
     });
   }
 
-  const dataRequestsReviewed = await dependencies.database.transaction(
-    async (transaction) => {
+  const dataRequestsReviewed = await (async () => {
+      const transaction = dependencies.database;
       const [retentionCase] = await transaction
         .select({
           status: retentionCases.status,
@@ -180,8 +187,7 @@ export async function applyRetention(
         changed += 1;
       }
       return changed;
-    }
-  );
+    })();
 
   const [retentionGuard] = await dependencies.database
     .select({ status: retentionCases.status })
@@ -489,4 +495,20 @@ export async function applyRetention(
     occurredAt: now
   });
   return result;
+}
+
+export async function applyRetention(
+  dependencies: {
+    database: Database;
+    clock: { now(): Date };
+    batchSize?: number;
+  },
+  payload: JobPayloads['retention.apply']
+) {
+  return dependencies.database.transaction((transaction) =>
+    applyRetentionLocked(
+      { ...dependencies, database: transaction },
+      payload
+    )
+  );
 }

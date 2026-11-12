@@ -13,6 +13,7 @@ import {
 } from '@bc5000/db';
 
 import { processSubscriptionLifecycle } from '../src/handlers/subscription-lifecycle.js';
+import { placeRetentionLegalHold } from '../src/services/retention-legal-hold.js';
 import { recordSubscriptionRetentionDeadline } from '../src/services/subscription-retention.js';
 
 const client = createDatabase(
@@ -23,6 +24,34 @@ const now = new Date('2026-11-09T12:00:00.000Z');
 
 beforeAll(async () => migrateDatabase(client.db));
 afterAll(async () => client.pool.end());
+
+const deferred = <T>() => {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  return { promise, resolve };
+};
+
+const waitForBlockedRetentionWrite = async (): Promise<void> => {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const result = await client.pool.query<{ blocked: boolean }>(`
+      select exists (
+        select 1
+          from pg_stat_activity
+         where datname = current_database()
+           and pid <> pg_backend_pid()
+           and state = 'active'
+           and wait_event_type = 'Lock'
+           and query like '%"retention_cases"%'
+      ) as blocked
+    `);
+    if (result.rows[0]?.blocked === true) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('cancellation did not reach the controlled retention lock');
+};
 
 describe('cancelled Solo subscription lifecycle', () => {
   it('disconnects once and persists an auditable retention deadline', async () => {
@@ -184,5 +213,112 @@ describe('cancelled Solo subscription lifecycle', () => {
           )
         )
     ).toHaveLength(2);
+  });
+
+  it('preserves a legal hold committed while a newer cancellation is being recorded', async () => {
+    const organisationId = randomUUID();
+    const firstClosure = new Date('2026-11-09T12:00:00.000Z');
+    const secondClosure = new Date('2027-04-10T04:00:00.000Z');
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: randomUUID(),
+      name: 'Concurrent cancellation hold tenant',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD',
+      edition: 'SOLO'
+    });
+    await client.db.insert(retentionCases).values({
+      organisationId,
+      source: 'SUBSCRIPTION_CANCELLED',
+      status: 'SCHEDULED',
+      disconnectedAt: firstClosure,
+      reviewAfter: new Date('2026-12-09T12:00:00.000Z'),
+      closureEffectiveAt: firstClosure,
+      deletionEligibleAt: new Date('2031-11-09T12:00:00.000Z')
+    });
+
+    const writerReady = deferred<void>();
+    const releaseWriter = deferred<void>();
+    const legalHoldWriter = client.db.transaction(async (transaction) => {
+      await transaction
+        .select({ organisationId: retentionCases.organisationId })
+        .from(retentionCases)
+        .where(eq(retentionCases.organisationId, organisationId))
+        .for('update');
+      await transaction
+        .update(retentionCases)
+        .set({ status: 'LEGAL_HOLD' })
+        .where(eq(retentionCases.organisationId, organisationId));
+      writerReady.resolve();
+      await releaseWriter.promise;
+    });
+    await writerReady.promise;
+
+    const cancellation = recordSubscriptionRetentionDeadline(client.db, {
+      organisationId,
+      disconnectedAt: new Date('2027-04-11T00:00:00.000Z'),
+      retentionDeadline: new Date('2027-05-11T00:00:00.000Z'),
+      deletionEligibleAt: new Date('2032-04-10T04:00:00.000Z'),
+      closureEffectiveAt: secondClosure
+    });
+    await waitForBlockedRetentionWrite();
+    releaseWriter.resolve();
+    await legalHoldWriter;
+
+    await expect(cancellation).resolves.toBe('RECORDED');
+    expect(
+      (
+        await client.db
+          .select()
+          .from(retentionCases)
+          .where(eq(retentionCases.organisationId, organisationId))
+      )[0]
+    ).toMatchObject({
+      status: 'LEGAL_HOLD',
+      closureVersion: 2,
+      closureEffectiveAt: secondClosure
+    });
+  }, 10_000);
+
+  it('records a trusted cancellation that predates an initial legal-hold work item', async () => {
+    const organisationId = randomUUID();
+    const cancellationAt = new Date('2027-04-10T04:00:00.000Z');
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: randomUUID(),
+      name: 'Pre-lifecycle legal hold tenant',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD',
+      edition: 'SOLO'
+    });
+    await placeRetentionLegalHold(client.db, {
+      organisationId,
+      recordedAt: new Date('2027-04-11T00:00:00.000Z'),
+      reason: 'Preserve records while the cancellation lifecycle is pending'
+    });
+
+    await expect(
+      recordSubscriptionRetentionDeadline(client.db, {
+        organisationId,
+        disconnectedAt: new Date('2027-04-11T01:00:00.000Z'),
+        retentionDeadline: new Date('2027-05-11T01:00:00.000Z'),
+        deletionEligibleAt: new Date('2032-04-10T04:00:00.000Z'),
+        closureEffectiveAt: cancellationAt
+      })
+    ).resolves.toBe('RECORDED');
+    expect(
+      (
+        await client.db
+          .select()
+          .from(retentionCases)
+          .where(eq(retentionCases.organisationId, organisationId))
+      )[0]
+    ).toMatchObject({
+      source: 'SUBSCRIPTION_CANCELLED',
+      status: 'LEGAL_HOLD',
+      closureVersion: 2,
+      closureEffectiveAt: cancellationAt,
+      deletionEligibleAt: new Date('2032-04-10T04:00:00.000Z')
+    });
   });
 });

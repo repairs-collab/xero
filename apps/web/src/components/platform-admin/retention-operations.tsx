@@ -167,7 +167,7 @@ export function PlatformRetentionOperations({
                 <input
                   type="hidden"
                   name="operationId"
-                  value={`backup-${item.closureEpisodeId}-v${item.closureVersion}`}
+                  value={`backup-${item.closureEpisodeId}-at${item.updatedAt.getTime()}`}
                 />
                 <label>
                   Backup review completed at (UTC)

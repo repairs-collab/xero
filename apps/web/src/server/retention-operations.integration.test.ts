@@ -206,7 +206,7 @@ describe('retention owner repository', () => {
     ).toHaveLength(1);
   });
 
-  it('records backup-ageing evidence once with tenant and expected-state guards', async () => {
+  it('refreshes backup-ageing evidence with tenant, retry and expected-state guards', async () => {
     const actorUserId = randomUUID();
     const organisationId = randomUUID();
     const closureEpisodeId = randomUUID();
@@ -235,10 +235,11 @@ describe('retention owner repository', () => {
       deletionEligibleAt: new Date('2026-08-01T00:00:00.000Z'),
       updatedAt: expectedUpdatedAt
     });
+    let actionNow = now;
     const service = createRetentionOperationsService({
       verifyOwner: () => Promise.resolve(true),
       repository: new PostgresRetentionOperationsRepository(client.db),
-      clock: { now: () => now }
+      clock: { now: () => actionNow }
     });
     const input = {
       organisationId,
@@ -266,6 +267,23 @@ describe('retention owner repository', () => {
         evidenceReference: 'different-evidence'
       }
     );
+    actionNow = new Date('2026-09-19T00:00:00.000Z');
+    const refreshedInput = {
+      ...input,
+      verifiedAt: new Date('2026-09-18T12:00:00.000Z'),
+      evidenceReference: 'ovh-backup-review-456',
+      expectedUpdatedAt: now,
+      operationId: 'backup-review-episode-at1789689600000',
+      reason: 'Refreshed evidence for a later completed backup review'
+    };
+    const refreshed = await service.recordBackupExpiryVerification(
+      actorUserId,
+      refreshedInput
+    );
+    const refreshedRetry = await service.recordBackupExpiryVerification(
+      actorUserId,
+      refreshedInput
+    );
 
     expect(first).toEqual(retry);
     expect(first).toMatchObject({
@@ -279,6 +297,17 @@ describe('retention owner repository', () => {
       }
     });
     expect(conflict).toEqual({ ok: false, code: 'CONFLICT' });
+    expect(refreshed).toEqual(refreshedRetry);
+    expect(refreshed).toMatchObject({
+      ok: true,
+      value: {
+        organisationId,
+        backupExpiryVerifiedAt: new Date('2026-09-18T12:00:00.000Z'),
+        backupExpiryEvidenceReference: 'ovh-backup-review-456',
+        backupExpiryClosureEpisodeId: closureEpisodeId,
+        updatedAt: actionNow
+      }
+    });
     expect(
       await client.db
         .select()
@@ -289,7 +318,7 @@ describe('retention owner repository', () => {
             eq(auditEvents.eventType, 'BACKUP_AGEING_VERIFIED')
           )
         )
-    ).toHaveLength(1);
+    ).toHaveLength(2);
   });
 
   it('completes an exported request once only after a request-bound backup audit', async () => {
