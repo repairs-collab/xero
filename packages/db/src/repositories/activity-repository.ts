@@ -15,6 +15,34 @@ export interface ActivityFilters {
   to?: Date;
 }
 
+export const CUSTOMER_ACTIVITY_FILTER_OPTIONS = [
+  { value: 'account', label: 'Account' },
+  { value: 'customers', label: 'Customers' },
+  { value: 'messaging', label: 'Messages and reminders' },
+  { value: 'sequences', label: 'Sequences' },
+  { value: 'users', label: 'Users' },
+  { value: 'voice', label: 'Voice reminders' },
+  { value: 'xero', label: 'Xero' }
+] as const;
+
+export type CustomerActivityType =
+  (typeof CUSTOMER_ACTIVITY_FILTER_OPTIONS)[number]['value'];
+
+export interface CustomerActivityFilters {
+  query?: string;
+  activityType?: CustomerActivityType;
+  from?: Date;
+  to?: Date;
+}
+
+export interface CustomerAuditActivityRecord {
+  id: string;
+  occurredAt: Date;
+  label: string;
+  subject: string;
+  actorLabel: 'User action' | 'System activity';
+}
+
 export interface CustomerActivityRecord {
   id: string;
   occurredAt: Date;
@@ -29,6 +57,77 @@ export interface CustomerActivityRecord {
 
 type VoiceCallSource = 'MANUAL' | 'SEQUENCE_REVIEW' | 'SEQUENCE_AUTOMATIC';
 type VoiceInvoiceReference = { invoiceId: string; invoiceNumber: string };
+
+type CustomerAuditPresentation = {
+  label: string;
+  subject: string;
+  activityType: CustomerActivityType;
+};
+
+const customerAuditPresentation = {
+  ADMIN_MOBILE_VERIFICATION_REQUESTED: { label: 'Mobile verification requested', subject: 'Account security', activityType: 'account' },
+  ADMIN_MOBILE_VERIFIED: { label: 'Mobile number verified', subject: 'Account security', activityType: 'account' },
+  ALL_PROVIDER_SENDING_DISABLED: { label: 'Message sending paused', subject: 'Sending controls', activityType: 'messaging' },
+  APPROVAL_EXPIRED_STALE: { label: 'Reminder approval expired', subject: 'Reminder', activityType: 'messaging' },
+  CALL_LINK_OPENED: { label: 'Customer call opened', subject: 'Customer', activityType: 'customers' },
+  CUSTOMER_CHASING_PAUSED: { label: 'Customer reminders paused', subject: 'Customer', activityType: 'customers' },
+  CUSTOMER_CHASING_RESUMED: { label: 'Customer reminders resumed', subject: 'Customer', activityType: 'customers' },
+  CUSTOMER_NOTE_ADDED: { label: 'Customer note added', subject: 'Customer', activityType: 'customers' },
+  CUSTOMER_PHONE_OVERRIDE_CLEARED: { label: 'Customer phone override cleared', subject: 'Customer', activityType: 'customers' },
+  CUSTOMER_PHONE_OVERRIDE_SET: { label: 'Customer phone updated', subject: 'Customer', activityType: 'customers' },
+  CUSTOMER_ROLLOUT_ACTIVATED: { label: 'Live customer messaging enabled', subject: 'Sending controls', activityType: 'messaging' },
+  CUSTOMER_ROLLOUT_RETURNED_TO_CONTROLLED: { label: 'Customer messaging returned to review', subject: 'Sending controls', activityType: 'messaging' },
+  CUSTOMER_ROLLOUT_SETUP_OVERRIDE_ACTIVATED: { label: 'Customer messaging setup confirmed', subject: 'Sending controls', activityType: 'messaging' },
+  DISPUTE_RECORDED: { label: 'Dispute recorded', subject: 'Customer', activityType: 'customers' },
+  ESCALATION_TASK_COMPLETED: { label: 'Escalation completed', subject: 'Customer', activityType: 'customers' },
+  INITIAL_ADMIN_BOOTSTRAPPED: { label: 'Initial administrator created', subject: 'Account', activityType: 'account' },
+  LIVE_SENDING_ACTIVATED: { label: 'Live sending enabled', subject: 'Sending controls', activityType: 'messaging' },
+  ONBOARDING_ATTESTATION_RECORDED: { label: 'Onboarding acceptance recorded', subject: 'Account', activityType: 'account' },
+  ONBOARDING_COMPLETED: { label: 'Onboarding completed', subject: 'Account', activityType: 'account' },
+  OPERATOR_REPLY_ACCEPTED: { label: 'Reply accepted for delivery', subject: 'Customer message', activityType: 'messaging' },
+  OPERATOR_REPLY_QUEUED: { label: 'Reply queued', subject: 'Customer message', activityType: 'messaging' },
+  PAYMENT_PROMISE_RECORDED: { label: 'Payment promise recorded', subject: 'Customer', activityType: 'customers' },
+  REMINDER_APPROVED: { label: 'Reminder approved', subject: 'Reminder', activityType: 'messaging' },
+  REMINDER_REJECTED: { label: 'Reminder rejected', subject: 'Reminder', activityType: 'messaging' },
+  REMINDER_SNOOZED: { label: 'Reminder snoozed', subject: 'Reminder', activityType: 'messaging' },
+  REMINDER_WHITELIST_ADDED: { label: 'Reminder exclusion added', subject: 'Reminder exclusions', activityType: 'sequences' },
+  REMINDER_WHITELIST_REMOVED: { label: 'Reminder exclusion removed', subject: 'Reminder exclusions', activityType: 'sequences' },
+  REMINDERS_CANCELLED_BY_WHITELIST: { label: 'Excluded reminders cancelled', subject: 'Reminder exclusions', activityType: 'sequences' },
+  ROLLOUT_RECONCILIATION_ACKNOWLEDGED: { label: 'Xero reconciliation confirmed', subject: 'Sending controls', activityType: 'xero' },
+  SEND_ALLOWLIST_UPDATED: { label: 'Test recipient list updated', subject: 'Sending controls', activityType: 'messaging' },
+  SEQUENCE_ENABLED_CHANGED: { label: 'Sequence availability changed', subject: 'Sequence', activityType: 'sequences' },
+  SEQUENCE_MODE_CHANGED: { label: 'Sequence mode changed', subject: 'Sequence', activityType: 'sequences' },
+  SMS_OPT_OUT: { label: 'Customer opted out of SMS', subject: 'Customer message', activityType: 'messaging' },
+  TEST_SMS_QUEUED: { label: 'Test message queued', subject: 'Test sending', activityType: 'messaging' },
+  USER_DISABLED: { label: 'User disabled', subject: 'User access', activityType: 'users' },
+  USER_INVITATION_RESENT: { label: 'User invitation resent', subject: 'User access', activityType: 'users' },
+  USER_INVITED: { label: 'User invited', subject: 'User access', activityType: 'users' },
+  USER_ROLE_CHANGED: { label: 'User role changed', subject: 'User access', activityType: 'users' },
+  VOICE_CALL_FACTS_APPROVED: { label: 'Voice call details approved', subject: 'Voice reminder', activityType: 'voice' },
+  VOICE_CALL_RECONCILED: { label: 'Voice call outcome reconciled', subject: 'Voice reminder', activityType: 'voice' },
+  VOICE_CONNECTION_TESTED: { label: 'Voice connection tested', subject: 'Voice settings', activityType: 'voice' },
+  VOICE_GENERIC_FLOW_TESTED: { label: 'Voice call flow tested', subject: 'Voice settings', activityType: 'voice' },
+  VOICE_REMINDER_APPROVED: { label: 'Voice reminder approved', subject: 'Voice reminder', activityType: 'voice' },
+  VOICE_REMINDER_QUEUED: { label: 'Voice reminder queued', subject: 'Voice reminder', activityType: 'voice' },
+  VOICE_REMINDER_REJECTED: { label: 'Voice reminder rejected', subject: 'Voice reminder', activityType: 'voice' },
+  VOICE_SETTINGS_CHANGED: { label: 'Voice settings changed', subject: 'Voice settings', activityType: 'voice' },
+  VOICE_TEST_CALL_FACTS_APPROVED: { label: 'Voice test details approved', subject: 'Voice settings', activityType: 'voice' },
+  XERO_DISCONNECTED: { label: 'Xero disconnected', subject: 'Xero connection', activityType: 'xero' },
+  XERO_RECONCILIATION_COMPLETED: { label: 'Xero reconciliation completed', subject: 'Xero sync', activityType: 'xero' },
+  XERO_SYNC_QUEUE_FAILED: { label: 'Xero sync could not be queued', subject: 'Xero sync', activityType: 'xero' },
+  XERO_SYNC_QUEUED: { label: 'Xero sync queued', subject: 'Xero sync', activityType: 'xero' },
+  XERO_SYNC_REQUESTED: { label: 'Xero sync requested', subject: 'Xero sync', activityType: 'xero' },
+  XERO_TENANT_CONFLICT_REJECTED: { label: 'Xero organisation selection rejected', subject: 'Xero connection', activityType: 'xero' },
+  XERO_TENANT_SELECTED: { label: 'Xero organisation selected', subject: 'Xero connection', activityType: 'xero' }
+} as const satisfies Readonly<Record<string, CustomerAuditPresentation>>;
+
+const customerAuditEventTypes = Object.keys(customerAuditPresentation);
+
+export const isCustomerActivityType = (
+  value: string | undefined
+): value is CustomerActivityType => CUSTOMER_ACTIVITY_FILTER_OPTIONS.some(
+  (option) => option.value === value
+);
 
 const voiceEventPresentation: Readonly<Record<string, { label: string; tone: CustomerActivityRecord['tone'] }>> = {
   VOICE_CALL_STARTED: { label: 'Voice call started', tone: 'neutral' },
@@ -107,6 +206,60 @@ export class PostgresActivityRepository {
     return this.database.select().from(auditEvents).where(and(...conditions)).orderBy(desc(auditEvents.occurredAt), desc(auditEvents.id)).limit(250);
   }
 
+  async searchCustomerActivity(
+    organisationId: string,
+    filters: CustomerActivityFilters = {}
+  ): Promise<CustomerAuditActivityRecord[]> {
+    const conditions: SQL[] = [
+      eq(auditEvents.organisationId, organisationId),
+      inArray(auditEvents.eventType, customerAuditEventTypes)
+    ];
+    if (filters.activityType) {
+      if (!isCustomerActivityType(filters.activityType)) return [];
+      conditions.push(inArray(
+        auditEvents.eventType,
+        customerAuditEventTypes.filter(
+          (eventType) => customerAuditPresentation[eventType as keyof typeof customerAuditPresentation].activityType === filters.activityType
+        )
+      ));
+    }
+    if (filters.from) conditions.push(gte(auditEvents.occurredAt, filters.from));
+    if (filters.to) conditions.push(lte(auditEvents.occurredAt, filters.to));
+    if (filters.query) {
+      const pattern = `%${filters.query.replaceAll('%', '\\%').replaceAll('_', '\\_')}%`;
+      conditions.push(or(
+        ilike(auditEvents.entityId, pattern),
+        ilike(auditEvents.eventType, pattern),
+        ilike(auditEvents.correlationId, pattern)
+      )!);
+    }
+    const rows = await this.database
+      .select({
+        id: auditEvents.id,
+        occurredAt: auditEvents.occurredAt,
+        eventType: auditEvents.eventType,
+        actorUserId: auditEvents.actorUserId
+      })
+      .from(auditEvents)
+      .where(and(...conditions))
+      .orderBy(desc(auditEvents.occurredAt), desc(auditEvents.id))
+      .limit(250);
+
+    return rows.flatMap((row) => {
+      const presentation = customerAuditPresentation[
+        row.eventType as keyof typeof customerAuditPresentation
+      ];
+      if (!presentation) return [];
+      return [{
+        id: row.id,
+        occurredAt: row.occurredAt,
+        label: presentation.label,
+        subject: presentation.subject,
+        actorLabel: row.actorUserId ? 'User action' as const : 'System activity' as const
+      }];
+    });
+  }
+
   async customerTimeline(organisationId: string, customerId: string): Promise<CustomerActivityRecord[]> {
     const [invoiceRows, approvalRows, outboundRows, inboundRows, replyRows, pauseRows, disputeRows, promiseRows, taskRows, auditRows] = await Promise.all([
       this.database.select().from(invoices).where(and(eq(invoices.organisationId, organisationId), eq(invoices.contactId, customerId))),
@@ -144,9 +297,9 @@ export class PostgresActivityRepository {
     const events: CustomerActivityRecord[] = [];
     for (const invoice of invoiceRows) events.push({ id: `invoice:${invoice.id}`, occurredAt: invoice.updatedAt, label: 'Xero invoice updated', source: 'Xero', detail: `${invoice.invoiceNumber} · ${invoice.status} · ${invoice.currency} ${invoice.amountDue}`, tone: invoice.status === 'PAID' ? 'positive' : 'neutral' });
     for (const row of approvalRows) events.push({ id: `approval:${row.approval.id}`, occurredAt: row.approval.decidedAt ?? row.approval.createdAt, label: `Reminder ${row.approval.status.toLowerCase()}`, source: 'AccountPulse', detail: `${row.invoiceNumber} · source version ${row.approval.sourceVersion}`, tone: row.approval.status === 'EXPIRED' || row.approval.status === 'REJECTED' ? 'warning' : 'neutral' });
-    for (const row of outboundRows) events.push({ id: `outbound:${row.message.id}`, occurredAt: row.message.completedAt ?? row.message.updatedAt, label: `${row.message.channel === 'SMS' ? 'SMS' : 'Xero email'} ${row.message.status.toLowerCase()}`, source: row.message.channel === 'SMS' ? 'Sinch' : 'Xero', detail: row.invoiceNumber, tone: row.message.status === 'DELIVERED' || row.message.status === 'ACCEPTED' ? 'positive' : row.message.status === 'FAILED' || row.message.status === 'UNKNOWN' ? 'warning' : 'neutral' });
-    for (const row of inboundRows) events.push({ id: `inbound:${row.message.id}`, occurredAt: row.message.receivedAt, label: 'Customer replied', source: 'Sinch', detail: row.message.body, tone: 'neutral' });
-    for (const row of replyRows) events.push({ id: `reply:${row.reply.id}`, occurredAt: row.reply.sentAt ?? row.reply.createdAt, label: 'Operator replied', source: 'AccountPulse via Sinch', detail: row.reply.content, tone: row.reply.status === 'FAILED' ? 'warning' : 'neutral' });
+    for (const row of outboundRows) events.push({ id: `outbound:${row.message.id}`, occurredAt: row.message.completedAt ?? row.message.updatedAt, label: `${row.message.channel === 'SMS' ? 'SMS' : 'Xero email'} ${row.message.status.toLowerCase()}`, source: row.message.channel === 'SMS' ? 'AccountPulse messaging' : 'Xero', detail: row.invoiceNumber, tone: row.message.status === 'DELIVERED' || row.message.status === 'ACCEPTED' ? 'positive' : row.message.status === 'FAILED' || row.message.status === 'UNKNOWN' ? 'warning' : 'neutral' });
+    for (const row of inboundRows) events.push({ id: `inbound:${row.message.id}`, occurredAt: row.message.receivedAt, label: 'Customer replied', source: 'AccountPulse messaging', detail: row.message.body, tone: 'neutral' });
+    for (const row of replyRows) events.push({ id: `reply:${row.reply.id}`, occurredAt: row.reply.sentAt ?? row.reply.createdAt, label: 'Operator replied', source: 'AccountPulse messaging', detail: row.reply.content, tone: row.reply.status === 'FAILED' ? 'warning' : 'neutral' });
     for (const pause of pauseRows) events.push({ id: `pause:${pause.id}`, occurredAt: pause.endedAt ?? pause.startedAt, label: pause.active ? 'Chasing paused' : 'Chasing resumed', source: 'AccountPulse', detail: pause.reason ?? pause.kind, tone: pause.active ? 'warning' : 'positive' });
     for (const dispute of disputeRows) events.push({ id: `dispute:${dispute.id}`, occurredAt: dispute.resolvedAt ?? dispute.recordedAt, label: `Dispute ${dispute.status.toLowerCase()}`, source: 'Operator', detail: dispute.reason, tone: dispute.status === 'OPEN' ? 'warning' : 'neutral' });
     for (const promise of promiseRows) events.push({ id: `promise:${promise.id}`, occurredAt: promise.endedAt ?? promise.recordedAt, label: 'Promise to pay', source: 'Operator', detail: `${promise.status} · promised ${promise.promisedDate} + ${promise.graceDays} grace days`, tone: promise.status === 'MISSED' ? 'warning' : 'neutral' });
