@@ -26,13 +26,10 @@ export const provisionPaidSmsNumber = async (
     return 'OWNER_ACTION_REQUIRED';
   }
 
-  const request = await dependencies.repository.ensureRequestForPaidOrganisation({
+  await dependencies.repository.ensureRequestForPaidOrganisation({
     organisationId: payload.organisationId,
     provider: 'SINCH',
     now: dependencies.clock.now()
   });
-  if (!request.ok) {
-    throw new Error(`REPLY_NUMBER_PROVISIONING_${request.code}`);
-  }
   return 'OWNER_ACTION_REQUIRED';
 };

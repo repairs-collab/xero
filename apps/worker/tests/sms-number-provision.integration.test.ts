@@ -87,4 +87,37 @@ describe('SMS number provisioning worker manual control plane', () => {
       { status: 'AVAILABLE', organisationId: null, readyAt: null }
     ]);
   });
+
+  it('completes a stale job without creating a request for an unpaid organisation', async () => {
+    const organisationId = randomUUID();
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: `worker-reply-unpaid-${organisationId}`,
+      name: 'Unpaid worker reply number organisation',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD',
+      edition: 'SOLO',
+      platformStatus: 'ACTIVE'
+    });
+    await client.db.insert(subscriptions).values({
+      organisationId,
+      planCode: 'SOLO_AU_2000',
+      status: 'CANCELLED',
+      trustedStripeProviderStatus: 'canceled',
+      cancelledAt: now
+    });
+
+    await expect(
+      provisionPaidSmsNumber(
+        { repository, clock: { now: () => now } },
+        { organisationId }
+      )
+    ).resolves.toBe('OWNER_ACTION_REQUIRED');
+    await expect(
+      client.db
+        .select()
+        .from(replyNumberProvisioningRequests)
+        .where(eq(replyNumberProvisioningRequests.organisationId, organisationId))
+    ).resolves.toHaveLength(0);
+  });
 });

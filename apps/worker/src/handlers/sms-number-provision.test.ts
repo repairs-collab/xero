@@ -156,7 +156,7 @@ describe('paid SMS reply number provisioning', () => {
     });
   });
 
-  it('does not report owner action when strict paid eligibility rejects the request', async () => {
+  it('completes without retrying when a stale job is no longer paid-eligible', async () => {
     await expect(
       provisionPaidSmsNumber(
         {
@@ -170,6 +170,6 @@ describe('paid SMS reply number provisioning', () => {
         },
         { organisationId: 'organisation-1' }
       )
-    ).rejects.toThrow('REPLY_NUMBER_PROVISIONING_NOT_ELIGIBLE');
+    ).resolves.toBe('OWNER_ACTION_REQUIRED');
   });
 });
