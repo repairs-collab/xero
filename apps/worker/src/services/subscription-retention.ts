@@ -5,7 +5,9 @@ import { eq } from 'drizzle-orm';
 import {
   auditEvents,
   type Database,
-  retentionCases
+  retentionCases,
+  type SubscriptionStatus,
+  subscriptions
 } from '@bc5000/db';
 
 import { lockRetentionOrganisation } from './retention-legal-hold.js';
@@ -16,6 +18,45 @@ export interface SubscriptionRetentionDeadlineInput {
   retentionDeadline: Date;
   deletionEligibleAt: Date | null;
   closureEffectiveAt: Date;
+}
+
+export interface SubscriptionRetentionState {
+  status: SubscriptionStatus;
+  cancelledAt: Date | null;
+  retentionDeadlineRecorded: boolean;
+  recordedCancellationAt: Date | null;
+}
+
+export async function loadSubscriptionRetentionState(
+  database: Database,
+  organisationId: string
+): Promise<SubscriptionRetentionState | null> {
+  const [subscription] = await database
+    .select({
+      status: subscriptions.status,
+      cancelledAt: subscriptions.cancelledAt
+    })
+    .from(subscriptions)
+    .where(eq(subscriptions.organisationId, organisationId))
+    .limit(1);
+  if (subscription === undefined) return null;
+  const [retentionCase] = await database
+    .select({
+      source: retentionCases.source,
+      closureEffectiveAt: retentionCases.closureEffectiveAt
+    })
+    .from(retentionCases)
+    .where(eq(retentionCases.organisationId, organisationId))
+    .limit(1);
+  const cancellationRecorded =
+    retentionCase?.source === 'SUBSCRIPTION_CANCELLED';
+  return {
+    ...subscription,
+    retentionDeadlineRecorded: cancellationRecorded,
+    recordedCancellationAt: cancellationRecorded
+      ? retentionCase.closureEffectiveAt
+      : null
+  };
 }
 
 /**

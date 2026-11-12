@@ -11,7 +11,8 @@ import {
   retentionCases,
   retentionOperationReceipts,
   type DataRequestType,
-  type Database
+  type Database,
+  type DbTransaction
 } from '@bc5000/db';
 import { dataRequestReviewDecision } from '@bc5000/domain';
 
@@ -102,6 +103,19 @@ export interface RetentionOperationsRepository {
 const operationInputHash = (value: Record<string, unknown>): string =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
+const lockOwnerRetentionOrganisation = async (
+  transaction: DbTransaction,
+  organisationId: string
+): Promise<boolean> => {
+  const [organisation] = await transaction
+    .select({ id: organisations.id })
+    .from(organisations)
+    .where(eq(organisations.id, organisationId))
+    .for('update')
+    .limit(1);
+  return organisation !== undefined;
+};
+
 export class PostgresRetentionOperationsRepository
   implements RetentionOperationsRepository
 {
@@ -175,12 +189,14 @@ export class PostgresRetentionOperationsRepository
     input: Parameters<RetentionOperationsRepository['recordVerifiedRequest']>[0]
   ): Promise<RetentionMutationResult> {
     return this.database.transaction(async (transaction) => {
-      const [organisation] = await transaction
-        .select({ id: organisations.id })
-        .from(organisations)
-        .where(eq(organisations.id, input.organisationId))
-        .limit(1);
-      if (organisation === undefined) return { ok: false, code: 'NOT_FOUND' };
+      if (
+        !(await lockOwnerRetentionOrganisation(
+          transaction,
+          input.organisationId
+        ))
+      ) {
+        return { ok: false, code: 'NOT_FOUND' };
+      }
       const [retentionCase] = await transaction
         .select({ closureEpisodeId: retentionCases.closureEpisodeId })
         .from(retentionCases)
@@ -263,6 +279,14 @@ export class PostgresRetentionOperationsRepository
       reason: input.reason
     });
     return this.database.transaction(async (transaction) => {
+      if (
+        !(await lockOwnerRetentionOrganisation(
+          transaction,
+          input.organisationId
+        ))
+      ) {
+        return { ok: false, code: 'NOT_FOUND' };
+      }
       const [retentionCase] = await transaction
         .select({
           status: retentionCases.status,
@@ -402,6 +426,14 @@ export class PostgresRetentionOperationsRepository
       reason: input.reason
     });
     return this.database.transaction(async (transaction) => {
+      if (
+        !(await lockOwnerRetentionOrganisation(
+          transaction,
+          input.organisationId
+        ))
+      ) {
+        return { ok: false, code: 'NOT_FOUND' };
+      }
       const [current] = await transaction
         .select()
         .from(retentionCases)
@@ -507,6 +539,14 @@ export class PostgresRetentionOperationsRepository
       deliveryReference: input.deliveryReference
     });
     return this.database.transaction(async (transaction) => {
+      if (
+        !(await lockOwnerRetentionOrganisation(
+          transaction,
+          input.organisationId
+        ))
+      ) {
+        return { ok: false, code: 'NOT_FOUND' };
+      }
       const [request] = await transaction
         .select()
         .from(dataRequestCases)

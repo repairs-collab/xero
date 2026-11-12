@@ -63,7 +63,10 @@ import {
   parseXeroOAuthReadinessCommand
 } from './operations/xero-oauth-readiness.js';
 import { processInboundReply } from './services/inbound-reply-service.js';
-import { recordSubscriptionRetentionDeadline } from './services/subscription-retention.js';
+import {
+  loadSubscriptionRetentionState,
+  recordSubscriptionRetentionDeadline
+} from './services/subscription-retention.js';
 import {
   databaseUrlFromEnvironment,
   parseApprovedSmsRecoveryCommand,
@@ -560,31 +563,11 @@ async function main() {
       [jobNames.subscriptionLifecycle]: (payload) =>
         processSubscriptionLifecycle(
           {
-            load: async (organisationId) => {
-              const [subscription] = await databaseClient.db
-                .select({
-                  status: subscriptions.status,
-                  cancelledAt: subscriptions.cancelledAt
-                })
-                .from(subscriptions)
-                .where(eq(subscriptions.organisationId, organisationId))
-                .limit(1);
-              if (subscription === undefined) return null;
-              const [retentionCase] = await databaseClient.db
-                .select({
-                  organisationId: retentionCases.organisationId,
-                  closureEffectiveAt: retentionCases.closureEffectiveAt
-                })
-                .from(retentionCases)
-                .where(eq(retentionCases.organisationId, organisationId))
-                .limit(1);
-              return {
-                ...subscription,
-                retentionDeadlineRecorded: retentionCase !== undefined,
-                recordedCancellationAt:
-                  retentionCase?.closureEffectiveAt ?? null
-              };
-            },
+            load: (organisationId) =>
+              loadSubscriptionRetentionState(
+                databaseClient.db,
+                organisationId
+              ),
             disconnectXero: async (organisationId) => {
               const connection =
                 await xeroConnections.findByOrganisationId(organisationId);

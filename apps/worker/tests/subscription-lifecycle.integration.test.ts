@@ -14,7 +14,10 @@ import {
 
 import { processSubscriptionLifecycle } from '../src/handlers/subscription-lifecycle.js';
 import { placeRetentionLegalHold } from '../src/services/retention-legal-hold.js';
-import { recordSubscriptionRetentionDeadline } from '../src/services/subscription-retention.js';
+import {
+  loadSubscriptionRetentionState,
+  recordSubscriptionRetentionDeadline
+} from '../src/services/subscription-retention.js';
 
 const client = createDatabase(
   process.env.DATABASE_URL ??
@@ -280,7 +283,7 @@ describe('cancelled Solo subscription lifecycle', () => {
     });
   }, 10_000);
 
-  it('records a trusted cancellation that predates an initial legal-hold work item', async () => {
+  it('runs the production cancellation lifecycle when an initial legal hold is unbound', async () => {
     const organisationId = randomUUID();
     const cancellationAt = new Date('2027-04-10T04:00:00.000Z');
     await client.db.insert(organisations).values({
@@ -291,21 +294,47 @@ describe('cancelled Solo subscription lifecycle', () => {
       baseCurrency: 'AUD',
       edition: 'SOLO'
     });
+    await client.db.insert(subscriptions).values({
+      organisationId,
+      planCode: 'SOLO_AU_2000',
+      status: 'CANCELLED',
+      cancelledAt: cancellationAt
+    });
     await placeRetentionLegalHold(client.db, {
       organisationId,
       recordedAt: new Date('2027-04-11T00:00:00.000Z'),
       reason: 'Preserve records while the cancellation lifecycle is pending'
     });
 
-    await expect(
-      recordSubscriptionRetentionDeadline(client.db, {
-        organisationId,
-        disconnectedAt: new Date('2027-04-11T01:00:00.000Z'),
-        retentionDeadline: new Date('2027-05-11T01:00:00.000Z'),
-        deletionEligibleAt: new Date('2032-04-10T04:00:00.000Z'),
-        closureEffectiveAt: cancellationAt
-      })
-    ).resolves.toBe('RECORDED');
+    const disconnects: string[] = [];
+    const quarantines: string[] = [];
+    const result = await processSubscriptionLifecycle(
+      {
+        load: (candidateOrganisationId: string) =>
+          loadSubscriptionRetentionState(
+            client.db,
+            candidateOrganisationId
+          ),
+        disconnectXero: (candidateOrganisationId: string) => {
+          disconnects.push(candidateOrganisationId);
+          return Promise.resolve();
+        },
+        quarantineSmsNumber: (candidateOrganisationId: string) => {
+          quarantines.push(candidateOrganisationId);
+          return Promise.resolve();
+        },
+        recordRetentionDeadline: (input) =>
+          recordSubscriptionRetentionDeadline(client.db, input).then(
+            () => undefined
+          ),
+        clock: { now: () => new Date('2027-04-11T01:00:00.000Z') }
+      },
+      { organisationId, status: 'CANCELLED' }
+    );
+
+    expect(result).toBe('DISCONNECTED');
+    expect(disconnects).toEqual([organisationId]);
+    expect(quarantines).toEqual([organisationId]);
     expect(
       (
         await client.db

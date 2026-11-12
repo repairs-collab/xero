@@ -29,6 +29,37 @@ const now = new Date('2026-09-18T00:00:00.000Z');
 beforeAll(async () => migrateDatabase(client.db));
 afterAll(async () => client.pool.end());
 
+const deferred = <T>() => {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  return { promise, resolve };
+};
+
+const waitForOwnerMutationBlockedOnOrganisation = async (): Promise<void> => {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const result = await client.pool.query<{ blocked: boolean }>(`
+      select exists (
+        select 1
+          from pg_stat_activity
+         where datname = current_database()
+           and pid <> pg_backend_pid()
+           and state = 'active'
+           and wait_event_type = 'Lock'
+           and (
+             query like '%"retention_operation_receipts"%'
+             or query like '%"organisations"%'
+           )
+      ) as blocked
+    `);
+    if (result.rows[0]?.blocked === true) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('owner retention mutation did not reach the organisation lock');
+};
+
 describe('retention owner repository', () => {
   it('records a verified request once and rejects conflicting reuse of its tenant idempotency key', async () => {
     const actorUserId = randomUUID();
@@ -320,6 +351,81 @@ describe('retention owner repository', () => {
         )
     ).toHaveLength(2);
   });
+
+  it('uses organisation-before-retention lock order with concurrent cleanup', async () => {
+    const actorUserId = randomUUID();
+    const organisationId = randomUUID();
+    const closureEpisodeId = randomUUID();
+    const expectedUpdatedAt = new Date('2026-09-16T00:00:00.000Z');
+    await client.db.insert(users).values({
+      id: actorUserId,
+      cognitoSubject: randomUUID(),
+      email: `${actorUserId}@example.invalid`,
+      displayName: 'Concurrent Backup Reviewer'
+    });
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: randomUUID(),
+      name: 'Retention lock-order tenant',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await client.db.insert(retentionCases).values({
+      organisationId,
+      source: 'SUBSCRIPTION_CANCELLED',
+      status: 'REVIEW_REQUIRED',
+      disconnectedAt: new Date('2021-08-01T00:00:00.000Z'),
+      reviewAfter: new Date('2021-09-01T00:00:00.000Z'),
+      closureEpisodeId,
+      closureEffectiveAt: new Date('2021-08-01T00:00:00.000Z'),
+      deletionEligibleAt: new Date('2026-08-01T00:00:00.000Z'),
+      updatedAt: expectedUpdatedAt
+    });
+    const service = createRetentionOperationsService({
+      verifyOwner: () => Promise.resolve(true),
+      repository: new PostgresRetentionOperationsRepository(client.db),
+      clock: { now: () => now }
+    });
+    const organisationLocked = deferred<void>();
+    const attemptRetentionLock = deferred<void>();
+    const cleanup = client.db.transaction(async (transaction) => {
+      await transaction
+        .select({ id: organisations.id })
+        .from(organisations)
+        .where(eq(organisations.id, organisationId))
+        .for('update');
+      organisationLocked.resolve();
+      await attemptRetentionLock.promise;
+      await transaction
+        .select({ organisationId: retentionCases.organisationId })
+        .from(retentionCases)
+        .where(eq(retentionCases.organisationId, organisationId))
+        .for('update');
+    });
+    await organisationLocked.promise;
+
+    const ownerMutation = service.recordBackupExpiryVerification(actorUserId, {
+      organisationId,
+      closureEpisodeId,
+      verifiedAt: new Date('2026-09-17T05:00:00.000Z'),
+      evidenceReference: 'concurrent-backup-review-123',
+      expectedUpdatedAt,
+      operationId: 'concurrent-backup-review-operation',
+      reason: 'Verify consistent retention lock ordering'
+    });
+    await waitForOwnerMutationBlockedOnOrganisation();
+    attemptRetentionLock.resolve();
+
+    const outcomes = await Promise.allSettled([cleanup, ownerMutation]);
+    expect(outcomes.map((outcome) => outcome.status)).toEqual([
+      'fulfilled',
+      'fulfilled'
+    ]);
+    expect(outcomes[1]).toMatchObject({
+      status: 'fulfilled',
+      value: { ok: true }
+    });
+  }, 10_000);
 
   it('completes an exported request once only after a request-bound backup audit', async () => {
     const actorUserId = randomUUID();
