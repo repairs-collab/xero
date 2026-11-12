@@ -183,6 +183,13 @@
       "when": 1794460000002,
       "tag": "0025_orange_rattler",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1794460000003,
+      "tag": "0026_messy_big_bertha",
+      "breakpoints": true
     }
   ]
 }

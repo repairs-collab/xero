@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { and, desc, eq, isNull, or } from 'drizzle-orm';
+import { and, desc, eq, isNull, or, sql } from 'drizzle-orm';
 
 import {
   auditEvents,
@@ -23,6 +23,7 @@ import {
   type BillingAccount,
   type StripeCheckoutCompletedInput,
   type StripeEventApplicationOutcome,
+  type StripeEventReplayResult,
   type StripeLifecycleEventInput,
   type StripeOperationalEventInput,
   type SubscriptionRepository
@@ -52,6 +53,13 @@ const insertEvent = async (
     eventType: string;
     eventCreatedAt: Date;
     payloadHash: string;
+    providerObjectType?: StripeOperationalEventInput['providerObjectType'];
+    providerObjectId?: string;
+    billingCaseKind?: StripeOperationalEventInput['caseKind'];
+    billingCaseStatus?: StripeOperationalEventInput['targetStatus'];
+    blocksSending?: boolean;
+    amountMinor?: number;
+    heldTemplate?: StripeOperationalEventInput['heldTemplate'];
   },
   outcome: Exclude<StripeEventApplicationOutcome, 'DUPLICATE'>
 ): Promise<void> => {
@@ -61,9 +69,28 @@ const insertEvent = async (
     eventType: input.eventType,
     stripeEventCreatedAt: input.eventCreatedAt,
     payloadHash: input.payloadHash,
+    providerObjectType: input.providerObjectType,
+    providerObjectId: input.providerObjectId,
+    billingCaseKind: input.billingCaseKind,
+    billingCaseStatus: input.billingCaseStatus,
+    blocksSending: input.blocksSending,
+    amountMinor: input.amountMinor,
+    heldTemplate: input.heldTemplate,
     outcome: eventOutcome(outcome)
   });
 };
+
+const operationalEventEvidence = (
+  input: StripeOperationalEventInput,
+  organisationId: string,
+  blocksSending: boolean
+) => ({
+  ...input,
+  organisationId,
+  billingCaseKind: input.caseKind,
+  billingCaseStatus: input.targetStatus,
+  blocksSending
+});
 
 const latestAppliedCheckoutAt = async (
   transaction: DbTransaction,
@@ -108,8 +135,21 @@ const operationalRiskRank = (input: {
   return 1;
 };
 
+const persistedOperationalRiskRank = sql<number>`case
+  when ${subscriptionEvents.blocksSending} = true and ${subscriptionEvents.billingCaseStatus} = 'OPEN' then 5
+  when ${subscriptionEvents.blocksSending} = true and ${subscriptionEvents.billingCaseStatus} = 'REVIEW_REQUIRED' then 4
+  when ${subscriptionEvents.billingCaseStatus} = 'OPEN' then 3
+  when ${subscriptionEvents.billingCaseStatus} = 'REVIEW_REQUIRED' then 2
+  else 1
+end`;
+
 const normalizedEmail = (value: string): string =>
   value.trim().toLocaleLowerCase('en-AU');
+
+const validNoticeRecipient = (value: string): boolean =>
+  value.length > 0 &&
+  value.length <= 320 &&
+  /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 
 const noticeIdempotencyKey = (
   eventId: string,
@@ -158,6 +198,20 @@ export const createPostgresSubscriptionRepository = (
       )
       .limit(1);
     return row ?? null;
+  };
+
+  const lookupEventReplay: SubscriptionRepository['lookupEventReplay'] = async (
+    input
+  ): Promise<StripeEventReplayResult> => {
+    const [row] = await database
+      .select({ payloadHash: subscriptionEvents.payloadHash })
+      .from(subscriptionEvents)
+      .where(eq(subscriptionEvents.stripeEventId, input.eventId))
+      .limit(1);
+    if (row === undefined) return 'ABSENT';
+    return row.payloadHash === input.payloadHash
+      ? 'DUPLICATE'
+      : 'HASH_MISMATCH';
   };
 
   const eventExists = async (eventId: string): Promise<boolean> => {
@@ -450,11 +504,16 @@ export const createPostgresSubscriptionRepository = (
     try {
       return await database.transaction(async (transaction) => {
         const [duplicate] = await transaction
-          .select({ id: subscriptionEvents.id })
+          .select({ payloadHash: subscriptionEvents.payloadHash })
           .from(subscriptionEvents)
           .where(eq(subscriptionEvents.stripeEventId, input.eventId))
           .limit(1);
-        if (duplicate !== undefined) return 'DUPLICATE';
+        if (duplicate !== undefined) {
+          if (duplicate.payloadHash !== input.payloadHash) {
+            throw new Error('STRIPE_EVENT_PAYLOAD_MISMATCH');
+          }
+          return 'DUPLICATE';
+        }
 
         const [currentCandidate] = await transaction
           .select({
@@ -492,8 +551,6 @@ export const createPostgresSubscriptionRepository = (
         ) {
           return 'REJECTED';
         }
-        const relation =
-          currentCandidate !== undefined ? ('CURRENT' as const) : ('RETIRED' as const);
         const candidate = currentCandidate ?? retiredCandidate!;
         if (candidate.stripeCustomerId !== input.stripeCustomerId) {
           return 'REJECTED';
@@ -526,26 +583,26 @@ export const createPostgresSubscriptionRepository = (
           organisation === undefined ||
           subscription === undefined ||
           organisation.edition !== 'SOLO' ||
-          subscription.stripeCustomerId !== input.stripeCustomerId ||
-          (relation === 'CURRENT' &&
-            subscription.stripeSubscriptionId !== input.stripeSubscriptionId)
+          subscription.stripeCustomerId !== input.stripeCustomerId
         ) {
           return 'REJECTED';
         }
-        if (relation === 'RETIRED') {
-          const [retired] = await transaction
-            .select({ organisationId: retiredStripeSubscriptions.organisationId })
-            .from(retiredStripeSubscriptions)
-            .where(
-              eq(
-                retiredStripeSubscriptions.stripeSubscriptionId,
-                input.stripeSubscriptionId
-              )
+        const [retired] = await transaction
+          .select({ organisationId: retiredStripeSubscriptions.organisationId })
+          .from(retiredStripeSubscriptions)
+          .where(
+            eq(
+              retiredStripeSubscriptions.stripeSubscriptionId,
+              input.stripeSubscriptionId
             )
-            .for('update')
-            .limit(1);
-          if (retired?.organisationId !== organisation.id) return 'REJECTED';
-        }
+          )
+          .for('update')
+          .limit(1);
+        const currentMatch =
+          subscription.stripeSubscriptionId === input.stripeSubscriptionId;
+        const retiredMatch = retired?.organisationId === organisation.id;
+        if (currentMatch === retiredMatch) return 'REJECTED';
+        const relation = currentMatch ? ('CURRENT' as const) : ('RETIRED' as const);
 
         const [existingCase] = await transaction
           .select()
@@ -561,33 +618,87 @@ export const createPostgresSubscriptionRepository = (
           .for('update')
           .limit(1);
         const blocksSending = operationalEventBlocksSending(input, relation);
-        if (existingCase !== undefined) {
+        const [latestAppliedEvidence] = await transaction
+          .select({
+            eventId: subscriptionEvents.stripeEventId,
+            eventCreatedAt: subscriptionEvents.stripeEventCreatedAt,
+            status: subscriptionEvents.billingCaseStatus,
+            blocksSending: subscriptionEvents.blocksSending,
+            amountMinor: subscriptionEvents.amountMinor
+          })
+          .from(subscriptionEvents)
+          .where(
+            and(
+              eq(subscriptionEvents.organisationId, organisation.id),
+              eq(subscriptionEvents.providerObjectType, input.providerObjectType),
+              eq(subscriptionEvents.providerObjectId, input.providerObjectId),
+              eq(subscriptionEvents.outcome, 'APPLIED')
+            )
+          )
+          .orderBy(
+            desc(subscriptionEvents.stripeEventCreatedAt),
+            desc(persistedOperationalRiskRank),
+            desc(subscriptionEvents.amountMinor),
+            desc(subscriptionEvents.stripeEventId)
+          )
+          .limit(1);
+        const previousWinner =
+          latestAppliedEvidence?.status !== null &&
+          latestAppliedEvidence?.status !== undefined &&
+          latestAppliedEvidence.blocksSending !== null &&
+          latestAppliedEvidence.amountMinor !== null
+            ? {
+                eventId: latestAppliedEvidence.eventId,
+                eventCreatedAt: latestAppliedEvidence.eventCreatedAt,
+                status: latestAppliedEvidence.status,
+                blocksSending: latestAppliedEvidence.blocksSending,
+                amountMinor: latestAppliedEvidence.amountMinor
+              }
+            : existingCase === undefined
+              ? null
+              : {
+                  eventId: existingCase.latestProviderEventId,
+                  eventCreatedAt: existingCase.latestProviderEventCreatedAt,
+                  status: existingCase.status,
+                  blocksSending: existingCase.blocksSending,
+                  amountMinor: existingCase.amountMinor
+                };
+        let supersededSourceEventId: string | null = null;
+        if (previousWinner !== null) {
           const incomingTime = input.eventCreatedAt.getTime();
-          const existingTime = existingCase.latestProviderEventCreatedAt.getTime();
-          const lowerOrEqualRiskAtSameTime =
-            incomingTime === existingTime &&
-            operationalRiskRank({
-              status: input.targetStatus,
-              blocksSending
-            }) <=
-              operationalRiskRank({
-                status: existingCase.status,
-                blocksSending: existingCase.blocksSending
-              });
-          if (incomingTime < existingTime || lowerOrEqualRiskAtSameTime) {
+          const previousTime = previousWinner.eventCreatedAt.getTime();
+          const incomingRisk = operationalRiskRank({
+            status: input.targetStatus,
+            blocksSending
+          });
+          const previousRisk = operationalRiskRank(previousWinner);
+          const greaterRefundAtSameTime =
+            input.caseKind === 'REFUND' &&
+            incomingTime === previousTime &&
+            incomingRisk === previousRisk &&
+            input.amountMinor > previousWinner.amountMinor;
+          const shouldIgnore =
+            incomingTime < previousTime ||
+            (incomingTime === previousTime &&
+              incomingRisk <= previousRisk &&
+              !greaterRefundAtSameTime);
+          if (shouldIgnore) {
             await insertEvent(
               transaction,
-              { ...input, organisationId: organisation.id },
+              operationalEventEvidence(input, organisation.id, blocksSending),
               'IGNORED_OUT_OF_ORDER'
             );
             return 'IGNORED_OUT_OF_ORDER';
+          }
+          if (incomingTime === previousTime) {
+            supersededSourceEventId = previousWinner.eventId;
           }
         }
 
         if (existingCase === undefined && input.resolveExistingOnly) {
           await insertEvent(
             transaction,
-            { ...input, organisationId: organisation.id },
+            operationalEventEvidence(input, organisation.id, blocksSending),
             'APPLIED'
           );
           return 'APPLIED';
@@ -639,6 +750,21 @@ export const createPostgresSubscriptionRepository = (
                 .returning();
         if (billingCase === undefined) throw new Error('BILLING_CASE_WRITE_FAILED');
 
+        if (supersededSourceEventId !== null) {
+          await transaction
+            .delete(transactionalEmailOutbox)
+            .where(
+              and(
+                eq(transactionalEmailOutbox.billingCaseId, billingCase.id),
+                eq(
+                  transactionalEmailOutbox.sourceEventId,
+                  supersededSourceEventId
+                ),
+                eq(transactionalEmailOutbox.status, 'HELD')
+              )
+            );
+        }
+
         if (blocksSending && organisation.platformStatus === 'ACTIVE') {
           await transaction
             .update(organisations)
@@ -682,7 +808,42 @@ export const createPostgresSubscriptionRepository = (
               )
             )
             .orderBy(users.id);
-          if (administrators.length === 0) {
+          const recipients = new Map<string, (typeof administrators)[number]>();
+          for (const administrator of administrators) {
+            const recipient = normalizedEmail(administrator.email);
+            if (!validNoticeRecipient(recipient)) {
+              const reason =
+                recipient.length === 0
+                  ? 'EMPTY'
+                  : recipient.length > 320
+                    ? 'TOO_LONG'
+                    : 'INVALID_FORMAT';
+              await transaction.insert(auditEvents).values({
+                organisationId: organisation.id,
+                eventType: 'BILLING_NOTICE_RECIPIENT_INVALID',
+                entityType: 'USER',
+                entityId: administrator.userId,
+                correlationId: input.eventId,
+                afterValue: { template: input.heldTemplate, reason },
+                occurredAt: actionNow
+              });
+              continue;
+            }
+            if (recipients.has(recipient)) {
+              await transaction.insert(auditEvents).values({
+                organisationId: organisation.id,
+                eventType: 'BILLING_NOTICE_RECIPIENT_DUPLICATE',
+                entityType: 'USER',
+                entityId: administrator.userId,
+                correlationId: input.eventId,
+                afterValue: { template: input.heldTemplate },
+                occurredAt: actionNow
+              });
+              continue;
+            }
+            recipients.set(recipient, administrator);
+          }
+          if (recipients.size === 0) {
             await transaction.insert(auditEvents).values({
               organisationId: organisation.id,
               eventType: 'BILLING_NOTICE_RECIPIENT_MISSING',
@@ -693,31 +854,72 @@ export const createPostgresSubscriptionRepository = (
               occurredAt: actionNow
             });
           } else {
-            for (const administrator of administrators) {
-              const recipient = normalizedEmail(administrator.email);
-              await transaction.insert(transactionalEmailOutbox).values({
-                organisationId: organisation.id,
-                billingCaseId: billingCase.id,
-                recipient,
-                template: input.heldTemplate,
-                templateVersion: 1,
-                renderData: {
-                  caseKind: input.caseKind,
-                  providerObjectId: input.providerObjectId,
-                  providerStatus: input.providerStatus,
-                  amountMinor: input.amountMinor,
-                  currency: input.currency
-                },
-                idempotencyKey: noticeIdempotencyKey(
-                  input.eventId,
-                  input.heldTemplate,
-                  recipient
-                ),
-                status: 'HELD',
-                attempts: 0,
-                createdAt: actionNow,
-                updatedAt: actionNow
-              });
+            for (const [recipient] of recipients) {
+              try {
+                const inserted = await transaction.transaction(
+                  async (savepoint) =>
+                    savepoint
+                      .insert(transactionalEmailOutbox)
+                      .values({
+                        organisationId: organisation.id,
+                        billingCaseId: billingCase.id,
+                        recipient,
+                        template: input.heldTemplate,
+                        templateVersion: 1,
+                        renderData: {
+                          caseKind: input.caseKind,
+                          providerObjectId: input.providerObjectId,
+                          providerStatus: input.providerStatus,
+                          amountMinor: input.amountMinor,
+                          currency: input.currency
+                        },
+                        idempotencyKey: noticeIdempotencyKey(
+                          input.eventId,
+                          input.heldTemplate,
+                          recipient
+                        ),
+                        sourceEventId: input.eventId,
+                        status: 'HELD',
+                        attempts: 0,
+                        createdAt: actionNow,
+                        updatedAt: actionNow
+                      })
+                      .onConflictDoNothing({
+                        target: [
+                          transactionalEmailOutbox.organisationId,
+                          transactionalEmailOutbox.idempotencyKey
+                        ]
+                      })
+                      .returning({ id: transactionalEmailOutbox.id })
+                );
+                if (inserted.length === 0) {
+                  await transaction.insert(auditEvents).values({
+                    organisationId: organisation.id,
+                    eventType: 'BILLING_NOTICE_WRITE_SKIPPED',
+                    entityType: 'BILLING_CASE',
+                    entityId: billingCase.id,
+                    correlationId: input.eventId,
+                    afterValue: {
+                      template: input.heldTemplate,
+                      reason: 'IDEMPOTENCY_CONFLICT'
+                    },
+                    occurredAt: actionNow
+                  });
+                }
+              } catch (error) {
+                await transaction.insert(auditEvents).values({
+                  organisationId: organisation.id,
+                  eventType: 'BILLING_NOTICE_WRITE_FAILED',
+                  entityType: 'BILLING_CASE',
+                  entityId: billingCase.id,
+                  correlationId: input.eventId,
+                  afterValue: {
+                    template: input.heldTemplate,
+                    failureCode: postgresErrorCode(error) ?? 'UNKNOWN'
+                  },
+                  occurredAt: actionNow
+                });
+              }
             }
           }
         }
@@ -745,17 +947,21 @@ export const createPostgresSubscriptionRepository = (
         });
         await insertEvent(
           transaction,
-          { ...input, organisationId: organisation.id },
+          operationalEventEvidence(input, organisation.id, blocksSending),
           'APPLIED'
         );
         return 'APPLIED';
       });
     } catch (error) {
-      if (
-        postgresErrorCode(error) === '23505' &&
-        (await eventExists(input.eventId))
-      ) {
-        return 'DUPLICATE';
+      if (postgresErrorCode(error) === '23505') {
+        const replay = await lookupEventReplay({
+          eventId: input.eventId,
+          payloadHash: input.payloadHash
+        });
+        if (replay === 'DUPLICATE') return 'DUPLICATE';
+        if (replay === 'HASH_MISMATCH') {
+          throw new Error('STRIPE_EVENT_PAYLOAD_MISMATCH');
+        }
       }
       throw error;
     }
@@ -808,6 +1014,7 @@ export const createPostgresSubscriptionRepository = (
 
   return {
     loadBillingAccount,
+    lookupEventReplay,
     applyLifecycleEvent,
     applyCheckoutCompleted,
     applyOperationalEvent,

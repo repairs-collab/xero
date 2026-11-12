@@ -265,6 +265,7 @@ describe('database invariants', () => {
         'template_version',
         'render_data',
         'idempotency_key',
+        'source_event_id',
         'status',
         'attempts',
         'last_failure_code',
@@ -302,19 +303,34 @@ describe('database invariants', () => {
       .returning({ id: billingCases.id });
 
     expect(billingCase?.id).toBeDefined();
-    await database.db.insert(transactionalEmailOutbox).values({
-      organisationId,
-      billingCaseId: billingCase!.id,
-      recipient: 'billing@example.invalid',
-      template: 'PAYMENT_FAILED',
-      templateVersion: 1,
-      renderData: {
-        amountMinor: 12_345,
-        currency: 'aud'
-      },
-      idempotencyKey: `stripe:${randomUUID()}:PAYMENT_FAILED:v1`,
-      status: 'HELD'
-    });
+    const [notice] = await database.db
+      .insert(transactionalEmailOutbox)
+      .values({
+        organisationId,
+        billingCaseId: billingCase!.id,
+        recipient: 'billing@example.invalid',
+        template: 'PAYMENT_FAILED',
+        templateVersion: 1,
+        renderData: {
+          amountMinor: 12_345,
+          currency: 'aud'
+        },
+        idempotencyKey: `stripe:${randomUUID()}:PAYMENT_FAILED:v1`,
+        status: 'HELD'
+      })
+      .returning({ id: transactionalEmailOutbox.id });
+    await expect(
+      database.db
+        .update(transactionalEmailOutbox)
+        .set({ renderData: { amountMinor: 99_999, currency: 'aud' } })
+        .where(eq(transactionalEmailOutbox.id, notice!.id))
+    ).rejects.toMatchObject({ cause: { code: '23514' } });
+    await expect(
+      database.db
+        .update(transactionalEmailOutbox)
+        .set({ status: 'PENDING' })
+        .where(eq(transactionalEmailOutbox.id, notice!.id))
+    ).resolves.toBeDefined();
 
     const otherOrganisationId = randomUUID();
     await database.db.insert(organisations).values({

@@ -106,6 +106,17 @@ export const subscriptionEvents = pgTable(
       withTimezone: true
     }).notNull(),
     payloadHash: char('payload_hash', { length: 64 }).notNull(),
+    providerObjectType: varchar('provider_object_type', { length: 16 })
+      .$type<BillingProviderObjectType>(),
+    providerObjectId: varchar('provider_object_id', { length: 128 }),
+    billingCaseKind: varchar('billing_case_kind', { length: 32 })
+      .$type<BillingCaseKind>(),
+    billingCaseStatus: varchar('billing_case_status', { length: 32 })
+      .$type<BillingCaseStatus>(),
+    blocksSending: boolean('blocks_sending'),
+    amountMinor: integer('amount_minor'),
+    heldTemplate: varchar('held_template', { length: 32 })
+      .$type<TransactionalEmailTemplate>(),
     outcome: varchar('outcome', { length: 32 })
       .$type<SubscriptionEventOutcome>()
       .notNull(),
@@ -119,6 +130,12 @@ export const subscriptionEvents = pgTable(
       table.organisationId,
       table.stripeEventCreatedAt
     ),
+    index('subscription_events_operational_order_idx').on(
+      table.organisationId,
+      table.providerObjectType,
+      table.providerObjectId,
+      table.stripeEventCreatedAt
+    ),
     check(
       'subscription_events_outcome_ck',
       sql`${table.outcome} in ('APPLIED', 'IGNORED_OUT_OF_ORDER', 'REJECTED')`
@@ -126,6 +143,30 @@ export const subscriptionEvents = pgTable(
     check(
       'subscription_events_payload_hash_ck',
       sql`length(${table.payloadHash}) = 64`
+    ),
+    check(
+      'subscription_events_operational_amount_ck',
+      sql`${table.amountMinor} is null or ${table.amountMinor} >= 0`
+    ),
+    check(
+      'subscription_events_operational_metadata_ck',
+      sql`(
+        ${table.providerObjectType} is null and
+        ${table.providerObjectId} is null and
+        ${table.billingCaseKind} is null and
+        ${table.billingCaseStatus} is null and
+        ${table.blocksSending} is null and
+        ${table.amountMinor} is null and
+        ${table.heldTemplate} is null
+      ) or (
+        ${table.providerObjectType} is not null and
+        ${table.providerObjectId} is not null and
+        ${table.billingCaseKind} is not null and
+        ${table.billingCaseStatus} is not null and
+        ${table.blocksSending} is not null and
+        ${table.amountMinor} is not null and
+        ${table.heldTemplate} is not null
+      )`
     )
   ]
 );
@@ -252,6 +293,7 @@ export const transactionalEmailOutbox = pgTable(
       .$type<TransactionalEmailRenderData>()
       .notNull(),
     idempotencyKey: text('idempotency_key').notNull(),
+    sourceEventId: varchar('source_event_id', { length: 128 }),
     status: varchar('status', { length: 16 })
       .$type<TransactionalEmailStatus>()
       .notNull()
@@ -280,6 +322,10 @@ export const transactionalEmailOutbox = pgTable(
     index('transactional_email_outbox_case_created_idx').on(
       table.billingCaseId,
       table.createdAt
+    ),
+    index('transactional_email_outbox_case_source_idx').on(
+      table.billingCaseId,
+      table.sourceEventId
     ),
     foreignKey({
       name: 'transactional_email_outbox_org_case_fk',

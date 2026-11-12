@@ -95,6 +95,8 @@ class FakeRepository implements SubscriptionRepository {
   auditInputs: Parameters<SubscriptionRepository['recordBillingAudit']>[0][] = [];
   rejectedInputs: Parameters<SubscriptionRepository['recordRejectedEvent']>[0][] = [];
   operationalInputs: Parameters<SubscriptionRepository['applyOperationalEvent']>[0][] = [];
+  replayInputs: Array<{ eventId: string; payloadHash: string }> = [];
+  replayResult: 'ABSENT' | 'DUPLICATE' | 'HASH_MISMATCH' = 'ABSENT';
   applyOutcome: Awaited<ReturnType<SubscriptionRepository['applyLifecycleEvent']>> =
     'APPLIED';
 
@@ -141,6 +143,14 @@ class FakeRepository implements SubscriptionRepository {
   ): ReturnType<SubscriptionRepository['applyOperationalEvent']> {
     this.operationalInputs.push(input);
     return Promise.resolve(this.applyOutcome);
+  }
+
+  lookupEventReplay(input: {
+    eventId: string;
+    payloadHash: string;
+  }): Promise<'ABSENT' | 'DUPLICATE' | 'HASH_MISMATCH'> {
+    this.replayInputs.push(input);
+    return Promise.resolve(this.replayResult);
   }
 
   recordBillingAudit(
@@ -232,6 +242,7 @@ const invoiceEvent = (
   created: 1_794_201_600,
   data: {
     object: {
+      object: 'invoice',
       id: 'in_solo',
       customer: 'cus_solo',
       currency: 'aud',
@@ -254,6 +265,7 @@ const refundEvent = (
   created: 1_794_201_600,
   data: {
     object: {
+      object: 'charge',
       id: 'ch_solo',
       customer: 'cus_solo',
       currency: 'aud',
@@ -274,6 +286,7 @@ const disputeEvent = (
   created: 1_794_201_600,
   data: {
     object: {
+      object: 'dispute',
       id: 'dp_solo',
       charge: 'ch_solo',
       currency: 'aud',
@@ -605,6 +618,32 @@ describe('subscription webhooks', () => {
     expect(numberProvisionJobs).toEqual([]);
   });
 
+  it('deduplicates a signed operational replay before any live Stripe ownership read', async () => {
+    const { service, stripe, repository } = createService();
+    stripe.event = refundEvent();
+    repository.replayResult = 'DUPLICATE';
+
+    await expect(service.handleWebhook('{}', 'signed')).resolves.toBe(
+      'DUPLICATE'
+    );
+    expect(repository.replayInputs).toHaveLength(1);
+    expect(repository.replayInputs[0]?.eventId).toBe('evt_charge_refunded');
+    expect(stripe.chargeOwnershipRequests).toEqual([]);
+    expect(repository.operationalInputs).toEqual([]);
+  });
+
+  it('fails closed on a signed event ID replay with different payload bytes before live reads', async () => {
+    const { service, stripe, repository } = createService();
+    stripe.event = disputeEvent('charge.dispute.created', 'needs_response');
+    repository.replayResult = 'HASH_MISMATCH';
+
+    await expect(
+      service.handleWebhook('{"different":true}', 'signed')
+    ).rejects.toMatchObject({ code: 'STRIPE_EVENT_PAYLOAD_MISMATCH' });
+    expect(stripe.chargeOwnershipRequests).toEqual([]);
+    expect(repository.operationalInputs).toEqual([]);
+  });
+
   it('accepts the legacy invoice subscription field and rejects conflicting identities', async () => {
     const legacy = createService();
     legacy.stripe.event = invoiceEvent('invoice.payment_failed', {
@@ -628,6 +667,11 @@ describe('subscription webhooks', () => {
     ['currency', invoiceEvent('invoice.payment_failed', { currency: 'usd' })],
     ['negative amount', invoiceEvent('invoice.payment_failed', { amount_remaining: -1 })],
     ['fractional amount', refundEvent({ amount_refunded: 1.5 })],
+    ['invoice discriminator', invoiceEvent('invoice.payment_failed', { object: 'charge' })],
+    ['failed invoice status', invoiceEvent('invoice.payment_failed', { status: 'paid' })],
+    ['paid invoice status', invoiceEvent('invoice.paid', { status: 'open' })],
+    ['refund discriminator', refundEvent({ object: 'invoice' })],
+    ['dispute discriminator', disputeEvent('charge.dispute.created', 'needs_response', { object: 'charge' })],
     ['created dispute status', disputeEvent('charge.dispute.created', 'won')],
     ['closed dispute status', disputeEvent('charge.dispute.closed', 'under_review')]
   ])('rejects malformed operational event %s', async (_label, event) => {

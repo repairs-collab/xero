@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 
 import { getTableConfig } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
@@ -66,6 +66,7 @@ describe('Solo commerce schema contract', () => {
         'template_version',
         'render_data',
         'idempotency_key',
+        'source_event_id',
         'status',
         'attempts',
         'last_failure_code',
@@ -159,6 +160,20 @@ describe('Solo commerce schema contract', () => {
     expect(event.indexes.map((index) => index.config.name)).toContain(
       'subscription_events_stripe_event_uq'
     );
+    expect(event.columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        'provider_object_type',
+        'provider_object_id',
+        'billing_case_kind',
+        'billing_case_status',
+        'blocks_sending',
+        'amount_minor',
+        'held_template'
+      ])
+    );
+    expect(event.indexes.map((index) => index.config.name)).toContain(
+      'subscription_events_operational_order_idx'
+    );
     expect(onboarding.columns.map((column) => column.name)).toEqual(
       expect.arrayContaining([
         'version',
@@ -224,6 +239,45 @@ describe('Solo commerce schema contract', () => {
     expect(migration).toContain('CREATE TABLE "billing_cases"');
     expect(migration).toContain('CREATE TABLE "transactional_email_outbox"');
     expect(migration).toContain('ON DELETE restrict');
+  });
+
+  it('adds operational ordering evidence and immutable email render data in migration 0026', async () => {
+    const migrationDirectory = new URL('../../drizzle/', import.meta.url);
+    const migrationName = (await readdir(migrationDirectory)).find((name) =>
+      /^0026_.*\.sql$/.test(name)
+    );
+    expect(migrationName).toBeDefined();
+    const migration = await readFile(
+      new URL(migrationName!, migrationDirectory),
+      'utf8'
+    );
+
+    expect(migration).toContain('subscription_events_operational_order_idx');
+    expect(migration).toContain('source_event_id');
+    expect(migration).toMatch(
+      /CREATE TRIGGER transactional_email_render_data_immutable/i
+    );
+    expect(migration).toMatch(
+      /OLD\.render_data IS DISTINCT FROM NEW\.render_data/i
+    );
+  });
+
+  it('keeps generated migration journal timestamps in strict execution order', async () => {
+    const journal = JSON.parse(
+      await readFile(
+        new URL('../../drizzle/meta/_journal.json', import.meta.url),
+        'utf8'
+      )
+    ) as { entries: Array<{ idx: number; when: number }> };
+
+    for (let index = 1; index < journal.entries.length; index += 1) {
+      expect(journal.entries[index]!.idx).toBeGreaterThan(
+        journal.entries[index - 1]!.idx
+      );
+      expect(journal.entries[index]!.when).toBeGreaterThan(
+        journal.entries[index - 1]!.when
+      );
+    }
   });
 
   it('creates retired subscription storage and does not grant a future trial during backfill', async () => {

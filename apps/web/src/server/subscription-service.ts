@@ -42,6 +42,11 @@ export type StripeEventApplicationOutcome =
   | 'IGNORED_OUT_OF_ORDER'
   | 'REJECTED';
 
+export type StripeEventReplayResult =
+  | 'ABSENT'
+  | 'DUPLICATE'
+  | 'HASH_MISMATCH';
+
 export interface StripeLifecycleEventInput {
   organisationId: string;
   eventId: string;
@@ -113,6 +118,10 @@ export interface SubscriptionRepository {
   applyOperationalEvent(
     input: StripeOperationalEventInput
   ): Promise<StripeEventApplicationOutcome>;
+  lookupEventReplay(input: {
+    eventId: string;
+    payloadHash: string;
+  }): Promise<StripeEventReplayResult>;
   recordRejectedEvent(input: {
     organisationId: string;
     eventId: string;
@@ -391,6 +400,15 @@ const isOperationalEventType = (
 ): value is StripeOperationalEventInput['eventType'] =>
   operationalEventTypes.has(value as StripeOperationalEventInput['eventType']);
 
+const requireObjectDiscriminator = (
+  object: Record<string, unknown>,
+  expected: 'invoice' | 'charge' | 'dispute'
+): void => {
+  if (object.object !== expected) {
+    throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
+  }
+};
+
 const parseOperationalEvent = async (
   event: StripeWebhookEvent & { type: StripeOperationalEventInput['eventType'] },
   hash: string,
@@ -406,14 +424,19 @@ const parseOperationalEvent = async (
   } as const;
 
   if (event.type === 'invoice.payment_failed' || event.type === 'invoice.paid') {
+    requireObjectDiscriminator(object, 'invoice');
     const failed = event.type === 'invoice.payment_failed';
+    const providerStatus = requiredString(object.status);
+    if (providerStatus !== (failed ? 'open' : 'paid')) {
+      throw new SubscriptionFailure('STRIPE_STATUS_UNSUPPORTED');
+    }
     return {
       ...common,
       stripeCustomerId: requiredString(object.customer),
       stripeSubscriptionId: invoiceSubscriptionId(object),
       providerObjectType: 'INVOICE',
       providerObjectId: requiredString(object.id),
-      providerStatus: requiredString(object.status),
+      providerStatus,
       amountMinor: nonNegativeMinorAmount(object.amount_remaining),
       caseKind: 'PAYMENT_FAILURE',
       targetStatus: failed ? 'OPEN' : 'RESOLVED',
@@ -424,6 +447,7 @@ const parseOperationalEvent = async (
   }
 
   if (event.type === 'charge.refunded') {
+    requireObjectDiscriminator(object, 'charge');
     if (typeof object.refunded !== 'boolean') {
       throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
     }
@@ -449,6 +473,7 @@ const parseOperationalEvent = async (
     };
   }
 
+  requireObjectDiscriminator(object, 'dispute');
   const providerStatus = requiredString(object.status);
   const createdStatuses = new Set([
     'needs_response',
@@ -594,6 +619,14 @@ export const createSubscriptionService = (dependencies: {
       );
     }
     if (isOperationalEventType(event.type)) {
+      const replay = await dependencies.repository.lookupEventReplay({
+        eventId: event.id,
+        payloadHash: hash
+      });
+      if (replay === 'DUPLICATE') return 'DUPLICATE';
+      if (replay === 'HASH_MISMATCH') {
+        throw new SubscriptionFailure('STRIPE_EVENT_PAYLOAD_MISMATCH');
+      }
       return dependencies.repository.applyOperationalEvent(
         await parseOperationalEvent(
           event as StripeWebhookEvent & {
