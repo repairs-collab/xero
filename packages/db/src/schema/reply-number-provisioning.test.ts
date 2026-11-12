@@ -59,7 +59,7 @@ describe('reply-number provisioning schema', () => {
       ])
     );
     expect(table.foreignKeys.map((foreignKey) => foreignKey.getName())).toContain(
-      'reply_number_requests_org_number_fk'
+      'reply_number_requests_number_fk'
     );
   });
 });

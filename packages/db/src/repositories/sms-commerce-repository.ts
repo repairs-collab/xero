@@ -12,6 +12,7 @@ import {
   auditEvents,
   organisationOnboarding,
   organisations,
+  replyNumberProvisioningRequests,
   smsAllowanceSettings,
   smsNumberPool,
   smsUsageLedger,
@@ -417,6 +418,27 @@ export class PostgresSmsCommerceRepository {
         !hasPaidSubscriptionAccess({ subscriptionStatus: subscription.status, stripeProviderStatus: subscription.stripeProviderStatus, currentPeriodEnd: subscription.currentPeriodEnd, cancelAt: subscription.cancelAt, now: new Date(Math.max(now.getTime(), this.clock.now().getTime())) })
       ) {
         throw new Error('PAID_SUBSCRIPTION_REQUIRED');
+      }
+      const [activeProvisioningRequest] = await transaction
+        .select({ id: replyNumberProvisioningRequests.id })
+        .from(replyNumberProvisioningRequests)
+        .where(
+          and(
+            eq(
+              replyNumberProvisioningRequests.organisationId,
+              organisationId
+            ),
+            inArray(replyNumberProvisioningRequests.status, [
+              'AWAITING_QUOTE',
+              'AWAITING_OWNER_APPROVAL',
+              'APPROVED_FOR_MANUAL_ORDER',
+              'MANUAL_ORDER_RECORDED'
+            ])
+          )
+        )
+        .limit(1);
+      if (activeProvisioningRequest) {
+        throw new Error('SMS_NUMBER_PROVISIONING_REQUEST_ACTIVE');
       }
       const [existing] = await transaction
         .select({

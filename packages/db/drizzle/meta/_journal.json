@@ -225,6 +225,13 @@
       "when": 1794460000008,
       "tag": "0031_shallow_caretaker",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1794460000009,
+      "tag": "0032_past_nicolaos",
+      "breakpoints": true
     }
   ]
 }

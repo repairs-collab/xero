@@ -765,6 +765,9 @@ export class PostgresReplyNumberProvisioningRepository {
       ) {
         return { ok: false, code: 'INVALID_STATE' } as const;
       }
+      if (await hasActiveNumber(transaction, input.organisationId)) {
+        return { ok: false, code: 'NUMBER_CONFLICT' } as const;
+      }
 
       const [updated] = await transaction
         .update(replyNumberProvisioningRequests)

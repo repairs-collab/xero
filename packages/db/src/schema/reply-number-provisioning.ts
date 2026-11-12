@@ -111,9 +111,9 @@ export const replyNumberProvisioningRequests = pgTable(
       table.updatedAt
     ),
     foreignKey({
-      columns: [table.organisationId, table.fulfilledNumberId],
-      foreignColumns: [smsNumberPool.organisationId, smsNumberPool.id],
-      name: 'reply_number_requests_org_number_fk'
+      columns: [table.fulfilledNumberId],
+      foreignColumns: [smsNumberPool.id],
+      name: 'reply_number_requests_number_fk'
     }).onDelete('restrict'),
     check(
       'reply_number_requests_provider_ck',

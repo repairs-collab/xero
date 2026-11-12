@@ -8,6 +8,7 @@ import {
   organisationOnboarding,
   organisations,
   outboundMessages,
+  replyNumberProvisioningRequests,
   smsAllowanceSettings,
   smsNumberPool,
   smsUsageLedger,
@@ -154,6 +155,29 @@ describe('PostgresSmsCommerceRepository', () => {
     await expect(
       repository.reserveAvailableNumber(organisationId, now)
     ).resolves.toMatchObject({ id: poolNumber.id, status: 'READY' });
+  });
+
+  it('does not claim a pool number while manual provisioning is active', async () => {
+    const organisationId = await seedPaidOrganisation();
+    const poolNumber = await seedPoolNumber({ verified: true });
+    await client.db.insert(replyNumberProvisioningRequests).values({
+      organisationId,
+      provider: 'SINCH',
+      requestKey: `reply-number:${organisationId}:1`,
+      attempt: 1,
+      status: 'AWAITING_QUOTE',
+      createdAt: now,
+      updatedAt: now
+    });
+
+    await expect(
+      repository.reserveAvailableNumber(organisationId, now)
+    ).rejects.toThrow('SMS_NUMBER_PROVISIONING_REQUEST_ACTIVE');
+    await expect(
+      client.db.query.smsNumberPool.findFirst({
+        where: (table, { eq }) => eq(table.id, poolNumber.id)
+      })
+    ).resolves.toMatchObject({ status: 'AVAILABLE', organisationId: null });
   });
 
   it('reserves and commits final rendered parts idempotently per tenant', async () => {

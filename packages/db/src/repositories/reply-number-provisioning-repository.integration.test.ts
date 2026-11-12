@@ -395,6 +395,41 @@ describe('PostgresReplyNumberProvisioningRepository', () => {
     ).resolves.toEqual({ ok: false, code: 'AMOUNT_MISMATCH' });
   });
 
+  it('does not record a paid external order after another path assigns a number', async () => {
+    const organisationId = await seedOrganisation();
+    const approved = await approveRequest(organisationId);
+    await client.db.insert(smsNumberPool).values({
+      e164Number: `+614${randomInt(10_000_000, 99_999_999)}`,
+      provider: 'SINCH',
+      providerNumberId: `sinch-${randomUUID()}`,
+      providerVerifiedAt: now,
+      status: 'RESERVED',
+      organisationId,
+      reservedAt: now
+    });
+
+    await expect(
+      repository.recordManualOrderReference({
+        actorUserId: ownerId,
+        organisationId,
+        requestId: approved.id,
+        expectedVersion: approved.version,
+        externalOrderReference: `ORDER-${randomUUID()}`,
+        reason: 'Must not orphan a paid external order',
+        now
+      })
+    ).resolves.toEqual({ ok: false, code: 'NUMBER_CONFLICT' });
+    await expect(
+      client.db.query.replyNumberProvisioningRequests.findFirst({
+        where: (table, { eq }) => eq(table.id, approved.id)
+      })
+    ).resolves.toMatchObject({
+      status: 'APPROVED_FOR_MANUAL_ORDER',
+      externalOrderReference: null,
+      manualOrderRecordedAt: null
+    });
+  });
+
   it('blocks a manual order until required documentation has a redacted completion reference', async () => {
     const organisationId = await seedOrganisation();
     const ensured = await repository.ensureRequestForPaidOrganisation({

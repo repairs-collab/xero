@@ -1443,6 +1443,27 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
         )
         .limit(1);
       if (active) return { ok: false, code: 'INVALID_STATE' } as const;
+      const [activeProvisioningRequest] = await transaction
+        .select({ id: replyNumberProvisioningRequests.id })
+        .from(replyNumberProvisioningRequests)
+        .where(
+          and(
+            eq(
+              replyNumberProvisioningRequests.organisationId,
+              input.organisationId
+            ),
+            inArray(replyNumberProvisioningRequests.status, [
+              'AWAITING_QUOTE',
+              'AWAITING_OWNER_APPROVAL',
+              'APPROVED_FOR_MANUAL_ORDER',
+              'MANUAL_ORDER_RECORDED'
+            ])
+          )
+        )
+        .limit(1);
+      if (activeProvisioningRequest) {
+        return { ok: false, code: 'INVALID_STATE' } as const;
+      }
       await transaction
         .update(smsNumberPool)
         .set({
