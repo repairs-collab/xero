@@ -319,16 +319,50 @@ describe('database invariants', () => {
         status: 'HELD'
       })
       .returning({ id: transactionalEmailOutbox.id });
+    const immutableEvidenceUpdates: Array<
+      Partial<typeof transactionalEmailOutbox.$inferInsert>
+    > = [
+      { organisationId: randomUUID() },
+      { billingCaseId: randomUUID() },
+      { recipient: 'other-billing@example.invalid' },
+      { template: 'PAYMENT_RECOVERED' },
+      { templateVersion: 2 },
+      { renderData: { amountMinor: 99_999, currency: 'aud' } },
+      { idempotencyKey: `stripe:${randomUUID()}:PAYMENT_FAILED:v1` },
+      { sourceEventId: `evt_${randomUUID()}` }
+    ];
+    for (const update of immutableEvidenceUpdates) {
+      await expect(
+        database.db
+          .update(transactionalEmailOutbox)
+          .set(update)
+          .where(eq(transactionalEmailOutbox.id, notice!.id))
+      ).rejects.toMatchObject({ cause: { code: '23514' } });
+    }
+    const deliveryAttemptedAt = new Date('2026-11-12T00:05:00.000Z');
     await expect(
       database.db
         .update(transactionalEmailOutbox)
-        .set({ renderData: { amountMinor: 99_999, currency: 'aud' } })
+        .set({
+          status: 'FAILED',
+          attempts: 1,
+          lastFailureCode: 'PROVIDER_TIMEOUT',
+          lastAttemptedAt: deliveryAttemptedAt,
+          updatedAt: deliveryAttemptedAt
+        })
         .where(eq(transactionalEmailOutbox.id, notice!.id))
-    ).rejects.toMatchObject({ cause: { code: '23514' } });
+    ).resolves.toBeDefined();
     await expect(
       database.db
         .update(transactionalEmailOutbox)
-        .set({ status: 'PENDING' })
+        .set({
+          status: 'SENT',
+          attempts: 2,
+          lastFailureCode: null,
+          lastAttemptedAt: deliveryAttemptedAt,
+          sentAt: deliveryAttemptedAt,
+          updatedAt: deliveryAttemptedAt
+        })
         .where(eq(transactionalEmailOutbox.id, notice!.id))
     ).resolves.toBeDefined();
 
@@ -780,6 +814,9 @@ describe('database invariants', () => {
   it('keeps one Xero tenant per organisation and one organisation per tenant', async () => {
     const firstOrganisationId = await seedOAuthOrganisation('First OAuth owner');
     const secondOrganisationId = await seedOAuthOrganisation('Second OAuth owner');
+    const tenantSuffix = randomUUID();
+    const tenantOne = `tenant-one-${tenantSuffix}`;
+    const tenantTwo = `tenant-two-${tenantSuffix}`;
     const envelope = {
       version: 1,
       keyId: 'primary',
@@ -803,12 +840,12 @@ describe('database invariants', () => {
         ]
       );
 
-    await insertConnection(firstOrganisationId, 'tenant-one');
+    await insertConnection(firstOrganisationId, tenantOne);
     await expect(
-      insertConnection(firstOrganisationId, 'tenant-two')
+      insertConnection(firstOrganisationId, tenantTwo)
     ).rejects.toMatchObject({ code: '23505' });
     await expect(
-      insertConnection(secondOrganisationId, 'tenant-one')
+      insertConnection(secondOrganisationId, tenantOne)
     ).rejects.toMatchObject({ code: '23505' });
   });
 

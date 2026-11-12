@@ -545,9 +545,15 @@ export const createPostgresSubscriptionRepository = (
             )
           )
           .limit(1);
+        if (currentCandidate === undefined && retiredCandidate === undefined) {
+          return 'REJECTED';
+        }
         if (
-          (currentCandidate === undefined && retiredCandidate === undefined) ||
-          (currentCandidate !== undefined && retiredCandidate !== undefined)
+          currentCandidate !== undefined &&
+          retiredCandidate !== undefined &&
+          (currentCandidate.organisationId !== retiredCandidate.organisationId ||
+            currentCandidate.stripeCustomerId !==
+              retiredCandidate.stripeCustomerId)
         ) {
           return 'REJECTED';
         }

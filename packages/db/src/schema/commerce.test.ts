@@ -280,6 +280,33 @@ describe('Solo commerce schema contract', () => {
     }
   });
 
+  it('makes every transactional-email evidence identity immutable in migration 0027', async () => {
+    const migration = await readFile(
+      new URL(
+        '../../drizzle/0027_transactional_email_evidence_immutability.sql',
+        import.meta.url
+      ),
+      'utf8'
+    );
+
+    for (const column of [
+      'organisation_id',
+      'billing_case_id',
+      'recipient',
+      'template',
+      'template_version',
+      'render_data',
+      'idempotency_key',
+      'source_event_id'
+    ]) {
+      expect(migration).toContain(
+        `OLD.${column} IS DISTINCT FROM NEW.${column}`
+      );
+    }
+    expect(migration).not.toMatch(/OLD\.status IS DISTINCT FROM NEW\.status/);
+    expect(migration).not.toMatch(/OLD\.attempts IS DISTINCT FROM NEW\.attempts/);
+  });
+
   it('creates retired subscription storage and does not grant a future trial during backfill', async () => {
     const migration = await readFile(new URL('../../drizzle/0024_lyrical_may_parker.sql', import.meta.url), 'utf8');
     expect(migration).toMatch(/CREATE TABLE "retired_stripe_subscriptions"/i);
