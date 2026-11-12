@@ -16,6 +16,8 @@ describe('customer reply number', () => {
     expect(markup).toContain('Ready for replies');
     expect(markup).not.toContain('Sinch');
     expect(markup).not.toContain('provider');
+    expect(markup).not.toContain('<form');
+    expect(markup).not.toContain('<button');
   });
 
   it('explains provisioning without inventing a number', () => {
@@ -23,5 +25,7 @@ describe('customer reply number', () => {
 
     expect(markup).toContain('Your reply number is being prepared');
     expect(markup).not.toContain('+61');
+    expect(markup).not.toContain('<form');
+    expect(markup).not.toContain('<button');
   });
 });

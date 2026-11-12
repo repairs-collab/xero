@@ -264,10 +264,20 @@ describe('platform owner views', () => {
     const html = renderToStaticMarkup(
       <PlatformSmsAdministration
         page={{ items: [organisation.smsNumber, availableNumber], total: 30, page: 1, pageSize: 25 }}
+        provisioningPage={{ items: [], total: 0, page: 1, pageSize: 25 }}
         organisations={[{ id: organisation.id, name: organisation.name }]}
         filters={{ search: '', customerSearch: 'Alpha', status: '' }}
+        provisioningFilters={{ search: '', organisationId: '', status: '', documentationStatus: '' }}
+        now={now}
         feedbackCode="UPDATED"
         actions={{
+          recordQuote: noAction,
+          completeDocumentation: noAction,
+          approveOrder: noAction,
+          recordOrder: noAction,
+          fulfilOrder: noAction,
+          failRequest: noAction,
+          expireRequest: noAction,
           register: noAction,
           verify: noAction,
           assign: noAction,
@@ -279,7 +289,7 @@ describe('platform owner views', () => {
       />
     );
 
-    expect(html).toContain('Register Sinch number');
+    expect(html).toContain('Legacy spare-number pool');
     expect(html).toContain('sinch-number-1');
     expect(html).toContain('Ready');
     expect(html).toContain('Assign customer');
@@ -292,6 +302,127 @@ describe('platform owner views', () => {
     expect(html).toContain('Find customer');
     expect(html).toContain('Change saved');
     expect(html).toContain('Next →');
+  });
+
+  it('renders the owner-held manual provisioning workflow without provider secrets or paid actions', () => {
+    const requestBase = {
+      id: '33333333-3333-4333-8333-333333333333',
+      organisationId: organisation.id,
+      organisationName: organisation.name,
+      xeroOrganisationId: organisation.xeroOrganisationId,
+      organisationPlatformStatus: 'ACTIVE' as const,
+      provider: 'SINCH',
+      attempt: 1,
+      version: 2,
+      status: 'AWAITING_OWNER_APPROVAL' as const,
+      quoteSetupFeeMinor: 1_135,
+      quoteMonthlyFeeMinor: 1_530,
+      quoteCurrency: 'aud',
+      quoteExpiresAt: new Date('2026-11-30T00:00:00.000Z'),
+      quotedAt: now,
+      documentationStatus: 'REQUIRED' as const,
+      documentationEvidenceReference: 'redacted-case-reference',
+      approvedAt: null,
+      externalOrderReference: null,
+      manualOrderRecordedAt: null,
+      fulfilledNumberId: null,
+      fulfilledE164Number: null,
+      failureCode: null,
+      failedAt: null,
+      expiredAt: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    const html = renderToStaticMarkup(
+      <PlatformSmsAdministration
+        page={{ items: [], total: 0, page: 1, pageSize: 25 }}
+        provisioningPage={{
+          items: [
+            requestBase,
+            {
+              ...requestBase,
+              id: '44444444-4444-4444-8444-444444444444',
+              version: 4,
+              status: 'APPROVED_FOR_MANUAL_ORDER',
+              documentationStatus: 'COMPLETE'
+            },
+            {
+              ...requestBase,
+              id: '55555555-5555-4555-8555-555555555555',
+              version: 5,
+              status: 'MANUAL_ORDER_RECORDED',
+              documentationStatus: 'NOT_REQUIRED',
+              externalOrderReference: 'redacted-order-reference',
+              manualOrderRecordedAt: now
+            },
+            {
+              ...requestBase,
+              id: '66666666-6666-4666-8666-666666666666',
+              version: 4,
+              status: 'APPROVED_FOR_MANUAL_ORDER',
+              documentationStatus: 'COMPLETE',
+              quoteExpiresAt: new Date('2026-11-10T00:00:00.000Z')
+            }
+          ],
+          total: 3,
+          page: 1,
+          pageSize: 25
+        }}
+        organisations={[{ id: organisation.id, name: organisation.name }]}
+        filters={{ search: '', customerSearch: '', status: '' }}
+        provisioningFilters={{
+          search: 'Alpha',
+          organisationId: organisation.id,
+          status: '',
+          documentationStatus: ''
+        }}
+        now={now}
+        actions={{
+          recordQuote: noAction,
+          completeDocumentation: noAction,
+          approveOrder: noAction,
+          recordOrder: noAction,
+          fulfilOrder: noAction,
+          failRequest: noAction,
+          expireRequest: noAction,
+          register: noAction,
+          verify: noAction,
+          assign: noAction,
+          ready: noAction,
+          quarantine: noAction,
+          release: noAction,
+          returnToPool: noAction
+        }}
+      />
+    );
+
+    expect(html).toContain('Manual reply-number provisioning');
+    expect(html).toContain(
+      'AccountPulse will not contact Sinch, place an order or pay any fee.'
+    );
+    expect(html).toContain('Owner/manual hold');
+    expect(html).toContain('Alpha Repairs');
+    expect(html).toContain('Version 2');
+    expect(html).toContain('$11.35 setup');
+    expect(html).toContain('$15.30 monthly');
+    expect(html).toContain('redacted-case-reference');
+    expect(html).toContain('name="approvalConfirmed"');
+    expect(html).toContain('name="approvalPhrase"');
+    expect(html).toContain('APPROVE EXACT QUOTE');
+    expect(html).toContain('name="documentationEvidenceReference"');
+    expect(html).toContain('Record external order reference');
+    expect(html.match(/Record external order reference/g)).toHaveLength(1);
+    expect(html).toContain('Expired approved quote — do not place an order.');
+    expect(html).toContain('name="externalOrderReference"');
+    expect(html).toContain('Record fulfilled number');
+    expect(html).toContain('name="e164Number"');
+    expect(html).toContain('name="providerNumberId"');
+    expect(html).toContain('name="expectedVersion" value="2"');
+    expect(html).toContain('Legacy spare-number pool');
+    expect(html).not.toContain('apiKey');
+    expect(html).not.toContain('clientSecret');
+    expect(html).not.toContain('rawDocument');
+    expect(html).not.toContain('Buy number now');
   });
 
   it('renders filterable audit summaries while redacting sensitive and message fields', () => {

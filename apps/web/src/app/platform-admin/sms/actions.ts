@@ -24,14 +24,64 @@ export interface SmsAdminActionDependencies {
     | 'releaseSmsNumber'
     | 'returnSmsNumberToPool'
     | 'updateSmsAllowance'
+    | 'recordReplyNumberQuote'
+    | 'completeReplyNumberDocumentation'
+    | 'approveManualReplyNumberOrder'
+    | 'recordManualReplyNumberOrder'
+    | 'recordFulfilledReplyNumber'
+    | 'failReplyNumberProvisioningRequest'
+    | 'expireReplyNumberProvisioningRequest'
   >;
   revalidate(path: string): void;
 }
 
 export interface SmsAdminActionState {
   ok: boolean;
-  code: 'UPDATED' | 'CONFLICT' | 'INVALID_STATE' | 'VALIDATION';
+  code:
+    | 'UPDATED'
+    | 'CONFLICT'
+    | 'INVALID_STATE'
+    | 'VALIDATION'
+    | 'NOT_FOUND'
+    | 'NOT_OWNER'
+    | 'NOT_ELIGIBLE'
+    | 'BILLING_RISK_HOLD'
+    | 'QUOTE_EXPIRED'
+    | 'AMOUNT_MISMATCH'
+    | 'NUMBER_CONFLICT';
 }
+
+export const parseAudMinor = (raw: string): number => {
+  const value = raw.trim();
+  const match = /^(0|[1-9]\d{0,7})(?:\.(\d{1,2}))?$/u.exec(value);
+  if (!match) throw new Error('AUD amount is invalid');
+  const whole = Number(match[1]);
+  const fraction = (match[2] ?? '').padEnd(2, '0');
+  const minor = whole * 100 + Number(fraction || '0');
+  if (!Number.isSafeInteger(minor) || minor > 2_147_483_647) {
+    throw new Error('AUD amount is invalid');
+  }
+  return minor;
+};
+
+export const parseSydneyLocalDate = (
+  localValue: string,
+  utcOffset: string
+): Date => {
+  const local = localValue.trim();
+  const offset = utcOffset.trim();
+  if (
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/u.test(local) ||
+    !['+10:00', '+11:00'].includes(offset)
+  ) {
+    throw new Error('Sydney date or UTC offset is invalid');
+  }
+  const value = new Date(`${local}:00${offset}`);
+  if (!Number.isFinite(value.getTime())) {
+    throw new Error('Sydney date or UTC offset is invalid');
+  }
+  return value;
+};
 
 const text = (formData: FormData, name: string): string => {
   const value = formData.get(name);
@@ -71,6 +121,16 @@ const positiveInteger = (formData: FormData, name: string): number => {
 const checked = (formData: FormData, name: string): boolean =>
   formData.get(name) === 'on';
 
+const documentationStatus = (
+  formData: FormData
+): 'NOT_REQUIRED' | 'REQUIRED' | 'COMPLETE' => {
+  const value = text(formData, 'documentationStatus');
+  if (!['NOT_REQUIRED', 'REQUIRED', 'COMPLETE'].includes(value)) {
+    throw new Error('documentationStatus is invalid');
+  }
+  return value as 'NOT_REQUIRED' | 'REQUIRED' | 'COMPLETE';
+};
+
 const resultState = (result: {
   ok: boolean;
   code?: SmsAdminActionState['code'];
@@ -90,6 +150,159 @@ export const createSmsAdminActions = (
     }
   };
   return {
+    async recordReplyNumberQuoteAction(formData: FormData): Promise<SmsAdminActionState> {
+      const organisationId = text(formData, 'organisationId');
+      const session = await dependencies.getOwnerSession();
+      const result = await dependencies.service.recordReplyNumberQuote(
+        session.userId,
+        {
+          organisationId,
+          requestId: text(formData, 'requestId'),
+          expectedVersion: positiveInteger(formData, 'expectedVersion'),
+          setupFeeMinor: parseAudMinor(text(formData, 'setupFeeAud')),
+          monthlyFeeMinor: parseAudMinor(text(formData, 'monthlyFeeAud')),
+          quoteExpiresAt: parseSydneyLocalDate(
+            text(formData, 'quoteExpiresLocal'),
+            text(formData, 'quoteUtcOffset')
+          ),
+          documentationStatus: documentationStatus(formData),
+          documentationEvidenceReference: optionalText(
+            formData,
+            'documentationEvidenceReference'
+          ),
+          reason: text(formData, 'reason')
+        }
+      );
+      if (result.ok) finish(organisationId);
+      return resultState(result);
+    },
+
+    async completeReplyNumberDocumentationAction(
+      formData: FormData
+    ): Promise<SmsAdminActionState> {
+      const organisationId = text(formData, 'organisationId');
+      const session = await dependencies.getOwnerSession();
+      const result = await dependencies.service.completeReplyNumberDocumentation(
+        session.userId,
+        {
+          organisationId,
+          requestId: text(formData, 'requestId'),
+          expectedVersion: positiveInteger(formData, 'expectedVersion'),
+          documentationEvidenceReference: text(
+            formData,
+            'documentationEvidenceReference'
+          ),
+          reason: text(formData, 'reason')
+        }
+      );
+      if (result.ok) finish(organisationId);
+      return resultState(result);
+    },
+
+    async approveManualReplyNumberOrderAction(
+      formData: FormData
+    ): Promise<SmsAdminActionState> {
+      const organisationId = text(formData, 'organisationId');
+      const session = await dependencies.getOwnerSession();
+      const result = await dependencies.service.approveManualReplyNumberOrder(
+        session.userId,
+        {
+          organisationId,
+          requestId: text(formData, 'requestId'),
+          expectedVersion: positiveInteger(formData, 'expectedVersion'),
+          confirmedSetupFeeMinor: parseAudMinor(
+            text(formData, 'confirmedSetupFeeAud')
+          ),
+          confirmedMonthlyFeeMinor: parseAudMinor(
+            text(formData, 'confirmedMonthlyFeeAud')
+          ),
+          approvalConfirmed: checked(formData, 'approvalConfirmed'),
+          approvalPhrase: text(formData, 'approvalPhrase'),
+          reason: text(formData, 'reason')
+        }
+      );
+      if (result.ok) finish(organisationId);
+      return resultState(result);
+    },
+
+    async recordManualReplyNumberOrderAction(
+      formData: FormData
+    ): Promise<SmsAdminActionState> {
+      const organisationId = text(formData, 'organisationId');
+      const session = await dependencies.getOwnerSession();
+      const result = await dependencies.service.recordManualReplyNumberOrder(
+        session.userId,
+        {
+          organisationId,
+          requestId: text(formData, 'requestId'),
+          expectedVersion: positiveInteger(formData, 'expectedVersion'),
+          externalOrderReference: text(formData, 'externalOrderReference'),
+          reason: text(formData, 'reason')
+        }
+      );
+      if (result.ok) finish(organisationId);
+      return resultState(result);
+    },
+
+    async fulfilReplyNumberProvisioningRequestAction(
+      formData: FormData
+    ): Promise<SmsAdminActionState> {
+      const organisationId = text(formData, 'organisationId');
+      const session = await dependencies.getOwnerSession();
+      const result = await dependencies.service.recordFulfilledReplyNumber(
+        session.userId,
+        {
+          organisationId,
+          requestId: text(formData, 'requestId'),
+          expectedVersion: positiveInteger(formData, 'expectedVersion'),
+          e164Number: text(formData, 'e164Number'),
+          providerNumberId: text(formData, 'providerNumberId'),
+          reason: text(formData, 'reason')
+        }
+      );
+      if (result.ok) finish(organisationId);
+      return resultState(result);
+    },
+
+    async failReplyNumberProvisioningRequestAction(
+      formData: FormData
+    ): Promise<SmsAdminActionState> {
+      const organisationId = text(formData, 'organisationId');
+      const session = await dependencies.getOwnerSession();
+      const result =
+        await dependencies.service.failReplyNumberProvisioningRequest(
+          session.userId,
+          {
+            organisationId,
+            requestId: text(formData, 'requestId'),
+            expectedVersion: positiveInteger(formData, 'expectedVersion'),
+            failureCode: text(formData, 'failureCode'),
+            reason: text(formData, 'reason')
+          }
+        );
+      if (result.ok) finish(organisationId);
+      return resultState(result);
+    },
+
+    async expireReplyNumberProvisioningRequestAction(
+      formData: FormData
+    ): Promise<SmsAdminActionState> {
+      const organisationId = text(formData, 'organisationId');
+      const session = await dependencies.getOwnerSession();
+      const result =
+        await dependencies.service.expireReplyNumberProvisioningRequest(
+          session.userId,
+          {
+            organisationId,
+            requestId: text(formData, 'requestId'),
+            expectedVersion: positiveInteger(formData, 'expectedVersion'),
+            reason: text(formData, 'reason')
+          }
+        );
+      if (result.ok) finish(organisationId);
+      return resultState(result);
+    },
+
     async registerSmsNumberAction(formData: FormData): Promise<SmsAdminActionState> {
       const session = await dependencies.getOwnerSession();
       const result = await dependencies.service.registerSmsNumber(session.userId, {
@@ -229,6 +442,46 @@ const run = async (
 export async function registerSmsNumberAction(formData: FormData) {
   'use server';
   return run(formData, (data) => actions.registerSmsNumberAction(data));
+}
+export async function recordReplyNumberQuoteAction(formData: FormData) {
+  'use server';
+  return run(formData, (data) => actions.recordReplyNumberQuoteAction(data));
+}
+export async function completeReplyNumberDocumentationAction(formData: FormData) {
+  'use server';
+  return run(formData, (data) =>
+    actions.completeReplyNumberDocumentationAction(data)
+  );
+}
+export async function approveManualReplyNumberOrderAction(formData: FormData) {
+  'use server';
+  return run(formData, (data) =>
+    actions.approveManualReplyNumberOrderAction(data)
+  );
+}
+export async function recordManualReplyNumberOrderAction(formData: FormData) {
+  'use server';
+  return run(formData, (data) =>
+    actions.recordManualReplyNumberOrderAction(data)
+  );
+}
+export async function fulfilReplyNumberProvisioningRequestAction(formData: FormData) {
+  'use server';
+  return run(formData, (data) =>
+    actions.fulfilReplyNumberProvisioningRequestAction(data)
+  );
+}
+export async function failReplyNumberProvisioningRequestAction(formData: FormData) {
+  'use server';
+  return run(formData, (data) =>
+    actions.failReplyNumberProvisioningRequestAction(data)
+  );
+}
+export async function expireReplyNumberProvisioningRequestAction(formData: FormData) {
+  'use server';
+  return run(formData, (data) =>
+    actions.expireReplyNumberProvisioningRequestAction(data)
+  );
 }
 export async function verifySmsNumberForPoolAction(formData: FormData) {
   'use server';

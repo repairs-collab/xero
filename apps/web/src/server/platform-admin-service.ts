@@ -1,10 +1,12 @@
 import { AuthorizationFailure } from '@bc5000/auth';
+import { PostgresReplyNumberProvisioningRepository } from '@bc5000/db';
 import {
   PostgresPlatformAdminRepository,
   type PlatformAdminRepository,
   type PlatformAuditListInput,
   type PlatformBillingOperationsListInput,
   type PlatformNumberListInput,
+  type PlatformReplyNumberProvisioningListInput,
   type PlatformOrganisationListInput,
   type PlatformOrganisationSort
 } from '@bc5000/db/web';
@@ -15,6 +17,16 @@ import { isPlatformOwner } from './platform-authorization.js';
 export interface PlatformAdminServiceDependencies {
   verifyOwner(userId: string): Promise<boolean>;
   repository: PlatformAdminRepository;
+  provisioningRepository?: Pick<
+    PostgresReplyNumberProvisioningRepository,
+    | 'recordQuote'
+    | 'recordDocumentationComplete'
+    | 'approveManualOrder'
+    | 'recordManualOrderReference'
+    | 'recordFulfilledNumber'
+    | 'failRequest'
+    | 'expireRequest'
+  >;
   clock?: { now(): Date };
 }
 
@@ -52,6 +64,30 @@ const emptyBillingOperationsPage = () => ({
   heldEmails: { items: [], nextCursor: null }
 });
 
+const replyNumberProvisioningStatuses = [
+  'AWAITING_QUOTE',
+  'AWAITING_OWNER_APPROVAL',
+  'APPROVED_FOR_MANUAL_ORDER',
+  'MANUAL_ORDER_RECORDED',
+  'FULFILLED',
+  'FAILED',
+  'EXPIRED'
+] as const;
+
+const replyNumberDocumentationStatuses = [
+  'UNKNOWN',
+  'NOT_REQUIRED',
+  'REQUIRED',
+  'COMPLETE'
+] as const;
+
+const emptyReplyNumberProvisioningPage = () => ({
+  items: [],
+  total: 0,
+  page: 1,
+  pageSize: 25
+});
+
 export const createPlatformAdminService = (
   dependencies: PlatformAdminServiceDependencies
 ) => {
@@ -59,6 +95,29 @@ export const createPlatformAdminService = (
   const validReason = (reason: string) => {
     const value = reason.trim();
     return value.length > 0 && value.length <= 500;
+  };
+  const validReference = (value: string, maximum: number) => {
+    const cleaned = value.trim();
+    return (
+      cleaned.length > 0 &&
+      cleaned.length <= maximum &&
+      !/[\r\n\0]/u.test(cleaned)
+    );
+  };
+  const validRequestTarget = (input: {
+    organisationId: string;
+    requestId: string;
+    expectedVersion: number;
+  }) =>
+    uuidPattern.test(input.organisationId) &&
+    uuidPattern.test(input.requestId) &&
+    Number.isSafeInteger(input.expectedVersion) &&
+    input.expectedVersion >= 1;
+  const provisioningRepository = () => {
+    if (!dependencies.provisioningRepository) {
+      throw new Error('Reply-number provisioning repository is not configured');
+    }
+    return dependencies.provisioningRepository;
   };
   return {
   async listOrganisations(
@@ -84,6 +143,62 @@ export const createPlatformAdminService = (
       page: positiveInteger(input.page, 1, Number.MAX_SAFE_INTEGER),
       pageSize: positiveInteger(input.pageSize, 25, 100)
     });
+  },
+
+  async listReplyNumberProvisioningRequests(
+    actorUserId: string,
+    input: Record<string, unknown> = {}
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    const organisationId =
+      typeof input.organisationId === 'string'
+        ? input.organisationId.trim()
+        : '';
+    const status = typeof input.status === 'string' ? input.status.trim() : '';
+    const documentationStatus =
+      typeof input.documentationStatus === 'string'
+        ? input.documentationStatus.trim()
+        : '';
+    if (
+      (organisationId && !uuidPattern.test(organisationId)) ||
+      (status &&
+        !replyNumberProvisioningStatuses.includes(
+          status as (typeof replyNumberProvisioningStatuses)[number]
+        )) ||
+      (documentationStatus &&
+        !replyNumberDocumentationStatuses.includes(
+          documentationStatus as (typeof replyNumberDocumentationStatuses)[number]
+        ))
+    ) {
+      return emptyReplyNumberProvisioningPage();
+    }
+    const search =
+      typeof input.search === 'string' ? input.search.trim().slice(0, 100) : '';
+    const normalized: PlatformReplyNumberProvisioningListInput = {
+      ...(organisationId ? { organisationId } : {}),
+      ...(search ? { search } : {}),
+      ...(status
+        ? {
+            status:
+              status as NonNullable<
+                PlatformReplyNumberProvisioningListInput['status']
+              >
+          }
+        : {}),
+      ...(documentationStatus
+        ? {
+            documentationStatus:
+              documentationStatus as NonNullable<
+                PlatformReplyNumberProvisioningListInput['documentationStatus']
+              >
+          }
+        : {}),
+      page: positiveInteger(input.page, 1, Number.MAX_SAFE_INTEGER),
+      pageSize: positiveInteger(input.pageSize, 25, 100)
+    };
+    return dependencies.repository.listReplyNumberProvisioningRequests(
+      normalized
+    );
   },
 
   async listAuditEvents(actorUserId: string, input: PlatformAuditListInput = {}) {
@@ -412,6 +527,233 @@ export const createPlatformAdminService = (
       reason: input.reason.trim(),
       now: now()
     });
+  },
+
+  async recordReplyNumberQuote(
+    actorUserId: string,
+    input: {
+      organisationId: string;
+      requestId: string;
+      expectedVersion: number;
+      setupFeeMinor: number;
+      monthlyFeeMinor: number;
+      quoteExpiresAt: Date;
+      documentationStatus: 'NOT_REQUIRED' | 'REQUIRED' | 'COMPLETE';
+      documentationEvidenceReference: string | null;
+      reason: string;
+    }
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    const actionNow = now();
+    const evidenceReference =
+      input.documentationEvidenceReference?.trim() || null;
+    if (
+      !validRequestTarget(input) ||
+      !validReason(input.reason) ||
+      !Number.isSafeInteger(input.setupFeeMinor) ||
+      input.setupFeeMinor < 0 ||
+      input.setupFeeMinor > 2_147_483_647 ||
+      !Number.isSafeInteger(input.monthlyFeeMinor) ||
+      input.monthlyFeeMinor < 0 ||
+      input.monthlyFeeMinor > 2_147_483_647 ||
+      !Number.isFinite(input.quoteExpiresAt.getTime()) ||
+      input.quoteExpiresAt.getTime() <= actionNow.getTime() ||
+      !['NOT_REQUIRED', 'REQUIRED', 'COMPLETE'].includes(
+        input.documentationStatus
+      ) ||
+      (evidenceReference !== null &&
+        !validReference(evidenceReference, 256)) ||
+      (input.documentationStatus === 'COMPLETE' && evidenceReference === null)
+    ) {
+      return { ok: false, code: 'VALIDATION' } as const;
+    }
+    return provisioningRepository().recordQuote({
+      actorUserId,
+      organisationId: input.organisationId,
+      requestId: input.requestId,
+      expectedVersion: input.expectedVersion,
+      setupFeeMinor: input.setupFeeMinor,
+      monthlyFeeMinor: input.monthlyFeeMinor,
+      currency: 'aud',
+      quoteExpiresAt: input.quoteExpiresAt,
+      documentationStatus: input.documentationStatus,
+      documentationEvidenceReference: evidenceReference,
+      reason: input.reason.trim(),
+      now: actionNow
+    });
+  },
+
+  async completeReplyNumberDocumentation(
+    actorUserId: string,
+    input: {
+      organisationId: string;
+      requestId: string;
+      expectedVersion: number;
+      documentationEvidenceReference: string;
+      reason: string;
+    }
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    if (
+      !validRequestTarget(input) ||
+      !validReason(input.reason) ||
+      !validReference(input.documentationEvidenceReference, 256)
+    ) {
+      return { ok: false, code: 'VALIDATION' } as const;
+    }
+    return provisioningRepository().recordDocumentationComplete({
+      ...input,
+      actorUserId,
+      documentationEvidenceReference:
+        input.documentationEvidenceReference.trim(),
+      reason: input.reason.trim(),
+      now: now()
+    });
+  },
+
+  async approveManualReplyNumberOrder(
+    actorUserId: string,
+    input: {
+      organisationId: string;
+      requestId: string;
+      expectedVersion: number;
+      confirmedSetupFeeMinor: number;
+      confirmedMonthlyFeeMinor: number;
+      approvalConfirmed: boolean;
+      approvalPhrase: string;
+      reason: string;
+    }
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    if (
+      !validRequestTarget(input) ||
+      !validReason(input.reason) ||
+      !input.approvalConfirmed ||
+      input.approvalPhrase.trim() !== 'APPROVE EXACT QUOTE' ||
+      !Number.isSafeInteger(input.confirmedSetupFeeMinor) ||
+      input.confirmedSetupFeeMinor < 0 ||
+      input.confirmedSetupFeeMinor > 2_147_483_647 ||
+      !Number.isSafeInteger(input.confirmedMonthlyFeeMinor) ||
+      input.confirmedMonthlyFeeMinor < 0 ||
+      input.confirmedMonthlyFeeMinor > 2_147_483_647
+    ) {
+      return { ok: false, code: 'VALIDATION' } as const;
+    }
+    return provisioningRepository().approveManualOrder({
+      actorUserId,
+      organisationId: input.organisationId,
+      requestId: input.requestId,
+      expectedVersion: input.expectedVersion,
+      confirmedSetupFeeMinor: input.confirmedSetupFeeMinor,
+      confirmedMonthlyFeeMinor: input.confirmedMonthlyFeeMinor,
+      reason: input.reason.trim(),
+      now: now()
+    });
+  },
+
+  async recordManualReplyNumberOrder(
+    actorUserId: string,
+    input: {
+      organisationId: string;
+      requestId: string;
+      expectedVersion: number;
+      externalOrderReference: string;
+      reason: string;
+    }
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    if (
+      !validRequestTarget(input) ||
+      !validReason(input.reason) ||
+      !validReference(input.externalOrderReference, 256)
+    ) {
+      return { ok: false, code: 'VALIDATION' } as const;
+    }
+    return provisioningRepository().recordManualOrderReference({
+      ...input,
+      actorUserId,
+      externalOrderReference: input.externalOrderReference.trim(),
+      reason: input.reason.trim(),
+      now: now()
+    });
+  },
+
+  async recordFulfilledReplyNumber(
+    actorUserId: string,
+    input: {
+      organisationId: string;
+      requestId: string;
+      expectedVersion: number;
+      e164Number: string;
+      providerNumberId: string;
+      reason: string;
+    }
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    if (
+      !validRequestTarget(input) ||
+      !validReason(input.reason) ||
+      !/^\+61\d{9}$/u.test(input.e164Number) ||
+      !validReference(input.providerNumberId, 128)
+    ) {
+      return { ok: false, code: 'VALIDATION' } as const;
+    }
+    return provisioningRepository().recordFulfilledNumber({
+      ...input,
+      actorUserId,
+      providerNumberId: input.providerNumberId.trim(),
+      reason: input.reason.trim(),
+      now: now()
+    });
+  },
+
+  async failReplyNumberProvisioningRequest(
+    actorUserId: string,
+    input: {
+      organisationId: string;
+      requestId: string;
+      expectedVersion: number;
+      failureCode: string;
+      reason: string;
+    }
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    const failureCode = input.failureCode.trim();
+    if (
+      !validRequestTarget(input) ||
+      !validReason(input.reason) ||
+      !/^[A-Z0-9][A-Z0-9_-]{0,63}$/u.test(failureCode)
+    ) {
+      return { ok: false, code: 'VALIDATION' } as const;
+    }
+    return provisioningRepository().failRequest({
+      ...input,
+      actorUserId,
+      failureCode,
+      reason: input.reason.trim(),
+      now: now()
+    });
+  },
+
+  async expireReplyNumberProvisioningRequest(
+    actorUserId: string,
+    input: {
+      organisationId: string;
+      requestId: string;
+      expectedVersion: number;
+      reason: string;
+    }
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    if (!validRequestTarget(input) || !validReason(input.reason)) {
+      return { ok: false, code: 'VALIDATION' } as const;
+    }
+    return provisioningRepository().expireRequest({
+      ...input,
+      actorUserId,
+      reason: input.reason.trim(),
+      now: now()
+    });
   }
   };
 };
@@ -421,7 +763,10 @@ let service: ReturnType<typeof createPlatformAdminService> | undefined;
 export const getPlatformAdminService = () => {
   service ??= createPlatformAdminService({
     verifyOwner: isPlatformOwner,
-    repository: new PostgresPlatformAdminRepository(getDatabaseClient().db)
+    repository: new PostgresPlatformAdminRepository(getDatabaseClient().db),
+    provisioningRepository: new PostgresReplyNumberProvisioningRepository(
+      getDatabaseClient().db
+    )
   });
   return service;
 };

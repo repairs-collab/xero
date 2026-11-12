@@ -10,6 +10,7 @@ import {
   organisationOnboarding,
   organisations,
   platformAdminAuditEvents,
+  replyNumberProvisioningRequests,
   smsAllowanceSettings,
   smsNumberPool,
   smsUsageLedger,
@@ -21,6 +22,8 @@ import {
   type BillingCaseKind,
   type BillingCaseStatus,
   type PlatformAccountStatus,
+  type ReplyNumberDocumentationStatus,
+  type ReplyNumberProvisioningStatus,
   type SmsNumberStatus,
   type SubscriptionStatus,
   type XeroConnectionStatus
@@ -47,6 +50,15 @@ export interface PlatformOrganisationListInput {
 export interface PlatformNumberListInput {
   search?: string;
   status?: SmsNumberStatus;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface PlatformReplyNumberProvisioningListInput {
+  search?: string;
+  organisationId?: string;
+  status?: ReplyNumberProvisioningStatus;
+  documentationStatus?: ReplyNumberDocumentationStatus;
   page?: number;
   pageSize?: number;
 }
@@ -201,6 +213,35 @@ export interface PlatformNumberSummary {
   updatedAt: Date;
 }
 
+export interface PlatformReplyNumberProvisioningView {
+  id: string;
+  organisationId: string;
+  organisationName: string;
+  xeroOrganisationId: string;
+  organisationPlatformStatus: PlatformAccountStatus;
+  provider: string;
+  attempt: number;
+  version: number;
+  status: ReplyNumberProvisioningStatus;
+  quoteSetupFeeMinor: number | null;
+  quoteMonthlyFeeMinor: number | null;
+  quoteCurrency: string | null;
+  quoteExpiresAt: Date | null;
+  quotedAt: Date | null;
+  documentationStatus: ReplyNumberDocumentationStatus;
+  documentationEvidenceReference: string | null;
+  approvedAt: Date | null;
+  externalOrderReference: string | null;
+  manualOrderRecordedAt: Date | null;
+  fulfilledNumberId: string | null;
+  fulfilledE164Number: string | null;
+  failureCode: string | null;
+  failedAt: Date | null;
+  expiredAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 export interface PlatformAuditView {
   id: string;
   actorUserId: string;
@@ -233,12 +274,17 @@ export type PlatformOrganisationPage = PlatformPage<PlatformOrganisationSummary>
   };
 };
 export type PlatformNumberPage = PlatformPage<PlatformNumberSummary>;
+export type PlatformReplyNumberProvisioningPage =
+  PlatformPage<PlatformReplyNumberProvisioningView>;
 export type PlatformAuditPage = PlatformPage<PlatformAuditView>;
 
 export interface PlatformAdminReadRepository {
   listOrganisations(input?: PlatformOrganisationListInput): Promise<PlatformOrganisationPage>;
   getOrganisationDetail(organisationId: string): Promise<PlatformOrganisationDetail | null>;
   listSmsNumbers(input?: PlatformNumberListInput): Promise<PlatformNumberPage>;
+  listReplyNumberProvisioningRequests(
+    input?: PlatformReplyNumberProvisioningListInput
+  ): Promise<PlatformReplyNumberProvisioningPage>;
   listAuditEvents(input?: PlatformAuditListInput): Promise<PlatformAuditPage>;
   listBillingOperations(
     input?: PlatformBillingOperationsListInput
@@ -669,6 +715,104 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
     const total = rows.length;
     const offset = (page - 1) * pageSize;
     return { items: rows.slice(offset, offset + pageSize), total, page, pageSize };
+  }
+
+  async listReplyNumberProvisioningRequests(
+    input: PlatformReplyNumberProvisioningListInput = {}
+  ): Promise<PlatformReplyNumberProvisioningPage> {
+    const { page, pageSize } = pageValues(input.page, input.pageSize);
+    const [requestRows, organisationRows, numberRows] = await Promise.all([
+      this.database.select().from(replyNumberProvisioningRequests),
+      this.database
+        .select({
+          id: organisations.id,
+          name: organisations.name,
+          xeroOrganisationId: organisations.xeroOrganisationId,
+          platformStatus: organisations.platformStatus
+        })
+        .from(organisations),
+      this.database
+        .select({ id: smsNumberPool.id, e164Number: smsNumberPool.e164Number })
+        .from(smsNumberPool)
+    ]);
+    const organisationById = new Map(
+      organisationRows.map((row) => [row.id, row])
+    );
+    const numberById = new Map(numberRows.map((row) => [row.id, row]));
+    const query = input.search?.trim().toLocaleLowerCase() ?? '';
+    let rows: PlatformReplyNumberProvisioningView[] = requestRows.flatMap(
+      (request) => {
+        const organisation = organisationById.get(request.organisationId);
+        if (!organisation) return [];
+        const fulfilledNumber = request.fulfilledNumberId
+          ? numberById.get(request.fulfilledNumberId)
+          : undefined;
+        return [{
+          id: request.id,
+          organisationId: request.organisationId,
+          organisationName: organisation.name,
+          xeroOrganisationId: organisation.xeroOrganisationId,
+          organisationPlatformStatus: organisation.platformStatus,
+          provider: request.provider,
+          attempt: request.attempt,
+          version: request.version,
+          status: request.status,
+          quoteSetupFeeMinor: request.quoteSetupFeeMinor,
+          quoteMonthlyFeeMinor: request.quoteMonthlyFeeMinor,
+          quoteCurrency: request.quoteCurrency,
+          quoteExpiresAt: request.quoteExpiresAt,
+          quotedAt: request.quotedAt,
+          documentationStatus: request.documentationStatus,
+          documentationEvidenceReference:
+            request.documentationEvidenceReference,
+          approvedAt: request.approvedAt,
+          externalOrderReference: request.externalOrderReference,
+          manualOrderRecordedAt: request.manualOrderRecordedAt,
+          fulfilledNumberId: request.fulfilledNumberId,
+          fulfilledE164Number: fulfilledNumber?.e164Number ?? null,
+          failureCode: request.failureCode,
+          failedAt: request.failedAt,
+          expiredAt: request.expiredAt,
+          createdAt: request.createdAt,
+          updatedAt: request.updatedAt
+        }];
+      }
+    );
+    if (input.organisationId) {
+      rows = rows.filter((row) => row.organisationId === input.organisationId);
+    }
+    if (input.status) {
+      rows = rows.filter((row) => row.status === input.status);
+    }
+    if (input.documentationStatus) {
+      rows = rows.filter(
+        (row) => row.documentationStatus === input.documentationStatus
+      );
+    }
+    if (query) {
+      rows = rows.filter((row) =>
+        [
+          row.id,
+          row.organisationName,
+          row.xeroOrganisationId,
+          row.externalOrderReference ?? '',
+          row.fulfilledE164Number ?? ''
+        ].some((value) => value.toLocaleLowerCase().includes(query))
+      );
+    }
+    rows.sort(
+      (left, right) =>
+        right.updatedAt.getTime() - left.updatedAt.getTime() ||
+        right.id.localeCompare(left.id)
+    );
+    const total = rows.length;
+    const offset = (page - 1) * pageSize;
+    return {
+      items: rows.slice(offset, offset + pageSize),
+      total,
+      page,
+      pageSize
+    };
   }
 
   async listAuditEvents(

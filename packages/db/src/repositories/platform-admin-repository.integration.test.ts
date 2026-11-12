@@ -11,6 +11,7 @@ import {
   organisations,
   platformAdminAuditEvents,
   providerConnections,
+  replyNumberProvisioningRequests,
   smsAllowanceSettings,
   smsNumberPool,
   smsUsageLedger,
@@ -212,6 +213,52 @@ afterAll(async () => {
 });
 
 describe('PostgresPlatformAdminRepository reads', () => {
+  it('lists and filters safe reply-number provisioning records with customer context', async () => {
+    const requestId = randomUUID();
+    await client.db.insert(replyNumberProvisioningRequests).values({
+      id: requestId,
+      organisationId: ids.beta,
+      provider: 'SINCH',
+      requestKey: `reply-number-platform-admin-${runId}`,
+      attempt: 1,
+      version: 2,
+      status: 'AWAITING_OWNER_APPROVAL',
+      quoteSetupFeeMinor: 1_135,
+      quoteMonthlyFeeMinor: 1_530,
+      quoteCurrency: 'aud',
+      quoteExpiresAt: new Date('2026-11-30T00:00:00.000Z'),
+      quotedAt: new Date('2026-11-11T00:00:00.000Z'),
+      documentationStatus: 'REQUIRED',
+      documentationEvidenceReference: 'case-safe-reference',
+      createdAt: new Date('2026-11-10T00:00:00.000Z'),
+      updatedAt: new Date('2026-11-11T00:00:00.000Z')
+    });
+
+    const page = await repository.listReplyNumberProvisioningRequests({
+      organisationId: ids.beta,
+      search: organisationNames.beta,
+      status: 'AWAITING_OWNER_APPROVAL',
+      documentationStatus: 'REQUIRED',
+      page: 1,
+      pageSize: 10
+    });
+
+    expect(page).toMatchObject({ total: 1, page: 1, pageSize: 10 });
+    expect(page.items[0]).toMatchObject({
+      id: requestId,
+      organisationId: ids.beta,
+      organisationName: organisationNames.beta,
+      status: 'AWAITING_OWNER_APPROVAL',
+      version: 2,
+      quoteSetupFeeMinor: 1_135,
+      quoteMonthlyFeeMinor: 1_530,
+      documentationStatus: 'REQUIRED',
+      documentationEvidenceReference: 'case-safe-reference'
+    });
+    expect(JSON.stringify(page.items[0])).not.toContain('approvedByUserId');
+    expect(JSON.stringify(page.items[0])).not.toContain('secretArn');
+  });
+
   it('paginates and sorts organisations deterministically', async () => {
     const first = await repository.listOrganisations({
       search: runId,
