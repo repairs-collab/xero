@@ -3,12 +3,13 @@ import { describe, expect, it } from 'vitest';
 import { processSubscriptionLifecycle } from './subscription-lifecycle.js';
 
 describe('processSubscriptionLifecycle', () => {
-  it('disconnects Xero and records a 30-day retention deadline after cancellation', async () => {
+  it('records five-year deletion eligibility from the cancellation time while retaining the 30-day review', async () => {
     const disconnected: string[] = [];
     const records: Array<{
       organisationId: string;
       disconnectedAt: Date;
       retentionDeadline: Date;
+      deletionEligibleAt: Date | null;
     }> = [];
 
     await expect(
@@ -17,6 +18,7 @@ describe('processSubscriptionLifecycle', () => {
           load: () =>
             Promise.resolve({
               status: 'CANCELLED',
+              cancelledAt: new Date('2026-11-08T09:30:00.000Z'),
               retentionDeadlineRecorded: false
             }),
           disconnectXero: (organisationId) => {
@@ -39,7 +41,8 @@ describe('processSubscriptionLifecycle', () => {
       {
         organisationId: 'org_solo',
         disconnectedAt: new Date('2026-11-09T12:00:00.000Z'),
-        retentionDeadline: new Date('2026-12-09T12:00:00.000Z')
+        retentionDeadline: new Date('2026-12-09T12:00:00.000Z'),
+        deletionEligibleAt: new Date('2031-11-08T09:30:00.000Z')
       }
     ]);
   });
@@ -51,6 +54,7 @@ describe('processSubscriptionLifecycle', () => {
         load: () =>
           Promise.resolve({
             status: 'CANCEL_AT_PERIOD_END',
+            cancelledAt: null,
             retentionDeadlineRecorded: false
           }),
         disconnectXero: () => {
@@ -75,6 +79,7 @@ describe('processSubscriptionLifecycle', () => {
         load: () =>
           Promise.resolve({
             status: 'CANCELLED',
+            cancelledAt: new Date('2026-11-08T09:30:00.000Z'),
             retentionDeadlineRecorded: true
           }),
         disconnectXero: () => {

@@ -16,7 +16,7 @@ import {
   varchar
 } from 'drizzle-orm/pg-core';
 
-import { organisations } from './organisation.js';
+import { organisations, users } from './organisation.js';
 import { outboundMessages } from './messaging.js';
 
 export const soloAu2000PlanCode = 'SOLO_AU_2000' as const;
@@ -391,6 +391,16 @@ export const retentionCases = pgTable(
     disconnectedAt: timestamp('disconnected_at', { withTimezone: true })
       .notNull(),
     reviewAfter: timestamp('review_after', { withTimezone: true }).notNull(),
+    deletionEligibleAt: timestamp('deletion_eligible_at', {
+      withTimezone: true
+    }),
+    backupExpiryVerifiedAt: timestamp('backup_expiry_verified_at', {
+      withTimezone: true
+    }),
+    backupExpiryEvidenceReference: varchar(
+      'backup_expiry_evidence_reference',
+      { length: 128 }
+    ),
     reviewAttempts: integer('review_attempts').notNull().default(0),
     lastReviewedAt: timestamp('last_reviewed_at', { withTimezone: true }),
     lastReviewError: text('last_review_error'),
@@ -403,6 +413,10 @@ export const retentionCases = pgTable(
   },
   (table) => [
     index('retention_cases_due_idx').on(table.status, table.reviewAfter),
+    index('retention_cases_deletion_eligibility_idx').on(
+      table.status,
+      table.deletionEligibleAt
+    ),
     check(
       'retention_cases_source_ck',
       sql`${table.source} in ('TRIAL_EXPIRED', 'SUBSCRIPTION_CANCELLED', 'CUSTOMER_REQUEST')`
@@ -418,6 +432,102 @@ export const retentionCases = pgTable(
     check(
       'retention_cases_attempts_ck',
       sql`${table.reviewAttempts} >= 0`
+    ),
+    check(
+      'retention_cases_backup_evidence_ck',
+      sql`(${table.backupExpiryVerifiedAt} is null and ${table.backupExpiryEvidenceReference} is null) or (${table.backupExpiryVerifiedAt} is not null and ${table.backupExpiryEvidenceReference} is not null)`
+    )
+  ]
+);
+
+export type DataRequestType = 'EXPORT' | 'DELETION';
+export type DataRequestStatus =
+  | 'VERIFIED'
+  | 'IN_REVIEW'
+  | 'BLOCKED'
+  | 'MANUAL_REVIEW_REQUIRED'
+  | 'COMPLETED';
+export type DataRequestBlockReason =
+  | 'LEGAL_HOLD'
+  | 'RETENTION_PERIOD_ACTIVE'
+  | 'BACKUP_AGEING_UNVERIFIED';
+
+/**
+ * A verified privacy request is an owner work item, never a deletion queue.
+ * The target date is enforced at the database boundary and every deletion
+ * request still requires a scoped manual review of protected evidence.
+ */
+export const dataRequestCases = pgTable(
+  'data_request_cases',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    organisationId: uuid('organisation_id')
+      .notNull()
+      .references(() => organisations.id, { onDelete: 'restrict' }),
+    requestType: varchar('request_type', { length: 16 })
+      .$type<DataRequestType>()
+      .notNull(),
+    status: varchar('status', { length: 32 })
+      .$type<DataRequestStatus>()
+      .notNull()
+      .default('VERIFIED'),
+    verificationReference: varchar('verification_reference', {
+      length: 128
+    }).notNull(),
+    idempotencyKey: varchar('idempotency_key', { length: 128 }).notNull(),
+    verifiedAt: timestamp('verified_at', { withTimezone: true }).notNull(),
+    targetAt: timestamp('target_at', { withTimezone: true }).notNull(),
+    version: integer('version').notNull().default(0),
+    blockReason: varchar('block_reason', { length: 32 }).$type<
+      DataRequestBlockReason
+    >(),
+    lastReviewedAt: timestamp('last_reviewed_at', { withTimezone: true }),
+    lastReviewedByUserId: uuid('last_reviewed_by_user_id').references(
+      () => users.id,
+      { onDelete: 'set null' }
+    ),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow()
+  },
+  (table) => [
+    unique('data_request_cases_org_idempotency_uq').on(
+      table.organisationId,
+      table.idempotencyKey
+    ),
+    index('data_request_cases_target_idx').on(table.status, table.targetAt),
+    index('data_request_cases_org_status_idx').on(
+      table.organisationId,
+      table.status
+    ),
+    check(
+      'data_request_cases_type_ck',
+      sql`${table.requestType} in ('EXPORT', 'DELETION')`
+    ),
+    check(
+      'data_request_cases_status_ck',
+      sql`${table.status} in ('VERIFIED', 'IN_REVIEW', 'BLOCKED', 'MANUAL_REVIEW_REQUIRED', 'COMPLETED')`
+    ),
+    check(
+      'data_request_cases_target_ck',
+      sql`${table.targetAt} = ${table.verifiedAt} + interval '14 days'`
+    ),
+    check('data_request_cases_version_ck', sql`${table.version} >= 0`),
+    check(
+      'data_request_cases_block_reason_ck',
+      sql`${table.blockReason} is null or ${table.blockReason} in ('LEGAL_HOLD', 'RETENTION_PERIOD_ACTIVE', 'BACKUP_AGEING_UNVERIFIED')`
+    ),
+    check(
+      'data_request_cases_blocked_ck',
+      sql`(${table.status} = 'BLOCKED' and ${table.blockReason} is not null) or (${table.status} <> 'BLOCKED' and ${table.blockReason} is null)`
+    ),
+    check(
+      'data_request_cases_completed_ck',
+      sql`(${table.status} = 'COMPLETED' and ${table.completedAt} is not null) or (${table.status} <> 'COMPLETED' and ${table.completedAt} is null)`
     )
   ]
 );

@@ -45,7 +45,10 @@ describe('cancelled Solo subscription lifecycle', () => {
     const dependencies = {
       load: async (candidateOrganisationId: string) => {
         const [subscription] = await client.db
-          .select({ status: subscriptions.status })
+          .select({
+            status: subscriptions.status,
+            cancelledAt: subscriptions.cancelledAt
+          })
           .from(subscriptions)
           .where(eq(subscriptions.organisationId, candidateOrganisationId));
         if (subscription === undefined) return null;
@@ -54,7 +57,7 @@ describe('cancelled Solo subscription lifecycle', () => {
           .from(retentionCases)
           .where(eq(retentionCases.organisationId, candidateOrganisationId));
         return {
-          status: subscription.status,
+          ...subscription,
           retentionDeadlineRecorded: recorded !== undefined
         };
       },
@@ -67,13 +70,15 @@ describe('cancelled Solo subscription lifecycle', () => {
         organisationId: string;
         disconnectedAt: Date;
         retentionDeadline: Date;
+        deletionEligibleAt: Date | null;
       }) => {
         await client.db.transaction(async (transaction) => {
           await transaction.insert(retentionCases).values({
             organisationId: input.organisationId,
             source: 'SUBSCRIPTION_CANCELLED',
             disconnectedAt: input.disconnectedAt,
-            reviewAfter: input.retentionDeadline
+            reviewAfter: input.retentionDeadline,
+            deletionEligibleAt: input.deletionEligibleAt
           });
           await transaction.insert(auditEvents).values({
             organisationId: input.organisationId,
@@ -82,7 +87,8 @@ describe('cancelled Solo subscription lifecycle', () => {
             entityId: input.organisationId,
             afterValue: {
               disconnectedAt: input.disconnectedAt.toISOString(),
-              retentionDeadline: input.retentionDeadline.toISOString()
+              retentionDeadline: input.retentionDeadline.toISOString(),
+              deletionEligibleAt: input.deletionEligibleAt?.toISOString() ?? null
             },
             occurredAt: input.disconnectedAt
           });
@@ -116,7 +122,8 @@ describe('cancelled Solo subscription lifecycle', () => {
       );
     expect(audit?.afterValue).toEqual({
       disconnectedAt: '2026-11-09T12:00:00.000Z',
-      retentionDeadline: '2026-12-09T12:00:00.000Z'
+      retentionDeadline: '2026-12-09T12:00:00.000Z',
+      deletionEligibleAt: '2031-11-09T12:00:00.000Z'
     });
     expect(
       (
@@ -128,7 +135,8 @@ describe('cancelled Solo subscription lifecycle', () => {
     ).toMatchObject({
       source: 'SUBSCRIPTION_CANCELLED',
       status: 'SCHEDULED',
-      reviewAfter: new Date('2026-12-09T12:00:00.000Z')
+      reviewAfter: new Date('2026-12-09T12:00:00.000Z'),
+      deletionEligibleAt: new Date('2031-11-09T12:00:00.000Z')
     });
   });
 });

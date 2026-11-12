@@ -487,6 +487,7 @@ async function main() {
             xero: await xeroFactory.forOrganisation(payload.organisationId),
             sinch,
             callbackUrl,
+            holidays: { list: () => [] },
             xeroEmailAllowance: {
               hasSafeHeadroom: () => Promise.resolve(true)
             }
@@ -552,7 +553,10 @@ async function main() {
           {
             load: async (organisationId) => {
               const [subscription] = await databaseClient.db
-                .select({ status: subscriptions.status })
+                .select({
+                  status: subscriptions.status,
+                  cancelledAt: subscriptions.cancelledAt
+                })
                 .from(subscriptions)
                 .where(eq(subscriptions.organisationId, organisationId))
                 .limit(1);
@@ -563,7 +567,7 @@ async function main() {
                 .where(eq(retentionCases.organisationId, organisationId))
                 .limit(1);
               return {
-                status: subscription.status,
+                ...subscription,
                 retentionDeadlineRecorded: retentionCase !== undefined
               };
             },
@@ -607,6 +611,7 @@ async function main() {
                     status: 'SCHEDULED',
                     disconnectedAt: input.disconnectedAt,
                     reviewAfter: input.retentionDeadline,
+                    deletionEligibleAt: input.deletionEligibleAt,
                     updatedAt: input.disconnectedAt
                   })
                   .onConflictDoNothing({
@@ -621,7 +626,9 @@ async function main() {
                   entityId: input.organisationId,
                   afterValue: {
                     disconnectedAt: input.disconnectedAt.toISOString(),
-                    retentionDeadline: input.retentionDeadline.toISOString()
+                    retentionDeadline: input.retentionDeadline.toISOString(),
+                    deletionEligibleAt:
+                      input.deletionEligibleAt?.toISOString() ?? null
                   },
                   occurredAt: input.disconnectedAt
                 });

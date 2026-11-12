@@ -4,6 +4,7 @@ import type { JobPayloads } from '@bc5000/jobs';
 export interface SubscriptionLifecycleDependencies {
   load(organisationId: string): Promise<{
     status: SubscriptionStatus;
+    cancelledAt: Date | null;
     retentionDeadlineRecorded: boolean;
   } | null>;
   disconnectXero(organisationId: string): Promise<void>;
@@ -12,6 +13,7 @@ export interface SubscriptionLifecycleDependencies {
     organisationId: string;
     disconnectedAt: Date;
     retentionDeadline: Date;
+    deletionEligibleAt: Date | null;
   }): Promise<void>;
   clock: { now(): Date };
 }
@@ -38,10 +40,18 @@ export const processSubscriptionLifecycle = async (
   const retentionDeadline = new Date(
     disconnectedAt.getTime() + 30 * 24 * 60 * 60 * 1000
   );
+  const deletionEligibleAt =
+    current.cancelledAt === null
+      ? null
+      : new Date(current.cancelledAt).setUTCFullYear(
+            current.cancelledAt.getUTCFullYear() + 5
+          );
   await dependencies.recordRetentionDeadline({
     organisationId: payload.organisationId,
     disconnectedAt,
-    retentionDeadline
+    retentionDeadline,
+    deletionEligibleAt:
+      deletionEligibleAt === null ? null : new Date(deletionEligibleAt)
   });
   return 'DISCONNECTED';
 };

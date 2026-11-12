@@ -232,6 +232,20 @@
       "when": 1794460000009,
       "tag": "0032_past_nicolaos",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1794460000010,
+      "tag": "0033_fat_sharon_ventura",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1794460000011,
+      "tag": "0034_polite_guardian",
+      "breakpoints": true
     }
   ]
 }

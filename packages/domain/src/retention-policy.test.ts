@@ -41,7 +41,7 @@ describe('AccountPulse retention policy', () => {
     ).toBe('LEGAL_HOLD');
   });
 
-  it('makes every public record category explicit without inventing legal periods', () => {
+  it('applies five years only to approved account records and keeps the direct-debit exception narrow', () => {
     expect(accountPulseRetentionMatrix.map((row) => row.category)).toEqual([
       'XERO_REFRESH_TOKEN',
       'OAUTH_TRANSIENT_TOKEN',
@@ -49,15 +49,37 @@ describe('AccountPulse retention policy', () => {
       'OUTBOUND_MESSAGE_CONTENT',
       'INBOUND_MESSAGE_CONTENT',
       'PROCESSED_WEBHOOK_PAYLOAD',
+      'CUSTOMER_RECORD',
+      'INVOICE_RECORD',
+      'MESSAGE_METADATA',
+      'CALL_METADATA',
       'AUDIT_METADATA',
       'BILLING_RECORD',
+      'DIRECT_DEBIT_MANDATE_EVIDENCE',
       'DATABASE_BACKUP'
     ]);
+    const fiveYearCategories = [
+      'CUSTOMER_RECORD',
+      'INVOICE_RECORD',
+      'MESSAGE_METADATA',
+      'CALL_METADATA',
+      'AUDIT_METADATA'
+    ];
     expect(
-      accountPulseRetentionMatrix.find(
-        (row) => row.category === 'AUDIT_METADATA'
-      )?.duration
-    ).toBeNull();
+      accountPulseRetentionMatrix
+        .filter((row) => fiveYearCategories.includes(row.category))
+        .map((row) => ({
+          category: row.category,
+          duration: row.duration,
+          implementation: row.implementation
+        }))
+    ).toEqual(
+      fiveYearCategories.map((category) => ({
+        category,
+        duration: '5 years after account cancellation',
+        implementation: 'ENFORCED'
+      }))
+    );
     expect(
       accountPulseRetentionMatrix.find(
         (row) => row.category === 'BILLING_RECORD'
@@ -65,8 +87,26 @@ describe('AccountPulse retention policy', () => {
     ).toBeNull();
     expect(
       accountPulseRetentionMatrix.find(
+        (row) => row.category === 'DIRECT_DEBIT_MANDATE_EVIDENCE'
+      )?.duration
+    ).toBe('Up to 7 years where BECS or Stripe rules require it');
+    expect(
+      accountPulseRetentionMatrix.find(
         (row) => row.category === 'DATABASE_BACKUP'
       )?.duration
     ).toBeNull();
+  });
+
+  it('keeps the shorter raw-content and processed-webhook minimisation periods', () => {
+    expect(
+      accountPulseRetentionMatrix.find(
+        (row) => row.category === 'OUTBOUND_MESSAGE_CONTENT'
+      )?.duration
+    ).toBe('24 months');
+    expect(
+      accountPulseRetentionMatrix.find(
+        (row) => row.category === 'PROCESSED_WEBHOOK_PAYLOAD'
+      )?.duration
+    ).toBe('90 days');
   });
 });
