@@ -23,6 +23,7 @@ import {
   reminderSequenceVersions,
   reminderWhitelistEntries,
   sequenceStages,
+  subscriptions,
   suppressions,
   users,
   voiceCallRequests
@@ -59,6 +60,13 @@ async function seedApprovedCall(
     timezone?: string;
     weekdayStartLocal?: string;
     weekdayEndLocal?: string;
+    subscriptionStatus?:
+      | 'TRIALING'
+      | 'ACTIVE'
+      | 'PAST_DUE'
+      | 'CANCEL_AT_PERIOD_END'
+      | 'CANCELLED'
+      | 'INCOMPLETE';
   } = {}
 ) {
   const organisationId = randomUUID();
@@ -75,12 +83,26 @@ async function seedApprovedCall(
     name: 'Mott Appliance Repairs',
     timeZone: 'Australia/Sydney',
     baseCurrency: 'AUD',
+    ...(options.subscriptionStatus === undefined
+      ? {}
+      : { edition: 'SOLO' as const }),
     sendMode: 'live',
     rolloutScope: 'CUSTOMER',
     liveSendAcknowledged: true,
     operationalState: 'READY',
     lastSuccessfulSyncAt: new Date('2026-10-07T23:45:00.000Z')
   });
+  if (options.subscriptionStatus !== undefined) {
+    await client.db.insert(subscriptions).values({
+      organisationId,
+      planCode: 'SOLO_AU_2000',
+      status: options.subscriptionStatus,
+      trialEndsAt:
+        options.subscriptionStatus === 'TRIALING'
+          ? new Date('2026-10-20T00:00:00.000Z')
+          : null
+    });
+  }
   await client.db.insert(users).values({
     id: userId,
     cognitoSubject: randomUUID(),
@@ -365,6 +387,34 @@ async function insertAdditionalChasedInvoice(
 }
 
 describe('voice call execution', () => {
+  it.each([
+    'INCOMPLETE',
+    'PAST_DUE',
+    'TRIALING',
+    'CANCELLED',
+    'CANCEL_AT_PERIOD_END'
+  ] as const)(
+    'cancels a customer call before provider submission for %s billing',
+    async (subscriptionStatus) => {
+      const seeded = await seedApprovedCall({ subscriptionStatus });
+      const createPhoneCall = vi.fn(() =>
+        Promise.resolve({ callId: 'not-used', callStatus: 'registered' })
+      );
+      const runtime = executionDependencies(seeded.repository, createPhoneCall);
+
+      await expect(
+        executeVoiceCall(runtime.dependencies, {
+          organisationId: seeded.organisationId,
+          voiceCallId: seeded.voiceCallId
+        })
+      ).resolves.toEqual({
+        kind: 'cancelled',
+        reason: 'SUBSCRIPTION_REQUIRED'
+      });
+      expect(createPhoneCall).not.toHaveBeenCalled();
+    }
+  );
+
   it('executes an automatic sequence call without an initiating user', async () => {
     const seeded = await seedApprovedCall({ scheduledAutomatic: true });
     const createPhoneCall = vi.fn(() =>
@@ -600,11 +650,44 @@ describe('voice call execution', () => {
     expect(createPhoneCall).not.toHaveBeenCalled();
   });
 
+  it('rechecks paid access after claiming a queued call and before contacting the gateway', async () => {
+    const seeded = await seedApprovedCall({ subscriptionStatus: 'ACTIVE' });
+    const originalClaim = seeded.repository.claimForSubmission.bind(
+      seeded.repository
+    );
+    vi.spyOn(seeded.repository, 'claimForSubmission').mockImplementationOnce(
+      async (input) => {
+        const result = await originalClaim(input);
+        await client.db
+          .update(subscriptions)
+          .set({ status: 'PAST_DUE' })
+          .where(eq(subscriptions.organisationId, seeded.organisationId));
+        return result;
+      }
+    );
+    const createPhoneCall = vi.fn(() =>
+      Promise.resolve({ callId: 'not-used', callStatus: 'registered' })
+    );
+    const runtime = executionDependencies(seeded.repository, createPhoneCall);
+
+    await expect(
+      executeVoiceCall(runtime.dependencies, {
+        organisationId: seeded.organisationId,
+        voiceCallId: seeded.voiceCallId
+      })
+    ).resolves.toEqual({
+      kind: 'cancelled',
+      reason: 'SUBSCRIPTION_REQUIRED'
+    });
+    expect(createPhoneCall).not.toHaveBeenCalled();
+  });
+
   it('executes a TEST call while customer voice is disabled and does not require the staff number on the customer', async () => {
     const seeded = await seedApprovedCall({
       purpose: 'TEST',
       voiceEnabled: false,
-      destinationNumber: '+61400000002'
+      destinationNumber: '+61400000002',
+      subscriptionStatus: 'INCOMPLETE'
     });
     const createPhoneCall = vi.fn(() =>
       Promise.resolve({ callId: 'retell-test-call-1', callStatus: 'registered' })

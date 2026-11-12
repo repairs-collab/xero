@@ -23,6 +23,7 @@ import {
   pauses,
   paymentPromises,
   PostgresDebtContactRepository,
+  PostgresEntitlementRepository,
   type PostgresVoiceCallRepository,
   reminderSequences,
   reminderSequenceVersions,
@@ -83,6 +84,7 @@ export type VoiceCallCancellationCode =
   | 'VOICE_CALL_NOT_FOUND'
   | 'DEPLOYMENT_DISABLED'
   | 'INITIATING_USER_DISABLED'
+  | 'SUBSCRIPTION_REQUIRED'
   | 'DAILY_CONTACT_LIMIT'
   | 'UNKNOWN_OUTCOME'
   | 'STALE_ACCOUNT_DATA';
@@ -323,6 +325,18 @@ const revalidate = async (
       kind: 'blocked',
       actorUserId: call.actorUserId,
       reason: 'DEPLOYMENT_DISABLED'
+    };
+  }
+  if (
+    call.purpose === 'CUSTOMER' &&
+    !(await new PostgresEntitlementRepository(
+      dependencies.database
+    ).hasPaidCustomerAccess(payload.organisationId, now))
+  ) {
+    return {
+      kind: 'blocked',
+      actorUserId: call.actorUserId,
+      reason: 'SUBSCRIPTION_REQUIRED'
     };
   }
 

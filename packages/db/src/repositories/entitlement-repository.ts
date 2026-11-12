@@ -2,6 +2,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 
 import {
   decideAccountEntitlements,
+  hasPaidSubscriptionAccess,
   renderSms,
   type AccountEntitlements
 } from '@bc5000/domain';
@@ -18,6 +19,37 @@ type Executor = Database | DbTransaction;
 
 export class PostgresEntitlementRepository {
   constructor(private readonly database: Database) {}
+
+  async hasPaidCustomerAccess(
+    organisationId: string,
+    now: Date,
+    executor: Executor = this.database
+  ): Promise<boolean> {
+    const [account] = await executor
+      .select({
+        edition: organisations.edition,
+        subscriptionStatus: subscriptions.status,
+        stripeProviderStatus: subscriptions.trustedStripeProviderStatus,
+        currentPeriodEnd: subscriptions.currentPeriodEnd,
+        cancelAt: subscriptions.cancelAt
+      })
+      .from(organisations)
+      .leftJoin(
+        subscriptions,
+        eq(subscriptions.organisationId, organisations.id)
+      )
+      .where(eq(organisations.id, organisationId))
+      .limit(1);
+    if (account === undefined) throw new Error('ORGANISATION_NOT_FOUND');
+    if (account.edition === 'INTERNAL_LEGACY') return true;
+    return hasPaidSubscriptionAccess({
+      subscriptionStatus: account.subscriptionStatus,
+      stripeProviderStatus: account.stripeProviderStatus,
+      currentPeriodEnd: account.currentPeriodEnd,
+      cancelAt: account.cancelAt,
+      now
+    });
+  }
 
   async decide(
     organisationId: string,

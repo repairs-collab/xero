@@ -7,6 +7,7 @@ import {
   type ApprovedVoiceFacts,
   type ApprovedVoiceInvoiceFact,
   type Database,
+  PostgresEntitlementRepository,
   type PostgresVoiceCallRepository,
   type VoiceCallDraftView
 } from '@bc5000/db/web';
@@ -52,6 +53,21 @@ export function createVoiceCallService(
     clock: dependencies.clock,
     holidays: dependencies.holidays
   });
+  const entitlements = new PostgresEntitlementRepository(
+    dependencies.database
+  );
+  const requirePaidCustomerAccess = async (
+    organisationId: string
+  ): Promise<void> => {
+    if (
+      !(await entitlements.hasPaidCustomerAccess(
+        organisationId,
+        dependencies.clock.now()
+      ))
+    ) {
+      throw new Error('SUBSCRIPTION_REQUIRED');
+    }
+  };
 
   const preparationInput = (input: PrepareVoiceCallInput) => ({
     organisationId: input.organisationId,
@@ -66,6 +82,7 @@ export function createVoiceCallService(
     input: PrepareVoiceCallInput
   ): Promise<VoiceCallDraftView> => {
     authorise(dependencies.session, 'voice-call.prepare', input.organisationId);
+    await requirePaidCustomerAccess(input.organisationId);
     return preparation.create(preparationInput(input));
   };
 
@@ -73,6 +90,7 @@ export function createVoiceCallService(
     input: ApproveAndQueueVoiceCallInput
   ): Promise<{ voiceCallId: string; created: boolean }> => {
     authorise(dependencies.session, 'voice-call.place', input.organisationId);
+    await requirePaidCustomerAccess(input.organisationId);
     if (!input.confirmed) throw new Error('VOICE_CALL_CONFIRMATION_REQUIRED');
     const draft = await dependencies.repository.loadForExecution(
       input.organisationId,

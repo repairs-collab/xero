@@ -43,7 +43,9 @@ const tokenEnvelope = {
   tag: Buffer.alloc(16).toString('base64')
 };
 
-const seedProvisionalIdentity = async (): Promise<{
+const seedProvisionalIdentity = async (
+  candidate: { baseCurrency?: string; timeZone?: string } = {}
+): Promise<{
   session: AppSession;
   pendingAuthorisationId: string;
   connectionId: string;
@@ -74,8 +76,8 @@ const seedProvisionalIdentity = async (): Promise<{
         tenantType: 'ORGANISATION',
         xeroOrganisationId: randomUUID(),
         organisationName: 'Solo Repairs Pty Ltd',
-        baseCurrency: 'AUD',
-        timeZone: 'Australia/Sydney'
+        baseCurrency: candidate.baseCurrency ?? 'AUD',
+        timeZone: candidate.timeZone ?? 'Australia/Sydney'
       }
     ],
     grantedScopes: ['offline_access', 'accounting.invoices'],
@@ -96,6 +98,44 @@ const seedProvisionalIdentity = async (): Promise<{
 };
 
 describe('AccountPulse Solo provisioning', () => {
+  it.each([
+    {
+      name: 'a non-AUD organisation',
+      candidate: { baseCurrency: 'NZD', timeZone: 'Australia/Sydney' },
+      error: 'XERO_ORGANISATION_CURRENCY_INVALID'
+    },
+    {
+      name: 'a New Zealand organisation',
+      candidate: { baseCurrency: 'AUD', timeZone: 'Pacific/Auckland' },
+      error: 'XERO_ORGANISATION_TIMEZONE_UNSUPPORTED'
+    },
+    {
+      name: 'an unapproved Australian time zone',
+      candidate: { baseCurrency: 'AUD', timeZone: 'Australia/Hobart' },
+      error: 'XERO_ORGANISATION_TIMEZONE_UNSUPPORTED'
+    }
+  ])('rejects $name before persisting a Solo workspace', async ({ candidate, error }) => {
+    const seeded = await seedProvisionalIdentity(candidate);
+    const repository = createPostgresSoloProvisioningRepository(client.db);
+
+    await expect(
+      repository.provision({
+        userId: seeded.session.userId,
+        pendingAuthorisationId: seeded.pendingAuthorisationId,
+        connectionId: seeded.connectionId,
+        tenantId: seeded.tenantId,
+        now
+      })
+    ).rejects.toThrow(error);
+
+    await expect(
+      client.db
+        .select()
+        .from(memberships)
+        .where(eq(memberships.userId, seeded.session.userId))
+    ).resolves.toEqual([]);
+  });
+
   it('atomically creates one unpaid workspace and remains idempotent on retry', async () => {
     const seeded = await seedProvisionalIdentity();
     const published = new Set<string>();

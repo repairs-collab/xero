@@ -43,8 +43,22 @@ const required = (value: string | undefined, code: string): string => {
 
 const validCurrency = (value: string): string => {
   const result = value.trim().toUpperCase();
-  if (!/^[A-Z]{3}$/.test(result)) {
+  if (result !== 'AUD') {
     throw new Error('XERO_ORGANISATION_CURRENCY_INVALID');
+  }
+  return result;
+};
+
+const approvedSoloTimeZones = new Set([
+  'Australia/Sydney',
+  'Australia/Adelaide',
+  'Australia/Perth'
+]);
+
+const validSoloTimeZone = (value: string): string => {
+  const result = value.trim();
+  if (!approvedSoloTimeZones.has(result)) {
+    throw new Error('XERO_ORGANISATION_TIMEZONE_UNSUPPORTED');
   }
   return result;
 };
@@ -153,9 +167,11 @@ export const createPostgresSoloProvisioningRepository = (
           candidate.organisationName,
           'XERO_ORGANISATION_DETAILS_REQUIRED'
         );
-        const timeZone = required(
-          candidate.timeZone,
-          'XERO_ORGANISATION_TIMEZONE_REQUIRED'
+        const timeZone = validSoloTimeZone(
+          required(
+            candidate.timeZone,
+            'XERO_ORGANISATION_TIMEZONE_REQUIRED'
+          )
         );
         const baseCurrency = validCurrency(
           required(
