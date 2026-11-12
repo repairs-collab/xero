@@ -14,6 +14,11 @@ class FakeStripeApi implements StripeApi {
     options: { idempotencyKey: string };
   }> = [];
   portalCalls: Array<Record<string, unknown>> = [];
+  subscriptionUpdateCalls: Array<{
+    subscriptionId: string;
+    parameters: Record<string, unknown>;
+    options: { idempotencyKey: string };
+  }> = [];
   webhookCalls: Array<{
     rawBody: string | Buffer;
     signature: string;
@@ -87,6 +92,21 @@ class FakeStripeApi implements StripeApi {
     }
   };
 
+  subscriptions = {
+    update: (
+      subscriptionId: string,
+      parameters: Record<string, unknown>,
+      options: { idempotencyKey: string }
+    ) => {
+      this.subscriptionUpdateCalls.push({
+        subscriptionId,
+        parameters,
+        options
+      });
+      return Promise.resolve({ id: subscriptionId });
+    }
+  };
+
   charges = {
     retrieve: (chargeId: string) => {
       this.chargeCalls.push(chargeId);
@@ -126,7 +146,8 @@ class FakeStripeApi implements StripeApi {
 
 const createClient = (api: StripeApi): StripeBillingClient =>
   new StripeBillingClient(api, {
-    soloPriceId: 'price_solo_au_2000',
+    soloMonthlyPriceId: 'price_solo_monthly',
+    soloAnnualPriceId: 'price_solo_annual',
     priceCurrency: 'aud',
     automaticTaxEnabled: true,
     portalConfigurationId: 'bpc_solo',
@@ -145,6 +166,7 @@ describe('StripeBillingClient checkout', () => {
         organisationId: 'org_solo',
         userId: 'user_owner',
         customerEmail: 'owner@example.com',
+        billingCadence: 'MONTHLY',
         idempotencyKey: 'solo-checkout:org_solo:attempt_1'
       })
     ).resolves.toEqual({
@@ -156,7 +178,8 @@ describe('StripeBillingClient checkout', () => {
       {
         parameters: {
           mode: 'subscription',
-          line_items: [{ price: 'price_solo_au_2000', quantity: 1 }],
+          line_items: [{ price: 'price_solo_monthly', quantity: 1 }],
+          payment_method_types: ['card'],
           automatic_tax: { enabled: true },
           billing_address_collection: 'required',
           tax_id_collection: { enabled: true },
@@ -190,6 +213,7 @@ describe('StripeBillingClient checkout', () => {
       organisationId: 'org_solo',
       userId: 'user_owner',
       customerEmail: 'owner@example.com',
+      billingCadence: 'MONTHLY' as const,
       idempotencyKey: 'paid-checkout',
       trialEnd: 1_795_392_000
     };
@@ -210,6 +234,7 @@ describe('StripeBillingClient checkout', () => {
       userId: 'user_owner',
       stripeCustomerId: 'cus_existing',
       customerEmail: 'ignored@example.com',
+      billingCadence: 'MONTHLY',
       idempotencyKey: 'solo-checkout:org_solo:attempt_2'
     });
 
@@ -217,6 +242,106 @@ describe('StripeBillingClient checkout', () => {
       customer: 'cus_existing'
     });
     expect(api.checkoutCalls[0]?.parameters).not.toHaveProperty('customer_email');
+  });
+
+  it('uses only the configured annual Price and fails closed when it is unavailable', async () => {
+    const api = new FakeStripeApi();
+    await createClient(api).createSoloCheckout({
+      organisationId: 'org_solo',
+      userId: 'user_owner',
+      customerEmail: 'owner@example.com',
+      billingCadence: 'ANNUAL',
+      idempotencyKey: 'solo-checkout:org_solo:annual'
+    });
+    expect(api.checkoutCalls[0]?.parameters).toMatchObject({
+      line_items: [{ price: 'price_solo_annual', quantity: 1 }],
+      payment_method_types: ['card']
+    });
+
+    const unavailableApi = new FakeStripeApi();
+    const unavailable = new StripeBillingClient(unavailableApi, {
+      soloMonthlyPriceId: 'price_solo_monthly',
+      priceCurrency: 'aud',
+      automaticTaxEnabled: true,
+      portalConfigurationId: 'bpc_solo',
+      publicBaseUrl: 'https://ap.motts.com.au',
+      webhookSecret: 'whsec_test_only'
+    });
+    await expect(
+      unavailable.createSoloCheckout({
+        organisationId: 'org_solo',
+        userId: 'user_owner',
+        customerEmail: 'owner@example.com',
+        billingCadence: 'ANNUAL',
+        idempotencyKey: 'solo-checkout:org_solo:annual-unavailable'
+      })
+    ).rejects.toBeInstanceOf(StripeConfigurationFailure);
+    expect(unavailableApi.checkoutCalls).toEqual([]);
+  });
+
+  it('creates a request-only Stripe-hosted BECS setup and activates only the confirmed payment method', async () => {
+    const api = new FakeStripeApi();
+    const client = createClient(api);
+
+    await expect(
+      client.createDirectDebitSetup({
+        organisationId: 'org_solo',
+        userId: 'platform_owner',
+        stripeCustomerId: 'cus_solo',
+        idempotencyKey: 'direct-debit-setup:org_solo:requested'
+      })
+    ).resolves.toEqual({
+      id: 'cs_solo_checkout',
+      url: 'https://checkout.stripe.com/c/pay/cs_solo_checkout'
+    });
+    expect(api.checkoutCalls[0]).toEqual({
+      parameters: {
+        mode: 'setup',
+        customer: 'cus_solo',
+        currency: 'aud',
+        payment_method_types: ['au_becs_debit'],
+        client_reference_id: 'org_solo',
+        metadata: {
+          organisation_id: 'org_solo',
+          initiating_user_id: 'platform_owner',
+          purpose: 'DIRECT_DEBIT_REQUEST'
+        },
+        setup_intent_data: {
+          metadata: {
+            organisation_id: 'org_solo',
+            initiating_user_id: 'platform_owner',
+            purpose: 'DIRECT_DEBIT_REQUEST'
+          }
+        },
+        success_url:
+          'https://ap.motts.com.au/settings/billing?direct_debit=mandate_submitted&session_id={CHECKOUT_SESSION_ID}',
+        cancel_url:
+          'https://ap.motts.com.au/settings/billing?direct_debit=cancelled'
+      },
+      options: {
+        idempotencyKey: 'direct-debit-setup:org_solo:requested'
+      }
+    });
+
+    await expect(
+      client.activateDirectDebit({
+        stripeSubscriptionId: 'sub_solo',
+        stripePaymentMethodId: 'pm_becs_confirmed',
+        idempotencyKey: 'direct-debit-activate:org_solo:mandate_1'
+      })
+    ).resolves.toBeUndefined();
+    expect(api.subscriptionUpdateCalls).toEqual([
+      {
+        subscriptionId: 'sub_solo',
+        parameters: { default_payment_method: 'pm_becs_confirmed' },
+        options: {
+          idempotencyKey: 'direct-debit-activate:org_solo:mandate_1'
+        }
+      }
+    ]);
+    expect(JSON.stringify(api.checkoutCalls)).not.toMatch(
+      /bank_account|account_number|bsb/i
+    );
   });
 
   it.each([
@@ -229,7 +354,8 @@ describe('StripeBillingClient checkout', () => {
     expect(
       () =>
         new StripeBillingClient(api, {
-          soloPriceId: 'price_solo_au_2000',
+          soloMonthlyPriceId: 'price_solo_monthly',
+          soloAnnualPriceId: 'price_solo_annual',
           priceCurrency: 'aud',
           automaticTaxEnabled: true,
           portalConfigurationId: 'bpc_solo',

@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   billingCases,
+  directDebitRequests,
   smsAllowanceSettings,
   smsNumberPool,
   smsUsageLedger,
@@ -140,12 +141,14 @@ describe('Solo commerce schema contract', () => {
 
   it('defines subscriptions, idempotent events and versioned onboarding', () => {
     const subscription = getTableConfig(subscriptions);
+    const directDebit = getTableConfig(directDebitRequests);
     const event = getTableConfig(subscriptionEvents);
     const onboarding = getTableConfig(organisationOnboarding);
 
     expect(subscription.columns.map((column) => column.name)).toEqual(
       expect.arrayContaining([
         'plan_code',
+        'billing_cadence',
         'status',
         'stripe_customer_id',
         'stripe_subscription_id',
@@ -154,7 +157,37 @@ describe('Solo commerce schema contract', () => {
         'trial_ends_at',
         'cancel_at',
         'cancelled_at',
-        'last_stripe_event_created_at'
+        'last_stripe_event_created_at',
+        'initial_card_invoice_id',
+        'initial_card_payment_succeeded_at'
+      ])
+    );
+    expect(subscriptions.billingCadence.default).toBe('MONTHLY');
+    expect(subscription.checks.map((constraint) => constraint.name)).toEqual(
+      expect.arrayContaining([
+        'subscriptions_billing_cadence_ck',
+        'subscriptions_initial_card_evidence_ck'
+      ])
+    );
+    expect(directDebit.columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        'organisation_id',
+        'status',
+        'requested_by_user_id',
+        'requested_at',
+        'setup_session_id',
+        'setup_intent_id',
+        'stripe_payment_method_id',
+        'stripe_mandate_id',
+        'mandate_confirmed_at',
+        'activated_by_user_id',
+        'activated_at'
+      ])
+    );
+    expect(directDebit.checks.map((constraint) => constraint.name)).toEqual(
+      expect.arrayContaining([
+        'direct_debit_requests_status_ck',
+        'direct_debit_requests_state_ck'
       ])
     );
     expect(event.indexes.map((index) => index.config.name)).toContain(
@@ -360,5 +393,23 @@ describe('Solo commerce schema contract', () => {
     expect(migration).not.toMatch(
       /update\s+"organisations"\s+set\s+"(?:send_mode|rollout_scope|live_send_acknowledged|maintenance_mode|operational_state)"/i
     );
+  });
+
+  it('adds cadence and request-only direct debit state with a safe monthly backfill', async () => {
+    const migration = await readFile(
+      new URL('../../drizzle/0035_same_azazel.sql', import.meta.url),
+      'utf8'
+    );
+
+    expect(migration).toContain(
+      `ADD COLUMN "billing_cadence" varchar(16) DEFAULT 'MONTHLY' NOT NULL`
+    );
+    expect(migration).toContain('CREATE TABLE "direct_debit_requests"');
+    expect(migration).toContain('"initial_card_invoice_id" varchar(128)');
+    expect(migration).toContain(
+      '"initial_card_payment_succeeded_at" timestamp with time zone'
+    );
+    expect(migration).toContain('direct_debit_requests_state_ck');
+    expect(migration).not.toMatch(/bank_(?:account|details)|bsb|account_number/i);
   });
 });

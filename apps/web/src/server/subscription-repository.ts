@@ -5,6 +5,7 @@ import { and, desc, eq, isNull, or, sql } from 'drizzle-orm';
 import {
   auditEvents,
   billingCases,
+  directDebitRequests,
   type Database,
   type DbTransaction,
   memberships,
@@ -21,6 +22,7 @@ import {
   retainedTrialEnd,
   shouldRetireIgnoredReplacementCandidate,
   type BillingAccount,
+  type DirectDebitRequestRecord,
   type StripeCheckoutCompletedInput,
   type StripeEventApplicationOutcome,
   type StripeEventReplayResult,
@@ -171,6 +173,20 @@ const lockStripeSubscriptionOwnership = async (
   }
 };
 
+const toDirectDebitRequestRecord = (
+  row: typeof directDebitRequests.$inferSelect
+): DirectDebitRequestRecord => ({
+  organisationId: row.organisationId,
+  status: row.status,
+  requestedAt: row.requestedAt,
+  setupSessionId: row.setupSessionId,
+  setupIntentId: row.setupIntentId,
+  stripePaymentMethodId: row.stripePaymentMethodId,
+  stripeMandateId: row.stripeMandateId,
+  mandateConfirmedAt: row.mandateConfirmedAt,
+  activatedAt: row.activatedAt
+});
+
 export const createPostgresSubscriptionRepository = (
   database: Database,
   clock: { now(): Date }
@@ -185,6 +201,7 @@ export const createPostgresSubscriptionRepository = (
         billingEmail: users.email,
         edition: organisations.edition,
         planCode: subscriptions.planCode,
+        billingCadence: subscriptions.billingCadence,
         status: subscriptions.status,
         stripeProviderStatus: subscriptions.trustedStripeProviderStatus,
         stripeCustomerId: subscriptions.stripeCustomerId,
@@ -195,6 +212,10 @@ export const createPostgresSubscriptionRepository = (
         cancelAt: subscriptions.cancelAt,
         cancelledAt: subscriptions.cancelledAt,
         lastStripeEventCreatedAt: subscriptions.lastStripeEventCreatedAt,
+        initialCardInvoiceId: subscriptions.initialCardInvoiceId,
+        initialCardPaymentSucceededAt:
+          subscriptions.initialCardPaymentSucceededAt,
+        directDebitStatus: directDebitRequests.status,
         createdAt: subscriptions.createdAt
       })
       .from(organisations)
@@ -203,6 +224,10 @@ export const createPostgresSubscriptionRepository = (
         eq(subscriptions.organisationId, organisations.id)
       )
       .innerJoin(users, eq(users.id, userId))
+      .leftJoin(
+        directDebitRequests,
+        eq(directDebitRequests.organisationId, organisations.id)
+      )
       .where(
         and(
           eq(organisations.id, organisationId),
@@ -345,6 +370,11 @@ export const createPostgresSubscriptionRepository = (
           .set({
             stripeCustomerId: input.stripeCustomerId,
             stripeSubscriptionId: input.stripeSubscriptionId,
+            initialCardInvoiceId:
+              subscription.initialCardInvoiceId ?? input.initialCardInvoiceId,
+            initialCardPaymentSucceededAt:
+              subscription.initialCardPaymentSucceededAt ??
+              input.initialCardPaymentSucceededAt,
             updatedAt: clock.now()
           })
           .where(eq(subscriptions.organisationId, input.organisationId));
@@ -474,6 +504,7 @@ export const createPostgresSubscriptionRepository = (
           .update(subscriptions)
           .set({
             status: input.status,
+            billingCadence: input.billingCadence,
             stripeProviderStatus: input.stripeProviderStatus,
             stripeCustomerId: input.stripeCustomerId,
             stripeSubscriptionId: input.stripeSubscriptionId,
@@ -505,6 +536,7 @@ export const createPostgresSubscriptionRepository = (
           entityId: input.organisationId,
           afterValue: {
             planCode: input.planCode,
+            billingCadence: input.billingCadence,
             status: input.status,
             currentPeriodEnd: input.currentPeriodEnd.toISOString(),
             cancelAt: input.cancelAt?.toISOString() ?? null
@@ -1059,6 +1091,291 @@ export const createPostgresSubscriptionRepository = (
     }
   };
 
+  const requestDirectDebit: SubscriptionRepository['requestDirectDebit'] =
+    async (input) =>
+      database.transaction(async (transaction) => {
+        const [subscription] = await transaction
+          .select({
+            stripeCustomerId: subscriptions.stripeCustomerId,
+            stripeSubscriptionId: subscriptions.stripeSubscriptionId,
+            initialCardInvoiceId: subscriptions.initialCardInvoiceId,
+            initialCardPaymentSucceededAt:
+              subscriptions.initialCardPaymentSucceededAt
+          })
+          .from(subscriptions)
+          .where(eq(subscriptions.organisationId, input.organisationId))
+          .for('update')
+          .limit(1);
+        const [administrator] = await transaction
+          .select({ userId: memberships.userId })
+          .from(memberships)
+          .where(
+            and(
+              eq(memberships.organisationId, input.organisationId),
+              eq(memberships.userId, input.requestedByUserId),
+              eq(memberships.role, 'ADMIN'),
+              isNull(memberships.disabledAt)
+            )
+          )
+          .limit(1);
+        if (administrator === undefined) {
+          throw new Error('DIRECT_DEBIT_REQUEST_FORBIDDEN');
+        }
+        if (
+          subscription === undefined ||
+          subscription.stripeCustomerId === null ||
+          subscription.stripeSubscriptionId === null ||
+          subscription.initialCardInvoiceId === null ||
+          subscription.initialCardPaymentSucceededAt === null
+        ) {
+          throw new Error('DIRECT_DEBIT_CARD_PAYMENT_REQUIRED');
+        }
+        const [existing] = await transaction
+          .select()
+          .from(directDebitRequests)
+          .where(
+            eq(directDebitRequests.organisationId, input.organisationId)
+          )
+          .for('update')
+          .limit(1);
+        if (existing !== undefined) {
+          return toDirectDebitRequestRecord(existing);
+        }
+        const [created] = await transaction
+          .insert(directDebitRequests)
+          .values({
+            organisationId: input.organisationId,
+            requestedByUserId: input.requestedByUserId,
+            requestedAt: input.requestedAt,
+            createdAt: input.requestedAt,
+            updatedAt: input.requestedAt
+          })
+          .returning();
+        if (created === undefined) {
+          throw new Error('DIRECT_DEBIT_REQUEST_WRITE_FAILED');
+        }
+        await transaction.insert(auditEvents).values({
+          organisationId: input.organisationId,
+          actorUserId: input.requestedByUserId,
+          eventType: 'DIRECT_DEBIT_REQUESTED',
+          entityType: 'SUBSCRIPTION',
+          entityId: input.organisationId,
+          afterValue: { status: 'REQUESTED' },
+          occurredAt: input.requestedAt
+        });
+        return toDirectDebitRequestRecord(created);
+      });
+
+  const loadDirectDebitRequest: SubscriptionRepository['loadDirectDebitRequest'] =
+    async (organisationId) => {
+      const [row] = await database
+        .select()
+        .from(directDebitRequests)
+        .where(eq(directDebitRequests.organisationId, organisationId))
+        .limit(1);
+      return row === undefined ? null : toDirectDebitRequestRecord(row);
+    };
+
+  const loadDirectDebitRequesterEmail: SubscriptionRepository['loadDirectDebitRequesterEmail'] =
+    async (organisationId) => {
+      const [requester] = await database
+        .select({ email: users.email })
+        .from(directDebitRequests)
+        .innerJoin(users, eq(users.id, directDebitRequests.requestedByUserId))
+        .where(
+          and(
+            eq(directDebitRequests.organisationId, organisationId),
+            isNull(users.disabledAt)
+          )
+        )
+        .limit(1);
+      return requester?.email ?? null;
+    };
+
+  const markDirectDebitSetupPending: SubscriptionRepository['markDirectDebitSetupPending'] =
+    async (input) => {
+      await database.transaction(async (transaction) => {
+        const [request] = await transaction
+          .select()
+          .from(directDebitRequests)
+          .where(
+            eq(directDebitRequests.organisationId, input.organisationId)
+          )
+          .for('update')
+          .limit(1);
+        if (
+          request === undefined ||
+          (request.status !== 'REQUESTED' &&
+            !(
+              request.status === 'SETUP_PENDING' &&
+              request.setupSessionId === input.setupSessionId
+            ))
+        ) {
+          throw new Error('DIRECT_DEBIT_REQUEST_REQUIRED');
+        }
+        if (request.status === 'REQUESTED') {
+          await transaction
+            .update(directDebitRequests)
+            .set({
+              status: 'SETUP_PENDING',
+              setupSessionId: input.setupSessionId,
+              updatedAt: input.occurredAt
+            })
+            .where(
+              eq(directDebitRequests.organisationId, input.organisationId)
+            );
+          await transaction.insert(auditEvents).values({
+            organisationId: input.organisationId,
+            actorUserId: input.actorUserId,
+            eventType: 'DIRECT_DEBIT_SETUP_CREATED',
+            entityType: 'SUBSCRIPTION',
+            entityId: input.organisationId,
+            afterValue: { status: 'SETUP_PENDING' },
+            occurredAt: input.occurredAt
+          });
+        }
+      });
+    };
+
+  const confirmDirectDebitMandate: SubscriptionRepository['confirmDirectDebitMandate'] =
+    async (input) => {
+      try {
+        return await database.transaction(async (transaction) => {
+          const [duplicate] = await transaction
+            .select({ payloadHash: subscriptionEvents.payloadHash })
+            .from(subscriptionEvents)
+            .where(eq(subscriptionEvents.stripeEventId, input.eventId))
+            .limit(1);
+          if (duplicate !== undefined) {
+            if (duplicate.payloadHash !== input.payloadHash) {
+              throw new Error('STRIPE_EVENT_PAYLOAD_MISMATCH');
+            }
+            return 'DUPLICATE';
+          }
+          const [subscription] = await transaction
+            .select({ stripeCustomerId: subscriptions.stripeCustomerId })
+            .from(subscriptions)
+            .where(eq(subscriptions.organisationId, input.organisationId))
+            .for('update')
+            .limit(1);
+          const [request] = await transaction
+            .select()
+            .from(directDebitRequests)
+            .where(
+              eq(directDebitRequests.organisationId, input.organisationId)
+            )
+            .for('update')
+            .limit(1);
+          if (
+            subscription === undefined ||
+            subscription.stripeCustomerId !== input.stripeCustomerId ||
+            request?.status !== 'SETUP_PENDING' ||
+            request.setupSessionId === null
+          ) {
+            if (subscription !== undefined) {
+              await insertEvent(transaction, input, 'REJECTED');
+            }
+            return 'REJECTED';
+          }
+          await transaction
+            .update(directDebitRequests)
+            .set({
+              status: 'MANDATE_CONFIRMED',
+              setupIntentId: input.setupIntentId,
+              stripePaymentMethodId: input.stripePaymentMethodId,
+              stripeMandateId: input.stripeMandateId,
+              mandateConfirmedAt: input.eventCreatedAt,
+              updatedAt: clock.now()
+            })
+            .where(
+              eq(directDebitRequests.organisationId, input.organisationId)
+            );
+          await insertEvent(transaction, input, 'APPLIED');
+          await transaction.insert(auditEvents).values({
+            organisationId: input.organisationId,
+            eventType: 'DIRECT_DEBIT_MANDATE_CONFIRMED',
+            entityType: 'SUBSCRIPTION',
+            entityId: input.organisationId,
+            correlationId: input.eventId,
+            afterValue: {
+              status: 'MANDATE_CONFIRMED',
+              setupIntentId: input.setupIntentId,
+              mandateId: input.stripeMandateId
+            },
+            occurredAt: clock.now()
+          });
+          return 'APPLIED';
+        });
+      } catch (error) {
+        if (postgresErrorCode(error) === '23505') {
+          const replay = await lookupEventReplay({
+            eventId: input.eventId,
+            payloadHash: input.payloadHash
+          });
+          if (replay === 'DUPLICATE') return 'DUPLICATE';
+          if (replay === 'HASH_MISMATCH') {
+            throw new Error('STRIPE_EVENT_PAYLOAD_MISMATCH');
+          }
+        }
+        throw error;
+      }
+    };
+
+  const activateDirectDebit: SubscriptionRepository['activateDirectDebit'] =
+    async (input) =>
+      database.transaction(async (transaction) => {
+        const [request] = await transaction
+          .select()
+          .from(directDebitRequests)
+          .where(
+            eq(directDebitRequests.organisationId, input.organisationId)
+          )
+          .for('update')
+          .limit(1);
+        if (
+          request === undefined ||
+          (request.status !== 'MANDATE_CONFIRMED' &&
+            request.status !== 'ACTIVE') ||
+          request.stripePaymentMethodId !== input.stripePaymentMethodId ||
+          request.stripeMandateId !== input.stripeMandateId ||
+          request.mandateConfirmedAt === null
+        ) {
+          throw new Error('DIRECT_DEBIT_MANDATE_REQUIRED');
+        }
+        if (request.status === 'ACTIVE') {
+          return toDirectDebitRequestRecord(request);
+        }
+        const [activated] = await transaction
+          .update(directDebitRequests)
+          .set({
+            status: 'ACTIVE',
+            activatedByUserId: input.activatedByUserId,
+            activatedAt: input.activatedAt,
+            updatedAt: input.activatedAt
+          })
+          .where(
+            eq(directDebitRequests.organisationId, input.organisationId)
+          )
+          .returning();
+        if (activated === undefined) {
+          throw new Error('DIRECT_DEBIT_ACTIVATION_WRITE_FAILED');
+        }
+        await transaction.insert(auditEvents).values({
+          organisationId: input.organisationId,
+          actorUserId: input.activatedByUserId,
+          eventType: 'DIRECT_DEBIT_ACTIVATED',
+          entityType: 'SUBSCRIPTION',
+          entityId: input.organisationId,
+          beforeValue: { status: 'MANDATE_CONFIRMED' },
+          afterValue: {
+            status: 'ACTIVE',
+            mandateId: input.stripeMandateId
+          },
+          occurredAt: input.activatedAt
+        });
+        return toDirectDebitRequestRecord(activated);
+      });
+
   const recordBillingAudit: SubscriptionRepository['recordBillingAudit'] =
     async (input) => {
       await database.insert(auditEvents).values({
@@ -1110,6 +1427,12 @@ export const createPostgresSubscriptionRepository = (
     applyLifecycleEvent,
     applyCheckoutCompleted,
     applyOperationalEvent,
+    requestDirectDebit,
+    loadDirectDebitRequest,
+    loadDirectDebitRequesterEmail,
+    markDirectDebitSetupPending,
+    confirmDirectDebitMandate,
+    activateDirectDebit,
     recordRejectedEvent,
     recordBillingAudit
   };

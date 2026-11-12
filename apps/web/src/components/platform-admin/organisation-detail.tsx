@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import type { ReactNode } from 'react';
 
 import type { PlatformOrganisationDetail } from '@bc5000/db/web';
 
@@ -58,11 +59,13 @@ const feedback = (code: string | undefined) => {
 export function PlatformOrganisationDetailView({
   detail,
   actions,
-  feedbackCode
+  feedbackCode,
+  directDebitOperations
 }: {
   detail: PlatformOrganisationDetail;
   actions: PlatformOrganisationActions;
   feedbackCode?: string;
+  directDebitOperations?: ReactNode;
 }) {
   const smsUsed = detail.smsUsage.committedParts + detail.smsUsage.reservedParts;
   const expectedUpdatedAt = detail.subscription?.updatedAt.toISOString() ?? '';
@@ -106,6 +109,7 @@ export function PlatformOrganisationDetailView({
       </section>
 
       <section className="platform-admin-grid">
+        {directDebitOperations}
         <article className="panel platform-control-card">
           <h2>Trial and account status</h2>
           {detail.subscription?.status === 'TRIALING' ? (

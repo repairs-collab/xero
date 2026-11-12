@@ -19,6 +19,7 @@ vi.mock('../../../../server/runtime.js', () => ({
 
 vi.mock('./actions.js', () => ({
   openBillingPortal: vi.fn(),
+  requestDirectDebit: vi.fn(),
   startSoloCheckout: vi.fn()
 }));
 
@@ -43,6 +44,7 @@ describe('billing SMS hard-cap copy', () => {
       billingEmail: 'admin@example.com',
       edition: 'SOLO',
       planCode: 'SOLO_AU_2000',
+      billingCadence: 'MONTHLY',
       status: 'ACTIVE',
       stripeProviderStatus: 'active',
       stripeCustomerId: 'cus_123',
@@ -53,6 +55,9 @@ describe('billing SMS hard-cap copy', () => {
       cancelAt: null,
       cancelledAt: null,
       lastStripeEventCreatedAt: new Date('2026-11-01T00:00:00.000Z'),
+      initialCardInvoiceId: null,
+      initialCardPaymentSucceededAt: null,
+      directDebitStatus: null,
       createdAt: new Date('2026-10-01T00:00:00.000Z')
     });
     loadUsage.mockResolvedValue({
@@ -73,10 +78,10 @@ describe('billing SMS hard-cap copy', () => {
   it('renders configured included, used and remaining parts with an explicit blocked limit', async () => {
     const markup = renderToStaticMarkup(await BillingSettingsPage());
 
-    expect(markup).toContain('2,500 SMS parts per billing period');
+    expect(markup).toContain('2,500 SMS parts per monthly allowance period');
     expect(markup).toContain('1,240 of 2,500 parts used');
-    expect(markup).toContain('Used this billing period');
-    expect(markup).toContain('Remaining this billing period');
+    expect(markup).toContain('Used this monthly allowance period');
+    expect(markup).toContain('Remaining this monthly allowance period');
     expect(markup).toContain('1,260');
     expect(markup).toContain(
       'Sends that would exceed the included allowance are blocked'
@@ -85,12 +90,56 @@ describe('billing SMS hard-cap copy', () => {
     expect(markup).not.toMatch(/overage/i);
   });
 
+  it('renders exact monthly and derived annual AUD pricing before paid signup', async () => {
+    getBillingAccountSnapshot.mockResolvedValue({
+      ...(await getBillingAccountSnapshot()),
+      status: 'INCOMPLETE',
+      stripeCustomerId: null,
+      stripeSubscriptionId: null,
+      currentPeriodStart: null,
+      currentPeriodEnd: null
+    });
+
+    const markup = renderToStaticMarkup(await BillingSettingsPage());
+
+    expect(markup).toContain('$299.00 AUD excluding GST');
+    expect(markup).toContain('GST $29.90');
+    expect(markup).toContain('payable total $328.90');
+    expect(markup).toContain('$3,408.60 AUD excluding GST');
+    expect(markup).toContain('GST $340.86');
+    expect(markup).toContain('payable total $3,749.46');
+    expect(markup).toContain('5% less than twelve monthly charges');
+    expect(markup).toContain('2,000 included SMS parts reset every month');
+    expect(markup).toMatch(/name="billingCadence" value="MONTHLY"/);
+    expect(markup).toMatch(/name="billingCadence" value="ANNUAL"/);
+    expect(markup).toContain('First payment is collected by card on signup');
+    expect(markup).not.toContain('Request direct debit');
+  });
+
+  it('offers only a request after first-card evidence and never collects bank details', async () => {
+    getBillingAccountSnapshot.mockResolvedValue({
+      ...(await getBillingAccountSnapshot()),
+      initialCardInvoiceId: 'in_initial_card',
+      initialCardPaymentSucceededAt: new Date('2026-11-01T00:00:00.000Z'),
+      directDebitStatus: null
+    });
+
+    const markup = renderToStaticMarkup(await BillingSettingsPage());
+
+    expect(markup).toContain('Request direct debit');
+    expect(markup).toContain('reviewed manually');
+    expect(markup).toContain('Stripe-hosted setup link');
+    expect(markup).toContain('not enabled automatically');
+    expect(markup).not.toMatch(/name="(?:bsb|accountNumber|bankAccount)"/i);
+  });
+
   it('uses the configured trial allowance before Stripe supplies a billing period', async () => {
     getBillingAccountSnapshot.mockResolvedValue({
       organisationId: 'org-solo',
       billingEmail: 'admin@example.com',
       edition: 'SOLO',
       planCode: 'SOLO_AU_2000',
+      billingCadence: 'MONTHLY',
       status: 'TRIALING',
       stripeProviderStatus: null,
       stripeCustomerId: null,
@@ -101,6 +150,9 @@ describe('billing SMS hard-cap copy', () => {
       cancelAt: null,
       cancelledAt: null,
       lastStripeEventCreatedAt: null,
+      initialCardInvoiceId: null,
+      initialCardPaymentSucceededAt: null,
+      directDebitStatus: null,
       createdAt: new Date('2026-11-01T00:00:00.000Z')
     });
     loadUsage.mockResolvedValue(null);
@@ -111,9 +163,9 @@ describe('billing SMS hard-cap copy', () => {
 
     const markup = renderToStaticMarkup(await BillingSettingsPage());
 
-    expect(markup).toContain('2,500 SMS parts per billing period');
+    expect(markup).toContain('2,500 SMS parts per monthly allowance period');
     expect(markup).toContain('0 of 2,500 parts used');
-    expect(markup).toContain('Remaining this billing period');
+    expect(markup).toContain('Remaining this monthly allowance period');
     expect(markup).toContain('2,500');
   });
 
@@ -123,6 +175,7 @@ describe('billing SMS hard-cap copy', () => {
       billingEmail: 'admin@example.com',
       edition: 'INTERNAL_LEGACY',
       planCode: 'INTERNAL_LEGACY',
+      billingCadence: 'MONTHLY',
       status: 'ACTIVE',
       stripeProviderStatus: null,
       stripeCustomerId: null,
@@ -133,6 +186,9 @@ describe('billing SMS hard-cap copy', () => {
       cancelAt: null,
       cancelledAt: null,
       lastStripeEventCreatedAt: null,
+      initialCardInvoiceId: null,
+      initialCardPaymentSucceededAt: null,
+      directDebitStatus: null,
       createdAt: new Date('2026-10-01T00:00:00.000Z')
     });
 

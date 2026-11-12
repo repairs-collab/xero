@@ -42,6 +42,17 @@ class FakeStripe implements StripeBillingGateway {
     return Promise.resolve({ id: 'bps_test', url: 'https://billing.stripe.test' });
   }
 
+  createDirectDebitSetup() {
+    return Promise.resolve({
+      id: 'cs_becs_test',
+      url: 'https://checkout.stripe.test/becs'
+    });
+  }
+
+  activateDirectDebit() {
+    return Promise.resolve();
+  }
+
   loadChargeOwnership() {
     return Promise.reject(new Error('Charge ownership is not used by lifecycle tests'));
   }
@@ -151,7 +162,9 @@ describe('AccountPulse Solo subscription persistence', () => {
       repository: createPostgresSubscriptionRepository(client.db, {
         now: () => now
       }),
-      soloPriceId: 'price_solo_au_2000',
+      soloMonthlyPriceId: 'price_solo_au_2000',
+      soloAnnualPriceId: 'price_solo_annual',
+      verifyPlatformOwner: () => Promise.resolve(false),
       clock: { now: () => now },
       publishLifecycle: (job) => {
         lifecycleJobs.push(job.organisationId);
@@ -213,7 +226,9 @@ describe('AccountPulse Solo subscription persistence', () => {
     const service = createSubscriptionService({
       stripe,
       repository: createPostgresSubscriptionRepository(client.db, { now: () => now }),
-      soloPriceId: 'price_solo_au_2000',
+      soloMonthlyPriceId: 'price_solo_au_2000',
+      soloAnnualPriceId: 'price_solo_annual',
+      verifyPlatformOwner: () => Promise.resolve(false),
       clock: { now: () => now },
       publishLifecycle: () => Promise.resolve(),
       publishNumberProvision: (job) => { provisionJobs.push(job.organisationId); return Promise.resolve(); }
@@ -236,7 +251,9 @@ describe('AccountPulse Solo subscription persistence', () => {
       repository: createPostgresSubscriptionRepository(client.db, {
         now: () => now
       }),
-      soloPriceId: 'price_solo_au_2000',
+      soloMonthlyPriceId: 'price_solo_au_2000',
+      soloAnnualPriceId: 'price_solo_annual',
+      verifyPlatformOwner: () => Promise.resolve(false),
       clock: { now: () => now },
       publishLifecycle: () => Promise.resolve(),
       publishNumberProvision: () => Promise.resolve()
@@ -280,8 +297,8 @@ describe('resubscription and immutable trial persistence', () => {
     const initialTrial = new Date('2026-11-23T12:00:00Z');
     await client.db.update(subscriptions).set({status:'CANCELLED', stripeProviderStatus:'canceled', stripeCustomerId:customer, stripeSubscriptionId:old, lastStripeEventCreatedAt:new Date('2026-11-09T10:00:00Z')}).where(eq(subscriptions.organisationId, organisationId));
     const common = {organisationId, eventCreatedAt:new Date('2026-11-09T11:00:00Z'), payloadHash:'a'.repeat(64), stripeCustomerId:customer, stripeSubscriptionId:replacement};
-    const checkout = {...common, eventId:'evt_checkout_' + organisationId, eventType:'checkout.session.completed' as const};
-    const lifecycle = {...common, eventId:'evt_lifecycle_' + organisationId, eventType:'customer.subscription.created', planCode:'SOLO_AU_2000' as const, status:'ACTIVE' as const, stripeProviderStatus:'active', currentPeriodStart:new Date('2026-11-09T00:00:00Z'), currentPeriodEnd:new Date('2026-12-09T00:00:00Z'), trialEndsAt:new Date('2026-12-01T00:00:00Z'), cancelAt:null, cancelledAt:null};
+    const checkout = {...common, eventId:'evt_checkout_' + organisationId, eventType:'checkout.session.completed' as const, initialCardInvoiceId:'in_' + organisationId, initialCardPaymentSucceededAt:new Date('2026-11-09T11:00:00Z')};
+    const lifecycle = {...common, eventId:'evt_lifecycle_' + organisationId, eventType:'customer.subscription.created', planCode:'SOLO_AU_2000' as const, billingCadence:'MONTHLY' as const, status:'ACTIVE' as const, stripeProviderStatus:'active', currentPeriodStart:new Date('2026-11-09T00:00:00Z'), currentPeriodEnd:new Date('2026-12-09T00:00:00Z'), trialEndsAt:new Date('2026-12-01T00:00:00Z'), cancelAt:null, cancelledAt:null};
     if (order === 'checkout-first') {
       expect(await repository.applyCheckoutCompleted(checkout)).toBe('APPLIED');
       const [before] = await client.db.select().from(subscriptions).where(eq(subscriptions.organisationId, organisationId));
@@ -335,7 +352,11 @@ describe('resubscription and immutable trial persistence', () => {
         eventCreatedAt: new Date('2026-11-09T11:00:00.000Z'),
         payloadHash: 'c'.repeat(64),
         stripeCustomerId: foreignCustomerId,
-        stripeSubscriptionId: foreignSubscriptionId
+        stripeSubscriptionId: foreignSubscriptionId,
+        initialCardInvoiceId: `in_${target.organisationId}`,
+        initialCardPaymentSucceededAt: new Date(
+          '2026-11-09T11:00:00.000Z'
+        )
       })
     ).resolves.toBe('REJECTED');
 
@@ -350,6 +371,7 @@ describe('resubscription and immutable trial persistence', () => {
         stripeCustomerId: foreignCustomerId,
         stripeSubscriptionId: foreignSubscriptionId,
         planCode: 'SOLO_AU_2000',
+        billingCadence: 'MONTHLY',
         status: 'ACTIVE',
         stripeProviderStatus: 'active',
         currentPeriodStart: new Date('2026-11-09T00:00:00.000Z'),
@@ -396,7 +418,7 @@ describe('competing checkout replacement order', () => {
     const initialId = 'sub_old_' + organisationId;
     const newerId = 'sub_b_' + organisationId;
     await client.db.update(subscriptions).set({status:'CANCELLED', stripeProviderStatus:'canceled', stripeCustomerId:customer, stripeSubscriptionId:initialId, lastStripeEventCreatedAt:new Date('2026-11-09T10:00:00Z')}).where(eq(subscriptions.organisationId, organisationId));
-    const common = {organisationId, payloadHash:'a'.repeat(64), stripeCustomerId:customer, eventType:'checkout.session.completed' as const};
+    const common = {organisationId, payloadHash:'a'.repeat(64), stripeCustomerId:customer, eventType:'checkout.session.completed' as const, initialCardInvoiceId:'in_' + organisationId, initialCardPaymentSucceededAt:new Date('2026-11-09T11:00:00Z')};
     const newerTime = new Date('2026-11-09T11:00:00Z');
     expect(await repository.applyCheckoutCompleted({...common, eventId:'evt_b_' + organisationId, eventCreatedAt:newerTime, stripeSubscriptionId:newerId})).toBe('APPLIED');
     const [afterCheckout] = await client.db.select().from(subscriptions).where(eq(subscriptions.organisationId, organisationId));
@@ -405,10 +427,10 @@ describe('competing checkout replacement order', () => {
     expect(await repository.applyCheckoutCompleted({...common, eventId:'evt_a_' + organisationId, eventCreatedAt:ordering === 'older' ? new Date('2026-11-09T10:30:00Z') : newerTime, stripeSubscriptionId:ignoredId})).toBe('IGNORED_OUT_OF_ORDER');
     const [beforeLifecycle] = await client.db.select().from(subscriptions).where(eq(subscriptions.organisationId, organisationId));
     expect(beforeLifecycle?.stripeSubscriptionId).toBe(newerId);
-    expect(await repository.applyLifecycleEvent({organisationId, eventId:'evt_stale_candidate_' + organisationId, eventType:'customer.subscription.created', eventCreatedAt:new Date('2026-11-09T12:00:00Z'), payloadHash:'b'.repeat(64), stripeCustomerId:customer, stripeSubscriptionId:ignoredId, planCode:'SOLO_AU_2000', status:'ACTIVE', stripeProviderStatus:'active', currentPeriodStart:new Date('2026-11-09T00:00:00Z'), currentPeriodEnd:new Date('2026-12-09T00:00:00Z'), trialEndsAt:null, cancelAt:null, cancelledAt:null})).toBe('REJECTED');
+    expect(await repository.applyLifecycleEvent({organisationId, eventId:'evt_stale_candidate_' + organisationId, eventType:'customer.subscription.created', eventCreatedAt:new Date('2026-11-09T12:00:00Z'), payloadHash:'b'.repeat(64), stripeCustomerId:customer, stripeSubscriptionId:ignoredId, planCode:'SOLO_AU_2000', billingCadence:'MONTHLY', status:'ACTIVE', stripeProviderStatus:'active', currentPeriodStart:new Date('2026-11-09T00:00:00Z'), currentPeriodEnd:new Date('2026-12-09T00:00:00Z'), trialEndsAt:null, cancelAt:null, cancelledAt:null})).toBe('REJECTED');
     const [afterStaleLifecycle] = await client.db.select().from(subscriptions).where(eq(subscriptions.organisationId, organisationId));
     expect(afterStaleLifecycle?.stripeSubscriptionId).toBe(newerId);
-    expect(await repository.applyLifecycleEvent({organisationId, eventId:'evt_live_' + organisationId, eventType:'customer.subscription.created', eventCreatedAt:newerTime, payloadHash:'a'.repeat(64), stripeCustomerId:customer, stripeSubscriptionId:newerId, planCode:'SOLO_AU_2000', status:'ACTIVE', stripeProviderStatus:'active', currentPeriodStart:new Date('2026-11-09T00:00:00Z'), currentPeriodEnd:new Date('2026-12-09T00:00:00Z'), trialEndsAt:null, cancelAt:null, cancelledAt:null})).toBe('APPLIED');
+    expect(await repository.applyLifecycleEvent({organisationId, eventId:'evt_live_' + organisationId, eventType:'customer.subscription.created', eventCreatedAt:newerTime, payloadHash:'a'.repeat(64), stripeCustomerId:customer, stripeSubscriptionId:newerId, planCode:'SOLO_AU_2000', billingCadence:'MONTHLY', status:'ACTIVE', stripeProviderStatus:'active', currentPeriodStart:new Date('2026-11-09T00:00:00Z'), currentPeriodEnd:new Date('2026-12-09T00:00:00Z'), trialEndsAt:null, cancelAt:null, cancelledAt:null})).toBe('APPLIED');
   });
 
   it('rejects an older competing lifecycle that arrives before its Checkout', async () => {
@@ -421,9 +443,9 @@ describe('competing checkout replacement order', () => {
     const selectedTime = new Date('2026-11-09T11:00:00Z');
     const staleTime = new Date('2026-11-09T10:30:00Z');
     await client.db.update(subscriptions).set({status:'CANCELLED', stripeProviderStatus:'canceled', stripeCustomerId:customer, stripeSubscriptionId:initialId, lastStripeEventCreatedAt:new Date('2026-11-09T10:00:00Z')}).where(eq(subscriptions.organisationId, organisationId));
-    const checkout = {organisationId, eventType:'checkout.session.completed' as const, payloadHash:'c'.repeat(64), stripeCustomerId:customer};
+    const checkout = {organisationId, eventType:'checkout.session.completed' as const, payloadHash:'c'.repeat(64), stripeCustomerId:customer, initialCardInvoiceId:'in_' + organisationId, initialCardPaymentSucceededAt:new Date('2026-11-09T11:00:00Z')};
     expect(await repository.applyCheckoutCompleted({...checkout, eventId:'evt_selected_checkout_' + organisationId, eventCreatedAt:selectedTime, stripeSubscriptionId:selectedId})).toBe('APPLIED');
-    const lifecycle = {organisationId, eventType:'customer.subscription.created', payloadHash:'d'.repeat(64), stripeCustomerId:customer, planCode:'SOLO_AU_2000' as const, status:'ACTIVE' as const, stripeProviderStatus:'active', currentPeriodStart:new Date('2026-11-09T00:00:00Z'), currentPeriodEnd:new Date('2026-12-09T00:00:00Z'), trialEndsAt:null, cancelAt:null, cancelledAt:null};
+    const lifecycle = {organisationId, eventType:'customer.subscription.created', payloadHash:'d'.repeat(64), stripeCustomerId:customer, planCode:'SOLO_AU_2000' as const, billingCadence:'MONTHLY' as const, status:'ACTIVE' as const, stripeProviderStatus:'active', currentPeriodStart:new Date('2026-11-09T00:00:00Z'), currentPeriodEnd:new Date('2026-12-09T00:00:00Z'), trialEndsAt:null, cancelAt:null, cancelledAt:null};
     expect(await repository.applyLifecycleEvent({...lifecycle, eventId:'evt_stale_lifecycle_first_' + organisationId, eventCreatedAt:staleTime, stripeSubscriptionId:staleId})).toBe('IGNORED_OUT_OF_ORDER');
     expect(await repository.applyCheckoutCompleted({...checkout, eventId:'evt_stale_checkout_later_' + organisationId, eventCreatedAt:staleTime, stripeSubscriptionId:staleId})).toBe('REJECTED');
     const [afterStaleCandidate] = await client.db.select().from(subscriptions).where(eq(subscriptions.organisationId, organisationId));

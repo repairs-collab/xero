@@ -85,7 +85,8 @@ describe('OVH release pipeline', () => {
       'XERO_OAUTH_CLIENT_SECRET',
       'STRIPE_SECRET_KEY',
       'STRIPE_WEBHOOK_SECRET',
-      'STRIPE_SOLO_PRICE_ID',
+      'STRIPE_SOLO_MONTHLY_PRICE_ID',
+      'STRIPE_SOLO_ANNUAL_PRICE_ID',
       'STRIPE_PORTAL_CONFIGURATION_ID'
     ]) {
       expect(workflow).toContain(`secrets.${name}`);

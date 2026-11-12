@@ -20,6 +20,7 @@ import {
   organisations,
   PostgresSmsCommerceRepository,
   PostgresXeroConnectionRepository,
+  users,
   type DatabaseClient
 } from '@bc5000/db/web';
 import { FetchHttpClient } from '@bc5000/integrations/http';
@@ -272,18 +273,24 @@ export const getXeroTokenCipher = (): TokenCipher => {
 export const getStripeConfiguration = (): StripeRuntimeConfiguration => {
   const secretKey = process.env.STRIPE_SECRET_KEY?.trim();
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET?.trim();
-  const soloPriceId = process.env.STRIPE_SOLO_PRICE_ID?.trim();
+  const soloMonthlyPriceId =
+    process.env.STRIPE_SOLO_MONTHLY_PRICE_ID?.trim();
+  const soloAnnualPriceId = process.env.STRIPE_SOLO_ANNUAL_PRICE_ID?.trim();
   const portalConfigurationId =
     process.env.STRIPE_PORTAL_CONFIGURATION_ID?.trim();
   const publicBaseUrl = process.env.PUBLIC_BASE_URL?.trim();
   if (
     !secretKey ||
     !webhookSecret ||
-    !soloPriceId ||
+    !soloMonthlyPriceId ||
+    !soloAnnualPriceId ||
     !portalConfigurationId ||
     !publicBaseUrl
   ) {
     throw new Error('Stripe billing configuration is incomplete');
+  }
+  if (soloMonthlyPriceId === soloAnnualPriceId) {
+    throw new Error('Stripe monthly and annual Price IDs must be distinct');
   }
   let publicUrl: URL;
   try {
@@ -304,7 +311,8 @@ export const getStripeConfiguration = (): StripeRuntimeConfiguration => {
   return {
     secretKey,
     webhookSecret,
-    soloPriceId,
+    soloMonthlyPriceId,
+    soloAnnualPriceId,
     portalConfigurationId,
     publicBaseUrl: publicUrl.origin,
     priceCurrency: 'aud',
@@ -324,7 +332,16 @@ export const getSubscriptionService = () => {
           getDatabaseClient().db,
           clock
         ),
-        soloPriceId: configuration.soloPriceId,
+        soloMonthlyPriceId: configuration.soloMonthlyPriceId,
+        soloAnnualPriceId: configuration.soloAnnualPriceId ?? null,
+        verifyPlatformOwner: async (userId) => {
+          const [user] = await getDatabaseClient()
+            .db.select({ platformRole: users.platformRole })
+            .from(users)
+            .where(and(eq(users.id, userId), isNull(users.disabledAt)))
+            .limit(1);
+          return user?.platformRole === 'OWNER';
+        },
         clock,
         publishLifecycle: async (input) => {
           const queue = await getJobQueue();

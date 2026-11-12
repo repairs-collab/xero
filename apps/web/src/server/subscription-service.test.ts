@@ -39,6 +39,7 @@ const account = (overrides: Partial<BillingAccount> = {}): BillingAccount => ({
   billingEmail: 'owner@example.com',
   edition: 'SOLO',
   planCode: 'SOLO_AU_2000',
+  billingCadence: 'MONTHLY',
   status: 'TRIALING',
   stripeCustomerId: null,
   stripeSubscriptionId: null,
@@ -48,12 +49,26 @@ const account = (overrides: Partial<BillingAccount> = {}): BillingAccount => ({
   cancelAt: null,
   cancelledAt: null,
   lastStripeEventCreatedAt: null,
+  initialCardInvoiceId: null,
+  initialCardPaymentSucceededAt: null,
+  directDebitStatus: null,
   createdAt: new Date('2026-11-09T00:00:00.000Z'),
   ...overrides
 });
 
 class FakeStripe implements StripeBillingGateway {
   checkoutRequests: SoloCheckoutRequest[] = [];
+  directDebitSetupRequests: Array<{
+    organisationId: string;
+    userId: string;
+    stripeCustomerId: string;
+    idempotencyKey: string;
+  }> = [];
+  directDebitActivationRequests: Array<{
+    stripeSubscriptionId: string;
+    stripePaymentMethodId: string;
+    idempotencyKey: string;
+  }> = [];
   portalCustomers: string[] = [];
   chargeOwnershipRequests: string[] = [];
   chargeOwnership = new Map<string, StripeChargeOwnership>();
@@ -73,6 +88,28 @@ class FakeStripe implements StripeBillingGateway {
       id: 'bps_solo',
       url: 'https://billing.stripe.com/p/session/bps_solo'
     });
+  }
+
+  createDirectDebitSetup(request: {
+    organisationId: string;
+    userId: string;
+    stripeCustomerId: string;
+    idempotencyKey: string;
+  }): Promise<StripeHostedSession> {
+    this.directDebitSetupRequests.push(request);
+    return Promise.resolve({
+      id: 'cs_becs_setup',
+      url: 'https://checkout.stripe.com/c/setup/cs_becs_setup'
+    });
+  }
+
+  activateDirectDebit(request: {
+    stripeSubscriptionId: string;
+    stripePaymentMethodId: string;
+    idempotencyKey: string;
+  }): Promise<void> {
+    this.directDebitActivationRequests.push(request);
+    return Promise.resolve();
   }
 
   loadChargeOwnership(chargeId: string): Promise<StripeChargeOwnership> {
@@ -99,6 +136,22 @@ class FakeRepository implements SubscriptionRepository {
   replayResult: 'ABSENT' | 'DUPLICATE' | 'HASH_MISMATCH' = 'ABSENT';
   applyOutcome: Awaited<ReturnType<SubscriptionRepository['applyLifecycleEvent']>> =
     'APPLIED';
+  directDebitRequest: {
+    organisationId: string;
+    status: 'REQUESTED' | 'SETUP_PENDING' | 'MANDATE_CONFIRMED' | 'ACTIVE';
+    requestedAt: Date;
+    setupSessionId: string | null;
+    setupIntentId: string | null;
+    stripePaymentMethodId: string | null;
+    stripeMandateId: string | null;
+    mandateConfirmedAt: Date | null;
+    activatedAt: Date | null;
+  } | null = null;
+  directDebitRequestCalls: Array<Record<string, unknown>> = [];
+  directDebitSetupPendingCalls: Array<Record<string, unknown>> = [];
+  directDebitMandateCalls: Array<Record<string, unknown>> = [];
+  directDebitActivationCalls: Array<Record<string, unknown>> = [];
+  directDebitRequesterEmail = 'owner@example.com';
 
   loadBillingAccount(
     organisationId: string
@@ -118,6 +171,7 @@ class FakeRepository implements SubscriptionRepository {
       this.currentAccount = {
         ...this.currentAccount,
         status: input.status,
+        billingCadence: input.billingCadence,
         stripeCustomerId: input.stripeCustomerId,
         stripeSubscriptionId: input.stripeSubscriptionId,
         currentPeriodStart: input.currentPeriodStart,
@@ -166,6 +220,97 @@ class FakeRepository implements SubscriptionRepository {
     this.rejectedInputs.push(input);
     return Promise.resolve('REJECTED');
   }
+
+  requestDirectDebit(input: {
+    organisationId: string;
+    requestedByUserId: string;
+    requestedAt: Date;
+  }) {
+    this.directDebitRequestCalls.push(input);
+    this.directDebitRequest ??= {
+      organisationId: input.organisationId,
+      status: 'REQUESTED',
+      requestedAt: input.requestedAt,
+      setupSessionId: null,
+      setupIntentId: null,
+      stripePaymentMethodId: null,
+      stripeMandateId: null,
+      mandateConfirmedAt: null,
+      activatedAt: null
+    };
+    return Promise.resolve(this.directDebitRequest);
+  }
+
+  loadDirectDebitRequest() {
+    return Promise.resolve(this.directDebitRequest);
+  }
+
+  loadDirectDebitRequesterEmail() {
+    return Promise.resolve(this.directDebitRequesterEmail);
+  }
+
+  markDirectDebitSetupPending(input: {
+    organisationId: string;
+    actorUserId: string;
+    setupSessionId: string;
+    occurredAt: Date;
+  }) {
+    this.directDebitSetupPendingCalls.push(input);
+    if (this.directDebitRequest !== null) {
+      this.directDebitRequest = {
+        ...this.directDebitRequest,
+        status: 'SETUP_PENDING',
+        setupSessionId: input.setupSessionId
+      };
+    }
+    return Promise.resolve();
+  }
+
+  confirmDirectDebitMandate(input: {
+    organisationId: string;
+    setupIntentId: string;
+    stripeCustomerId: string;
+    stripePaymentMethodId: string;
+    stripeMandateId: string;
+    eventId: string;
+    eventType: 'setup_intent.succeeded';
+    eventCreatedAt: Date;
+    payloadHash: string;
+  }) {
+    this.directDebitMandateCalls.push(input);
+    if (this.directDebitRequest !== null) {
+      this.directDebitRequest = {
+        ...this.directDebitRequest,
+        status: 'MANDATE_CONFIRMED',
+        setupIntentId: input.setupIntentId,
+        stripePaymentMethodId: input.stripePaymentMethodId,
+        stripeMandateId: input.stripeMandateId,
+        mandateConfirmedAt: input.eventCreatedAt
+      };
+    }
+    return Promise.resolve(this.applyOutcome);
+  }
+
+  activateDirectDebit(input: {
+    organisationId: string;
+    activatedByUserId: string;
+    activatedAt: Date;
+    stripePaymentMethodId: string;
+    stripeMandateId: string;
+  }) {
+    this.directDebitActivationCalls.push(input);
+    if (this.directDebitRequest !== null) {
+      this.directDebitRequest = {
+        ...this.directDebitRequest,
+        status: 'ACTIVE',
+        activatedAt: input.activatedAt
+      };
+    }
+    if (this.directDebitRequest === null) {
+      return Promise.reject(new Error('Missing direct-debit request'));
+    }
+    return Promise.resolve(this.directDebitRequest);
+  }
 }
 
 const createService = () => {
@@ -181,7 +326,10 @@ const createService = () => {
     service: createSubscriptionService({
       stripe,
       repository,
-      soloPriceId: 'price_solo_au_2000',
+      soloMonthlyPriceId: 'price_solo_au_2000',
+      soloAnnualPriceId: 'price_solo_annual',
+      verifyPlatformOwner: (userId: string) =>
+        Promise.resolve(userId === 'platform_owner'),
       clock: { now: () => new Date('2026-11-09T12:00:00.000Z') },
       publishLifecycle: (job) => {
         lifecycleJobs.push(job);
@@ -193,6 +341,11 @@ const createService = () => {
       }
     })
   };
+};
+
+const platformOwnerSession: AppSession = {
+  ...adminSession,
+  userId: 'platform_owner'
 };
 
 const subscriptionEvent = (
@@ -301,8 +454,16 @@ describe('subscription checkout and portal', () => {
   it('lets an Admin create one idempotent Solo Checkout Session', async () => {
     const { service, stripe, repository } = createService();
 
-    const first = await service.createCheckout(adminSession, 'org_solo');
-    const second = await service.createCheckout(adminSession, 'org_solo');
+    const first = await service.createCheckout(
+      adminSession,
+      'org_solo',
+      'MONTHLY'
+    );
+    const second = await service.createCheckout(
+      adminSession,
+      'org_solo',
+      'MONTHLY'
+    );
 
     expect(first.url).toContain('checkout.stripe.com');
     expect(second).toEqual(first);
@@ -310,6 +471,7 @@ describe('subscription checkout and portal', () => {
     expect(stripe.checkoutRequests[0]).toMatchObject({
       organisationId: 'org_solo',
       userId: 'user_admin',
+      billingCadence: 'MONTHLY',
       idempotencyKey: stripe.checkoutRequests[1]?.idempotencyKey
     });
     expect(stripe.checkoutRequests[0]?.idempotencyKey).toContain(
@@ -318,8 +480,31 @@ describe('subscription checkout and portal', () => {
     expect(repository.currentAccount?.status).toBe('TRIALING');
     expect(repository.auditInputs[0]?.detail).toEqual({
       action: 'CHECKOUT_CREATED',
-      planCode: 'SOLO_AU_2000'
+      planCode: 'SOLO_AU_2000',
+      billingCadence: 'MONTHLY'
     });
+  });
+
+  it('selects annual billing explicitly and rejects forged cadences', async () => {
+    const annual = createService();
+
+    await annual.service.createCheckout(adminSession, 'org_solo', 'ANNUAL');
+    expect(annual.stripe.checkoutRequests[0]).toMatchObject({
+      billingCadence: 'ANNUAL'
+    });
+    expect(annual.stripe.checkoutRequests[0]?.idempotencyKey).toContain(
+      ':ANNUAL:'
+    );
+
+    const forged = createService();
+    await expect(
+      forged.service.createCheckout(
+        adminSession,
+        'org_solo',
+        'WEEKLY' as never
+      )
+    ).rejects.toMatchObject({ code: 'BILLING_CADENCE_INVALID' });
+    expect(forged.stripe.checkoutRequests).toEqual([]);
   });
 
   it('rejects Operators and legacy internal organisations', async () => {
@@ -365,6 +550,183 @@ describe('subscription checkout and portal', () => {
       service.createCheckout(adminSession, 'org_solo')
     ).rejects.toMatchObject({ code: 'CHECKOUT_NOT_AVAILABLE' });
     expect(stripe.checkoutRequests).toEqual([]);
+  });
+});
+
+describe('request-only direct debit', () => {
+  it('accepts a customer Admin request only after signed initial-card evidence', async () => {
+    const { service, repository } = createService();
+
+    await expect(
+      service.requestDirectDebit(adminSession, 'org_solo')
+    ).rejects.toMatchObject({ code: 'DIRECT_DEBIT_CARD_PAYMENT_REQUIRED' });
+    expect(repository.directDebitRequestCalls).toEqual([]);
+
+    Object.assign(repository.currentAccount!, {
+      stripeCustomerId: 'cus_solo',
+      stripeSubscriptionId: 'sub_solo',
+      initialCardInvoiceId: 'in_initial_card',
+      initialCardPaymentSucceededAt: new Date('2026-11-09T11:00:00.000Z')
+    });
+    await expect(
+      service.requestDirectDebit(adminSession, 'org_solo')
+    ).resolves.toMatchObject({ status: 'REQUESTED' });
+    await expect(
+      service.requestDirectDebit(operatorSession, 'org_solo')
+    ).rejects.toThrow('FORBIDDEN');
+    expect(repository.directDebitRequestCalls).toHaveLength(1);
+  });
+
+  it('lets only the platform owner create the manual Stripe-hosted setup flow', async () => {
+    const { service, repository, stripe } = createService();
+    Object.assign(repository.currentAccount!, {
+      stripeCustomerId: 'cus_solo',
+      stripeSubscriptionId: 'sub_solo',
+      initialCardInvoiceId: 'in_initial_card',
+      initialCardPaymentSucceededAt: new Date('2026-11-09T11:00:00.000Z')
+    });
+    await service.requestDirectDebit(adminSession, 'org_solo');
+    Object.assign(repository.currentAccount!, {
+      billingEmail: 'platform-owner@example.com'
+    });
+
+    await expect(
+      service.createDirectDebitSetup(adminSession, 'org_solo')
+    ).rejects.toMatchObject({ code: 'PLATFORM_OWNER_REQUIRED' });
+    expect(stripe.directDebitSetupRequests).toEqual([]);
+
+    await expect(
+      service.createDirectDebitSetup(platformOwnerSession, 'org_solo')
+    ).resolves.toMatchObject({
+      id: 'cs_becs_setup',
+      deliveryMode: 'MANUAL_CUSTOMER_DELIVERY',
+      customerEmail: 'owner@example.com'
+    });
+    expect(stripe.directDebitSetupRequests[0]).toMatchObject({
+      organisationId: 'org_solo',
+      userId: 'platform_owner',
+      stripeCustomerId: 'cus_solo'
+    });
+    expect(repository.directDebitSetupPendingCalls).toHaveLength(1);
+  });
+
+  it('records signed provider mandate evidence without auto-activating direct debit', async () => {
+    const { service, repository, stripe } = createService();
+    Object.assign(repository.currentAccount!, {
+      stripeCustomerId: 'cus_solo',
+      stripeSubscriptionId: 'sub_solo',
+      initialCardInvoiceId: 'in_initial_card',
+      initialCardPaymentSucceededAt: new Date('2026-11-09T11:00:00.000Z')
+    });
+    await service.requestDirectDebit(adminSession, 'org_solo');
+    await service.createDirectDebitSetup(platformOwnerSession, 'org_solo');
+    stripe.event = {
+      id: 'evt_setup_intent_succeeded',
+      type: 'setup_intent.succeeded',
+      created: 1_794_205_200,
+      data: {
+        object: {
+          object: 'setup_intent',
+          id: 'seti_becs',
+          customer: 'cus_solo',
+          status: 'succeeded',
+          payment_method: 'pm_becs',
+          mandate: 'mandate_becs',
+          payment_method_types: ['au_becs_debit'],
+          metadata: {
+            organisation_id: 'org_solo',
+            purpose: 'DIRECT_DEBIT_REQUEST'
+          }
+        }
+      }
+    };
+
+    await expect(service.handleWebhook('{}', 'signed')).resolves.toBe(
+      'APPLIED'
+    );
+    expect(repository.directDebitMandateCalls[0]).toMatchObject({
+      setupIntentId: 'seti_becs',
+      stripePaymentMethodId: 'pm_becs',
+      stripeMandateId: 'mandate_becs'
+    });
+    expect(repository.directDebitRequest?.status).toBe('MANDATE_CONFIRMED');
+    expect(stripe.directDebitActivationRequests).toEqual([]);
+  });
+
+  it('lets only the platform owner activate provider-confirmed mandate evidence', async () => {
+    const { service, repository, stripe } = createService();
+    Object.assign(repository.currentAccount!, {
+      stripeCustomerId: 'cus_solo',
+      stripeSubscriptionId: 'sub_solo',
+      initialCardInvoiceId: 'in_initial_card',
+      initialCardPaymentSucceededAt: new Date('2026-11-09T11:00:00.000Z')
+    });
+    repository.directDebitRequest = {
+      organisationId: 'org_solo',
+      status: 'REQUESTED',
+      requestedAt: new Date('2026-11-09T11:30:00.000Z'),
+      setupSessionId: null,
+      setupIntentId: null,
+      stripePaymentMethodId: null,
+      stripeMandateId: null,
+      mandateConfirmedAt: null,
+      activatedAt: null
+    };
+
+    await expect(
+      service.activateDirectDebit(platformOwnerSession, 'org_solo')
+    ).rejects.toMatchObject({ code: 'DIRECT_DEBIT_MANDATE_REQUIRED' });
+    expect(stripe.directDebitActivationRequests).toEqual([]);
+
+    Object.assign(repository.directDebitRequest, {
+      status: 'MANDATE_CONFIRMED',
+      setupSessionId: 'cs_becs_setup',
+      setupIntentId: 'seti_becs',
+      stripePaymentMethodId: 'pm_becs',
+      stripeMandateId: 'mandate_becs',
+      mandateConfirmedAt: new Date('2026-11-09T11:45:00.000Z')
+    });
+    await expect(
+      service.activateDirectDebit(adminSession, 'org_solo')
+    ).rejects.toMatchObject({ code: 'PLATFORM_OWNER_REQUIRED' });
+    await expect(
+      service.activateDirectDebit(platformOwnerSession, 'org_solo')
+    ).resolves.toMatchObject({ status: 'ACTIVE' });
+    expect(stripe.directDebitActivationRequests).toEqual([
+      {
+        stripeSubscriptionId: 'sub_solo',
+        stripePaymentMethodId: 'pm_becs',
+        idempotencyKey: 'direct-debit-activate:org_solo:mandate_becs'
+      }
+    ]);
+  });
+
+  it('gives only the platform owner a tenant-scoped direct-debit operations snapshot', async () => {
+    const { service, repository } = createService();
+    Object.assign(repository.currentAccount!, {
+      stripeCustomerId: 'cus_solo',
+      stripeSubscriptionId: 'sub_solo',
+      initialCardInvoiceId: 'in_initial_card',
+      initialCardPaymentSucceededAt: new Date('2026-11-09T11:00:00.000Z')
+    });
+    await service.requestDirectDebit(adminSession, 'org_solo');
+
+    await expect(
+      service.getDirectDebitOwnerSnapshot(adminSession, 'org_solo')
+    ).rejects.toMatchObject({ code: 'PLATFORM_OWNER_REQUIRED' });
+    await expect(
+      service.getDirectDebitOwnerSnapshot(platformOwnerSession, 'org_other')
+    ).rejects.toMatchObject({ code: 'SUBSCRIPTION_NOT_FOUND' });
+    await expect(
+      service.getDirectDebitOwnerSnapshot(platformOwnerSession, 'org_solo')
+    ).resolves.toMatchObject({
+      organisationId: 'org_solo',
+      initialCardInvoiceId: 'in_initial_card',
+      request: {
+        status: 'REQUESTED',
+        requesterEmail: 'owner@example.com'
+      }
+    });
   });
 });
 
@@ -496,6 +858,14 @@ describe('subscription webhooks', () => {
       data: {
         object: {
           id: 'cs_solo',
+          object: 'checkout.session',
+          mode: 'subscription',
+          status: 'complete',
+          payment_status: 'paid',
+          amount_total: 32_890,
+          currency: 'aud',
+          payment_method_types: ['card'],
+          invoice: 'in_initial_card',
           customer: 'cus_solo',
           subscription: 'sub_solo',
           client_reference_id: 'org_solo',
@@ -509,8 +879,74 @@ describe('subscription webhooks', () => {
 
     await service.handleWebhook('{}', 'valid-signature');
     expect(repository.checkoutInputs).toHaveLength(1);
+    expect(repository.checkoutInputs[0]).toMatchObject({
+      initialCardInvoiceId: 'in_initial_card',
+      initialCardPaymentSucceededAt: new Date(1_794_201_600 * 1000)
+    });
     expect(repository.lifecycleInputs).toEqual([]);
     expect(repository.currentAccount?.status).toBe('TRIALING');
+  });
+
+  it.each([
+    ['wrong mode', { mode: 'payment' }],
+    ['unpaid', { payment_status: 'unpaid' }],
+    ['incomplete', { status: 'open' }],
+    ['zero-credit', { amount_total: 0 }],
+    ['wrong currency', { currency: 'usd' }],
+    ['non-card method', { payment_method_types: ['au_becs_debit'] }],
+    ['missing invoice', { invoice: null }]
+  ])('rejects %s Checkout as initial-card evidence', async (_label, override) => {
+    const { service, stripe, repository } = createService();
+    stripe.event = {
+      id: `evt_checkout_invalid_${String(_label).replaceAll(' ', '_')}`,
+      type: 'checkout.session.completed',
+      created: 1_794_201_600,
+      data: {
+        object: {
+          id: 'cs_solo',
+          object: 'checkout.session',
+          mode: 'subscription',
+          status: 'complete',
+          payment_status: 'paid',
+          amount_total: 32_890,
+          currency: 'aud',
+          payment_method_types: ['card'],
+          invoice: 'in_initial_card',
+          customer: 'cus_solo',
+          subscription: 'sub_solo',
+          client_reference_id: 'org_solo',
+          metadata: {
+            organisation_id: 'org_solo',
+            plan_code: 'SOLO_AU_2000'
+          },
+          ...override
+        }
+      }
+    };
+
+    await expect(
+      service.handleWebhook('{}', 'valid-signature')
+    ).rejects.toMatchObject({ code: 'STRIPE_EVENT_INVALID' });
+    expect(repository.checkoutInputs).toEqual([]);
+  });
+
+  it('keeps invoice.paid recovery separate when Invoice payment settings are null', async () => {
+    const { service, stripe, repository } = createService();
+    stripe.event = invoiceEvent('invoice.paid', {
+      billing_reason: 'subscription_create',
+      amount_paid: 32_890,
+      payment_settings: { payment_method_types: null }
+    });
+
+    await expect(service.handleWebhook('{}', 'signed')).resolves.toBe(
+      'APPLIED'
+    );
+    expect(repository.operationalInputs[0]).toMatchObject({
+      resolveExistingOnly: true
+    });
+    expect(repository.operationalInputs[0]).not.toHaveProperty(
+      'successfulInitialCardPayment'
+    );
   });
 
   it.each([
@@ -777,6 +1213,37 @@ describe('one-time trial and event safety', () => {
     stripe.event = event;
     await expect(service.handleWebhook('{}', 'sig')).resolves.toBe('APPLIED');
     expect(repository.lifecycleInputs[0]?.currentPeriodEnd).toEqual(new Date(1796880000 * 1000));
+  });
+  it('derives annual cadence only from the exact configured annual Price', async () => {
+    const { service, stripe, repository } = createService();
+    const event = subscriptionEvent();
+    const object = event.data.object as {
+      items: {
+        data: Array<{
+          price: {
+            id: string;
+            currency: string;
+            recurring: { interval: string; interval_count?: number };
+          };
+        }>;
+      };
+    };
+    object.items.data[0]!.price = {
+      id: 'price_solo_annual',
+      currency: 'aud',
+      recurring: { interval: 'year', interval_count: 1 }
+    };
+    stripe.event = event;
+
+    await expect(service.handleWebhook('{}', 'sig')).resolves.toBe('APPLIED');
+    expect(repository.lifecycleInputs[0]?.billingCadence).toBe('ANNUAL');
+
+    object.items.data[0]!.price.recurring.interval = 'month';
+    stripe.event = { ...event, id: 'evt_forged_annual_cadence' };
+    await expect(service.handleWebhook('{"forged":true}', 'sig')).resolves.toBe(
+      'REJECTED'
+    );
+    expect(repository.lifecycleInputs).toHaveLength(1);
   });
   it('rejects equal-time status improvements', () => {
     const time = new Date('2026-11-09T12:00:00Z');

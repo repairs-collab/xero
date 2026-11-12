@@ -1,8 +1,10 @@
 import { notFound } from 'next/navigation';
 
 import { PlatformOrganisationDetailView } from '../../../../components/platform-admin/organisation-detail.js';
+import { PlatformDirectDebitOperations } from '../../../../components/platform-admin/direct-debit-operations.js';
 import { getPlatformAdminService } from '../../../../server/platform-admin-service.js';
 import { requirePlatformOwnerPage } from '../../../../server/platform-page-authorization.js';
+import { getSubscriptionService } from '../../../../server/runtime.js';
 import {
   endTrialAction,
   extendTrialAction,
@@ -16,6 +18,10 @@ import {
   inviteMemberAction,
   resendInvitationAction
 } from './user-actions.js';
+import {
+  activateDirectDebitAction,
+  createDirectDebitSetupLinkAction
+} from './direct-debit-actions.js';
 
 type RouteParams = Promise<{ organisationId: string }>;
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
@@ -40,11 +46,25 @@ export default async function PlatformOrganisationPage({
     organisationId
   );
   if (!detail) notFound();
+  const directDebit = await (
+    await getSubscriptionService()
+  ).getDirectDebitOwnerSnapshot(session, organisationId);
   const feedbackCode = first(query.result);
   return (
     <PlatformOrganisationDetailView
       detail={detail}
       {...(feedbackCode ? { feedbackCode } : {})}
+      directDebitOperations={
+        directDebit === null ? null : (
+          <PlatformDirectDebitOperations
+            snapshot={directDebit}
+            actions={{
+              createSetupLink: createDirectDebitSetupLinkAction,
+              activate: activateDirectDebitAction
+            }}
+          />
+        )
+      }
       actions={{
         extendTrial: extendTrialAction,
         endTrial: endTrialAction,

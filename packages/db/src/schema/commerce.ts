@@ -21,6 +21,7 @@ import { outboundMessages } from './messaging.js';
 
 export const soloAu2000PlanCode = 'SOLO_AU_2000' as const;
 export type SubscriptionPlanCode = typeof soloAu2000PlanCode;
+export type SubscriptionBillingCadence = 'MONTHLY' | 'ANNUAL';
 export type SubscriptionStatus =
   | 'TRIALING'
   | 'ACTIVE'
@@ -38,6 +39,10 @@ export const subscriptions = pgTable(
     planCode: varchar('plan_code', { length: 32 })
       .$type<SubscriptionPlanCode>()
       .notNull(),
+    billingCadence: varchar('billing_cadence', { length: 16 })
+      .$type<SubscriptionBillingCadence>()
+      .notNull()
+      .default('MONTHLY'),
     status: varchar('status', { length: 32 })
       .$type<SubscriptionStatus>()
       .notNull(),
@@ -55,6 +60,11 @@ export const subscriptions = pgTable(
     lastStripeEventCreatedAt: timestamp('last_stripe_event_created_at', {
       withTimezone: true
     }),
+    initialCardInvoiceId: varchar('initial_card_invoice_id', { length: 128 }),
+    initialCardPaymentSucceededAt: timestamp(
+      'initial_card_payment_succeeded_at',
+      { withTimezone: true }
+    ),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -77,8 +87,124 @@ export const subscriptions = pgTable(
       sql`${table.status} in ('TRIALING', 'ACTIVE', 'PAST_DUE', 'CANCEL_AT_PERIOD_END', 'CANCELLED', 'INCOMPLETE')`
     ),
     check(
+      'subscriptions_billing_cadence_ck',
+      sql`${table.billingCadence} in ('MONTHLY', 'ANNUAL')`
+    ),
+    check(
+      'subscriptions_initial_card_evidence_ck',
+      sql`(${table.initialCardInvoiceId} is null and ${table.initialCardPaymentSucceededAt} is null) or (${table.initialCardInvoiceId} is not null and ${table.initialCardPaymentSucceededAt} is not null)`
+    ),
+    check(
       'subscriptions_period_ck',
       sql`(${table.currentPeriodStart} is null and ${table.currentPeriodEnd} is null) or (${table.currentPeriodStart} is not null and ${table.currentPeriodEnd} is not null and ${table.currentPeriodEnd} > ${table.currentPeriodStart})`
+    )
+  ]
+);
+
+export type DirectDebitRequestStatus =
+  | 'REQUESTED'
+  | 'SETUP_PENDING'
+  | 'MANDATE_CONFIRMED'
+  | 'ACTIVE';
+
+/**
+ * Direct debit is an explicit, customer-initiated exception to card billing.
+ * Only opaque Stripe object identifiers are retained here; bank account
+ * details remain inside Stripe-hosted controls.
+ */
+export const directDebitRequests = pgTable(
+  'direct_debit_requests',
+  {
+    organisationId: uuid('organisation_id')
+      .primaryKey()
+      .references(() => subscriptions.organisationId, { onDelete: 'cascade' }),
+    status: varchar('status', { length: 24 })
+      .$type<DirectDebitRequestStatus>()
+      .notNull()
+      .default('REQUESTED'),
+    requestedByUserId: uuid('requested_by_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict' }),
+    requestedAt: timestamp('requested_at', { withTimezone: true }).notNull(),
+    setupSessionId: varchar('setup_session_id', { length: 128 }),
+    setupIntentId: varchar('setup_intent_id', { length: 128 }),
+    stripePaymentMethodId: varchar('stripe_payment_method_id', {
+      length: 128
+    }),
+    stripeMandateId: varchar('stripe_mandate_id', { length: 128 }),
+    mandateConfirmedAt: timestamp('mandate_confirmed_at', {
+      withTimezone: true
+    }),
+    activatedByUserId: uuid('activated_by_user_id').references(
+      () => users.id,
+      { onDelete: 'restrict' }
+    ),
+    activatedAt: timestamp('activated_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow()
+  },
+  (table) => [
+    uniqueIndex('direct_debit_requests_setup_session_uq').on(
+      table.setupSessionId
+    ),
+    uniqueIndex('direct_debit_requests_setup_intent_uq').on(
+      table.setupIntentId
+    ),
+    uniqueIndex('direct_debit_requests_payment_method_uq').on(
+      table.stripePaymentMethodId
+    ),
+    uniqueIndex('direct_debit_requests_mandate_uq').on(table.stripeMandateId),
+    index('direct_debit_requests_status_updated_idx').on(
+      table.status,
+      table.updatedAt
+    ),
+    check(
+      'direct_debit_requests_status_ck',
+      sql`${table.status} in ('REQUESTED', 'SETUP_PENDING', 'MANDATE_CONFIRMED', 'ACTIVE')`
+    ),
+    check(
+      'direct_debit_requests_state_ck',
+      sql`(
+        ${table.status} = 'REQUESTED' and
+        ${table.setupSessionId} is null and
+        ${table.setupIntentId} is null and
+        ${table.stripePaymentMethodId} is null and
+        ${table.stripeMandateId} is null and
+        ${table.mandateConfirmedAt} is null and
+        ${table.activatedByUserId} is null and
+        ${table.activatedAt} is null
+      ) or (
+        ${table.status} = 'SETUP_PENDING' and
+        ${table.setupSessionId} is not null and
+        ${table.setupIntentId} is null and
+        ${table.stripePaymentMethodId} is null and
+        ${table.stripeMandateId} is null and
+        ${table.mandateConfirmedAt} is null and
+        ${table.activatedByUserId} is null and
+        ${table.activatedAt} is null
+      ) or (
+        ${table.status} = 'MANDATE_CONFIRMED' and
+        ${table.setupSessionId} is not null and
+        ${table.setupIntentId} is not null and
+        ${table.stripePaymentMethodId} is not null and
+        ${table.stripeMandateId} is not null and
+        ${table.mandateConfirmedAt} is not null and
+        ${table.activatedByUserId} is null and
+        ${table.activatedAt} is null
+      ) or (
+        ${table.status} = 'ACTIVE' and
+        ${table.setupSessionId} is not null and
+        ${table.setupIntentId} is not null and
+        ${table.stripePaymentMethodId} is not null and
+        ${table.stripeMandateId} is not null and
+        ${table.mandateConfirmedAt} is not null and
+        ${table.activatedByUserId} is not null and
+        ${table.activatedAt} is not null
+      )`
     )
   ]
 );

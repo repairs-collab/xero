@@ -16,6 +16,13 @@ export interface StripeApi {
       create(parameters: Record<string, unknown>): Promise<unknown>;
     };
   };
+  readonly subscriptions: {
+    update(
+      subscriptionId: string,
+      parameters: Record<string, unknown>,
+      options: { idempotencyKey: string }
+    ): Promise<unknown>;
+  };
   readonly charges: {
     retrieve(chargeId: string): Promise<unknown>;
   };
@@ -40,7 +47,8 @@ export interface StripeApi {
 }
 
 export interface StripeBillingConfiguration {
-  readonly soloPriceId: string;
+  readonly soloMonthlyPriceId: string;
+  readonly soloAnnualPriceId?: string;
   readonly priceCurrency: 'aud';
   readonly automaticTaxEnabled: boolean;
   readonly portalConfigurationId: string;
@@ -58,6 +66,20 @@ export interface SoloCheckoutRequest {
   readonly userId: string;
   readonly customerEmail: string;
   readonly stripeCustomerId?: string;
+  readonly billingCadence: 'MONTHLY' | 'ANNUAL';
+  readonly idempotencyKey: string;
+}
+
+export interface DirectDebitSetupRequest {
+  readonly organisationId: string;
+  readonly userId: string;
+  readonly stripeCustomerId: string;
+  readonly idempotencyKey: string;
+}
+
+export interface DirectDebitActivationRequest {
+  readonly stripeSubscriptionId: string;
+  readonly stripePaymentMethodId: string;
   readonly idempotencyKey: string;
 }
 
@@ -285,7 +307,8 @@ const requireChargeInvoiceOwnership = (
 
 export class StripeBillingClient {
   readonly #api: StripeApi;
-  readonly #soloPriceId: string;
+  readonly #soloMonthlyPriceId: string;
+  readonly #soloAnnualPriceId: string | null;
   readonly #automaticTaxEnabled: boolean;
   readonly #portalConfigurationId: string;
   readonly #publicOrigin: string;
@@ -294,7 +317,16 @@ export class StripeBillingClient {
 
   constructor(api: StripeApi, configuration: StripeBillingConfiguration) {
     this.#api = api;
-    this.#soloPriceId = requireNonEmpty(configuration.soloPriceId);
+    this.#soloMonthlyPriceId = requireNonEmpty(
+      configuration.soloMonthlyPriceId
+    );
+    this.#soloAnnualPriceId =
+      configuration.soloAnnualPriceId === undefined
+        ? null
+        : requireNonEmpty(configuration.soloAnnualPriceId);
+    if (this.#soloAnnualPriceId === this.#soloMonthlyPriceId) {
+      throw new StripeConfigurationFailure();
+    }
     if (configuration.priceCurrency !== 'aud') {
       throw new StripeConfigurationFailure();
     }
@@ -321,6 +353,13 @@ export class StripeBillingClient {
     const organisationId = requireNonEmpty(request.organisationId);
     const userId = requireNonEmpty(request.userId);
     const idempotencyKey = requireNonEmpty(request.idempotencyKey);
+    const priceId =
+      request.billingCadence === 'MONTHLY'
+        ? this.#soloMonthlyPriceId
+        : request.billingCadence === 'ANNUAL'
+          ? this.#soloAnnualPriceId
+          : null;
+    if (priceId === null) throw new StripeConfigurationFailure();
     const metadata = {
       organisation_id: organisationId,
       initiating_user_id: userId,
@@ -336,7 +375,8 @@ export class StripeBillingClient {
       session = await this.#api.checkout.sessions.create(
         {
           mode: 'subscription',
-          line_items: [{ price: this.#soloPriceId, quantity: 1 }],
+          line_items: [{ price: priceId, quantity: 1 }],
+          payment_method_types: ['card'],
           automatic_tax: { enabled: this.#automaticTaxEnabled },
           billing_address_collection: 'required',
           tax_id_collection: { enabled: true },
@@ -373,6 +413,61 @@ export class StripeBillingClient {
       throw new StripeProviderFailure();
     }
     return requireHostedSession(session);
+  }
+
+  async createDirectDebitSetup(
+    request: DirectDebitSetupRequest
+  ): Promise<StripeHostedSession> {
+    const organisationId = requireNonEmpty(request.organisationId);
+    const userId = requireNonEmpty(request.userId);
+    const customer = requireNonEmpty(request.stripeCustomerId);
+    const idempotencyKey = requireNonEmpty(request.idempotencyKey);
+    const metadata = {
+      organisation_id: organisationId,
+      initiating_user_id: userId,
+      purpose: 'DIRECT_DEBIT_REQUEST'
+    };
+    let session: unknown;
+    try {
+      session = await this.#api.checkout.sessions.create(
+        {
+          mode: 'setup',
+          customer,
+          currency: 'aud',
+          payment_method_types: ['au_becs_debit'],
+          client_reference_id: organisationId,
+          metadata,
+          setup_intent_data: { metadata },
+          success_url: `${this.#publicOrigin}/settings/billing?direct_debit=mandate_submitted&session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${this.#publicOrigin}/settings/billing?direct_debit=cancelled`
+        },
+        { idempotencyKey }
+      );
+    } catch {
+      throw new StripeProviderFailure();
+    }
+    return requireHostedSession(session);
+  }
+
+  async activateDirectDebit(
+    request: DirectDebitActivationRequest
+  ): Promise<void> {
+    const stripeSubscriptionId = requireNonEmpty(
+      request.stripeSubscriptionId
+    );
+    const stripePaymentMethodId = requireNonEmpty(
+      request.stripePaymentMethodId
+    );
+    const idempotencyKey = requireNonEmpty(request.idempotencyKey);
+    try {
+      await this.#api.subscriptions.update(
+        stripeSubscriptionId,
+        { default_payment_method: stripePaymentMethodId },
+        { idempotencyKey }
+      );
+    } catch {
+      throw new StripeProviderFailure();
+    }
   }
 
   async loadChargeOwnership(chargeId: string): Promise<StripeChargeOwnership> {

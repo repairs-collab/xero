@@ -37,7 +37,8 @@ const composeEnvironment = {
   XERO_API_CREDENTIALS: '{}',
   STRIPE_SECRET_KEY: 'sk_test_example',
   STRIPE_WEBHOOK_SECRET: 'whsec_test_example',
-  STRIPE_SOLO_PRICE_ID: 'price_test_solo',
+  STRIPE_SOLO_MONTHLY_PRICE_ID: 'price_test_solo_monthly',
+  STRIPE_SOLO_ANNUAL_PRICE_ID: 'price_test_solo_annual',
   STRIPE_PORTAL_CONFIGURATION_ID: 'bpc_test_solo',
   SINCH_CALLBACK_PUBLIC_KEYS_JSON: '{}',
   SINCH_WEBHOOK_TOKEN: 'test-sinch-token',
@@ -156,7 +157,10 @@ describe('OVH voice deployment', () => {
         COGNITO_USER_POOL_ID: composeEnvironment.COGNITO_USER_POOL_ID,
         STRIPE_SECRET_KEY: composeEnvironment.STRIPE_SECRET_KEY,
         STRIPE_WEBHOOK_SECRET: composeEnvironment.STRIPE_WEBHOOK_SECRET,
-        STRIPE_SOLO_PRICE_ID: composeEnvironment.STRIPE_SOLO_PRICE_ID,
+        STRIPE_SOLO_MONTHLY_PRICE_ID:
+          composeEnvironment.STRIPE_SOLO_MONTHLY_PRICE_ID,
+        STRIPE_SOLO_ANNUAL_PRICE_ID:
+          composeEnvironment.STRIPE_SOLO_ANNUAL_PRICE_ID,
         STRIPE_PORTAL_CONFIGURATION_ID: composeEnvironment.STRIPE_PORTAL_CONFIGURATION_ID
       })
     );
