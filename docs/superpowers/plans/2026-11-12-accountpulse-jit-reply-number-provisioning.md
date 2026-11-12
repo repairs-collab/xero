@@ -47,6 +47,32 @@ Official references:
   a provider-neutral status to the customer.
 - Releasing or reassigning a number retains the existing quarantine controls.
 
+## Delivery phases
+
+### Phase A — five-customer beta control plane
+
+Build the no-cost, provider-neutral workflow first. A paid subscription creates
+one idempotent request. The owner records the written Australian quote and
+documentation state, explicitly approves the exact setup/monthly amounts,
+places the order outside AccountPulse, records the redacted external reference,
+and records the fulfilled number directly against that organisation as
+`RESERVED`. The existing messaging verification step is the only operation that
+may promote it to `READY`.
+
+Phase A deliberately has no Sinch order client, callback, polling loop,
+automatic mode, credentials form, spare inventory or provider spend ledger.
+The absence of a submit adapter is the automatic-purchase kill switch. This is
+the smallest safe implementation while Australian price, auth, documentation
+and lifecycle details remain provider-specific and manually quoted.
+
+### Phase B — provider automation after successful beta
+
+Only after written provider confirmation and a separately approved paid test,
+add a dedicated Numbers/Registration adapter, authenticated callbacks or
+bounded polling, quote expiry and automated spend controls. The existing Sinch
+Engage messaging client, credentials, webhook and health probe must not be
+assumed compatible with the Numbers/Registration services.
+
 ## State model
 
 `WAITING_CONFIGURATION -> AWAITING_OWNER_APPROVAL -> SUBMITTED ->
@@ -78,16 +104,18 @@ provisioning-settings table.
 Add an interface with these operations:
 
 - `prepareOrganisationOrder(organisationId)` — no provider call and no cost;
-- `submitOwnerApprovedOrder(orderId, expectedVersion, approval)` — paid-action
-  boundary;
-- `refreshOrder(orderId)` — status read only;
-- `applyAuthenticatedCallback(event)` — idempotent state transition;
-- `fulfilOrder(orderId, number, providerNumberId)` — verified assignment.
+- `recordWrittenQuote(orderId, expectedVersion, quote)` — owner evidence only;
+- `approveManualOrder(orderId, expectedVersion, approval)` — records approval
+  but performs no provider call;
+- `recordExternalOrder(orderId, expectedVersion, reference)` — redacted owner
+  evidence for an order placed outside AccountPulse; and
+- `fulfilOrder(orderId, number, providerNumberId)` — atomically inserts the
+  number assigned to that organisation as `RESERVED`.
 
-The Sinch adapter must validate the Australian long-number policy, submit a
-quantity of exactly one, request two-way messaging, parse manual-price and
-documentation requirements, and reject unsupported or ambiguous responses.
-Use test doubles only until commercial credentials and pricing are approved.
+The future Phase B Sinch adapter must validate the Australian long-number
+policy, submit a quantity of exactly one, request two-way messaging, parse
+manual-price and documentation requirements, and reject unsupported or
+ambiguous responses. Do not create or invoke that adapter in Phase A.
 
 ## Task 3 — Safe worker orchestration
 
@@ -96,11 +124,10 @@ Update `sms-number.provision` so it:
 1. returns immediately when the organisation already has a `READY` number;
 2. reuses an existing non-terminal order idempotently;
 3. creates a no-cost order draft when there is no number;
-4. never calls Sinch while provisioning is disabled or owner approval is
-   absent;
-5. schedules bounded status polling only after a submitted order exists;
-6. marks the number `READY` only after verified provider fulfilment; and
-7. records an owner-visible failure without retry storms or duplicate spend.
+4. never scans spare inventory or calls Sinch;
+5. returns an owner-action-required result rather than retrying an expected
+   waiting state; and
+6. leaves `READY` promotion to the separate verified messaging workflow.
 
 Retain `sms_number_pool` as the verified ownership, assignment and quarantine
 record. For the five-customer beta it contains assigned numbers only; there is
@@ -110,13 +137,12 @@ no requirement to pre-purchase spare `AVAILABLE` inventory.
 
 Extend `/platform-admin/sms` with:
 
-- provider configuration readiness without displaying secrets;
-- ordering disabled/owner-approval status;
-- exact quoted setup and monthly fee plus quote expiry;
-- monthly ceiling and committed provider cost;
+- exact written setup and monthly fee plus quote expiry;
+- documentation status and a redacted evidence reference;
 - pending, document-required, failed and fulfilled requests;
-- an explicit per-order approval that states the maximum charge;
-- authenticated connection/status testing;
+- an explicit per-order approval that states the exact recorded charge;
+- a redacted external-order reference entered after the owner orders outside
+  AccountPulse;
 - customer assignment, allowance and quarantine controls; and
 - immutable audit evidence for every approval and provider transition.
 
