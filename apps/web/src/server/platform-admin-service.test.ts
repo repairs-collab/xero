@@ -166,6 +166,33 @@ describe('platform administration read service', () => {
     expect(extendTrial).not.toHaveBeenCalled();
   });
 
+  it('passes a financial-risk reactivation hold through to its owner caller', async () => {
+    const reactivateOrganisation = vi.fn().mockResolvedValue({
+      ok: false,
+      code: 'BILLING_RISK_HOLD'
+    });
+    const service = createPlatformAdminService({
+      verifyOwner: () => Promise.resolve(true),
+      repository: { reactivateOrganisation } as never,
+      clock: { now: () => new Date('2026-11-11T00:00:00.000Z') }
+    });
+
+    await expect(
+      service.reactivateOrganisation('owner-user', {
+        organisationId: 'organisation-1',
+        expectedVersion: 4,
+        reason: 'Payment confirmed manually'
+      })
+    ).resolves.toEqual({ ok: false, code: 'BILLING_RISK_HOLD' });
+    expect(reactivateOrganisation).toHaveBeenCalledWith({
+      actorUserId: 'owner-user',
+      organisationId: 'organisation-1',
+      expectedVersion: 4,
+      reason: 'Payment confirmed manually',
+      now: new Date('2026-11-11T00:00:00.000Z')
+    });
+  });
+
   it('validates and normalizes number and allowance mutations before persistence', async () => {
     const registerSmsNumber = vi.fn();
     const updateSmsAllowance = vi.fn().mockResolvedValue({ ok: true, value: {} });

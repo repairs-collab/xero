@@ -4,6 +4,7 @@ import { summariseSmsUsage } from '@bc5000/domain';
 
 import type { Database, DbTransaction } from '../connection.js';
 import {
+  billingCases,
   invitations,
   memberships,
   organisationOnboarding,
@@ -199,6 +200,14 @@ export type PlatformMutationResult<T> =
   | { ok: true; value: T }
   | { ok: false; code: PlatformMutationFailureCode };
 
+export type PlatformStatusMutationFailureCode =
+  | PlatformMutationFailureCode
+  | 'BILLING_RISK_HOLD';
+
+export type PlatformStatusMutationResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; code: PlatformStatusMutationFailureCode };
+
 export interface PlatformTrialMutationInput {
   actorUserId: string;
   organisationId: string;
@@ -236,10 +245,10 @@ export interface PlatformAdminRepository extends PlatformAdminReadRepository {
   ): Promise<PlatformMutationResult<PlatformOrganisationDetail>>;
   suspendOrganisation(
     input: PlatformStatusMutationInput
-  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>>;
+  ): Promise<PlatformStatusMutationResult<PlatformOrganisationDetail>>;
   reactivateOrganisation(
     input: PlatformStatusMutationInput
-  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>>;
+  ): Promise<PlatformStatusMutationResult<PlatformOrganisationDetail>>;
   registerSmsNumber(input: {
     actorUserId: string;
     e164Number: string;
@@ -725,7 +734,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
       targetStatus: PlatformAccountStatus;
       eventType: 'ORGANISATION_SUSPENDED' | 'ORGANISATION_REACTIVATED';
     }
-  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>> {
+  ): Promise<PlatformStatusMutationResult<PlatformOrganisationDetail>> {
     const result = await this.database.transaction(async (transaction) => {
       const [organisation] = await transaction
         .select()
@@ -740,6 +749,22 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
       const reason = input.reason.trim();
       if (reason.length === 0 || reason.length > 500) {
         return { ok: false, code: 'VALIDATION' } as const;
+      }
+      if (input.targetStatus === 'ACTIVE') {
+        const [blockingCase] = await transaction
+          .select({ id: billingCases.id })
+          .from(billingCases)
+          .where(
+            and(
+              eq(billingCases.organisationId, input.organisationId),
+              eq(billingCases.blocksSending, true),
+              inArray(billingCases.status, ['OPEN', 'REVIEW_REQUIRED'])
+            )
+          )
+          .limit(1);
+        if (blockingCase) {
+          return { ok: false, code: 'BILLING_RISK_HOLD' } as const;
+        }
       }
       if (organisation.platformStatus === input.targetStatus) {
         if (
@@ -795,7 +820,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
 
   suspendOrganisation(
     input: PlatformStatusMutationInput
-  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>> {
+  ): Promise<PlatformStatusMutationResult<PlatformOrganisationDetail>> {
     return this.updatePlatformStatus({
       ...input,
       targetStatus: 'SUSPENDED',
@@ -805,7 +830,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
 
   reactivateOrganisation(
     input: PlatformStatusMutationInput
-  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>> {
+  ): Promise<PlatformStatusMutationResult<PlatformOrganisationDetail>> {
     return this.updatePlatformStatus({
       ...input,
       targetStatus: 'ACTIVE',

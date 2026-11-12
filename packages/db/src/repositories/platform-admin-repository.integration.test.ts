@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createDatabase, migrateDatabase } from '../client.js';
 import {
+  billingCases,
   invitations,
   memberships,
   organisations,
@@ -466,6 +467,223 @@ describe('PostgresPlatformAdminRepository mutations', () => {
     expect(retried).toMatchObject({ ok: true, value: { platformStatusVersion: 1 } });
     expect(stale).toEqual({ ok: false, code: 'CONFLICT' });
     expect(reactivated).toMatchObject({ ok: true, value: { platformStatus: 'ACTIVE', platformStatusVersion: 2 } });
+  });
+
+  it('rejects reactivation while blocking financial cases remain without changing account state or owner audit', async () => {
+    const organisationId = randomUUID();
+    const suspendedAt = new Date('2026-11-11T00:10:00.000Z');
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: `platform-risk-hold-${organisationId}`,
+      name: 'Financial risk hold target',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await repository.suspendOrganisation({
+      actorUserId: ids.owner,
+      organisationId,
+      reason: 'Stripe payment failure',
+      expectedVersion: 0,
+      now: suspendedAt
+    });
+    await client.db.insert(billingCases).values({
+      organisationId,
+      kind: 'PAYMENT_FAILURE',
+      status: 'OPEN',
+      providerObjectType: 'INVOICE',
+      providerObjectId: `in_${randomUUID()}`,
+      providerStatus: 'payment_failed',
+      stripeSubscriptionId: `sub_${randomUUID()}`,
+      subscriptionRelation: 'CURRENT',
+      amountMinor: 12_345,
+      currency: 'aud',
+      blocksSending: true,
+      latestProviderEventId: `evt_${randomUUID()}`,
+      latestProviderEventCreatedAt: suspendedAt,
+      openedAt: suspendedAt
+    });
+
+    const stale = await repository.reactivateOrganisation({
+      actorUserId: ids.owner,
+      organisationId,
+      reason: 'Payment confirmed manually',
+      expectedVersion: 0,
+      now: new Date('2026-11-11T00:11:00.000Z')
+    });
+    const held = await repository.reactivateOrganisation({
+      actorUserId: ids.owner,
+      organisationId,
+      reason: 'Payment confirmed manually',
+      expectedVersion: 1,
+      now: new Date('2026-11-11T00:12:00.000Z')
+    });
+    const stored = await client.db.query.organisations.findFirst({
+      where: (table, { eq }) => eq(table.id, organisationId)
+    });
+    const audit = await repository.listAuditEvents({ organisationId });
+
+    expect(stale).toEqual({ ok: false, code: 'CONFLICT' });
+    expect(held).toEqual({ ok: false, code: 'BILLING_RISK_HOLD' });
+    expect(stored).toMatchObject({
+      platformStatus: 'SUSPENDED',
+      platformStatusVersion: 1,
+      suspendedAt,
+      suspensionReason: 'Stripe payment failure'
+    });
+    expect(audit.items.map((event) => event.eventType)).toEqual([
+      'ORGANISATION_SUSPENDED'
+    ]);
+  });
+
+  it('permits reactivation after every blocking financial case is resolved', async () => {
+    const organisationId = randomUUID();
+    const openedAt = new Date('2026-11-11T00:20:00.000Z');
+    const resolvedAt = new Date('2026-11-11T00:21:00.000Z');
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: `platform-resolved-risk-${organisationId}`,
+      name: 'Resolved financial risk target',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD',
+      platformStatus: 'SUSPENDED',
+      platformStatusVersion: 1,
+      suspendedAt: openedAt,
+      suspensionReason: 'Dispute opened'
+    });
+    const [billingCase] = await client.db
+      .insert(billingCases)
+      .values({
+        organisationId,
+        kind: 'DISPUTE',
+        status: 'OPEN',
+        providerObjectType: 'DISPUTE',
+        providerObjectId: `dp_${randomUUID()}`,
+        providerStatus: 'needs_response',
+        stripeSubscriptionId: `sub_${randomUUID()}`,
+        subscriptionRelation: 'CURRENT',
+        amountMinor: 23_456,
+        currency: 'aud',
+        blocksSending: true,
+        latestProviderEventId: `evt_${randomUUID()}`,
+        latestProviderEventCreatedAt: openedAt,
+        openedAt
+      })
+      .returning({ id: billingCases.id });
+    await client.db
+      .update(billingCases)
+      .set({
+        status: 'RESOLVED',
+        providerStatus: 'won',
+        resolvedAt,
+        updatedAt: resolvedAt
+      })
+      .where(eq(billingCases.id, billingCase!.id));
+
+    const reactivated = await repository.reactivateOrganisation({
+      actorUserId: ids.owner,
+      organisationId,
+      reason: 'Dispute resolved in our favour',
+      expectedVersion: 1,
+      now: new Date('2026-11-11T00:22:00.000Z')
+    });
+
+    expect(reactivated).toMatchObject({
+      ok: true,
+      value: { platformStatus: 'ACTIVE', platformStatusVersion: 2 }
+    });
+  });
+
+  it('rejects an active-status shortcut when a blocking review case remains unresolved', async () => {
+    const organisationId = randomUUID();
+    const openedAt = new Date('2026-11-11T00:25:00.000Z');
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: `platform-blocking-review-${organisationId}`,
+      name: 'Blocking review target',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await client.db.insert(billingCases).values({
+      organisationId,
+      kind: 'DISPUTE',
+      status: 'REVIEW_REQUIRED',
+      providerObjectType: 'DISPUTE',
+      providerObjectId: `dp_${randomUUID()}`,
+      providerStatus: 'lost',
+      stripeSubscriptionId: `sub_${randomUUID()}`,
+      subscriptionRelation: 'CURRENT',
+      amountMinor: 8_765,
+      currency: 'aud',
+      blocksSending: true,
+      latestProviderEventId: `evt_${randomUUID()}`,
+      latestProviderEventCreatedAt: openedAt,
+      openedAt
+    });
+
+    const held = await repository.reactivateOrganisation({
+      actorUserId: ids.owner,
+      organisationId,
+      reason: 'Attempted duplicate reactivation',
+      expectedVersion: 0,
+      now: new Date('2026-11-11T00:26:00.000Z')
+    });
+    const stored = await client.db.query.organisations.findFirst({
+      where: (table, { eq }) => eq(table.id, organisationId)
+    });
+    const audit = await repository.listAuditEvents({ organisationId });
+
+    expect(held).toEqual({ ok: false, code: 'BILLING_RISK_HOLD' });
+    expect(stored).toMatchObject({
+      platformStatus: 'ACTIVE',
+      platformStatusVersion: 0,
+      suspensionReason: null
+    });
+    expect(audit.items).toHaveLength(0);
+  });
+
+  it('permits reactivation when a financial review case does not block sending', async () => {
+    const organisationId = randomUUID();
+    const openedAt = new Date('2026-11-11T00:30:00.000Z');
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: `platform-refund-review-${organisationId}`,
+      name: 'Non-blocking refund review target',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD',
+      platformStatus: 'SUSPENDED',
+      platformStatusVersion: 1,
+      suspendedAt: openedAt,
+      suspensionReason: 'Manual review'
+    });
+    await client.db.insert(billingCases).values({
+      organisationId,
+      kind: 'REFUND',
+      status: 'REVIEW_REQUIRED',
+      providerObjectType: 'CHARGE',
+      providerObjectId: `ch_${randomUUID()}`,
+      providerStatus: 'refunded',
+      stripeSubscriptionId: `sub_${randomUUID()}`,
+      subscriptionRelation: 'CURRENT',
+      amountMinor: 3_456,
+      currency: 'aud',
+      blocksSending: false,
+      latestProviderEventId: `evt_${randomUUID()}`,
+      latestProviderEventCreatedAt: openedAt,
+      openedAt
+    });
+
+    const reactivated = await repository.reactivateOrganisation({
+      actorUserId: ids.owner,
+      organisationId,
+      reason: 'Refund review does not restrict service',
+      expectedVersion: 1,
+      now: new Date('2026-11-11T00:31:00.000Z')
+    });
+
+    expect(reactivated).toMatchObject({
+      ok: true,
+      value: { platformStatus: 'ACTIVE', platformStatusVersion: 2 }
+    });
   });
 
   it('registers only unique Australian Sinch numbers and provider identifiers', async () => {

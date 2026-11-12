@@ -40,6 +40,8 @@ const feedback = (code: string | undefined) => {
       return { kind: 'success', title: 'Change saved', copy: 'The customer account is up to date.' };
     case 'CONFLICT':
       return { kind: 'warning', title: 'The record changed', copy: 'Refresh this page and review the latest values before trying again.' };
+    case 'BILLING_RISK_HOLD':
+      return { kind: 'warning', title: 'Financial review required', copy: 'resolve the open payment or dispute case before reactivating this account.' };
     case 'LAST_ADMIN_REQUIRED':
       return { kind: 'warning', title: 'Administrator required', copy: 'At least one active customer administrator must remain.' };
     case 'INVALID_STATE':

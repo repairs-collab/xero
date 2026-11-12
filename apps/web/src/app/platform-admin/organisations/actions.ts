@@ -23,7 +23,12 @@ export interface OrganisationAdminActionDependencies {
 
 export interface PlatformActionState {
   ok: boolean;
-  code: 'UPDATED' | 'CONFLICT' | 'INVALID_STATE' | 'VALIDATION';
+  code:
+    | 'UPDATED'
+    | 'CONFLICT'
+    | 'INVALID_STATE'
+    | 'VALIDATION'
+    | 'BILLING_RISK_HOLD';
 }
 
 const requiredText = (formData: FormData, name: string): string => {

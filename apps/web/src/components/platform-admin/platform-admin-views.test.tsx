@@ -150,6 +150,39 @@ describe('platform owner views', () => {
     expect(html).not.toContain('ciphertext');
   });
 
+  it('renders actionable feedback when unresolved financial risk blocks reactivation', () => {
+    const html = renderToStaticMarkup(
+      <PlatformOrganisationDetailView
+        detail={{
+          ...organisation,
+          platformStatus: 'SUSPENDED',
+          suspendedAt: now,
+          suspensionReason: 'Stripe payment failure',
+          users: [],
+          invitations: [],
+          onboarding: null
+        }}
+        actions={{
+          extendTrial: noAction,
+          endTrial: noAction,
+          suspend: noAction,
+          reactivate: noAction,
+          updateAllowance: noAction,
+          inviteUser: noAction,
+          resendInvitation: noAction,
+          changeRole: noAction,
+          disableUser: noAction
+        }}
+        feedbackCode="BILLING_RISK_HOLD"
+      />
+    );
+
+    expect(html).toContain('Financial review required');
+    expect(html).toContain(
+      'resolve the open payment or dispute case before reactivating this account.'
+    );
+  });
+
   it('renders Sinch number lifecycle and assignment controls', () => {
     const availableNumber = {
       ...organisation.smsNumber,
