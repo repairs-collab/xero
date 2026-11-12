@@ -7,9 +7,10 @@
 ## Decision
 
 AccountPulse can proceed to a **free, invitation-only beta of up to five Xero
-organisations** after the verified Sinch number-pool change is merged and
-deployed. It is **not ready to charge beta customers or open public
-self-service signup** yet.
+organisations** after the current safety release is merged and deployed and an
+owner-approved Australian numeric reply number has passed a real send/reply
+test for each invited customer. It is **not ready to charge beta customers or
+open public self-service signup** yet.
 
 The live `ap.motts.com.au` TLS and readiness endpoint were verified after the
 older deployment notes were written, so TLS is not treated as a current launch
@@ -26,11 +27,27 @@ this rule. The verified release candidate passed 706 unit tests across 118
 files and 496 integration tests across 62 files on the isolated local
 PostgreSQL 18 test database on 12 November 2026.
 
+The payment-operations foundation now records signed payment failures,
+recoveries, refunds and disputes as tenant-safe billing cases; holds customer
+sending for unresolved financial risk; prevents owner reactivation while a
+blocking case remains unresolved; and exposes a private read-only owner queue.
+Associated customer notices remain **held and not delivered**. This foundation
+does not close SMTP/template delivery, processor receipts, cancellation proof,
+dunning timing or the complete real-customer journey.
+
+The five-customer beta will use one dedicated Australian numeric two-way reply
+number per paid customer. Phone-number-only messaging does not depend on a
+branded alphanumeric Sender ID or EMSP registration. The beta will not maintain
+a spare number pool: each number requires one explicit owner-approved
+just-in-time order. Automatic purchase remains disabled until Sinch confirms
+the exact per-number price, required documentation and API process and the
+owner approves a spend ceiling. No number has been purchased by this release.
+
 ## Release stages
 
 | Stage | Current position | Required next work |
 | --- | --- | --- |
-| Free invite beta (maximum five Xero organisations) | Achievable after the current safety release | Use owner-assisted onboarding; manually verify each Sinch number; run one real invite/MFA/legal/Xero/send/reply journey; document beta support and incident contacts. |
+| Free invite beta (maximum five Xero organisations) | Achievable after the current safety release | Use owner-assisted onboarding; obtain explicit approval before each Australian numeric number order; verify the number and run one real invite/MFA/legal/Xero/send/reply journey; document beta support and incident contacts. |
 | Paid controlled beta | Not ready | Close every P0 item below and upgrade Xero before connection six. |
 | Public self-service | Not ready | Close P0 and P1, then verify the complete unassisted signup and cancellation journeys. |
 | Xero App Store | Later milestone | Reach a stable beta cohort, certify the app, move to Plus and complete Sign Up with Xero and listing review. |
@@ -72,17 +89,27 @@ PostgreSQL 18 test database on 12 November 2026.
    registration, business address, tax treatment, refund policy, subprocessors,
    security contact and incident-notification terms with Australian legal and
    accounting review.
-4. **Complete compliant SMS supply.** Finish the EMSP arrangement and prove
-   number ownership, sender compliance, outbound delivery and inbound reply
-   routing. Until automated provider provisioning exists, only owner-verified
-   numbers may enter the allocation pool.
+4. **Complete numeric SMS supply.** Branded Sender ID and EMSP participation are
+   deferred because the beta uses Australian phone numbers as the visible
+   sender. Obtain Sinch's written per-number price, ordering/API requirements,
+   supporting-document requirements and reply/billing terms. Approve a spend
+   ceiling before enabling purchase. For the five-customer beta, make one
+   idempotent owner-approved just-in-time order per paid customer, keep the
+   customer visibly pending until provider confirmation, and prove outbound
+   delivery plus inbound reply routing. Do not pre-purchase a spare pool or
+   enable automatic purchase yet.
 5. **Selected SMS hard cap — verified.** Launch UI, Terms and support guidance
    no longer promise paid overage, and runtime authorization blocks sends above
    the configured included allowance even when legacy overage fields are set.
    The PostgreSQL hard-cap regressions and full integration project pass. This
    item is closed; genuine metered overage remains a future product feature.
-6. **Build payment operations.** Verify payment-failure/dunning emails, refunds,
-   disputes, chargebacks, receipts, cancellation and provider webhook handling.
+6. **Finish payment operations.** The tenant-safe cases, financial hold,
+   reactivation guard, duplicate/out-of-order handling and private read-only
+   owner queue are implemented in the release candidate. This P0 remains open
+   until payment-failure/dunning delivery, refund and chargeback procedures,
+   Stripe receipt configuration, scheduled/effective cancellation and the
+   complete provider-webhook journey have production-grade evidence. Follow
+   `docs/runbooks/billing-operations.md`; held notices are not delivered.
 7. **Add essential lifecycle email.** Welcome, onboarding, usage warning, trial
    expiry, payment failure, cancellation, export and deletion notices need a
    monitored transactional mail service.
@@ -94,9 +121,10 @@ PostgreSQL 18 test database on 12 November 2026.
    verified export/deletion request and fulfilment process, including legal hold
    and customer notification.
 10. **Prove the real customer journey.** Run a staging journey using actual
-    Cognito invitation, MFA, legal acceptance, Xero OAuth, Stripe, Sinch outbound
-    SMS and inbound reply. Existing browser tests seed sessions and provider
-    data, so they do not prove this journey.
+    Cognito invitation, MFA, legal acceptance, Xero OAuth, Stripe, one
+    owner-approved Australian numeric number, outbound SMS and inbound reply.
+    Existing browser tests seed sessions and provider data, so they do not
+    prove this journey.
 
 ## P1 — complete before public self-service
 
@@ -116,17 +144,19 @@ PostgreSQL 18 test database on 12 November 2026.
 
 - Enterprise/multi-organisation plans and organisation switching.
 - Native iOS and Android applications.
-- Automated compliant number purchasing and provisioning.
+- Pre-funded number pools, automatic purchasing and provisioning beyond the
+  five-customer just-in-time beta process.
 - Database row-level security as defence in depth.
 - Advanced reporting and fully metered overage automation.
 
 ## Completed in the current safety release
 
-- Automatic SMS allocation now requires a Sinch provider ID and an explicit,
-  audited owner verification timestamp.
-- The owner console provides a confirmation checklist for verifying an
-  unassigned pool number.
-- Assigned numbers verified manually record the same provider evidence.
+- Dedicated-number storage requires a provider ID and explicit, audited owner
+  verification before a number can become ready. It can support the approved
+  just-in-time beta flow without maintaining spare inventory.
+- The owner console records number ownership, assignment, verification and
+  cooling evidence. Customer workspaces do not need provider credentials or
+  number-ordering controls.
 - A same-customer subscription reactivation can reclaim its still-bound number
   during cooling. Owner release and every return to the shared pool clear
   verification before the number can be reused for a different customer.
@@ -134,6 +164,9 @@ PostgreSQL 18 test database on 12 November 2026.
 - Solo SMS authorization, Billing, Terms and support guidance now use the same
   hard-cap rule; legacy overage fields are retained only for database
   compatibility.
+- Signed billing events create tenant-safe cases and held notice evidence;
+  unresolved blocking cases prevent owner reactivation, and the private billing
+  queue has no send, release or resolve controls.
 - Verification passed on a fresh database: 180 test files / 1,202 tests, plus
   lint, type-check and production build.
 
@@ -145,3 +178,11 @@ PostgreSQL 18 test database on 12 November 2026.
 - Certification checkpoints: https://developer.xero.com/documentation/xero-app-store/app-partner-guides/certification-checkpoints/
 - Current Xero FAQ, including Custom Connection dates and Sign Up with Xero: https://developer.xero.com/faq
 - Commercial terms: https://developer.xero.com/xero-developer-platform-commercial-terms
+
+## Official Australian SMS and provider references
+
+- ACMA SMS Sender ID frequently asked questions: https://www.acma.gov.au/frequently-asked-questions
+- ACMA Sender ID Register industry rules: https://www.acma.gov.au/industry-rules-sms-sender-id-register
+- Sinch Engage Australian pricing: https://sinch.com/engage/pricing/?country=au
+- Sinch dedicated-number guidance: https://support.app.sinch.com/hc/en-us/articles/10526389880207-Dedicated-numbers
+- Sinch number ordering guidance: https://support.sinch.com/hc/en-us/articles/54556480387603-Buying-a-number-from-Sinch
