@@ -25,6 +25,9 @@ const evidence = (
   allSequencesInReview: true,
   sequenceReviewedAt: now,
   subscriptionStatus: 'ACTIVE',
+  stripeProviderStatus: 'active',
+  currentPeriodEnd: new Date('2026-12-10T00:00:00.000Z'),
+  cancelAt: null,
   trialEndsAt: null,
   replyNumberStatus: 'READY',
   ...overrides

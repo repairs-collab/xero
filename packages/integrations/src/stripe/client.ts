@@ -74,6 +74,9 @@ export interface DirectDebitSetupRequest {
   readonly organisationId: string;
   readonly userId: string;
   readonly stripeCustomerId: string;
+  readonly stripeSubscriptionId: string;
+  readonly directDebitRequestId: string;
+  readonly setupAttemptVersion: number;
   readonly idempotencyKey: string;
 }
 
@@ -86,6 +89,10 @@ export interface DirectDebitActivationRequest {
 export interface StripeHostedSession {
   readonly id: string;
   readonly url: string;
+}
+
+export interface StripeHostedSetupSession extends StripeHostedSession {
+  readonly expiresAt: Date;
 }
 
 export interface StripeWebhookEvent {
@@ -169,6 +176,24 @@ const requireHostedSession = (value: unknown): StripeHostedSession => {
     throw new StripeProviderFailure();
   }
   return { id: value.id, url: value.url };
+};
+
+const requireHostedSetupSession = (value: unknown): StripeHostedSetupSession => {
+  const session = requireHostedSession(value);
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('expires_at' in value) ||
+    !Number.isSafeInteger(value.expires_at) ||
+    (value.expires_at as number) <= 0
+  ) {
+    throw new StripeProviderFailure();
+  }
+  const expiresAt = new Date((value.expires_at as number) * 1000);
+  if (!Number.isFinite(expiresAt.getTime())) {
+    throw new StripeProviderFailure();
+  }
+  return { ...session, expiresAt };
 };
 
 const requireWebhookEvent = (value: unknown): StripeWebhookEvent => {
@@ -417,14 +442,29 @@ export class StripeBillingClient {
 
   async createDirectDebitSetup(
     request: DirectDebitSetupRequest
-  ): Promise<StripeHostedSession> {
+  ): Promise<StripeHostedSetupSession> {
     const organisationId = requireNonEmpty(request.organisationId);
     const userId = requireNonEmpty(request.userId);
     const customer = requireNonEmpty(request.stripeCustomerId);
+    const stripeSubscriptionId = requireNonEmpty(
+      request.stripeSubscriptionId
+    );
+    const directDebitRequestId = requireNonEmpty(
+      request.directDebitRequestId
+    );
+    if (
+      !Number.isSafeInteger(request.setupAttemptVersion) ||
+      request.setupAttemptVersion < 1
+    ) {
+      throw new StripeConfigurationFailure();
+    }
     const idempotencyKey = requireNonEmpty(request.idempotencyKey);
     const metadata = {
       organisation_id: organisationId,
       initiating_user_id: userId,
+      stripe_subscription_id: stripeSubscriptionId,
+      direct_debit_request_id: directDebitRequestId,
+      direct_debit_setup_version: String(request.setupAttemptVersion),
       purpose: 'DIRECT_DEBIT_REQUEST'
     };
     let session: unknown;
@@ -446,7 +486,7 @@ export class StripeBillingClient {
     } catch {
       throw new StripeProviderFailure();
     }
-    return requireHostedSession(session);
+    return requireHostedSetupSession(session);
   }
 
   async activateDirectDebit(

@@ -126,4 +126,39 @@ describe('platform customer provisioning', () => {
     ).rejects.toThrow('VALIDATION');
     expect(dependencies.repository.createWorkspace).not.toHaveBeenCalled();
   });
+
+  it.each([
+    'Australia/Sydney',
+    'Australia/Melbourne',
+    'Australia/Hobart',
+    'Australia/Brisbane',
+    'Australia/Adelaide',
+    'Australia/Darwin',
+    'Australia/Perth',
+    'Australia/Lord_Howe'
+  ])('accepts the Australian customer zone %s', async (timeZone) => {
+    const repository = {
+      createWorkspace: vi.fn().mockResolvedValue({ organisationId: 'org-1' }),
+      removeFailedWorkspace: vi.fn()
+    };
+    const service = createPlatformCustomerProvisioningService({
+      verifyOwner: vi.fn().mockResolvedValue(true),
+      repository,
+      inviteMember: vi.fn().mockResolvedValue({
+        invitationId: 'invite-1',
+        userId: 'user-1'
+      }),
+      clock: { now: () => new Date('2026-11-11T00:00:00.000Z') }
+    });
+
+    await expect(
+      service.createCustomer(session, {
+        ...input,
+        timeZone: timeZone as never
+      })
+    ).resolves.toMatchObject({ organisationId: 'org-1' });
+    expect(repository.createWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({ timeZone })
+    );
+  });
 });

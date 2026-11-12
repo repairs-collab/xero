@@ -74,7 +74,8 @@ class FakeStripeApi implements StripeApi {
         this.checkoutCalls.push({ parameters, options });
         return Promise.resolve({
           id: 'cs_solo_checkout',
-          url: 'https://checkout.stripe.com/c/pay/cs_solo_checkout'
+          url: 'https://checkout.stripe.com/c/pay/cs_solo_checkout',
+          expires_at: 1_794_312_000
         });
       }
     }
@@ -288,11 +289,15 @@ describe('StripeBillingClient checkout', () => {
         organisationId: 'org_solo',
         userId: 'platform_owner',
         stripeCustomerId: 'cus_solo',
+        stripeSubscriptionId: 'sub_solo',
+        directDebitRequestId: 'ddr_solo',
+        setupAttemptVersion: 1,
         idempotencyKey: 'direct-debit-setup:org_solo:requested'
       })
     ).resolves.toEqual({
       id: 'cs_solo_checkout',
-      url: 'https://checkout.stripe.com/c/pay/cs_solo_checkout'
+      url: 'https://checkout.stripe.com/c/pay/cs_solo_checkout',
+      expiresAt: new Date('2026-11-10T12:00:00.000Z')
     });
     expect(api.checkoutCalls[0]).toEqual({
       parameters: {
@@ -304,12 +309,18 @@ describe('StripeBillingClient checkout', () => {
         metadata: {
           organisation_id: 'org_solo',
           initiating_user_id: 'platform_owner',
+          stripe_subscription_id: 'sub_solo',
+          direct_debit_request_id: 'ddr_solo',
+          direct_debit_setup_version: '1',
           purpose: 'DIRECT_DEBIT_REQUEST'
         },
         setup_intent_data: {
           metadata: {
             organisation_id: 'org_solo',
             initiating_user_id: 'platform_owner',
+              stripe_subscription_id: 'sub_solo',
+              direct_debit_request_id: 'ddr_solo',
+              direct_debit_setup_version: '1',
             purpose: 'DIRECT_DEBIT_REQUEST'
           }
         },

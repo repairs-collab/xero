@@ -1,7 +1,19 @@
 import Link from 'next/link';
 
+import { australianTimeZones } from '../../../../server/australian-time-zones.js';
 import { requirePlatformOwnerPage } from '../../../../server/platform-page-authorization.js';
 import { createCustomerAction } from './actions.js';
+
+const timeZoneLabels = {
+  'Australia/Sydney': 'Sydney (NSW and ACT)',
+  'Australia/Melbourne': 'Melbourne (Victoria)',
+  'Australia/Hobart': 'Hobart (Tasmania)',
+  'Australia/Brisbane': 'Brisbane (Queensland)',
+  'Australia/Adelaide': 'Adelaide (South Australia)',
+  'Australia/Darwin': 'Darwin (Northern Territory)',
+  'Australia/Perth': 'Perth (Western Australia)',
+  'Australia/Lord_Howe': 'Lord Howe Island'
+} as const;
 
 export default async function NewPlatformCustomerPage({
   searchParams
@@ -49,9 +61,11 @@ export default async function NewPlatformCustomerPage({
             <label>
               Region and time zone
               <select name="timeZone" defaultValue="Australia/Sydney">
-                <option value="Australia/Sydney">Australia — Eastern</option>
-                <option value="Australia/Adelaide">Australia — Central</option>
-                <option value="Australia/Perth">Australia — Western</option>
+                {australianTimeZones.map((timeZone) => (
+                  <option key={timeZone} value={timeZone}>
+                    {timeZoneLabels[timeZone]}
+                  </option>
+                ))}
               </select>
             </label>
             <label>

@@ -9,6 +9,7 @@ import type {
   SoloCheckoutRequest,
   StripeChargeOwnership,
   StripeHostedSession,
+  StripeHostedSetupSession,
   StripeWebhookEvent
 } from '@bc5000/integrations/stripe';
 import { mapStripeSubscriptionStatus } from '@bc5000/integrations/stripe';
@@ -30,6 +31,7 @@ export interface BillingAccount {
   cancelledAt: Date | null;
   lastStripeEventCreatedAt: Date | null;
   initialCardInvoiceId: string | null;
+  initialCardStripeSubscriptionId: string | null;
   initialCardPaymentSucceededAt: Date | null;
   directDebitStatus:
     | 'REQUESTED'
@@ -45,7 +47,7 @@ export interface StripeBillingGateway {
   createBillingPortal(customerId: string): Promise<StripeHostedSession>;
   createDirectDebitSetup(
     request: DirectDebitSetupRequest
-  ): Promise<StripeHostedSession>;
+  ): Promise<StripeHostedSetupSession>;
   activateDirectDebit(request: DirectDebitActivationRequest): Promise<void>;
   loadChargeOwnership(chargeId: string): Promise<StripeChargeOwnership>;
   verifyWebhook(rawBody: string | Buffer, signature: string): StripeWebhookEvent;
@@ -123,10 +125,15 @@ export interface StripeOperationalEventInput {
 }
 
 export interface DirectDebitRequestRecord {
+  id: string;
   organisationId: string;
+  stripeSubscriptionId: string;
   status: 'REQUESTED' | 'SETUP_PENDING' | 'MANDATE_CONFIRMED' | 'ACTIVE';
   requestedAt: Date;
+  setupAttemptVersion: number;
   setupSessionId: string | null;
+  setupSessionExpiresAt: Date | null;
+  setupCheckoutCompletedAt: Date | null;
   setupIntentId: string | null;
   stripePaymentMethodId: string | null;
   stripeMandateId: string | null;
@@ -134,7 +141,7 @@ export interface DirectDebitRequestRecord {
   activatedAt: Date | null;
 }
 
-export interface DirectDebitSetupLink extends StripeHostedSession {
+export interface DirectDebitSetupLink extends StripeHostedSetupSession {
   deliveryMode: 'MANUAL_CUSTOMER_DELIVERY';
   customerEmail: string;
 }
@@ -149,6 +156,9 @@ export interface DirectDebitOwnerSnapshot {
 
 export interface StripeDirectDebitMandateInput {
   organisationId: string;
+  directDebitRequestId: string;
+  stripeSubscriptionId: string;
+  setupAttemptVersion: number;
   eventId: string;
   eventType: 'setup_intent.succeeded';
   eventCreatedAt: Date;
@@ -157,6 +167,21 @@ export interface StripeDirectDebitMandateInput {
   setupIntentId: string;
   stripePaymentMethodId: string;
   stripeMandateId: string;
+}
+
+export interface StripeDirectDebitSetupCheckoutInput {
+  organisationId: string;
+  directDebitRequestId: string;
+  stripeSubscriptionId: string;
+  setupAttemptVersion: number;
+  eventId: string;
+  eventType: 'checkout.session.completed';
+  eventCreatedAt: Date;
+  payloadHash: string;
+  stripeCustomerId: string;
+  setupSessionId: string;
+  setupSessionExpiresAt: Date;
+  setupIntentId: string;
 }
 
 export interface SubscriptionRepository {
@@ -184,15 +209,24 @@ export interface SubscriptionRepository {
   loadDirectDebitRequesterEmail(organisationId: string): Promise<string | null>;
   markDirectDebitSetupPending(input: {
     organisationId: string;
+    directDebitRequestId: string;
+    stripeSubscriptionId: string;
     actorUserId: string;
+    setupAttemptVersion: number;
     setupSessionId: string;
+    setupSessionExpiresAt: Date;
     occurredAt: Date;
   }): Promise<void>;
+  bindDirectDebitSetupCheckout(
+    input: StripeDirectDebitSetupCheckoutInput
+  ): Promise<StripeEventApplicationOutcome>;
   confirmDirectDebitMandate(
     input: StripeDirectDebitMandateInput
   ): Promise<StripeEventApplicationOutcome>;
   activateDirectDebit(input: {
     organisationId: string;
+    directDebitRequestId: string;
+    stripeSubscriptionId: string;
     activatedByUserId: string;
     activatedAt: Date;
     stripePaymentMethodId: string;
@@ -340,6 +374,43 @@ const metadataFor = (
     throw new SubscriptionFailure('STRIPE_PLAN_MISMATCH');
   }
   return { organisationId, planCode: 'SOLO_AU_2000' };
+};
+
+const positiveIntegerString = (value: unknown): number => {
+  if (typeof value !== 'string' || !/^[1-9][0-9]*$/.test(value)) {
+    throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
+  }
+  const result = Number(value);
+  if (!Number.isSafeInteger(result)) {
+    throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
+  }
+  return result;
+};
+
+const directDebitMetadataFor = (
+  object: Record<string, unknown>
+): {
+  organisationId: string;
+  directDebitRequestId: string;
+  stripeSubscriptionId: string;
+  setupAttemptVersion: number;
+} => {
+  const metadata = objectValue(object.metadata);
+  if (metadata.purpose !== 'DIRECT_DEBIT_REQUEST') {
+    throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
+  }
+  return {
+    organisationId: requiredString(metadata.organisation_id),
+    directDebitRequestId: requiredString(
+      metadata.direct_debit_request_id
+    ),
+    stripeSubscriptionId: requiredString(
+      metadata.stripe_subscription_id
+    ),
+    setupAttemptVersion: positiveIntegerString(
+      metadata.direct_debit_setup_version
+    )
+  };
 };
 
 const payloadHash = (rawBody: string | Buffer): string =>
@@ -529,10 +600,9 @@ const parseDirectDebitMandateEvent = (
 ): StripeDirectDebitMandateInput => {
   const object = objectValue(event.data.object);
   requireObjectDiscriminator(object, 'setup_intent');
-  const metadata = objectValue(object.metadata);
+  const metadata = directDebitMetadataFor(object);
   if (
     object.status !== 'succeeded' ||
-    metadata.purpose !== 'DIRECT_DEBIT_REQUEST' ||
     !Array.isArray(object.payment_method_types) ||
     object.payment_method_types.length !== 1 ||
     object.payment_method_types[0] !== 'au_becs_debit'
@@ -540,7 +610,7 @@ const parseDirectDebitMandateEvent = (
     throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
   }
   return {
-    organisationId: requiredString(metadata.organisation_id),
+    ...metadata,
     eventId: requiredString(event.id),
     eventType: 'setup_intent.succeeded',
     eventCreatedAt: eventDate(event.created),
@@ -549,6 +619,46 @@ const parseDirectDebitMandateEvent = (
     setupIntentId: requiredString(object.id),
     stripePaymentMethodId: requiredString(object.payment_method),
     stripeMandateId: requiredString(object.mandate)
+  };
+};
+
+const parseDirectDebitSetupCheckout = (
+  event: StripeWebhookEvent,
+  hash: string
+): StripeDirectDebitSetupCheckoutInput => {
+  const object = objectValue(event.data.object);
+  const metadata = directDebitMetadataFor(object);
+  const clientReference = requiredString(object.client_reference_id);
+  if (
+    object.object !== 'checkout.session' ||
+    object.mode !== 'setup' ||
+    object.status !== 'complete' ||
+    object.payment_status !== 'no_payment' ||
+    object.currency !== 'aud' ||
+    !Array.isArray(object.payment_method_types) ||
+    object.payment_method_types.length !== 1 ||
+    object.payment_method_types[0] !== 'au_becs_debit'
+  ) {
+    throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
+  }
+  if (clientReference !== metadata.organisationId) {
+    throw new SubscriptionFailure('STRIPE_ORGANISATION_MISMATCH');
+  }
+  const eventCreatedAt = eventDate(event.created);
+  const setupSessionExpiresAt = eventDate(object.expires_at);
+  if (eventCreatedAt > setupSessionExpiresAt) {
+    throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
+  }
+  return {
+    ...metadata,
+    eventId: requiredString(event.id),
+    eventType: 'checkout.session.completed',
+    eventCreatedAt,
+    payloadHash: hash,
+    stripeCustomerId: requiredString(object.customer),
+    setupSessionId: requiredString(object.id),
+    setupSessionExpiresAt,
+    setupIntentId: requiredString(object.setup_intent)
   };
 };
 
@@ -776,6 +886,8 @@ export const createSubscriptionService = (dependencies: {
       account.stripeCustomerId === null ||
       account.stripeSubscriptionId === null ||
       account.initialCardInvoiceId === null ||
+      account.initialCardStripeSubscriptionId !==
+        account.stripeSubscriptionId ||
       account.initialCardPaymentSucceededAt === null
     ) {
       throw new SubscriptionFailure('DIRECT_DEBIT_CARD_PAYMENT_REQUIRED');
@@ -807,7 +919,9 @@ export const createSubscriptionService = (dependencies: {
     if (
       account.stripeCustomerId === null ||
       account.stripeSubscriptionId === null ||
-      account.initialCardPaymentSucceededAt === null
+      account.initialCardPaymentSucceededAt === null ||
+      account.initialCardStripeSubscriptionId !==
+        account.stripeSubscriptionId
     ) {
       throw new SubscriptionFailure('DIRECT_DEBIT_CARD_PAYMENT_REQUIRED');
     }
@@ -815,6 +929,7 @@ export const createSubscriptionService = (dependencies: {
       await dependencies.repository.loadDirectDebitRequest(organisationId);
     if (
       request === null ||
+      request.stripeSubscriptionId !== account.stripeSubscriptionId ||
       (request.status !== 'REQUESTED' && request.status !== 'SETUP_PENDING')
     ) {
       throw new SubscriptionFailure('DIRECT_DEBIT_REQUEST_REQUIRED');
@@ -826,22 +941,47 @@ export const createSubscriptionService = (dependencies: {
     if (requesterEmail === null) {
       throw new SubscriptionFailure('DIRECT_DEBIT_REQUESTER_NOT_FOUND');
     }
+    const now = dependencies.clock.now();
+    const setupAttemptVersion =
+      request.status === 'REQUESTED'
+        ? 1
+        : request.setupSessionExpiresAt !== null &&
+            request.setupSessionExpiresAt > now
+          ? request.setupAttemptVersion
+          : request.setupAttemptVersion + 1;
     const result = await dependencies.stripe.createDirectDebitSetup({
       organisationId,
       userId: session.userId,
       stripeCustomerId: account.stripeCustomerId,
-      idempotencyKey: `direct-debit-setup:${organisationId}:${request.requestedAt.toISOString()}`
+      stripeSubscriptionId: account.stripeSubscriptionId,
+      directDebitRequestId: request.id,
+      setupAttemptVersion,
+      idempotencyKey: `direct-debit-setup:${request.id}:v${setupAttemptVersion}`
     });
+    if (result.expiresAt <= now) {
+      throw new SubscriptionFailure('DIRECT_DEBIT_SETUP_EXPIRED');
+    }
     await dependencies.repository.markDirectDebitSetupPending({
       organisationId,
+      directDebitRequestId: request.id,
+      stripeSubscriptionId: account.stripeSubscriptionId,
       actorUserId: session.userId,
+      setupAttemptVersion,
       setupSessionId: result.id,
-      occurredAt: dependencies.clock.now()
+      setupSessionExpiresAt: result.expiresAt,
+      occurredAt: now
     });
+    const deliveryEmail =
+      await dependencies.repository.loadDirectDebitRequesterEmail(
+        organisationId
+      );
+    if (deliveryEmail === null) {
+      throw new SubscriptionFailure('DIRECT_DEBIT_REQUESTER_NOT_FOUND');
+    }
     return {
       ...result,
       deliveryMode: 'MANUAL_CUSTOMER_DELIVERY',
-      customerEmail: requesterEmail
+      customerEmail: deliveryEmail
     };
   };
 
@@ -861,6 +1001,7 @@ export const createSubscriptionService = (dependencies: {
     if (request?.status === 'ACTIVE') return request;
     if (
       account.stripeSubscriptionId === null ||
+      request?.stripeSubscriptionId !== account.stripeSubscriptionId ||
       request?.status !== 'MANDATE_CONFIRMED' ||
       request.stripePaymentMethodId === null ||
       request.stripeMandateId === null ||
@@ -871,10 +1012,12 @@ export const createSubscriptionService = (dependencies: {
     await dependencies.stripe.activateDirectDebit({
       stripeSubscriptionId: account.stripeSubscriptionId,
       stripePaymentMethodId: request.stripePaymentMethodId,
-      idempotencyKey: `direct-debit-activate:${organisationId}:${request.stripeMandateId}`
+      idempotencyKey: `direct-debit-activate:${request.id}:${request.stripeMandateId}`
     });
     return dependencies.repository.activateDirectDebit({
       organisationId,
+      directDebitRequestId: request.id,
+      stripeSubscriptionId: account.stripeSubscriptionId,
       activatedByUserId: session.userId,
       activatedAt: dependencies.clock.now(),
       stripePaymentMethodId: request.stripePaymentMethodId,
@@ -929,7 +1072,21 @@ export const createSubscriptionService = (dependencies: {
   ): Promise<StripeEventApplicationOutcome> => {
     const event = dependencies.stripe.verifyWebhook(rawBody, signature);
     const hash = payloadHash(rawBody);
+    const replay = await dependencies.repository.lookupEventReplay({
+      eventId: event.id,
+      payloadHash: hash
+    });
+    if (replay === 'DUPLICATE') return 'DUPLICATE';
+    if (replay === 'HASH_MISMATCH') {
+      throw new SubscriptionFailure('STRIPE_EVENT_PAYLOAD_MISMATCH');
+    }
     if (event.type === 'checkout.session.completed') {
+      const object = objectValue(event.data.object);
+      if (object.mode === 'setup') {
+        return dependencies.repository.bindDirectDebitSetupCheckout(
+          parseDirectDebitSetupCheckout(event, hash)
+        );
+      }
       return dependencies.repository.applyCheckoutCompleted(
         parseCheckoutCompleted(event, hash)
       );
@@ -940,14 +1097,6 @@ export const createSubscriptionService = (dependencies: {
       );
     }
     if (isOperationalEventType(event.type)) {
-      const replay = await dependencies.repository.lookupEventReplay({
-        eventId: event.id,
-        payloadHash: hash
-      });
-      if (replay === 'DUPLICATE') return 'DUPLICATE';
-      if (replay === 'HASH_MISMATCH') {
-        throw new SubscriptionFailure('STRIPE_EVENT_PAYLOAD_MISMATCH');
-      }
       return dependencies.repository.applyOperationalEvent(
         await parseOperationalEvent(
           event as StripeWebhookEvent & {

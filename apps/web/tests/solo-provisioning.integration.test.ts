@@ -108,11 +108,6 @@ describe('AccountPulse Solo provisioning', () => {
       name: 'a New Zealand organisation',
       candidate: { baseCurrency: 'AUD', timeZone: 'Pacific/Auckland' },
       error: 'XERO_ORGANISATION_TIMEZONE_UNSUPPORTED'
-    },
-    {
-      name: 'an unapproved Australian time zone',
-      candidate: { baseCurrency: 'AUD', timeZone: 'Australia/Hobart' },
-      error: 'XERO_ORGANISATION_TIMEZONE_UNSUPPORTED'
     }
   ])('rejects $name before persisting a Solo workspace', async ({ candidate, error }) => {
     const seeded = await seedProvisionalIdentity(candidate);
@@ -134,6 +129,28 @@ describe('AccountPulse Solo provisioning', () => {
         .from(memberships)
         .where(eq(memberships.userId, seeded.session.userId))
     ).resolves.toEqual([]);
+  });
+
+  it('persists an allowlisted Australian zone beyond Sydney and Melbourne', async () => {
+    const seeded = await seedProvisionalIdentity({
+      baseCurrency: 'AUD',
+      timeZone: 'Australia/Hobart'
+    });
+    const repository = createPostgresSoloProvisioningRepository(client.db);
+
+    const provisioned = await repository.provision({
+      userId: seeded.session.userId,
+      pendingAuthorisationId: seeded.pendingAuthorisationId,
+      connectionId: seeded.connectionId,
+      tenantId: seeded.tenantId,
+      now
+    });
+    const [organisation] = await client.db
+      .select({ timeZone: organisations.timeZone })
+      .from(organisations)
+      .where(eq(organisations.id, provisioned.organisationId));
+
+    expect(organisation?.timeZone).toBe('Australia/Hobart');
   });
 
   it('atomically creates one unpaid workspace and remains idempotent on retry', async () => {

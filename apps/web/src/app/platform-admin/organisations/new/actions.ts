@@ -5,6 +5,7 @@ import { redirect } from 'next/navigation';
 
 import { requirePlatformOwner } from '../../../../server/platform-authorization.js';
 import { getPlatformCustomerProvisioningService } from '../../../../server/platform-customer-provisioning.js';
+import type { AustralianTimeZone } from '../../../../server/australian-time-zones.js';
 
 const text = (formData: FormData, name: string): string => {
   const value = formData.get(name);
@@ -34,10 +35,7 @@ export async function createCustomerAction(formData: FormData): Promise<never> {
         name: text(formData, 'name'),
         adminEmail: text(formData, 'adminEmail'),
         adminDisplayName: text(formData, 'adminDisplayName'),
-        timeZone: text(formData, 'timeZone') as
-          | 'Australia/Sydney'
-          | 'Australia/Adelaide'
-          | 'Australia/Perth',
+        timeZone: text(formData, 'timeZone') as AustralianTimeZone,
         baseCurrency: text(formData, 'baseCurrency') as 'AUD',
         includedSmsParts: integer(formData, 'includedSmsParts'),
         warningPercent: integer(formData, 'warningPercent'),

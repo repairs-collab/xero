@@ -234,7 +234,8 @@ export class PostgresSmsCommerceRepository {
       existing !== undefined &&
       existing.partDelta === input.partCount &&
       existing.billingPeriodStart.getTime() ===
-        allowancePeriod.start.getTime();
+        allowancePeriod.start.getTime() &&
+      existing.billingPeriodEnd.getTime() === allowancePeriod.end.getTime();
     const decision = decideSmsAllowance({
       ...usage,
       requestedParts: input.partCount,

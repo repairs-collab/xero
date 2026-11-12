@@ -61,6 +61,10 @@ export const subscriptions = pgTable(
     lastStripeEventCreatedAt: timestamp('last_stripe_event_created_at', {
       withTimezone: true
     }),
+    initialCardStripeSubscriptionId: varchar(
+      'initial_card_stripe_subscription_id',
+      { length: 128 }
+    ),
     initialCardInvoiceId: varchar('initial_card_invoice_id', { length: 128 }),
     initialCardPaymentSucceededAt: timestamp(
       'initial_card_payment_succeeded_at',
@@ -93,7 +97,7 @@ export const subscriptions = pgTable(
     ),
     check(
       'subscriptions_initial_card_evidence_ck',
-      sql`(${table.initialCardInvoiceId} is null and ${table.initialCardPaymentSucceededAt} is null) or (${table.initialCardInvoiceId} is not null and ${table.initialCardPaymentSucceededAt} is not null)`
+      sql`(${table.initialCardStripeSubscriptionId} is null and ${table.initialCardInvoiceId} is null and ${table.initialCardPaymentSucceededAt} is null) or (${table.initialCardStripeSubscriptionId} is not null and ${table.initialCardInvoiceId} is not null and ${table.initialCardPaymentSucceededAt} is not null)`
     ),
     check(
       'subscriptions_period_ck',
@@ -116,9 +120,13 @@ export type DirectDebitRequestStatus =
 export const directDebitRequests = pgTable(
   'direct_debit_requests',
   {
+    id: uuid('id').defaultRandom().primaryKey(),
     organisationId: uuid('organisation_id')
-      .primaryKey()
+      .notNull()
       .references(() => subscriptions.organisationId, { onDelete: 'cascade' }),
+    stripeSubscriptionId: varchar('stripe_subscription_id', {
+      length: 128
+    }).notNull(),
     status: varchar('status', { length: 24 })
       .$type<DirectDebitRequestStatus>()
       .notNull()
@@ -127,7 +135,16 @@ export const directDebitRequests = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: 'restrict' }),
     requestedAt: timestamp('requested_at', { withTimezone: true }).notNull(),
+    setupAttemptVersion: integer('setup_attempt_version')
+      .notNull()
+      .default(0),
     setupSessionId: varchar('setup_session_id', { length: 128 }),
+    setupSessionExpiresAt: timestamp('setup_session_expires_at', {
+      withTimezone: true
+    }),
+    setupCheckoutCompletedAt: timestamp('setup_checkout_completed_at', {
+      withTimezone: true
+    }),
     setupIntentId: varchar('setup_intent_id', { length: 128 }),
     stripePaymentMethodId: varchar('stripe_payment_method_id', {
       length: 128
@@ -149,6 +166,10 @@ export const directDebitRequests = pgTable(
       .defaultNow()
   },
   (table) => [
+    uniqueIndex('direct_debit_requests_org_subscription_uq').on(
+      table.organisationId,
+      table.stripeSubscriptionId
+    ),
     uniqueIndex('direct_debit_requests_setup_session_uq').on(
       table.setupSessionId
     ),
@@ -168,10 +189,17 @@ export const directDebitRequests = pgTable(
       sql`${table.status} in ('REQUESTED', 'SETUP_PENDING', 'MANDATE_CONFIRMED', 'ACTIVE')`
     ),
     check(
+      'direct_debit_requests_setup_version_ck',
+      sql`${table.setupAttemptVersion} >= 0`
+    ),
+    check(
       'direct_debit_requests_state_ck',
       sql`(
         ${table.status} = 'REQUESTED' and
+        ${table.setupAttemptVersion} = 0 and
         ${table.setupSessionId} is null and
+        ${table.setupSessionExpiresAt} is null and
+        ${table.setupCheckoutCompletedAt} is null and
         ${table.setupIntentId} is null and
         ${table.stripePaymentMethodId} is null and
         ${table.stripeMandateId} is null and
@@ -180,8 +208,10 @@ export const directDebitRequests = pgTable(
         ${table.activatedAt} is null
       ) or (
         ${table.status} = 'SETUP_PENDING' and
+        ${table.setupAttemptVersion} > 0 and
         ${table.setupSessionId} is not null and
-        ${table.setupIntentId} is null and
+        ${table.setupSessionExpiresAt} is not null and
+        ((${table.setupIntentId} is null and ${table.setupCheckoutCompletedAt} is null) or (${table.setupIntentId} is not null and ${table.setupCheckoutCompletedAt} is not null)) and
         ${table.stripePaymentMethodId} is null and
         ${table.stripeMandateId} is null and
         ${table.mandateConfirmedAt} is null and
@@ -189,7 +219,10 @@ export const directDebitRequests = pgTable(
         ${table.activatedAt} is null
       ) or (
         ${table.status} = 'MANDATE_CONFIRMED' and
+        ${table.setupAttemptVersion} > 0 and
         ${table.setupSessionId} is not null and
+        ${table.setupSessionExpiresAt} is not null and
+        ${table.setupCheckoutCompletedAt} is not null and
         ${table.setupIntentId} is not null and
         ${table.stripePaymentMethodId} is not null and
         ${table.stripeMandateId} is not null and
@@ -198,7 +231,10 @@ export const directDebitRequests = pgTable(
         ${table.activatedAt} is null
       ) or (
         ${table.status} = 'ACTIVE' and
+        ${table.setupAttemptVersion} > 0 and
         ${table.setupSessionId} is not null and
+        ${table.setupSessionExpiresAt} is not null and
+        ${table.setupCheckoutCompletedAt} is not null and
         ${table.setupIntentId} is not null and
         ${table.stripePaymentMethodId} is not null and
         ${table.stripeMandateId} is not null and

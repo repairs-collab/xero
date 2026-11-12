@@ -13,6 +13,8 @@ import {
   xeroPendingAuthorisations
 } from '@bc5000/db/web';
 
+import { isAustralianTimeZone } from './australian-time-zones.js';
+
 export interface SoloProvisioningInput {
   userId: string;
   pendingAuthorisationId: string;
@@ -49,15 +51,9 @@ const validCurrency = (value: string): string => {
   return result;
 };
 
-const approvedSoloTimeZones = new Set([
-  'Australia/Sydney',
-  'Australia/Adelaide',
-  'Australia/Perth'
-]);
-
 const validSoloTimeZone = (value: string): string => {
   const result = value.trim();
-  if (!approvedSoloTimeZones.has(result)) {
+  if (!isAustralianTimeZone(result)) {
     throw new Error('XERO_ORGANISATION_TIMEZONE_UNSUPPORTED');
   }
   return result;
@@ -65,10 +61,16 @@ const validSoloTimeZone = (value: string): string => {
 
 const xeroTimeZones = new Map<string, string>([
   ['AUSEASTERNSTANDARDTIME', 'Australia/Sydney'],
-  ['AUSCENTRALSTANDARDTIME', 'Australia/Adelaide'],
+  ['AUSTRALIA/SYDNEY', 'Australia/Sydney'],
+  ['AUSTRALIA/MELBOURNE', 'Australia/Melbourne'],
+  ['AUSCENTRALSTANDARDTIME', 'Australia/Darwin'],
+  ['CENAUSTRALIASTANDARDTIME', 'Australia/Adelaide'],
+  ['EAUSTRALIASTANDARDTIME', 'Australia/Brisbane'],
+  ['EASTAUSTRALIASTANDARDTIME', 'Australia/Brisbane'],
   ['TASMANIASTANDARDTIME', 'Australia/Hobart'],
   ['WESTERNSTANDARDTIME', 'Australia/Perth'],
   ['WAUSTRALIASTANDARDTIME', 'Australia/Perth'],
+  ['LORDHOWESTANDARDTIME', 'Australia/Lord_Howe'],
   ['NEWZEALANDSTANDARDTIME', 'Pacific/Auckland']
 ]);
 

@@ -45,7 +45,8 @@ class FakeStripe implements StripeBillingGateway {
   createDirectDebitSetup() {
     return Promise.resolve({
       id: 'cs_becs_test',
-      url: 'https://checkout.stripe.test/becs'
+      url: 'https://checkout.stripe.test/becs',
+      expiresAt: new Date('2026-11-10T12:00:00.000Z')
     });
   }
 
@@ -283,6 +284,64 @@ describe('AccountPulse Solo subscription persistence', () => {
     expect(event?.outcome).toBe('REJECTED');
     expect(JSON.stringify(auditRows)).not.toContain('cus_' + seeded.organisationId);
     expect(JSON.stringify(auditRows)).not.toContain('sub_' + seeded.organisationId);
+  });
+
+  it('rejects reused lifecycle and Checkout event IDs with different payload hashes', async () => {
+    const { organisationId } = await seed();
+    const repository = createPostgresSubscriptionRepository(client.db, {
+      now: () => now
+    });
+    const stripeCustomerId = `cus_${organisationId}`;
+    const stripeSubscriptionId = `sub_${organisationId}`;
+    const lifecycle = {
+      organisationId,
+      eventId: `evt_lifecycle_hash_${organisationId}`,
+      eventType: 'customer.subscription.created',
+      eventCreatedAt: new Date('2026-11-09T11:00:00.000Z'),
+      payloadHash: 'a'.repeat(64),
+      stripeCustomerId,
+      stripeSubscriptionId,
+      planCode: 'SOLO_AU_2000' as const,
+      billingCadence: 'MONTHLY' as const,
+      status: 'ACTIVE' as const,
+      stripeProviderStatus: 'active',
+      currentPeriodStart: new Date('2026-11-09T00:00:00.000Z'),
+      currentPeriodEnd: new Date('2026-12-09T00:00:00.000Z'),
+      trialEndsAt: null,
+      cancelAt: null,
+      cancelledAt: null
+    };
+
+    await expect(repository.applyLifecycleEvent(lifecycle)).resolves.toBe(
+      'APPLIED'
+    );
+    await expect(
+      repository.applyLifecycleEvent({
+        ...lifecycle,
+        payloadHash: 'b'.repeat(64)
+      })
+    ).rejects.toThrow('STRIPE_EVENT_PAYLOAD_MISMATCH');
+
+    const checkout = {
+      organisationId,
+      eventId: `evt_checkout_hash_${organisationId}`,
+      eventType: 'checkout.session.completed' as const,
+      eventCreatedAt: new Date('2026-11-09T11:00:01.000Z'),
+      payloadHash: 'c'.repeat(64),
+      stripeCustomerId,
+      stripeSubscriptionId,
+      initialCardInvoiceId: `in_${organisationId}`,
+      initialCardPaymentSucceededAt: new Date('2026-11-09T11:00:01.000Z')
+    };
+    await expect(repository.applyCheckoutCompleted(checkout)).resolves.toBe(
+      'APPLIED'
+    );
+    await expect(
+      repository.applyCheckoutCompleted({
+        ...checkout,
+        payloadHash: 'd'.repeat(64)
+      })
+    ).rejects.toThrow('STRIPE_EVENT_PAYLOAD_MISMATCH');
   });
 });
 

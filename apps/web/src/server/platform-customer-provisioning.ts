@@ -16,12 +16,16 @@ import {
 import { getDatabaseClient } from './runtime.js';
 import { isPlatformOwner } from './platform-authorization.js';
 import { getPlatformUserAdministration } from './platform-user-administration.js';
+import {
+  type AustralianTimeZone,
+  isAustralianTimeZone
+} from './australian-time-zones.js';
 
 export interface CreatePlatformCustomerInput {
   name: string;
   adminEmail: string;
   adminDisplayName: string;
-  timeZone: 'Australia/Sydney' | 'Australia/Adelaide' | 'Australia/Perth';
+  timeZone: AustralianTimeZone;
   baseCurrency: 'AUD';
   includedSmsParts: number;
   warningPercent: number;
@@ -119,12 +123,6 @@ export const createPostgresPlatformCustomerProvisioningRepository = (
 });
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const allowedTimeZones = new Set<CreatePlatformCustomerInput['timeZone']>([
-  'Australia/Sydney',
-  'Australia/Adelaide',
-  'Australia/Perth'
-]);
-
 export const createPlatformCustomerProvisioningService = (dependencies: {
   verifyOwner(userId: string): Promise<boolean>;
   repository: PlatformCustomerProvisioningRepository;
@@ -148,7 +146,7 @@ export const createPlatformCustomerProvisioningService = (dependencies: {
       !emailPattern.test(input.adminEmail) ||
       input.adminDisplayName.length < 2 ||
       input.adminDisplayName.length > 160 ||
-      !allowedTimeZones.has(input.timeZone) ||
+      !isAustralianTimeZone(input.timeZone) ||
       input.baseCurrency !== 'AUD' ||
       !Number.isSafeInteger(input.includedSmsParts) ||
       input.includedSmsParts < 1 ||

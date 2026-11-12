@@ -176,10 +176,15 @@ const lockStripeSubscriptionOwnership = async (
 const toDirectDebitRequestRecord = (
   row: typeof directDebitRequests.$inferSelect
 ): DirectDebitRequestRecord => ({
+  id: row.id,
   organisationId: row.organisationId,
+  stripeSubscriptionId: row.stripeSubscriptionId,
   status: row.status,
   requestedAt: row.requestedAt,
+  setupAttemptVersion: row.setupAttemptVersion,
   setupSessionId: row.setupSessionId,
+  setupSessionExpiresAt: row.setupSessionExpiresAt,
+  setupCheckoutCompletedAt: row.setupCheckoutCompletedAt,
   setupIntentId: row.setupIntentId,
   stripePaymentMethodId: row.stripePaymentMethodId,
   stripeMandateId: row.stripeMandateId,
@@ -213,6 +218,8 @@ export const createPostgresSubscriptionRepository = (
         cancelledAt: subscriptions.cancelledAt,
         lastStripeEventCreatedAt: subscriptions.lastStripeEventCreatedAt,
         initialCardInvoiceId: subscriptions.initialCardInvoiceId,
+        initialCardStripeSubscriptionId:
+          subscriptions.initialCardStripeSubscriptionId,
         initialCardPaymentSucceededAt:
           subscriptions.initialCardPaymentSucceededAt,
         directDebitStatus: directDebitRequests.status,
@@ -226,7 +233,13 @@ export const createPostgresSubscriptionRepository = (
       .innerJoin(users, eq(users.id, userId))
       .leftJoin(
         directDebitRequests,
-        eq(directDebitRequests.organisationId, organisations.id)
+        and(
+          eq(directDebitRequests.organisationId, organisations.id),
+          eq(
+            directDebitRequests.stripeSubscriptionId,
+            subscriptions.stripeSubscriptionId
+          )
+        )
       )
       .where(
         and(
@@ -252,26 +265,22 @@ export const createPostgresSubscriptionRepository = (
       : 'HASH_MISMATCH';
   };
 
-  const eventExists = async (eventId: string): Promise<boolean> => {
-    const [row] = await database
-      .select({ id: subscriptionEvents.id })
-      .from(subscriptionEvents)
-      .where(eq(subscriptionEvents.stripeEventId, eventId))
-      .limit(1);
-    return row !== undefined;
-  };
-
   const applyCheckoutCompleted = async (
     input: StripeCheckoutCompletedInput
   ): Promise<StripeEventApplicationOutcome> => {
     try {
       return await database.transaction(async (transaction) => {
         const [duplicate] = await transaction
-          .select({ id: subscriptionEvents.id })
+          .select({ payloadHash: subscriptionEvents.payloadHash })
           .from(subscriptionEvents)
           .where(eq(subscriptionEvents.stripeEventId, input.eventId))
           .limit(1);
-        if (duplicate !== undefined) return 'DUPLICATE';
+        if (duplicate !== undefined) {
+          if (duplicate.payloadHash !== input.payloadHash) {
+            throw new Error('STRIPE_EVENT_PAYLOAD_MISMATCH');
+          }
+          return 'DUPLICATE';
+        }
 
         const [organisation] = await transaction
           .select({ edition: organisations.edition })
@@ -365,16 +374,25 @@ export const createPostgresSubscriptionRepository = (
         if (subscription.stripeSubscriptionId !== null && subscription.stripeSubscriptionId !== input.stripeSubscriptionId) {
           await transaction.insert(retiredStripeSubscriptions).values({ stripeSubscriptionId: subscription.stripeSubscriptionId, organisationId: input.organisationId });
         }
+        const sameBillingEpisode =
+          subscription.initialCardStripeSubscriptionId ===
+          input.stripeSubscriptionId;
         await transaction
           .update(subscriptions)
           .set({
             stripeCustomerId: input.stripeCustomerId,
             stripeSubscriptionId: input.stripeSubscriptionId,
+            initialCardStripeSubscriptionId: input.stripeSubscriptionId,
             initialCardInvoiceId:
-              subscription.initialCardInvoiceId ?? input.initialCardInvoiceId,
+              sameBillingEpisode
+                ? (subscription.initialCardInvoiceId ??
+                  input.initialCardInvoiceId)
+                : input.initialCardInvoiceId,
             initialCardPaymentSucceededAt:
-              subscription.initialCardPaymentSucceededAt ??
-              input.initialCardPaymentSucceededAt,
+              sameBillingEpisode
+                ? (subscription.initialCardPaymentSucceededAt ??
+                  input.initialCardPaymentSucceededAt)
+                : input.initialCardPaymentSucceededAt,
             updatedAt: clock.now()
           })
           .where(eq(subscriptions.organisationId, input.organisationId));
@@ -390,8 +408,15 @@ export const createPostgresSubscriptionRepository = (
         return 'APPLIED';
       });
     } catch (error) {
-      if (postgresErrorCode(error) === '23505' && (await eventExists(input.eventId))) {
-        return 'DUPLICATE';
+      if (postgresErrorCode(error) === '23505') {
+        const replay = await lookupEventReplay({
+          eventId: input.eventId,
+          payloadHash: input.payloadHash
+        });
+        if (replay === 'DUPLICATE') return 'DUPLICATE';
+        if (replay === 'HASH_MISMATCH') {
+          throw new Error('STRIPE_EVENT_PAYLOAD_MISMATCH');
+        }
       }
       throw error;
     }
@@ -403,11 +428,16 @@ export const createPostgresSubscriptionRepository = (
     try {
       return await database.transaction(async (transaction) => {
         const [duplicate] = await transaction
-          .select({ id: subscriptionEvents.id })
+          .select({ payloadHash: subscriptionEvents.payloadHash })
           .from(subscriptionEvents)
           .where(eq(subscriptionEvents.stripeEventId, input.eventId))
           .limit(1);
-        if (duplicate !== undefined) return 'DUPLICATE';
+        if (duplicate !== undefined) {
+          if (duplicate.payloadHash !== input.payloadHash) {
+            throw new Error('STRIPE_EVENT_PAYLOAD_MISMATCH');
+          }
+          return 'DUPLICATE';
+        }
 
         const [organisation] = await transaction
           .select({ edition: organisations.edition })
@@ -500,6 +530,9 @@ export const createPostgresSubscriptionRepository = (
           await transaction.insert(retiredStripeSubscriptions).values({ stripeSubscriptionId: subscription.stripeSubscriptionId, organisationId: input.organisationId });
         }
         const now = clock.now();
+        const replacesBillingEpisode =
+          subscription.stripeSubscriptionId !== null &&
+          subscription.stripeSubscriptionId !== input.stripeSubscriptionId;
         await transaction
           .update(subscriptions)
           .set({
@@ -514,6 +547,13 @@ export const createPostgresSubscriptionRepository = (
             cancelAt: input.cancelAt,
             cancelledAt: input.cancelledAt,
             lastStripeEventCreatedAt: input.eventCreatedAt,
+            ...(replacesBillingEpisode
+              ? {
+                  initialCardStripeSubscriptionId: null,
+                  initialCardInvoiceId: null,
+                  initialCardPaymentSucceededAt: null
+                }
+              : {}),
             updatedAt: now
           })
           .where(eq(subscriptions.organisationId, input.organisationId));
@@ -546,8 +586,15 @@ export const createPostgresSubscriptionRepository = (
         return 'APPLIED';
       });
     } catch (error) {
-      if (postgresErrorCode(error) === '23505' && (await eventExists(input.eventId))) {
-        return 'DUPLICATE';
+      if (postgresErrorCode(error) === '23505') {
+        const replay = await lookupEventReplay({
+          eventId: input.eventId,
+          payloadHash: input.payloadHash
+        });
+        if (replay === 'DUPLICATE') return 'DUPLICATE';
+        if (replay === 'HASH_MISMATCH') {
+          throw new Error('STRIPE_EVENT_PAYLOAD_MISMATCH');
+        }
       }
       throw error;
     }
@@ -1098,6 +1145,8 @@ export const createPostgresSubscriptionRepository = (
           .select({
             stripeCustomerId: subscriptions.stripeCustomerId,
             stripeSubscriptionId: subscriptions.stripeSubscriptionId,
+            initialCardStripeSubscriptionId:
+              subscriptions.initialCardStripeSubscriptionId,
             initialCardInvoiceId: subscriptions.initialCardInvoiceId,
             initialCardPaymentSucceededAt:
               subscriptions.initialCardPaymentSucceededAt
@@ -1125,6 +1174,8 @@ export const createPostgresSubscriptionRepository = (
           subscription === undefined ||
           subscription.stripeCustomerId === null ||
           subscription.stripeSubscriptionId === null ||
+          subscription.initialCardStripeSubscriptionId !==
+            subscription.stripeSubscriptionId ||
           subscription.initialCardInvoiceId === null ||
           subscription.initialCardPaymentSucceededAt === null
         ) {
@@ -1134,7 +1185,13 @@ export const createPostgresSubscriptionRepository = (
           .select()
           .from(directDebitRequests)
           .where(
-            eq(directDebitRequests.organisationId, input.organisationId)
+            and(
+              eq(directDebitRequests.organisationId, input.organisationId),
+              eq(
+                directDebitRequests.stripeSubscriptionId,
+                subscription.stripeSubscriptionId
+              )
+            )
           )
           .for('update')
           .limit(1);
@@ -1145,6 +1202,7 @@ export const createPostgresSubscriptionRepository = (
           .insert(directDebitRequests)
           .values({
             organisationId: input.organisationId,
+            stripeSubscriptionId: subscription.stripeSubscriptionId,
             requestedByUserId: input.requestedByUserId,
             requestedAt: input.requestedAt,
             createdAt: input.requestedAt,
@@ -1171,9 +1229,21 @@ export const createPostgresSubscriptionRepository = (
       const [row] = await database
         .select()
         .from(directDebitRequests)
+        .innerJoin(
+          subscriptions,
+          and(
+            eq(subscriptions.organisationId, organisationId),
+            eq(
+              subscriptions.stripeSubscriptionId,
+              directDebitRequests.stripeSubscriptionId
+            )
+          )
+        )
         .where(eq(directDebitRequests.organisationId, organisationId))
         .limit(1);
-      return row === undefined ? null : toDirectDebitRequestRecord(row);
+      return row === undefined
+        ? null
+        : toDirectDebitRequestRecord(row.direct_debit_requests);
     };
 
   const loadDirectDebitRequesterEmail: SubscriptionRepository['loadDirectDebitRequesterEmail'] =
@@ -1181,10 +1251,32 @@ export const createPostgresSubscriptionRepository = (
       const [requester] = await database
         .select({ email: users.email })
         .from(directDebitRequests)
+        .innerJoin(
+          subscriptions,
+          and(
+            eq(
+              subscriptions.organisationId,
+              directDebitRequests.organisationId
+            ),
+            eq(
+              subscriptions.stripeSubscriptionId,
+              directDebitRequests.stripeSubscriptionId
+            )
+          )
+        )
         .innerJoin(users, eq(users.id, directDebitRequests.requestedByUserId))
+        .innerJoin(
+          memberships,
+          and(
+            eq(memberships.organisationId, directDebitRequests.organisationId),
+            eq(memberships.userId, directDebitRequests.requestedByUserId)
+          )
+        )
         .where(
           and(
             eq(directDebitRequests.organisationId, organisationId),
+            eq(memberships.role, 'ADMIN'),
+            isNull(memberships.disabledAt),
             isNull(users.disabledAt)
           )
         )
@@ -1195,46 +1287,191 @@ export const createPostgresSubscriptionRepository = (
   const markDirectDebitSetupPending: SubscriptionRepository['markDirectDebitSetupPending'] =
     async (input) => {
       await database.transaction(async (transaction) => {
+        const [subscription] = await transaction
+          .select({ stripeSubscriptionId: subscriptions.stripeSubscriptionId })
+          .from(subscriptions)
+          .where(eq(subscriptions.organisationId, input.organisationId))
+          .for('update')
+          .limit(1);
         const [request] = await transaction
           .select()
           .from(directDebitRequests)
           .where(
-            eq(directDebitRequests.organisationId, input.organisationId)
+            and(
+              eq(directDebitRequests.id, input.directDebitRequestId),
+              eq(directDebitRequests.organisationId, input.organisationId),
+              eq(
+                directDebitRequests.stripeSubscriptionId,
+                input.stripeSubscriptionId
+              )
+            )
           )
           .for('update')
           .limit(1);
         if (
-          request === undefined ||
-          (request.status !== 'REQUESTED' &&
-            !(
-              request.status === 'SETUP_PENDING' &&
-              request.setupSessionId === input.setupSessionId
-            ))
+          subscription?.stripeSubscriptionId !== input.stripeSubscriptionId ||
+          request === undefined
         ) {
           throw new Error('DIRECT_DEBIT_REQUEST_REQUIRED');
         }
-        if (request.status === 'REQUESTED') {
+        const isInitialAttempt =
+          request.status === 'REQUESTED' &&
+          request.setupAttemptVersion === 0 &&
+          input.setupAttemptVersion === 1;
+        const isExactReplay =
+          request.status === 'SETUP_PENDING' &&
+          request.setupAttemptVersion === input.setupAttemptVersion &&
+          request.setupSessionId === input.setupSessionId &&
+          request.setupSessionExpiresAt?.getTime() ===
+            input.setupSessionExpiresAt.getTime();
+        const isExpiredRetry =
+          request.status === 'SETUP_PENDING' &&
+          request.setupSessionExpiresAt !== null &&
+          request.setupSessionExpiresAt <= input.occurredAt &&
+          input.setupAttemptVersion === request.setupAttemptVersion + 1;
+        if (!isInitialAttempt && !isExactReplay && !isExpiredRetry) {
+          throw new Error('DIRECT_DEBIT_SETUP_TRANSITION_INVALID');
+        }
+        if (!isExactReplay) {
           await transaction
             .update(directDebitRequests)
             .set({
               status: 'SETUP_PENDING',
+              setupAttemptVersion: input.setupAttemptVersion,
               setupSessionId: input.setupSessionId,
+              setupSessionExpiresAt: input.setupSessionExpiresAt,
+              setupCheckoutCompletedAt: null,
+              setupIntentId: null,
+              stripePaymentMethodId: null,
+              stripeMandateId: null,
+              mandateConfirmedAt: null,
+              activatedByUserId: null,
+              activatedAt: null,
               updatedAt: input.occurredAt
             })
             .where(
-              eq(directDebitRequests.organisationId, input.organisationId)
+              eq(directDebitRequests.id, input.directDebitRequestId)
             );
           await transaction.insert(auditEvents).values({
             organisationId: input.organisationId,
             actorUserId: input.actorUserId,
             eventType: 'DIRECT_DEBIT_SETUP_CREATED',
             entityType: 'SUBSCRIPTION',
-            entityId: input.organisationId,
-            afterValue: { status: 'SETUP_PENDING' },
+            entityId: input.directDebitRequestId,
+            beforeValue: {
+              status: request.status,
+              setupAttemptVersion: request.setupAttemptVersion,
+              setupSessionId: request.setupSessionId
+            },
+            afterValue: {
+              status: 'SETUP_PENDING',
+              setupAttemptVersion: input.setupAttemptVersion,
+              setupSessionId: input.setupSessionId,
+              setupSessionExpiresAt:
+                input.setupSessionExpiresAt.toISOString()
+            },
             occurredAt: input.occurredAt
           });
         }
       });
+    };
+
+  const bindDirectDebitSetupCheckout: SubscriptionRepository['bindDirectDebitSetupCheckout'] =
+    async (input) => {
+      try {
+        return await database.transaction(async (transaction) => {
+          const [duplicate] = await transaction
+            .select({ payloadHash: subscriptionEvents.payloadHash })
+            .from(subscriptionEvents)
+            .where(eq(subscriptionEvents.stripeEventId, input.eventId))
+            .limit(1);
+          if (duplicate !== undefined) {
+            if (duplicate.payloadHash !== input.payloadHash) {
+              throw new Error('STRIPE_EVENT_PAYLOAD_MISMATCH');
+            }
+            return 'DUPLICATE';
+          }
+          const [subscription] = await transaction
+            .select({
+              stripeCustomerId: subscriptions.stripeCustomerId,
+              stripeSubscriptionId: subscriptions.stripeSubscriptionId
+            })
+            .from(subscriptions)
+            .where(eq(subscriptions.organisationId, input.organisationId))
+            .for('update')
+            .limit(1);
+          const [request] = await transaction
+            .select()
+            .from(directDebitRequests)
+            .where(
+              and(
+                eq(directDebitRequests.id, input.directDebitRequestId),
+                eq(directDebitRequests.organisationId, input.organisationId),
+                eq(
+                  directDebitRequests.stripeSubscriptionId,
+                  input.stripeSubscriptionId
+                )
+              )
+            )
+            .for('update')
+            .limit(1);
+          const matchesStoredSetup =
+            subscription?.stripeCustomerId === input.stripeCustomerId &&
+            subscription.stripeSubscriptionId === input.stripeSubscriptionId &&
+            request?.status === 'SETUP_PENDING' &&
+            request.setupAttemptVersion === input.setupAttemptVersion &&
+            request.setupSessionId === input.setupSessionId &&
+            request.setupSessionExpiresAt?.getTime() ===
+              input.setupSessionExpiresAt.getTime() &&
+            input.eventCreatedAt <= input.setupSessionExpiresAt &&
+            (request.setupIntentId === null ||
+              request.setupIntentId === input.setupIntentId);
+          if (!matchesStoredSetup) {
+            if (subscription !== undefined) {
+              await insertEvent(transaction, input, 'REJECTED');
+            }
+            return 'REJECTED';
+          }
+          if (request.setupIntentId === null) {
+            await transaction
+              .update(directDebitRequests)
+              .set({
+                setupIntentId: input.setupIntentId,
+                setupCheckoutCompletedAt: input.eventCreatedAt,
+                updatedAt: clock.now()
+              })
+              .where(eq(directDebitRequests.id, input.directDebitRequestId));
+          }
+          await insertEvent(transaction, input, 'APPLIED');
+          await transaction.insert(auditEvents).values({
+            organisationId: input.organisationId,
+            eventType: 'DIRECT_DEBIT_SETUP_COMPLETED',
+            entityType: 'SUBSCRIPTION',
+            entityId: input.directDebitRequestId,
+            correlationId: input.eventId,
+            afterValue: {
+              status: 'SETUP_PENDING',
+              setupAttemptVersion: input.setupAttemptVersion,
+              setupSessionId: input.setupSessionId,
+              setupIntentId: input.setupIntentId
+            },
+            occurredAt: clock.now()
+          });
+          return 'APPLIED';
+        });
+      } catch (error) {
+        if (postgresErrorCode(error) === '23505') {
+          const replay = await lookupEventReplay({
+            eventId: input.eventId,
+            payloadHash: input.payloadHash
+          });
+          if (replay === 'DUPLICATE') return 'DUPLICATE';
+          if (replay === 'HASH_MISMATCH') {
+            throw new Error('STRIPE_EVENT_PAYLOAD_MISMATCH');
+          }
+        }
+        throw error;
+      }
     };
 
   const confirmDirectDebitMandate: SubscriptionRepository['confirmDirectDebitMandate'] =
@@ -1253,7 +1490,10 @@ export const createPostgresSubscriptionRepository = (
             return 'DUPLICATE';
           }
           const [subscription] = await transaction
-            .select({ stripeCustomerId: subscriptions.stripeCustomerId })
+            .select({
+              stripeCustomerId: subscriptions.stripeCustomerId,
+              stripeSubscriptionId: subscriptions.stripeSubscriptionId
+            })
             .from(subscriptions)
             .where(eq(subscriptions.organisationId, input.organisationId))
             .for('update')
@@ -1262,14 +1502,23 @@ export const createPostgresSubscriptionRepository = (
             .select()
             .from(directDebitRequests)
             .where(
-              eq(directDebitRequests.organisationId, input.organisationId)
+              and(
+                eq(directDebitRequests.id, input.directDebitRequestId),
+                eq(directDebitRequests.organisationId, input.organisationId),
+                eq(
+                  directDebitRequests.stripeSubscriptionId,
+                  input.stripeSubscriptionId
+                )
+              )
             )
             .for('update')
             .limit(1);
           if (
             subscription === undefined ||
             subscription.stripeCustomerId !== input.stripeCustomerId ||
+            subscription.stripeSubscriptionId !== input.stripeSubscriptionId ||
             request?.status !== 'SETUP_PENDING' ||
+            request.setupAttemptVersion !== input.setupAttemptVersion ||
             request.setupSessionId === null
           ) {
             if (subscription !== undefined) {
@@ -1277,25 +1526,36 @@ export const createPostgresSubscriptionRepository = (
             }
             return 'REJECTED';
           }
+          if (
+            request.setupIntentId === null ||
+            request.setupCheckoutCompletedAt === null
+          ) {
+            throw new Error('DIRECT_DEBIT_SETUP_CHECKOUT_REQUIRED');
+          }
+          if (
+            request.setupIntentId !== input.setupIntentId ||
+            request.setupSessionExpiresAt === null ||
+            input.eventCreatedAt > request.setupSessionExpiresAt
+          ) {
+            await insertEvent(transaction, input, 'REJECTED');
+            return 'REJECTED';
+          }
           await transaction
             .update(directDebitRequests)
             .set({
               status: 'MANDATE_CONFIRMED',
-              setupIntentId: input.setupIntentId,
               stripePaymentMethodId: input.stripePaymentMethodId,
               stripeMandateId: input.stripeMandateId,
               mandateConfirmedAt: input.eventCreatedAt,
               updatedAt: clock.now()
             })
-            .where(
-              eq(directDebitRequests.organisationId, input.organisationId)
-            );
+            .where(eq(directDebitRequests.id, input.directDebitRequestId));
           await insertEvent(transaction, input, 'APPLIED');
           await transaction.insert(auditEvents).values({
             organisationId: input.organisationId,
             eventType: 'DIRECT_DEBIT_MANDATE_CONFIRMED',
             entityType: 'SUBSCRIPTION',
-            entityId: input.organisationId,
+            entityId: input.directDebitRequestId,
             correlationId: input.eventId,
             afterValue: {
               status: 'MANDATE_CONFIRMED',
@@ -1324,15 +1584,29 @@ export const createPostgresSubscriptionRepository = (
   const activateDirectDebit: SubscriptionRepository['activateDirectDebit'] =
     async (input) =>
       database.transaction(async (transaction) => {
+        const [subscription] = await transaction
+          .select({ stripeSubscriptionId: subscriptions.stripeSubscriptionId })
+          .from(subscriptions)
+          .where(eq(subscriptions.organisationId, input.organisationId))
+          .for('update')
+          .limit(1);
         const [request] = await transaction
           .select()
           .from(directDebitRequests)
           .where(
-            eq(directDebitRequests.organisationId, input.organisationId)
+            and(
+              eq(directDebitRequests.id, input.directDebitRequestId),
+              eq(directDebitRequests.organisationId, input.organisationId),
+              eq(
+                directDebitRequests.stripeSubscriptionId,
+                input.stripeSubscriptionId
+              )
+            )
           )
           .for('update')
           .limit(1);
         if (
+          subscription?.stripeSubscriptionId !== input.stripeSubscriptionId ||
           request === undefined ||
           (request.status !== 'MANDATE_CONFIRMED' &&
             request.status !== 'ACTIVE') ||
@@ -1353,9 +1627,7 @@ export const createPostgresSubscriptionRepository = (
             activatedAt: input.activatedAt,
             updatedAt: input.activatedAt
           })
-          .where(
-            eq(directDebitRequests.organisationId, input.organisationId)
-          )
+          .where(eq(directDebitRequests.id, input.directDebitRequestId))
           .returning();
         if (activated === undefined) {
           throw new Error('DIRECT_DEBIT_ACTIVATION_WRITE_FAILED');
@@ -1365,7 +1637,7 @@ export const createPostgresSubscriptionRepository = (
           actorUserId: input.activatedByUserId,
           eventType: 'DIRECT_DEBIT_ACTIVATED',
           entityType: 'SUBSCRIPTION',
-          entityId: input.organisationId,
+          entityId: input.directDebitRequestId,
           beforeValue: { status: 'MANDATE_CONFIRMED' },
           afterValue: {
             status: 'ACTIVE',
@@ -1394,11 +1666,16 @@ export const createPostgresSubscriptionRepository = (
       try {
         return await database.transaction(async (transaction) => {
           const [duplicate] = await transaction
-            .select({ id: subscriptionEvents.id })
+            .select({ payloadHash: subscriptionEvents.payloadHash })
             .from(subscriptionEvents)
             .where(eq(subscriptionEvents.stripeEventId, input.eventId))
             .limit(1);
-          if (duplicate !== undefined) return 'DUPLICATE';
+          if (duplicate !== undefined) {
+            if (duplicate.payloadHash !== input.payloadHash) {
+              throw new Error('STRIPE_EVENT_PAYLOAD_MISMATCH');
+            }
+            return 'DUPLICATE';
+          }
           const [organisation] = await transaction
             .select({ id: organisations.id })
             .from(organisations)
@@ -1411,11 +1688,15 @@ export const createPostgresSubscriptionRepository = (
           return 'REJECTED';
         });
       } catch (error) {
-        if (
-          postgresErrorCode(error) === '23505' &&
-          (await eventExists(input.eventId))
-        ) {
-          return 'DUPLICATE';
+        if (postgresErrorCode(error) === '23505') {
+          const replay = await lookupEventReplay({
+            eventId: input.eventId,
+            payloadHash: input.payloadHash
+          });
+          if (replay === 'DUPLICATE') return 'DUPLICATE';
+          if (replay === 'HASH_MISMATCH') {
+            throw new Error('STRIPE_EVENT_PAYLOAD_MISMATCH');
+          }
         }
         throw error;
       }
@@ -1431,6 +1712,7 @@ export const createPostgresSubscriptionRepository = (
     loadDirectDebitRequest,
     loadDirectDebitRequesterEmail,
     markDirectDebitSetupPending,
+    bindDirectDebitSetupCheckout,
     confirmDirectDebitMandate,
     activateDirectDebit,
     recordRejectedEvent,

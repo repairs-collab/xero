@@ -158,6 +158,7 @@ describe('Solo commerce schema contract', () => {
         'cancel_at',
         'cancelled_at',
         'last_stripe_event_created_at',
+        'initial_card_stripe_subscription_id',
         'initial_card_invoice_id',
         'initial_card_payment_succeeded_at'
       ])
@@ -171,11 +172,16 @@ describe('Solo commerce schema contract', () => {
     );
     expect(directDebit.columns.map((column) => column.name)).toEqual(
       expect.arrayContaining([
+        'id',
         'organisation_id',
+        'stripe_subscription_id',
         'status',
         'requested_by_user_id',
         'requested_at',
+        'setup_attempt_version',
         'setup_session_id',
+        'setup_session_expires_at',
+        'setup_checkout_completed_at',
         'setup_intent_id',
         'stripe_payment_method_id',
         'stripe_mandate_id',
@@ -183,6 +189,9 @@ describe('Solo commerce schema contract', () => {
         'activated_by_user_id',
         'activated_at'
       ])
+    );
+    expect(directDebit.indexes.map((index) => index.config.name)).toContain(
+      'direct_debit_requests_org_subscription_uq'
     );
     expect(directDebit.checks.map((constraint) => constraint.name)).toEqual(
       expect.arrayContaining([
@@ -410,6 +419,30 @@ describe('Solo commerce schema contract', () => {
       '"initial_card_payment_succeeded_at" timestamp with time zone'
     );
     expect(migration).toContain('direct_debit_requests_state_ck');
+    expect(migration).not.toMatch(/bank_(?:account|details)|bsb|account_number/i);
+  });
+
+  it('forwards current-subscription direct debit evidence without dropping historical requests', async () => {
+    const migration = await readFile(
+      new URL('../../drizzle/0037_watery_tombstone.sql', import.meta.url),
+      'utf8'
+    );
+
+    expect(migration).toContain(
+      'DROP CONSTRAINT "direct_debit_requests_pkey"'
+    );
+    expect(migration).toMatch(
+      /UPDATE "direct_debit_requests" AS d[\s\S]*?SET "stripe_subscription_id" = s\."stripe_subscription_id"/i
+    );
+    expect(migration).toMatch(
+      /UPDATE "subscriptions"[\s\S]*?SET "initial_card_stripe_subscription_id" = "stripe_subscription_id"/i
+    );
+    expect(migration).toContain(
+      'ADD CONSTRAINT "direct_debit_requests_pkey" PRIMARY KEY ("id")'
+    );
+    expect(migration).toContain(
+      'direct_debit_requests_org_subscription_uq'
+    );
     expect(migration).not.toMatch(/bank_(?:account|details)|bsb|account_number/i);
   });
 });
