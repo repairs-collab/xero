@@ -458,6 +458,7 @@ export const smsNumberPool = pgTable(
       .defaultNow()
   },
   (table) => [
+    unique('sms_number_pool_org_id_uq').on(table.organisationId, table.id),
     uniqueIndex('sms_number_pool_e164_uq').on(table.e164Number),
     uniqueIndex('sms_number_pool_provider_number_uq').on(
       table.provider,

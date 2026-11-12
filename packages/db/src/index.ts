@@ -8,6 +8,7 @@ export * from './repositories/activity-repository.js';
 export * from './repositories/task-repository.js';
 export * from './repositories/message-repository.js';
 export * from './repositories/platform-admin-repository.js';
+export * from './repositories/reply-number-provisioning-repository.js';
 export * from './repositories/sms-commerce-repository.js';
 export * from './repositories/reminder-whitelist-repository.js';
 export * from './repositories/organisation-safety-repository.js';

@@ -6,6 +6,7 @@ export * from './operations.js';
 export * from './organisation.js';
 export * from './platform-administration.js';
 export * from './receivables.js';
+export * from './reply-number-provisioning.js';
 export * from './reminder-whitelist.js';
 export * from './reminders.js';
 export * from './rollout.js';
