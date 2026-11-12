@@ -15,6 +15,7 @@ import {
   smsNumberPool,
   smsUsageLedger,
   subscriptions,
+  transactionalEmailOutbox,
   users,
   xeroConnections
 } from '../schema/index.js';
@@ -294,6 +295,148 @@ describe('PostgresPlatformAdminRepository reads', () => {
       organisationName: organisationNames.beta,
       reason: 'Owner review'
     });
+  });
+
+  it('lists billing cases and held notices with independent stable cursors and safe fields', async () => {
+    const created = [
+      new Date('2026-11-11T03:00:00.000Z'),
+      new Date('2026-11-11T02:00:00.000Z'),
+      new Date('2026-11-11T01:00:00.000Z')
+    ];
+    const caseRows = await client.db
+      .insert(billingCases)
+      .values([
+        {
+          organisationId: ids.alpha,
+          kind: 'DISPUTE',
+          status: 'OPEN',
+          providerObjectType: 'DISPUTE',
+          providerObjectId: `dp-new-${runId}`,
+          providerStatus: 'needs_response',
+          stripeSubscriptionId: `sub-billing-${runId}`,
+          subscriptionRelation: 'CURRENT',
+          amountMinor: 30_000,
+          currency: 'aud',
+          blocksSending: true,
+          latestProviderEventId: `evt-secret-new-${runId}`,
+          latestProviderEventCreatedAt: created[0]!,
+          openedAt: created[0]!,
+          createdAt: created[0]!,
+          updatedAt: created[0]!
+        },
+        {
+          organisationId: ids.alpha,
+          kind: 'REFUND',
+          status: 'REVIEW_REQUIRED',
+          providerObjectType: 'CHARGE',
+          providerObjectId: `ch-middle-${runId}`,
+          providerStatus: 'refunded',
+          stripeSubscriptionId: `sub-billing-${runId}`,
+          subscriptionRelation: 'RETIRED',
+          amountMinor: 20_000,
+          currency: 'aud',
+          blocksSending: false,
+          latestProviderEventId: `evt-secret-middle-${runId}`,
+          latestProviderEventCreatedAt: created[1]!,
+          openedAt: created[1]!,
+          createdAt: created[1]!,
+          updatedAt: created[1]!
+        },
+        {
+          organisationId: ids.alpha,
+          kind: 'PAYMENT_FAILURE',
+          status: 'OPEN',
+          providerObjectType: 'INVOICE',
+          providerObjectId: `in-old-${runId}`,
+          providerStatus: 'open',
+          stripeSubscriptionId: `sub-billing-${runId}`,
+          subscriptionRelation: 'CURRENT',
+          amountMinor: 10_000,
+          currency: 'aud',
+          blocksSending: true,
+          latestProviderEventId: `evt-secret-old-${runId}`,
+          latestProviderEventCreatedAt: created[2]!,
+          openedAt: created[2]!,
+          createdAt: created[2]!,
+          updatedAt: created[2]!
+        }
+      ])
+      .returning({ id: billingCases.id, createdAt: billingCases.createdAt });
+    const templates = [
+      'DISPUTE_OPENED',
+      'REFUND_RECORDED',
+      'PAYMENT_FAILED'
+    ] as const;
+    await client.db.insert(transactionalEmailOutbox).values(
+      caseRows.map((billingCase, index) => ({
+        organisationId: ids.alpha,
+        billingCaseId: billingCase.id,
+        recipient: `billing-${index}-${runId}@alpha.example`,
+        template: templates[index]!,
+        renderData: { privateDetail: `never-render-${index}-${runId}` },
+        idempotencyKey: `billing-queue-${index}-${runId}`,
+        status: 'HELD' as const,
+        createdAt: billingCase.createdAt,
+        updatedAt: billingCase.createdAt
+      }))
+    );
+
+    const first = await repository.listBillingOperations({
+      organisationId: ids.alpha,
+      limit: 2
+    });
+    const nextCases = await repository.listBillingOperations({
+      organisationId: ids.alpha,
+      limit: 2,
+      casesCursor: first.cases.nextCursor!
+    });
+    const nextHeldEmails = await repository.listBillingOperations({
+      organisationId: ids.alpha,
+      limit: 2,
+      heldEmailsCursor: first.heldEmails.nextCursor!
+    });
+    const filtered = await repository.listBillingOperations({
+      organisationId: ids.alpha,
+      caseKind: 'PAYMENT_FAILURE',
+      caseStatus: 'OPEN',
+      limit: 10
+    });
+
+    expect(first.cases.items.map((item) => item.providerReference)).toEqual([
+      `dp-new-${runId}`,
+      `ch-middle-${runId}`
+    ]);
+    expect(first.heldEmails.items).toHaveLength(2);
+    expect(first.cases.nextCursor).toEqual(expect.any(String));
+    expect(first.heldEmails.nextCursor).toEqual(expect.any(String));
+    expect(nextCases.cases.items.map((item) => item.providerReference)).toEqual([
+      `in-old-${runId}`
+    ]);
+    expect(nextCases.heldEmails.items.map((item) => item.id)).toEqual(
+      first.heldEmails.items.map((item) => item.id)
+    );
+    expect(nextHeldEmails.cases.items.map((item) => item.id)).toEqual(
+      first.cases.items.map((item) => item.id)
+    );
+    expect(nextHeldEmails.heldEmails.items).toHaveLength(1);
+    expect(filtered.cases.items).toHaveLength(1);
+    expect(filtered.cases.items[0]).toMatchObject({
+      organisationId: ids.alpha,
+      organisationName: organisationNames.alpha,
+      kind: 'PAYMENT_FAILURE',
+      status: 'OPEN',
+      amountMinor: 10_000,
+      currency: 'aud',
+      providerReference: `in-old-${runId}`,
+      subscriptionRelation: 'CURRENT',
+      blocksSending: true
+    });
+    const serialized = JSON.stringify({ first, nextCases, nextHeldEmails, filtered });
+    expect(serialized).not.toContain('renderData');
+    expect(serialized).not.toContain('idempotencyKey');
+    expect(serialized).not.toContain('latestProviderEventId');
+    expect(serialized).not.toContain('evt-secret');
+    expect(serialized).not.toContain('never-render');
   });
 });
 

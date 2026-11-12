@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, lt, or, sql, type SQL } from 'drizzle-orm';
 
 import { summariseSmsUsage } from '@bc5000/domain';
 
@@ -14,9 +14,12 @@ import {
   smsNumberPool,
   smsUsageLedger,
   subscriptions,
+  transactionalEmailOutbox,
   users,
   xeroConnections,
   type OrganisationEdition,
+  type BillingCaseKind,
+  type BillingCaseStatus,
   type PlatformAccountStatus,
   type SmsNumberStatus,
   type SubscriptionStatus,
@@ -56,6 +59,54 @@ export interface PlatformAuditListInput {
   to?: Date;
   page?: number;
   pageSize?: number;
+}
+
+export interface PlatformBillingOperationsListInput {
+  organisationId?: string;
+  caseKind?: BillingCaseKind;
+  caseStatus?: BillingCaseStatus;
+  casesCursor?: string;
+  heldEmailsCursor?: string;
+  limit?: number;
+}
+
+export interface PlatformBillingCaseView {
+  id: string;
+  organisationId: string;
+  organisationName: string;
+  kind: BillingCaseKind;
+  status: BillingCaseStatus;
+  providerObjectType: 'INVOICE' | 'CHARGE' | 'DISPUTE';
+  providerReference: string;
+  providerStatus: string;
+  subscriptionRelation: 'CURRENT' | 'RETIRED';
+  amountMinor: number;
+  currency: string;
+  blocksSending: boolean;
+  openedAt: Date;
+  resolvedAt: Date | null;
+  createdAt: Date;
+}
+
+export interface PlatformHeldEmailView {
+  id: string;
+  organisationId: string;
+  organisationName: string;
+  billingCaseId: string;
+  recipient: string;
+  template:
+    | 'PAYMENT_FAILED'
+    | 'PAYMENT_RECOVERED'
+    | 'REFUND_RECORDED'
+    | 'DISPUTE_OPENED'
+    | 'DISPUTE_CLOSED';
+  status: 'HELD';
+  createdAt: Date;
+}
+
+export interface PlatformBillingOperationsPage {
+  cases: { items: PlatformBillingCaseView[]; nextCursor: string | null };
+  heldEmails: { items: PlatformHeldEmailView[]; nextCursor: string | null };
 }
 
 export interface PlatformSmsUsageSummary {
@@ -189,6 +240,9 @@ export interface PlatformAdminReadRepository {
   getOrganisationDetail(organisationId: string): Promise<PlatformOrganisationDetail | null>;
   listSmsNumbers(input?: PlatformNumberListInput): Promise<PlatformNumberPage>;
   listAuditEvents(input?: PlatformAuditListInput): Promise<PlatformAuditPage>;
+  listBillingOperations(
+    input?: PlatformBillingOperationsListInput
+  ): Promise<PlatformBillingOperationsPage>;
 }
 
 export type PlatformMutationFailureCode =
@@ -312,6 +366,43 @@ const compareNullableDates = (left: Date | null, right: Date | null): number => 
   if (right === null) return -1;
   return left.getTime() - right.getTime();
 };
+
+const uuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const encodeBillingCursor = (createdAt: Date, id: string): string =>
+  Buffer.from(
+    JSON.stringify({ createdAt: createdAt.toISOString(), id }),
+    'utf8'
+  ).toString('base64url');
+
+const decodeBillingCursor = (
+  value: string
+): { createdAt: Date; id: string } | null => {
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(value, 'base64url').toString('utf8')
+    ) as { createdAt?: unknown; id?: unknown };
+    if (
+      typeof parsed.createdAt !== 'string' ||
+      typeof parsed.id !== 'string' ||
+      !uuidPattern.test(parsed.id)
+    ) {
+      return null;
+    }
+    const createdAt = new Date(parsed.createdAt);
+    return Number.isFinite(createdAt.getTime())
+      ? { createdAt, id: parsed.id }
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+const emptyBillingOperationsPage = (): PlatformBillingOperationsPage => ({
+  cases: { items: [], nextCursor: null },
+  heldEmails: { items: [], nextCursor: null }
+});
 
 export class PostgresPlatformAdminRepository implements PlatformAdminRepository {
   constructor(private readonly database: Database) {}
@@ -617,6 +708,143 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
       total,
       page,
       pageSize
+    };
+  }
+
+  async listBillingOperations(
+    input: PlatformBillingOperationsListInput = {}
+  ): Promise<PlatformBillingOperationsPage> {
+    const organisationId = input.organisationId?.trim();
+    if (organisationId && !uuidPattern.test(organisationId)) {
+      return emptyBillingOperationsPage();
+    }
+    const limit =
+      Number.isSafeInteger(input.limit) && (input.limit ?? 0) > 0
+        ? Math.min(input.limit!, 100)
+        : 25;
+    const casesCursor = input.casesCursor
+      ? decodeBillingCursor(input.casesCursor)
+      : null;
+    const heldEmailsCursor = input.heldEmailsCursor
+      ? decodeBillingCursor(input.heldEmailsCursor)
+      : null;
+
+    const caseConditions: SQL[] = [];
+    if (organisationId) {
+      caseConditions.push(eq(billingCases.organisationId, organisationId));
+    }
+    if (input.caseKind) {
+      caseConditions.push(eq(billingCases.kind, input.caseKind));
+    }
+    if (input.caseStatus) {
+      caseConditions.push(eq(billingCases.status, input.caseStatus));
+    }
+    if (casesCursor) {
+      caseConditions.push(
+        or(
+          lt(billingCases.createdAt, casesCursor.createdAt),
+          and(
+            eq(billingCases.createdAt, casesCursor.createdAt),
+            lt(billingCases.id, casesCursor.id)
+          )
+        )!
+      );
+    }
+
+    const emailConditions: SQL[] = [
+      eq(transactionalEmailOutbox.status, 'HELD')
+    ];
+    if (organisationId) {
+      emailConditions.push(
+        eq(transactionalEmailOutbox.organisationId, organisationId)
+      );
+    }
+    if (heldEmailsCursor) {
+      emailConditions.push(
+        or(
+          lt(transactionalEmailOutbox.createdAt, heldEmailsCursor.createdAt),
+          and(
+            eq(transactionalEmailOutbox.createdAt, heldEmailsCursor.createdAt),
+            lt(transactionalEmailOutbox.id, heldEmailsCursor.id)
+          )
+        )!
+      );
+    }
+
+    const [caseRows, emailRows] = await Promise.all([
+      input.casesCursor && !casesCursor
+        ? Promise.resolve([])
+        : this.database
+            .select({
+              id: billingCases.id,
+              organisationId: billingCases.organisationId,
+              organisationName: organisations.name,
+              kind: billingCases.kind,
+              status: billingCases.status,
+              providerObjectType: billingCases.providerObjectType,
+              providerReference: billingCases.providerObjectId,
+              providerStatus: billingCases.providerStatus,
+              subscriptionRelation: billingCases.subscriptionRelation,
+              amountMinor: billingCases.amountMinor,
+              currency: billingCases.currency,
+              blocksSending: billingCases.blocksSending,
+              openedAt: billingCases.openedAt,
+              resolvedAt: billingCases.resolvedAt,
+              createdAt: billingCases.createdAt
+            })
+            .from(billingCases)
+            .innerJoin(
+              organisations,
+              eq(organisations.id, billingCases.organisationId)
+            )
+            .where(caseConditions.length > 0 ? and(...caseConditions) : undefined)
+            .orderBy(desc(billingCases.createdAt), desc(billingCases.id))
+            .limit(limit + 1),
+      input.heldEmailsCursor && !heldEmailsCursor
+        ? Promise.resolve([])
+        : this.database
+            .select({
+              id: transactionalEmailOutbox.id,
+              organisationId: transactionalEmailOutbox.organisationId,
+              organisationName: organisations.name,
+              billingCaseId: transactionalEmailOutbox.billingCaseId,
+              recipient: transactionalEmailOutbox.recipient,
+              template: transactionalEmailOutbox.template,
+              status: transactionalEmailOutbox.status,
+              createdAt: transactionalEmailOutbox.createdAt
+            })
+            .from(transactionalEmailOutbox)
+            .innerJoin(
+              organisations,
+              eq(organisations.id, transactionalEmailOutbox.organisationId)
+            )
+            .where(and(...emailConditions))
+            .orderBy(
+              desc(transactionalEmailOutbox.createdAt),
+              desc(transactionalEmailOutbox.id)
+            )
+            .limit(limit + 1)
+    ]);
+
+    const caseItems = caseRows.slice(0, limit);
+    const emailItems = emailRows.slice(0, limit);
+    const lastCase = caseItems.at(-1);
+    const lastEmail = emailItems.at(-1);
+    return {
+      cases: {
+        items: caseItems,
+        nextCursor:
+          caseRows.length > limit && lastCase
+            ? encodeBillingCursor(lastCase.createdAt, lastCase.id)
+            : null
+      },
+      heldEmails: {
+        items: emailItems as PlatformHeldEmailView[],
+        nextCursor:
+          emailRows.length > limit && lastEmail
+            ? encodeBillingCursor(lastEmail.createdAt, lastEmail.id)
+            : null
+      }
     };
   }
 

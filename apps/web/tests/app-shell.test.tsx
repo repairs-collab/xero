@@ -145,6 +145,8 @@ describe('AppShell', () => {
 
     expect(html).toContain('AccountPulse Owner');
     expect(html).toContain('href="/platform-admin"');
+    expect(html).toContain('href="/platform-admin/billing"');
+    expect(html).toContain('Billing operations');
     expect(html).toContain('Sinch &amp; SMS');
     expect(html).toContain('Audit');
     expect(html).not.toContain('Current workspace:');

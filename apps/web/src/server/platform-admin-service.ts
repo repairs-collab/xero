@@ -3,6 +3,7 @@ import {
   PostgresPlatformAdminRepository,
   type PlatformAdminRepository,
   type PlatformAuditListInput,
+  type PlatformBillingOperationsListInput,
   type PlatformNumberListInput,
   type PlatformOrganisationListInput,
   type PlatformOrganisationSort
@@ -42,6 +43,14 @@ const assertOwner = async (
     throw new AuthorizationFailure();
   }
 };
+
+const uuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const emptyBillingOperationsPage = () => ({
+  cases: { items: [], nextCursor: null },
+  heldEmails: { items: [], nextCursor: null }
+});
 
 export const createPlatformAdminService = (
   dependencies: PlatformAdminServiceDependencies
@@ -84,6 +93,62 @@ export const createPlatformAdminService = (
       page: positiveInteger(input.page, 1, Number.MAX_SAFE_INTEGER),
       pageSize: positiveInteger(input.pageSize, 25, 100)
     });
+  },
+
+  async listBillingOperations(
+    actorUserId: string,
+    input: Record<string, unknown> = {}
+  ) {
+    await assertOwner(dependencies, actorUserId);
+    const organisationId =
+      typeof input.organisationId === 'string'
+        ? input.organisationId.trim()
+        : '';
+    if (organisationId && !uuidPattern.test(organisationId)) {
+      return emptyBillingOperationsPage();
+    }
+    const caseKind =
+      typeof input.caseKind === 'string' ? input.caseKind.trim() : '';
+    const caseStatus =
+      typeof input.caseStatus === 'string' ? input.caseStatus.trim() : '';
+    if (
+      (caseKind && !['PAYMENT_FAILURE', 'REFUND', 'DISPUTE'].includes(caseKind)) ||
+      (caseStatus &&
+        !['OPEN', 'RESOLVED', 'REVIEW_REQUIRED'].includes(caseStatus))
+    ) {
+      return emptyBillingOperationsPage();
+    }
+    const casesCursor =
+      typeof input.casesCursor === 'string'
+        ? input.casesCursor.trim().slice(0, 1_000)
+        : '';
+    const heldEmailsCursor =
+      typeof input.heldEmailsCursor === 'string'
+        ? input.heldEmailsCursor.trim().slice(0, 1_000)
+        : '';
+    const normalized: PlatformBillingOperationsListInput = {
+      ...(organisationId ? { organisationId } : {}),
+      ...(caseKind
+        ? {
+            caseKind:
+              caseKind as NonNullable<
+                PlatformBillingOperationsListInput['caseKind']
+              >
+          }
+        : {}),
+      ...(caseStatus
+        ? {
+            caseStatus:
+              caseStatus as NonNullable<
+                PlatformBillingOperationsListInput['caseStatus']
+              >
+          }
+        : {}),
+      ...(casesCursor ? { casesCursor } : {}),
+      ...(heldEmailsCursor ? { heldEmailsCursor } : {}),
+      limit: positiveInteger(input.limit, 25, 100)
+    };
+    return dependencies.repository.listBillingOperations(normalized);
   },
 
   async extendTrial(

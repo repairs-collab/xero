@@ -17,6 +17,7 @@ describe('platform administration read service', () => {
         getOrganisationDetail: vi.fn(),
         listSmsNumbers: vi.fn(),
         listAuditEvents: vi.fn(),
+        listBillingOperations: vi.fn(),
         extendTrial: vi.fn(),
         endTrial: vi.fn(),
         suspendOrganisation: vi.fn(),
@@ -57,6 +58,7 @@ describe('platform administration read service', () => {
         getOrganisationDetail: vi.fn(),
         listSmsNumbers: vi.fn(),
         listAuditEvents: vi.fn(),
+        listBillingOperations: vi.fn(),
         extendTrial: vi.fn(),
         endTrial: vi.fn(),
         suspendOrganisation: vi.fn(),
@@ -77,12 +79,73 @@ describe('platform administration read service', () => {
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 
+  it('verifies owner access and normalizes the read-only billing queue filters', async () => {
+    const listBillingOperations = vi.fn().mockResolvedValue({
+      cases: { items: [], nextCursor: null },
+      heldEmails: { items: [], nextCursor: null }
+    });
+    const service = createPlatformAdminService({
+      verifyOwner: (userId) => Promise.resolve(userId === 'owner-user'),
+      repository: { listBillingOperations } as never
+    });
+
+    await service.listBillingOperations('owner-user', {
+      organisationId: ' 11111111-1111-4111-8111-111111111111 ',
+      caseKind: 'DISPUTE',
+      caseStatus: 'OPEN',
+      casesCursor: ' cases-cursor ',
+      heldEmailsCursor: ' held-cursor ',
+      limit: 500
+    });
+
+    expect(listBillingOperations).toHaveBeenCalledWith({
+      organisationId: '11111111-1111-4111-8111-111111111111',
+      caseKind: 'DISPUTE',
+      caseStatus: 'OPEN',
+      casesCursor: 'cases-cursor',
+      heldEmailsCursor: 'held-cursor',
+      limit: 100
+    });
+  });
+
+  it('fails a malformed exact organisation filter closed without broadening the queue', async () => {
+    const listBillingOperations = vi.fn();
+    const service = createPlatformAdminService({
+      verifyOwner: () => Promise.resolve(true),
+      repository: { listBillingOperations } as never
+    });
+
+    await expect(
+      service.listBillingOperations('owner-user', {
+        organisationId: 'not-a-customer-id'
+      })
+    ).resolves.toEqual({
+      cases: { items: [], nextCursor: null },
+      heldEmails: { items: [], nextCursor: null }
+    });
+    expect(listBillingOperations).not.toHaveBeenCalled();
+  });
+
+  it('denies the billing queue before repository access for a non-owner', async () => {
+    const listBillingOperations = vi.fn();
+    const service = createPlatformAdminService({
+      verifyOwner: () => Promise.resolve(false),
+      repository: { listBillingOperations } as never
+    });
+
+    await expect(
+      service.listBillingOperations('customer-admin', {})
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(listBillingOperations).not.toHaveBeenCalled();
+  });
+
   it('denies forged platform mutations before any repository call', async () => {
     const repository = {
       listOrganisations: vi.fn(),
       getOrganisationDetail: vi.fn(),
       listSmsNumbers: vi.fn(),
       listAuditEvents: vi.fn(),
+      listBillingOperations: vi.fn(),
       extendTrial: vi.fn(),
       endTrial: vi.fn(),
       suspendOrganisation: vi.fn(),
@@ -139,6 +202,7 @@ describe('platform administration read service', () => {
         getOrganisationDetail: vi.fn(),
         listSmsNumbers: vi.fn(),
         listAuditEvents: vi.fn(),
+        listBillingOperations: vi.fn(),
         extendTrial,
         endTrial: vi.fn(),
         suspendOrganisation: vi.fn(),

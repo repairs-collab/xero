@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
 import { PlatformAuditList } from './audit-list.js';
+import { PlatformBillingOperations } from './billing-operations.js';
 import { PlatformOrganisationDetailView } from './organisation-detail.js';
 import { PlatformAdminOverview } from './overview.js';
 import { PlatformSmsAdministration } from './sms-administration.js';
@@ -181,6 +182,70 @@ describe('platform owner views', () => {
     expect(html).toContain(
       'resolve the open payment or dispute case before reactivating this account.'
     );
+  });
+
+  it('renders a redacted read-only billing queue with independent continuation links', () => {
+    const html = renderToStaticMarkup(
+      <PlatformBillingOperations
+        page={{
+          cases: {
+            items: [{
+              id: 'case-1',
+              organisationId: organisation.id,
+              organisationName: organisation.name,
+              kind: 'DISPUTE',
+              status: 'OPEN',
+              providerObjectType: 'DISPUTE',
+              providerReference: 'dp_safe_reference',
+              providerStatus: 'needs_response',
+              subscriptionRelation: 'CURRENT',
+              amountMinor: 12_345,
+              currency: 'aud',
+              blocksSending: true,
+              openedAt: now,
+              resolvedAt: null,
+              createdAt: now
+            }],
+            nextCursor: 'next-cases'
+          },
+          heldEmails: {
+            items: [{
+              id: 'email-1',
+              organisationId: organisation.id,
+              organisationName: organisation.name,
+              billingCaseId: 'case-1',
+              recipient: 'billing@alpha.example',
+              template: 'DISPUTE_OPENED',
+              status: 'HELD',
+              createdAt: now
+            }],
+            nextCursor: 'next-emails'
+          }
+        }}
+        filters={{
+          organisationId: organisation.id,
+          caseKind: 'DISPUTE',
+          caseStatus: 'OPEN',
+          casesCursor: '',
+          heldEmailsCursor: ''
+        }}
+      />
+    );
+
+    expect(html).toContain('Billing operations');
+    expect(html).toContain('Held — not delivered');
+    expect(html).toContain('Alpha Repairs');
+    expect(html).toContain('dp_safe_reference');
+    expect(html).toContain('$123.45');
+    expect(html).toContain('billing@alpha.example');
+    expect(html).toContain('casesCursor=next-cases');
+    expect(html).toContain('heldEmailsCursor=next-emails');
+    expect(html).not.toContain('renderData');
+    expect(html).not.toContain('idempotencyKey');
+    expect(html).not.toContain('latestProviderEventId');
+    expect(html).not.toContain('Send now');
+    expect(html).not.toContain('Resolve case');
+    expect(html).not.toContain('Release notice');
   });
 
   it('renders Sinch number lifecycle and assignment controls', () => {

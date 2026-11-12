@@ -2,6 +2,7 @@
 
 import {
   ArrowRightStartOnRectangleIcon,
+  BanknotesIcon,
   BuildingOffice2Icon,
   ChatBubbleLeftRightIcon,
   ClipboardDocumentListIcon,
@@ -15,6 +16,7 @@ import type { ReactNode } from 'react';
 const navigation = [
   ['Overview', '/platform-admin', HomeIcon],
   ['Customers', '/platform-admin#customers', BuildingOffice2Icon],
+  ['Billing operations', '/platform-admin/billing', BanknotesIcon],
   ['Sinch & SMS', '/platform-admin/sms', ChatBubbleLeftRightIcon],
   ['Audit', '/platform-admin/audit', ClipboardDocumentListIcon]
 ] as const;
