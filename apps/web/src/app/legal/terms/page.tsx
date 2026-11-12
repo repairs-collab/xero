@@ -44,6 +44,15 @@ export default function TermsPage() {
         before purchase.
       </p>
       <p>
+        The initial payment must be made by card. After that payment succeeds,
+        an Australian customer may request Australian BECS Direct Debit for
+        future renewals. Direct debit is not enabled automatically: the account
+        holder must complete a valid Direct Debit Request and receive the
+        applicable service agreement before any bank debit is submitted. Bank
+        details are collected and stored by the payment provider rather than
+        AccountPulse.
+      </p>
+      <p>
         An SMS may consume more than one part because of message length or
         character encoding. Included SMS parts reset at the end of each monthly
         allowance period, including for annually billed subscriptions. They do

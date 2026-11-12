@@ -25,6 +25,9 @@ describe('AccountPulse commercial terms', () => {
     expect(markup).toContain('3 Cobb Court, Swan Hill VIC 3585');
     expect(markup).toContain('first payment is due on signup');
     expect(markup).toContain('5% discount');
+    expect(markup).toContain('initial payment must be made by card');
+    expect(markup).toContain('Australian BECS Direct Debit');
+    expect(markup).toContain('Direct Debit Request');
     expect(markup).toContain('end of the current billing period');
     expect(markup).toContain('do not roll over');
     expect(markup).toContain('including for annually billed subscriptions');

@@ -24,6 +24,10 @@ accounting review before customers are charged.
 | Price presentation | AUD excluding GST, with GST and the payable total shown before purchase |
 | Free trial | None for the commercial release |
 | First payment | Due on signup |
+| First payment method | Card only |
+| Direct debit | Available on customer request after the first successful card payment; Australian BECS mandate and service agreement required; never enabled automatically |
+| Bank details | Collected and stored by Stripe-hosted controls, not AccountPulse |
+| Direct-debit mandate retention | Retain through Stripe or securely for up to seven years where BECS/Stripe rules require it |
 | Billing periods | Monthly and annual |
 | Annual discount | 5% compared with twelve monthly payments |
 | Cancellation timing | End of the current billing period |

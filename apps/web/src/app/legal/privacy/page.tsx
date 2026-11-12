@@ -49,7 +49,9 @@ export default function PrivacyPage() {
         cancellation for support, security, accounting, disputes and legal
         obligations. Unnecessary raw provider payloads may be removed or redacted
         earlier while required records and evidence are preserved. A legal hold
-        may require longer retention.
+        may require longer retention. Direct-debit mandate evidence may also be
+        retained for up to seven years where required by the payment provider or
+        Australian payment rules.
       </p>
       <h2>Access, correction and complaints</h2>
       <p>
