@@ -18,6 +18,8 @@ describe('platform retention operations view', () => {
               status: 'LEGAL_HOLD',
               reviewAfter: new Date('2026-10-01T00:00:00.000Z'),
               deletionEligibleAt: new Date('2031-09-01T00:00:00.000Z'),
+              closureEpisodeId: '33333333-3333-4333-8333-333333333333',
+              closureVersion: 2,
               backupExpiryVerifiedAt: null,
               backupExpiryEvidenceReference: null,
               updatedAt: new Date('2026-09-18T00:00:00.000Z')
@@ -28,14 +30,17 @@ describe('platform retention operations view', () => {
               id: '22222222-2222-4222-8222-222222222222',
               organisationId: '11111111-1111-4111-8111-111111111111',
               organisationName: 'Alpha Repairs',
-              requestType: 'DELETION',
-              status: 'BLOCKED',
+              requestType: 'EXPORT',
+              status: 'IN_REVIEW',
               verificationReference: 'privacy-case-123',
               verifiedAt: new Date('2026-09-17T09:30:00.000Z'),
               targetAt: new Date('2026-10-01T09:30:00.000Z'),
               version: 1,
-              blockReason: 'LEGAL_HOLD',
+              blockReason: null,
+              retentionClosureEpisodeId: '33333333-3333-4333-8333-333333333333',
               lastReviewedAt: new Date('2026-09-18T00:00:00.000Z'),
+              completedAt: null,
+              completionReference: null,
               updatedAt: new Date('2026-09-18T00:00:00.000Z')
             }
           ]
@@ -45,7 +50,8 @@ describe('platform retention operations view', () => {
         actions={{
           recordVerifiedRequest: noAction,
           reviewRequest: noAction,
-          recordBackupExpiryVerification: noAction
+          recordBackupExpiryVerification: noAction,
+          completeExportRequest: noAction
         }}
       />
     );
@@ -59,11 +65,19 @@ describe('platform retention operations view', () => {
     expect(html).toContain('No automatic deletion');
     expect(html).toContain('privacy-case-123');
     expect(html).toContain('name="expectedVersion" value="1"');
+    expect(html).toContain('name="operationId" value="review-22222222-2222-4222-8222-222222222222-v1"');
     expect(html).toContain('Record verified request');
     expect(html).toContain('Record backup-ageing evidence');
+    expect(html).toContain('name="closureEpisodeId" value="33333333-3333-4333-8333-333333333333"');
+    expect(html).toContain('name="operationId" value="backup-33333333-3333-4333-8333-333333333333-v2"');
     expect(html).toContain(
       'name="expectedUpdatedAt" value="2026-09-18T00:00:00.000Z"'
     );
+    expect(html).toContain(
+      '/platform-admin/organisations/11111111-1111-4111-8111-111111111111/backup?requestId=22222222-2222-4222-8222-222222222222'
+    );
+    expect(html).toContain('Mark export delivered');
+    expect(html).toContain('name="deliveryReference"');
     expect(html).not.toContain('Delete customer now');
     expect(html).not.toContain('idempotencyKey</');
   });

@@ -63,6 +63,7 @@ import {
   parseXeroOAuthReadinessCommand
 } from './operations/xero-oauth-readiness.js';
 import { processInboundReply } from './services/inbound-reply-service.js';
+import { recordSubscriptionRetentionDeadline } from './services/subscription-retention.js';
 import {
   databaseUrlFromEnvironment,
   parseApprovedSmsRecoveryCommand,
@@ -570,13 +571,18 @@ async function main() {
                 .limit(1);
               if (subscription === undefined) return null;
               const [retentionCase] = await databaseClient.db
-                .select({ organisationId: retentionCases.organisationId })
+                .select({
+                  organisationId: retentionCases.organisationId,
+                  closureEffectiveAt: retentionCases.closureEffectiveAt
+                })
                 .from(retentionCases)
                 .where(eq(retentionCases.organisationId, organisationId))
                 .limit(1);
               return {
                 ...subscription,
-                retentionDeadlineRecorded: retentionCase !== undefined
+                retentionDeadlineRecorded: retentionCase !== undefined,
+                recordedCancellationAt:
+                  retentionCase?.closureEffectiveAt ?? null
               };
             },
             disconnectXero: async (organisationId) => {
@@ -610,37 +616,10 @@ async function main() {
               );
             },
             recordRetentionDeadline: async (input) => {
-              await databaseClient.db.transaction(async (transaction) => {
-                const inserted = await transaction
-                  .insert(retentionCases)
-                  .values({
-                    organisationId: input.organisationId,
-                    source: 'SUBSCRIPTION_CANCELLED',
-                    status: 'SCHEDULED',
-                    disconnectedAt: input.disconnectedAt,
-                    reviewAfter: input.retentionDeadline,
-                    deletionEligibleAt: input.deletionEligibleAt,
-                    updatedAt: input.disconnectedAt
-                  })
-                  .onConflictDoNothing({
-                    target: retentionCases.organisationId
-                  })
-                  .returning({ organisationId: retentionCases.organisationId });
-                if (inserted.length === 0) return;
-                await transaction.insert(auditEvents).values({
-                  organisationId: input.organisationId,
-                  eventType: 'SUBSCRIPTION_RETENTION_SCHEDULED',
-                  entityType: 'SUBSCRIPTION',
-                  entityId: input.organisationId,
-                  afterValue: {
-                    disconnectedAt: input.disconnectedAt.toISOString(),
-                    retentionDeadline: input.retentionDeadline.toISOString(),
-                    deletionEligibleAt:
-                      input.deletionEligibleAt?.toISOString() ?? null
-                  },
-                  occurredAt: input.disconnectedAt
-                });
-              });
+              await recordSubscriptionRetentionDeadline(
+                databaseClient.db,
+                input
+              );
             },
             clock
           },
@@ -708,6 +687,7 @@ async function main() {
                     status: 'SCHEDULED',
                     disconnectedAt: input.disconnectedAt,
                     reviewAfter: input.retentionDeadline,
+                    closureEffectiveAt: input.disconnectedAt,
                     updatedAt: input.disconnectedAt
                   })
                   .onConflictDoNothing({

@@ -88,8 +88,11 @@ export async function applyRetention(
       const [retentionCase] = await transaction
         .select({
           status: retentionCases.status,
+          closureEpisodeId: retentionCases.closureEpisodeId,
           deletionEligibleAt: retentionCases.deletionEligibleAt,
-          backupExpiryVerifiedAt: retentionCases.backupExpiryVerifiedAt
+          backupExpiryVerifiedAt: retentionCases.backupExpiryVerifiedAt,
+          backupExpiryClosureEpisodeId:
+            retentionCases.backupExpiryClosureEpisodeId
         })
         .from(retentionCases)
         .where(eq(retentionCases.organisationId, payload.organisationId))
@@ -101,6 +104,8 @@ export async function applyRetention(
           requestType: dataRequestCases.requestType,
           status: dataRequestCases.status,
           blockReason: dataRequestCases.blockReason,
+          retentionClosureEpisodeId:
+            dataRequestCases.retentionClosureEpisodeId,
           version: dataRequestCases.version
         })
         .from(dataRequestCases)
@@ -119,9 +124,14 @@ export async function applyRetention(
         const decision = dataRequestReviewDecision({
           requestType: request.requestType,
           legalHold: retentionCase?.status === 'LEGAL_HOLD',
+          requestClosureEpisodeId: request.retentionClosureEpisodeId,
+          currentClosureEpisodeId:
+            retentionCase?.closureEpisodeId ?? null,
           deletionEligibleAt: retentionCase?.deletionEligibleAt ?? null,
           backupExpiryVerifiedAt:
             retentionCase?.backupExpiryVerifiedAt ?? null,
+          backupExpiryClosureEpisodeId:
+            retentionCase?.backupExpiryClosureEpisodeId ?? null,
           now
         });
         const { status, blockReason } = decision;
@@ -172,6 +182,37 @@ export async function applyRetention(
       return changed;
     }
   );
+
+  const [retentionGuard] = await dependencies.database
+    .select({ status: retentionCases.status })
+    .from(retentionCases)
+    .where(eq(retentionCases.organisationId, payload.organisationId))
+    .limit(1);
+  const legalHoldActive = retentionGuard?.status === 'LEGAL_HOLD';
+  if (legalHoldActive) {
+    const result = {
+      accountReviewRequired,
+      dataRequestsReviewed,
+      legalHoldActive,
+      approvalsRedacted: 0,
+      outboundRedacted: 0,
+      attemptsRedacted: 0,
+      inboundRedacted: 0,
+      repliesRedacted: 0,
+      webhooksDeleted: 0,
+      contentCutoff: contentCutoff.toISOString(),
+      webhookCutoff: webhookCutoff.toISOString()
+    };
+    await dependencies.database.insert(auditEvents).values({
+      organisationId: payload.organisationId,
+      eventType: 'RETENTION_APPLIED',
+      entityType: 'ORGANISATION',
+      entityId: payload.organisationId,
+      afterValue: result,
+      occurredAt: now
+    });
+    return result;
+  }
 
   const oldInvoices = await dependencies.database
     .select({ id: invoices.id, contactId: invoices.contactId })
@@ -429,6 +470,7 @@ export async function applyRetention(
   const result = {
     accountReviewRequired,
     dataRequestsReviewed,
+    legalHoldActive,
     approvalsRedacted,
     outboundRedacted,
     attemptsRedacted,

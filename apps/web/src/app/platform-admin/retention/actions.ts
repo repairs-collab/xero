@@ -22,6 +22,7 @@ export interface RetentionActionDependencies {
     | 'recordVerifiedRequest'
     | 'reviewDataRequest'
     | 'recordBackupExpiryVerification'
+    | 'completeExportRequest'
   >;
   revalidate(path: string): void;
   redirect(path: string): void;
@@ -84,6 +85,7 @@ export const createRetentionActionHandlers = (
         organisationId: text(formData, 'organisationId'),
         requestId: text(formData, 'requestId'),
         expectedVersion: Number(text(formData, 'expectedVersion')),
+        operationId: text(formData, 'operationId'),
         reason: text(formData, 'reason')
       }
     );
@@ -99,13 +101,33 @@ export const createRetentionActionHandlers = (
       session.userId,
       {
         organisationId: text(formData, 'organisationId'),
+        closureEpisodeId: text(formData, 'closureEpisodeId'),
         verifiedAt: utcDateTime(text(formData, 'verifiedAt')),
         evidenceReference: text(formData, 'evidenceReference'),
         expectedUpdatedAt: date(
           text(formData, 'expectedUpdatedAt'),
           'expectedUpdatedAt'
         ),
+        operationId: text(formData, 'operationId'),
         reason: text(formData, 'reason')
+      }
+    );
+    dependencies.revalidate('/platform-admin/retention');
+    dependencies.redirect(
+      `/platform-admin/retention?result=${encodeURIComponent(resultCode(result))}`
+    );
+  },
+
+  async completeExportRequest(formData: FormData): Promise<void> {
+    const session = await dependencies.getOwnerSession();
+    const result = await dependencies.service.completeExportRequest(
+      session.userId,
+      {
+        organisationId: text(formData, 'organisationId'),
+        requestId: text(formData, 'requestId'),
+        expectedVersion: Number(text(formData, 'expectedVersion')),
+        operationId: text(formData, 'operationId'),
+        deliveryReference: text(formData, 'deliveryReference')
       }
     );
     dependencies.revalidate('/platform-admin/retention');
@@ -140,3 +162,7 @@ export const recordBackupExpiryVerificationAction = async (
   formData: FormData
 ): Promise<void> =>
   productionActions().recordBackupExpiryVerification(formData);
+
+export const completeExportRequestAction = async (
+  formData: FormData
+): Promise<void> => productionActions().completeExportRequest(formData);

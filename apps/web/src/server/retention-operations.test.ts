@@ -73,6 +73,7 @@ describe('retention owner operations', () => {
         organisationId,
         requestId,
         expectedVersion: 0,
+        operationId: 'review-request-v0',
         reason: 'Review verified privacy request'
       })
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
@@ -108,19 +109,57 @@ describe('retention owner operations', () => {
 
     await service.recordBackupExpiryVerification('verified-owner', {
       organisationId,
+      closureEpisodeId: '33333333-3333-4333-8333-333333333333',
       verifiedAt: new Date('2026-09-17T05:00:00.000Z'),
       evidenceReference: 'ovh-backup-review-123',
       expectedUpdatedAt: new Date('2026-09-16T00:00:00.000Z'),
+      operationId: 'verify-backup-33333333-v2',
       reason: 'Verified approved backup tiers have aged out'
     });
 
     expect(recordBackupExpiryVerification).toHaveBeenCalledWith({
       actorUserId: 'verified-owner',
       organisationId,
+      closureEpisodeId: '33333333-3333-4333-8333-333333333333',
       verifiedAt: new Date('2026-09-17T05:00:00.000Z'),
       evidenceReference: 'ovh-backup-review-123',
       expectedUpdatedAt: new Date('2026-09-16T00:00:00.000Z'),
+      operationId: 'verify-backup-33333333-v2',
       reason: 'Verified approved backup tiers have aged out',
+      now
+    });
+  });
+
+  it('completes a request-bound export with explicit retry identity', async () => {
+    const completeExportRequest = vi.fn().mockResolvedValue({
+      ok: true,
+      value: { id: requestId, status: 'COMPLETED' }
+    });
+    const service = createRetentionOperationsService({
+      verifyOwner: () => Promise.resolve(true),
+      repository: { completeExportRequest } as never,
+      clock: { now: () => now }
+    });
+
+    await expect(
+      service.completeExportRequest('verified-owner', {
+        organisationId,
+        requestId,
+        expectedVersion: 2,
+        operationId: 'complete-export-request-v2',
+        deliveryReference: 'secure-delivery-123'
+      })
+    ).resolves.toEqual({
+      ok: true,
+      value: { id: requestId, status: 'COMPLETED' }
+    });
+    expect(completeExportRequest).toHaveBeenCalledWith({
+      actorUserId: 'verified-owner',
+      organisationId,
+      requestId,
+      expectedVersion: 2,
+      operationId: 'complete-export-request-v2',
+      deliveryReference: 'secure-delivery-123',
       now
     });
   });

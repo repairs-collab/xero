@@ -42,7 +42,8 @@ describe('processSubscriptionLifecycle', () => {
         organisationId: 'org_solo',
         disconnectedAt: new Date('2026-11-09T12:00:00.000Z'),
         retentionDeadline: new Date('2026-12-09T12:00:00.000Z'),
-        deletionEligibleAt: new Date('2031-11-08T09:30:00.000Z')
+        deletionEligibleAt: new Date('2031-11-08T09:30:00.000Z'),
+        closureEffectiveAt: new Date('2026-11-08T09:30:00.000Z')
       }
     ]);
   });
@@ -95,6 +96,46 @@ describe('processSubscriptionLifecycle', () => {
 
     expect(result).toBe('ALREADY_APPLIED');
     expect(disconnects).toBe(0);
+  });
+
+  it('opens a fresh closure episode for a trusted newer cancellation', async () => {
+    const sideEffects: string[] = [];
+    const records: Array<{ closureEffectiveAt?: Date }> = [];
+
+    const result = await processSubscriptionLifecycle(
+      {
+        load: () =>
+          Promise.resolve({
+            status: 'CANCELLED',
+            cancelledAt: new Date('2027-04-10T04:00:00.000Z'),
+            retentionDeadlineRecorded: true,
+            recordedCancellationAt: new Date('2026-11-08T09:30:00.000Z')
+          }),
+        disconnectXero: () => {
+          sideEffects.push('disconnect-xero');
+          return Promise.resolve();
+        },
+        quarantineSmsNumber: () => {
+          sideEffects.push('quarantine-number');
+          return Promise.resolve();
+        },
+        recordRetentionDeadline: (input) => {
+          records.push(input);
+          return Promise.resolve();
+        },
+        clock: { now: () => new Date('2027-04-10T05:00:00.000Z') }
+      },
+      { organisationId: 'org_resubscribed', status: 'CANCELLED' }
+    );
+
+    expect(result).toBe('DISCONNECTED');
+    expect(sideEffects).toEqual(['quarantine-number', 'disconnect-xero']);
+    expect(records).toEqual([
+      expect.objectContaining({
+        closureEffectiveAt: new Date('2027-04-10T04:00:00.000Z'),
+        deletionEligibleAt: new Date('2032-04-10T04:00:00.000Z')
+      })
+    ]);
   });
 
   it('uses the last valid anniversary for a leap-day cancellation', async () => {

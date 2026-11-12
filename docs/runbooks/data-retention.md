@@ -26,6 +26,13 @@ account-closure review date. A subscription cancellation also records
 years. Existing cases are not guessed or backfilled when no trusted
 cancellation time exists.
 
+Each trusted account-closure event has its own immutable episode ID and an
+incrementing closure version. A later cancellation after resubscription starts
+a fresh episode from the later trusted cancellation time, clears backup-ageing
+evidence from the old episode and records the replacement in the audit trail.
+A stale or duplicate cancellation cannot move eligibility or replay closure
+side effects.
+
 The daily retention job atomically changes a due SCHEDULED case to
 REVIEW_REQUIRED. Retries are idempotent, a LEGAL_HOLD remains unchanged, and an
 audit event records that automatic purge is disabled. Reaching the five-year
@@ -56,8 +63,16 @@ retention job also moves requests into review when the target becomes due:
 
 Every select and mutation includes both request ID and organisation ID. A
 successful transition increments the request version and writes one audit
-event; retrying the same transition returns the existing state without another
-audit. There is no owner-console control or worker path that performs destructive
+event. Owner review, backup verification and export completion require an
+expected version plus an explicit operation ID. Only an exact retry of the same
+operation and input is idempotent; a stale version or a reused operation ID with
+different input is rejected.
+
+For an export request, the owner downloads an export whose platform audit is
+bound to that tenant and request ID, records an opaque delivery reference, and
+then marks that exact request complete. The completion stores the request-bound
+export audit, owner, time and reference so the 14-day outcome remains durable.
+There is no owner-console control or worker path that performs destructive
 tenant deletion.
 
 ## Record-category matrix
@@ -67,9 +82,9 @@ tenant deletion.
 | Xero refresh token | Disconnect, expired trial or effective cancellation | Immediate | Revoke the remote Xero connection, null the encrypted local token and mark the connection disconnected | No token survives the disconnect |
 | OAuth state and pending encrypted token | Consumed or expired OAuth transaction | At expiry | A global 15-minute cleanup deletes consumed/expired transient rows in bounded batches | Not tenant business data; removed independently |
 | Unresolved contacts and invoices | Account review date reached | Until authorised review | Preserve and place the account in REVIEW_REQUIRED | Never automatically purge while business/legal handling is undecided |
-| Outbound message content and provider payload | Related invoice resolved | 24 months | Replace content with [RETAINED_METADATA_ONLY]; replace provider payload with a metadata-only marker | Hashes, timestamps, outcomes, provider IDs and audit metadata remain |
-| Inbound message and operator-reply content | Every invoice for the contact resolved | 24 months | Redact bodies and provider payloads; an unresolved or recently resolved invoice blocks redaction | Conversation metadata remains |
-| Raw webhook projection | Event successfully processed | 90 days | Delete in bounded batches | An unprocessed event is never deleted by age alone |
+| Outbound message and provider payload | Related invoice resolved | 24 months | Replace content with [RETAINED_METADATA_ONLY]; replace provider payload with a metadata-only marker unless the tenant is under LEGAL_HOLD | Hashes, timestamps, outcomes, provider IDs and audit metadata remain |
+| Inbound message, operator-reply and approval content | Every related invoice resolved | 24 months | Redact bodies and provider payloads unless the tenant is under LEGAL_HOLD; an unresolved or recently resolved invoice blocks redaction | Conversation metadata remains |
+| Raw webhook projection | Event successfully processed | 90 days | Delete in bounded batches unless the tenant is under LEGAL_HOLD | An unprocessed event is never deleted by age alone |
 | Customer, invoice, message, call and audit metadata | Account cancellation | Five years | Record deletion eligibility; preserve metadata after shorter content minimisation; never automatically delete | Legal holds and required evidence override eligibility; scoped manual review is mandatory |
 | Subscription/payment record | Subscription/payment event | **Decision required** | Preserve; no automatic deletion duration is coded | Finance and Australian legal review must approve a period |
 | Direct-debit mandate evidence | Provider-confirmed BECS mandate/service agreement | Up to seven years only where BECS or Stripe rules require it | Retain only the required mandate evidence through Stripe or securely | This narrow exception does not extend the period for other billing or account records |
@@ -92,9 +107,15 @@ or 35-day backup statements into public policy.
   and a due date. A second run cannot create a second transition audit.
 - Verified-request intake uses a tenant-scoped idempotency key and rejects a
   conflicting replay. Owner review requires the same organisation, request ID
-  and expected version; a repeated completed transition is a no-op.
+  and expected version. Owner mutations are replayable only with the same
+  operation ID and exact semantic input.
 - LEGAL_HOLD is evaluated before eligibility or backup evidence for every
-  deletion request. Export review does not create deletion authority.
+  deletion request. It also suspends irreversible message/approval redaction
+  and processed-webhook deletion for the organisation. Export review does not
+  create deletion authority.
+- Backup-ageing evidence must name the current closure episode and be verified
+  no earlier than that episode's deletion-eligibility date. A later closure
+  invalidates the earlier evidence.
 - Content redaction is idempotent because rows already containing the retained
   marker are excluded.
 - Webhook cleanup requires processed_at and tenant ownership.

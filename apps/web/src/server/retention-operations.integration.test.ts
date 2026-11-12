@@ -9,7 +9,9 @@ import {
   dataRequestCases,
   migrateDatabase,
   organisations,
+  platformAdminAuditEvents,
   retentionCases,
+  retentionOperationReceipts,
   users
 } from '@bc5000/db';
 
@@ -97,6 +99,7 @@ describe('retention owner repository', () => {
     const actorUserId = randomUUID();
     const organisationId = randomUUID();
     const otherOrganisationId = randomUUID();
+    const closureEpisodeId = randomUUID();
     await client.db.insert(users).values({
       id: actorUserId,
       cognitoSubject: randomUUID(),
@@ -121,9 +124,12 @@ describe('retention owner repository', () => {
       status: 'LEGAL_HOLD',
       disconnectedAt: new Date('2021-08-01T00:00:00.000Z'),
       reviewAfter: new Date('2021-09-01T00:00:00.000Z'),
+      closureEpisodeId,
+      closureEffectiveAt: new Date('2021-08-01T00:00:00.000Z'),
       deletionEligibleAt: new Date('2026-08-01T00:00:00.000Z'),
       backupExpiryVerifiedAt: new Date('2026-08-15T00:00:00.000Z'),
-      backupExpiryEvidenceReference: 'backup-review-held-owner'
+      backupExpiryEvidenceReference: 'backup-review-held-owner',
+      backupExpiryClosureEpisodeId: closureEpisodeId
     });
     const repository = new PostgresRetentionOperationsRepository(client.db);
     const service = createRetentionOperationsService({
@@ -145,6 +151,7 @@ describe('retention owner repository', () => {
         organisationId: otherOrganisationId,
         requestId,
         expectedVersion: 0,
+        operationId: 'cross-tenant-review-attempt',
         reason: 'Attempted cross-tenant review'
       })
     ).resolves.toEqual({ ok: false, code: 'NOT_FOUND' });
@@ -153,6 +160,7 @@ describe('retention owner repository', () => {
       organisationId,
       requestId,
       expectedVersion: 0,
+      operationId: 'review-held-request-v0',
       reason: 'Legal hold must block deletion'
     };
     const firstReview = await service.reviewDataRequest(
@@ -184,11 +192,24 @@ describe('retention owner repository', () => {
           )
         )
     ).toHaveLength(1);
+    await expect(
+      service.reviewDataRequest(actorUserId, {
+        ...reviewInput,
+        operationId: 'different-review-of-stale-version'
+      })
+    ).resolves.toEqual({ ok: false, code: 'CONFLICT' });
+    expect(
+      await client.db
+        .select()
+        .from(retentionOperationReceipts)
+        .where(eq(retentionOperationReceipts.organisationId, organisationId))
+    ).toHaveLength(1);
   });
 
   it('records backup-ageing evidence once with tenant and expected-state guards', async () => {
     const actorUserId = randomUUID();
     const organisationId = randomUUID();
+    const closureEpisodeId = randomUUID();
     const expectedUpdatedAt = new Date('2026-09-16T00:00:00.000Z');
     await client.db.insert(users).values({
       id: actorUserId,
@@ -209,6 +230,8 @@ describe('retention owner repository', () => {
       status: 'REVIEW_REQUIRED',
       disconnectedAt: new Date('2021-08-01T00:00:00.000Z'),
       reviewAfter: new Date('2021-09-01T00:00:00.000Z'),
+      closureEpisodeId,
+      closureEffectiveAt: new Date('2021-08-01T00:00:00.000Z'),
       deletionEligibleAt: new Date('2026-08-01T00:00:00.000Z'),
       updatedAt: expectedUpdatedAt
     });
@@ -219,9 +242,11 @@ describe('retention owner repository', () => {
     });
     const input = {
       organisationId,
+      closureEpisodeId,
       verifiedAt: new Date('2026-09-17T05:00:00.000Z'),
       evidenceReference: 'ovh-backup-review-123',
       expectedUpdatedAt,
+      operationId: 'backup-review-episode-v1',
       reason: 'Verified approved backup tiers have aged out'
     };
 
@@ -235,7 +260,11 @@ describe('retention owner repository', () => {
     );
     const conflict = await service.recordBackupExpiryVerification(
       actorUserId,
-      { ...input, evidenceReference: 'different-evidence' }
+      {
+        ...input,
+        operationId: 'different-backup-operation',
+        evidenceReference: 'different-evidence'
+      }
     );
 
     expect(first).toEqual(retry);
@@ -245,6 +274,7 @@ describe('retention owner repository', () => {
         organisationId,
         backupExpiryVerifiedAt: new Date('2026-09-17T05:00:00.000Z'),
         backupExpiryEvidenceReference: 'ovh-backup-review-123',
+        backupExpiryClosureEpisodeId: closureEpisodeId,
         updatedAt: now
       }
     });
@@ -260,5 +290,27 @@ describe('retention owner repository', () => {
           )
         )
     ).toHaveLength(1);
+  });
+
+  it('completes an exported request once only after a request-bound backup audit', async () => {
+    const actorUserId = randomUUID();
+    const organisationId = randomUUID();
+    const requestId = randomUUID();
+    const exportAuditId = randomUUID();
+    await client.db.insert(users).values({ id: actorUserId, cognitoSubject: randomUUID(), email: `${actorUserId}@example.invalid`, displayName: 'Export Owner' });
+    await client.db.insert(organisations).values({ id: organisationId, xeroOrganisationId: randomUUID(), name: 'Export completion tenant', timeZone: 'Australia/Sydney', baseCurrency: 'AUD' });
+    await client.db.insert(dataRequestCases).values({ id: requestId, organisationId, requestType: 'EXPORT', status: 'IN_REVIEW', verificationReference: 'privacy-export-complete', idempotencyKey: 'verified-export-complete', verifiedAt: new Date('2026-09-01T00:00:00.000Z'), targetAt: new Date('2026-09-15T00:00:00.000Z'), version: 1, lastReviewedAt: new Date('2026-09-15T00:00:00.000Z') });
+    const service = createRetentionOperationsService({ verifyOwner: () => Promise.resolve(true), repository: new PostgresRetentionOperationsRepository(client.db), clock: { now: () => now } });
+    const completion = { organisationId, requestId, expectedVersion: 1, operationId: 'complete-export-request-v1', deliveryReference: 'secure-delivery-123' };
+
+    await expect(service.completeExportRequest(actorUserId, completion)).resolves.toEqual({ ok: false, code: 'CONFLICT' });
+    await client.db.insert(platformAdminAuditEvents).values({ id: exportAuditId, actorUserId, targetOrganisationId: organisationId, eventType: 'PLATFORM_CUSTOMER_BACKUP_DOWNLOADED', entityType: 'DATA_REQUEST', entityId: requestId, reason: 'Owner delivered verified customer export', afterValue: { requestId }, occurredAt: new Date('2026-09-17T23:00:00.000Z') });
+
+    const first = await service.completeExportRequest(actorUserId, completion);
+    const retry = await service.completeExportRequest(actorUserId, completion);
+    expect(first).toEqual(retry);
+    expect(first).toMatchObject({ ok: true, value: { id: requestId, status: 'COMPLETED', version: 2, completedAt: now, completedByUserId: actorUserId, completionReference: 'secure-delivery-123', completionExportAuditEventId: exportAuditId } });
+    await expect(service.completeExportRequest(actorUserId, { ...completion, operationId: 'stale-second-completion' })).resolves.toEqual({ ok: false, code: 'CONFLICT' });
+    expect(await client.db.select().from(auditEvents).where(and(eq(auditEvents.organisationId, organisationId), eq(auditEvents.eventType, 'DATA_REQUEST_EXPORT_COMPLETED'), eq(auditEvents.entityId, requestId)))).toHaveLength(1);
   });
 });

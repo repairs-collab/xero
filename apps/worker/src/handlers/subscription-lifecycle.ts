@@ -6,6 +6,7 @@ export interface SubscriptionLifecycleDependencies {
     status: SubscriptionStatus;
     cancelledAt: Date | null;
     retentionDeadlineRecorded: boolean;
+    recordedCancellationAt?: Date | null;
   } | null>;
   disconnectXero(organisationId: string): Promise<void>;
   quarantineSmsNumber(organisationId: string, now: Date): Promise<void>;
@@ -14,6 +15,7 @@ export interface SubscriptionLifecycleDependencies {
     disconnectedAt: Date;
     retentionDeadline: Date;
     deletionEligibleAt: Date | null;
+    closureEffectiveAt: Date;
   }): Promise<void>;
   clock: { now(): Date };
 }
@@ -42,7 +44,15 @@ export const processSubscriptionLifecycle = async (
 ): Promise<SubscriptionLifecycleResult> => {
   const current = await dependencies.load(payload.organisationId);
   if (current === null || current.status !== 'CANCELLED') return 'STALE';
-  if (current.retentionDeadlineRecorded) return 'ALREADY_APPLIED';
+  if (current.cancelledAt === null) return 'STALE';
+  if (
+    current.retentionDeadlineRecorded &&
+    (current.recordedCancellationAt === undefined ||
+      current.recordedCancellationAt === null ||
+      current.recordedCancellationAt >= current.cancelledAt)
+  ) {
+    return 'ALREADY_APPLIED';
+  }
 
   const disconnectedAt = dependencies.clock.now();
   await dependencies.quarantineSmsNumber(
@@ -53,15 +63,13 @@ export const processSubscriptionLifecycle = async (
   const retentionDeadline = new Date(
     disconnectedAt.getTime() + 30 * 24 * 60 * 60 * 1000
   );
-  const deletionEligibleAt =
-    current.cancelledAt === null
-      ? null
-      : fiveYearAnniversary(current.cancelledAt);
+  const deletionEligibleAt = fiveYearAnniversary(current.cancelledAt);
   await dependencies.recordRetentionDeadline({
     organisationId: payload.organisationId,
     disconnectedAt,
     retentionDeadline,
-    deletionEligibleAt
+    deletionEligibleAt,
+    closureEffectiveAt: current.cancelledAt
   });
   return 'DISCONNECTED';
 };

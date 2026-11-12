@@ -2,6 +2,7 @@ import { PlatformRetentionOperations } from '../../../components/platform-admin/
 import { requirePlatformOwnerPage } from '../../../server/platform-page-authorization.js';
 import { getRetentionOperationsService } from '../../../server/retention-operations-runtime.js';
 import {
+  completeExportRequestAction,
   recordBackupExpiryVerificationAction,
   recordVerifiedRequestAction,
   reviewDataRequestAction
@@ -35,7 +36,8 @@ export default async function PlatformRetentionPage({
       actions={{
         recordVerifiedRequest: recordVerifiedRequestAction,
         reviewRequest: reviewDataRequestAction,
-        recordBackupExpiryVerification: recordBackupExpiryVerificationAction
+        recordBackupExpiryVerification: recordBackupExpiryVerificationAction,
+        completeExportRequest: completeExportRequestAction
       }}
     />
   );

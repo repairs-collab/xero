@@ -61,6 +61,7 @@ describe('retention owner actions', () => {
     formData.set('organisationId', '11111111-1111-4111-8111-111111111111');
     formData.set('requestId', '22222222-2222-4222-8222-222222222222');
     formData.set('expectedVersion', '3');
+    formData.set('operationId', 'review-request-22222222-v3');
     formData.set('reason', 'Re-check legal and backup safeguards');
 
     await actions.reviewRequest(formData);
@@ -69,6 +70,7 @@ describe('retention owner actions', () => {
       organisationId: '11111111-1111-4111-8111-111111111111',
       requestId: '22222222-2222-4222-8222-222222222222',
       expectedVersion: 3,
+      operationId: 'review-request-22222222-v3',
       reason: 'Re-check legal and backup safeguards'
     });
     expect(redirect).toHaveBeenCalledWith(
@@ -88,9 +90,11 @@ describe('retention owner actions', () => {
     });
     const formData = new FormData();
     formData.set('organisationId', '11111111-1111-4111-8111-111111111111');
+    formData.set('closureEpisodeId', '33333333-3333-4333-8333-333333333333');
     formData.set('verifiedAt', '2026-09-17T05:00');
     formData.set('evidenceReference', 'ovh-backup-review-123');
     formData.set('expectedUpdatedAt', '2026-09-16T00:00:00.000Z');
+    formData.set('operationId', 'backup-episode-33333333-v2');
     formData.set('reason', 'Verified approved backup tiers have aged out');
 
     await actions.recordBackupExpiryVerification(formData);
@@ -99,11 +103,39 @@ describe('retention owner actions', () => {
       'verified-owner',
       {
         organisationId: '11111111-1111-4111-8111-111111111111',
+        closureEpisodeId: '33333333-3333-4333-8333-333333333333',
         verifiedAt: new Date('2026-09-17T05:00:00.000Z'),
         evidenceReference: 'ovh-backup-review-123',
         expectedUpdatedAt: new Date('2026-09-16T00:00:00.000Z'),
+        operationId: 'backup-episode-33333333-v2',
         reason: 'Verified approved backup tiers have aged out'
       }
     );
+  });
+
+  it('completes a request-bound export for the verified owner', async () => {
+    const completeExportRequest = vi.fn().mockResolvedValue({ ok: true });
+    const actions = createRetentionActionHandlers({
+      getOwnerSession: () => Promise.resolve(session),
+      service: { completeExportRequest } as never,
+      revalidate: vi.fn(),
+      redirect: vi.fn()
+    });
+    const formData = new FormData();
+    formData.set('organisationId', '11111111-1111-4111-8111-111111111111');
+    formData.set('requestId', '22222222-2222-4222-8222-222222222222');
+    formData.set('expectedVersion', '4');
+    formData.set('operationId', 'complete-export-22222222-v4');
+    formData.set('deliveryReference', 'secure-delivery-123');
+
+    await actions.completeExportRequest(formData);
+
+    expect(completeExportRequest).toHaveBeenCalledWith('verified-owner', {
+      organisationId: '11111111-1111-4111-8111-111111111111',
+      requestId: '22222222-2222-4222-8222-222222222222',
+      expectedVersion: 4,
+      operationId: 'complete-export-22222222-v4',
+      deliveryReference: 'secure-delivery-123'
+    });
   });
 });

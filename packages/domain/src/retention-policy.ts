@@ -162,8 +162,11 @@ export type DataRequestReviewDecision =
 export const dataRequestReviewDecision = (input: {
   requestType: 'EXPORT' | 'DELETION';
   legalHold: boolean;
+  requestClosureEpisodeId: string | null;
+  currentClosureEpisodeId: string | null;
   deletionEligibleAt: Date | null;
   backupExpiryVerifiedAt: Date | null;
+  backupExpiryClosureEpisodeId: string | null;
   now: Date;
 }): DataRequestReviewDecision => {
   if (input.requestType === 'EXPORT') {
@@ -173,12 +176,18 @@ export const dataRequestReviewDecision = (input: {
     return { status: 'BLOCKED', blockReason: 'LEGAL_HOLD' };
   }
   if (
+    input.currentClosureEpisodeId === null ||
+    input.requestClosureEpisodeId !== input.currentClosureEpisodeId ||
     input.deletionEligibleAt === null ||
     input.deletionEligibleAt.getTime() > input.now.getTime()
   ) {
     return { status: 'BLOCKED', blockReason: 'RETENTION_PERIOD_ACTIVE' };
   }
-  if (input.backupExpiryVerifiedAt === null) {
+  if (
+    input.backupExpiryVerifiedAt === null ||
+    input.backupExpiryClosureEpisodeId !== input.currentClosureEpisodeId ||
+    input.backupExpiryVerifiedAt.getTime() < input.deletionEligibleAt.getTime()
+  ) {
     return { status: 'BLOCKED', blockReason: 'BACKUP_AGEING_UNVERIFIED' };
   }
   return { status: 'MANUAL_REVIEW_REQUIRED', blockReason: null };

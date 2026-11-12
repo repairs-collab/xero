@@ -18,6 +18,7 @@ describe('retention', () => {
     const otherOrganisationId = randomUUID();
     const requestId = randomUUID();
     const otherRequestId = randomUUID();
+    const closureEpisodeId = randomUUID();
     for (const [id, name] of [
       [organisationId, 'Held retention tenant'],
       [otherOrganisationId, 'Other retention tenant']
@@ -36,9 +37,12 @@ describe('retention', () => {
       status: 'LEGAL_HOLD',
       disconnectedAt: new Date('2021-08-01T00:00:00.000Z'),
       reviewAfter: new Date('2021-09-01T00:00:00.000Z'),
+      closureEpisodeId,
+      closureEffectiveAt: new Date('2021-08-01T00:00:00.000Z'),
       deletionEligibleAt: new Date('2026-08-01T00:00:00.000Z'),
       backupExpiryVerifiedAt: new Date('2026-08-15T00:00:00.000Z'),
-      backupExpiryEvidenceReference: 'backup-review-held-tenant'
+      backupExpiryEvidenceReference: 'backup-review-held-tenant',
+      backupExpiryClosureEpisodeId: closureEpisodeId
     });
     await client.db.insert(dataRequestCases).values([
       {
@@ -49,6 +53,7 @@ describe('retention', () => {
         idempotencyKey: 'verified-request-held',
         verifiedAt: new Date('2026-08-17T00:00:00.000Z'),
         targetAt: new Date('2026-08-31T00:00:00.000Z')
+        ,retentionClosureEpisodeId: closureEpisodeId
       },
       {
         id: otherRequestId,
@@ -112,9 +117,41 @@ describe('retention', () => {
     ).toHaveLength(1);
   });
 
+  it('suspends irreversible message redaction and processed-webhook deletion under legal hold', async () => {
+    const organisationId = randomUUID();
+    const contactId = randomUUID();
+    const invoiceId = randomUUID();
+    const sequenceId = randomUUID();
+    const versionId = randomUUID();
+    const chaseId = randomUUID();
+    const stageId = randomUUID();
+    const approvalId = randomUUID();
+    const outboundId = randomUUID();
+    const webhookId = randomUUID();
+    await client.db.insert(organisations).values({ id: organisationId, xeroOrganisationId: randomUUID(), name: 'Held content tenant', timeZone: 'Australia/Sydney', baseCurrency: 'AUD' });
+    await client.db.insert(contacts).values({ id: contactId, organisationId, xeroContactId: randomUUID(), name: 'Held customer' });
+    await client.db.insert(invoices).values({ id: invoiceId, organisationId, xeroInvoiceId: randomUUID(), contactId, invoiceNumber: 'HOLD-1', type: 'ACCREC', status: 'PAID', issueDate: '2024-01-01', dueDate: '2024-02-01', amountDue: '0', currency: 'AUD', syncVersion: 1, resolvedAt: new Date('2024-08-01T00:00:00Z') });
+    await client.db.insert(reminderSequences).values({ id: sequenceId, organisationId, name: 'Held sequence' });
+    await client.db.insert(reminderSequenceVersions).values({ id: versionId, organisationId, sequenceId, versionNumber: 1, status: 'RETIRED' });
+    await client.db.insert(invoiceChases).values({ id: chaseId, organisationId, invoiceId, sequenceId, customerId: contactId, status: 'CLOSED' });
+    await client.db.insert(stageInstances).values({ id: stageId, organisationId, invoiceChaseId: chaseId, sequenceVersionId: versionId, stageKey: 'held', channel: 'SMS', status: 'DELIVERED', scheduledAt: new Date('2024-02-01T00:00:00Z'), sourceVersion: 1 });
+    await client.db.insert(approvals).values({ id: approvalId, organisationId, stageInstanceId: stageId, renderedPreview: 'Held approval content', sourceVersion: 1, status: 'APPROVED', expiresAt: new Date('2024-02-02T00:00:00Z') });
+    await client.db.insert(outboundMessages).values({ id: outboundId, organisationId, stageInstanceId: stageId, contactId, invoiceId, channel: 'SMS', source: 'AUTOMATED_REMINDER', recipientKey: '+61400000009', content: 'Held outbound content', contentHash: 'held-outbound-hash', status: 'DELIVERED', idempotencyKey: randomUUID(), completedAt: new Date('2024-03-01T00:00:00Z') });
+    await client.db.insert(webhookEvents).values({ id: webhookId, organisationId, provider: 'SINCH', providerEventKey: randomUUID(), bodyHash: 'held-webhook-hash', signatureValid: true, providerPayload: { held: true }, receivedAt: new Date('2026-01-01T00:00:00Z'), processedAt: new Date('2026-01-01T00:00:01Z') });
+    await client.db.insert(retentionCases).values({ organisationId, source: 'SUBSCRIPTION_CANCELLED', status: 'LEGAL_HOLD', disconnectedAt: new Date('2021-08-01T00:00:00Z'), reviewAfter: new Date('2021-09-01T00:00:00Z'), closureEffectiveAt: new Date('2021-08-01T00:00:00Z'), deletionEligibleAt: new Date('2026-08-01T00:00:00Z') });
+
+    const result = await applyRetention({ database: client.db, clock: { now: () => now }, batchSize: 100 }, { organisationId });
+
+    expect(result).toMatchObject({ legalHoldActive: true, approvalsRedacted: 0, outboundRedacted: 0, webhooksDeleted: 0 });
+    expect((await client.db.select().from(approvals).where(eq(approvals.id, approvalId)))[0]?.renderedPreview).toBe('Held approval content');
+    expect((await client.db.select().from(outboundMessages).where(eq(outboundMessages.id, outboundId)))[0]?.content).toBe('Held outbound content');
+    expect(await client.db.select().from(webhookEvents).where(eq(webhookEvents.id, webhookId))).toHaveLength(1);
+  });
+
   it('keeps a due deletion request blocked until the five-year eligibility date', async () => {
     const organisationId = randomUUID();
     const requestId = randomUUID();
+    const closureEpisodeId = randomUUID();
     await client.db.insert(organisations).values({
       id: organisationId,
       xeroOrganisationId: randomUUID(),
@@ -128,6 +165,8 @@ describe('retention', () => {
       status: 'SCHEDULED',
       disconnectedAt: new Date('2026-08-01T00:00:00.000Z'),
       reviewAfter: new Date('2026-10-01T00:00:00.000Z'),
+      closureEpisodeId,
+      closureEffectiveAt: new Date('2026-08-01T00:00:00.000Z'),
       deletionEligibleAt: new Date('2031-08-01T00:00:00.000Z')
     });
     await client.db.insert(dataRequestCases).values({
@@ -138,6 +177,7 @@ describe('retention', () => {
       idempotencyKey: 'verified-request-active-period',
       verifiedAt: new Date('2026-08-17T00:00:00.000Z'),
       targetAt: new Date('2026-08-31T00:00:00.000Z')
+      ,retentionClosureEpisodeId: closureEpisodeId
     });
 
     await applyRetention(
@@ -162,6 +202,7 @@ describe('retention', () => {
   it('blocks an eligible deletion request while backup ageing is unverified', async () => {
     const organisationId = randomUUID();
     const requestId = randomUUID();
+    const closureEpisodeId = randomUUID();
     await client.db.insert(organisations).values({
       id: organisationId,
       xeroOrganisationId: randomUUID(),
@@ -175,6 +216,8 @@ describe('retention', () => {
       status: 'REVIEW_REQUIRED',
       disconnectedAt: new Date('2021-08-01T00:00:00.000Z'),
       reviewAfter: new Date('2021-09-01T00:00:00.000Z'),
+      closureEpisodeId,
+      closureEffectiveAt: new Date('2021-08-01T00:00:00.000Z'),
       deletionEligibleAt: new Date('2026-08-01T00:00:00.000Z')
     });
     await client.db.insert(dataRequestCases).values({
@@ -185,6 +228,7 @@ describe('retention', () => {
       idempotencyKey: 'verified-request-backup-review',
       verifiedAt: new Date('2026-08-17T00:00:00.000Z'),
       targetAt: new Date('2026-08-31T00:00:00.000Z')
+      ,retentionClosureEpisodeId: closureEpisodeId
     });
 
     await applyRetention(
@@ -210,6 +254,7 @@ describe('retention', () => {
     const organisationId = randomUUID();
     const requestId = randomUUID();
     const preservedAuditId = randomUUID();
+    const closureEpisodeId = randomUUID();
     await client.db.insert(organisations).values({
       id: organisationId,
       xeroOrganisationId: randomUUID(),
@@ -223,9 +268,12 @@ describe('retention', () => {
       status: 'REVIEW_REQUIRED',
       disconnectedAt: new Date('2021-08-01T00:00:00.000Z'),
       reviewAfter: new Date('2021-09-01T00:00:00.000Z'),
+      closureEpisodeId,
+      closureEffectiveAt: new Date('2021-08-01T00:00:00.000Z'),
       deletionEligibleAt: new Date('2026-08-01T00:00:00.000Z'),
       backupExpiryVerifiedAt: new Date('2026-08-15T00:00:00.000Z'),
-      backupExpiryEvidenceReference: 'backup-review-complete'
+      backupExpiryEvidenceReference: 'backup-review-complete',
+      backupExpiryClosureEpisodeId: closureEpisodeId
     });
     await client.db.insert(dataRequestCases).values({
       id: requestId,
@@ -235,6 +283,7 @@ describe('retention', () => {
       idempotencyKey: 'verified-request-manual-review',
       verifiedAt: new Date('2026-08-17T00:00:00.000Z'),
       targetAt: new Date('2026-08-31T00:00:00.000Z')
+      ,retentionClosureEpisodeId: closureEpisodeId
     });
     await client.db.insert(auditEvents).values({
       id: preservedAuditId,
@@ -274,6 +323,7 @@ describe('retention', () => {
     const organisationId = randomUUID();
     const dueRequestId = randomUUID();
     const futureRequestId = randomUUID();
+    const closureEpisodeId = randomUUID();
     await client.db.insert(organisations).values({
       id: organisationId,
       xeroOrganisationId: randomUUID(),
@@ -286,7 +336,9 @@ describe('retention', () => {
       source: 'SUBSCRIPTION_CANCELLED',
       status: 'LEGAL_HOLD',
       disconnectedAt: new Date('2026-08-01T00:00:00.000Z'),
-      reviewAfter: new Date('2026-09-01T00:00:00.000Z')
+      reviewAfter: new Date('2026-09-01T00:00:00.000Z'),
+      closureEpisodeId,
+      closureEffectiveAt: new Date('2026-08-01T00:00:00.000Z')
     });
     await client.db.insert(dataRequestCases).values([
       {
@@ -383,7 +435,7 @@ describe('retention', () => {
     await client.db.insert(operatorReplies).values({ id: replyId, organisationId, conversationId, actorUserId: userId, content: 'Sensitive reply', contentHash: 'reply-hash', status: 'DELIVERED', idempotencyKey: randomUUID(), sentAt: new Date('2024-03-01T00:00:00Z') });
     await client.db.insert(webhookEvents).values({ id: webhookId, organisationId, provider: 'SINCH', providerEventKey: randomUUID(), bodyHash: 'webhook-hash', signatureValid: true, providerPayload: { sensitive: 'raw' }, receivedAt: new Date('2026-01-01T00:00:00Z'), processedAt: new Date('2026-01-01T00:00:01Z') });
     await client.db.insert(webhookEvents).values({ id: unprocessedWebhookId, organisationId, provider: 'SINCH', providerEventKey: randomUUID(), bodyHash: 'unprocessed-webhook-hash', signatureValid: true, providerPayload: { sensitive: 'must-stay-until-processed' }, receivedAt: new Date('2026-01-01T00:00:00Z') });
-    await client.db.insert(retentionCases).values({ organisationId, source: 'SUBSCRIPTION_CANCELLED', status: 'SCHEDULED', disconnectedAt: new Date('2026-07-01T00:00:00Z'), reviewAfter: new Date('2026-08-01T00:00:00Z') });
+    await client.db.insert(retentionCases).values({ organisationId, source: 'SUBSCRIPTION_CANCELLED', status: 'SCHEDULED', disconnectedAt: new Date('2026-07-01T00:00:00Z'), reviewAfter: new Date('2026-08-01T00:00:00Z'), closureEffectiveAt: new Date('2026-07-01T00:00:00Z') });
     await client.db.insert(auditEvents).values({ id: auditId, organisationId, eventType: 'OLD_AUDIT', entityType: 'INVOICE', entityId: invoiceId, occurredAt: new Date('2019-01-01T00:00:00Z') });
 
     const result = await applyRetention({ database: client.db, clock: { now: () => now }, batchSize: 100 }, { organisationId });

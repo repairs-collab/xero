@@ -253,6 +253,13 @@
       "when": 1794460000012,
       "tag": "0035_same_azazel",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1794460000013,
+      "tag": "0036_simple_xorn",
+      "breakpoints": true
     }
   ]
 }

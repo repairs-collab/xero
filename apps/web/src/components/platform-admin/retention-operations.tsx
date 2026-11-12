@@ -27,6 +27,7 @@ export function PlatformRetentionOperations({
     recordVerifiedRequest: (formData: FormData) => Promise<void>;
     reviewRequest: (formData: FormData) => Promise<void>;
     recordBackupExpiryVerification: (formData: FormData) => Promise<void>;
+    completeExportRequest: (formData: FormData) => Promise<void>;
   };
 }) {
   return (
@@ -137,6 +138,7 @@ export function PlatformRetentionOperations({
               </p>
               <div className="platform-audit-meta">
                 <span>{label(item.source)}</span>
+                <span>Closure episode {item.closureVersion}</span>
                 <span>
                   {item.backupExpiryVerifiedAt
                     ? `Backup ageing reviewed ${date(item.backupExpiryVerifiedAt)}`
@@ -156,6 +158,16 @@ export function PlatformRetentionOperations({
                   type="hidden"
                   name="expectedUpdatedAt"
                   value={item.updatedAt.toISOString()}
+                />
+                <input
+                  type="hidden"
+                  name="closureEpisodeId"
+                  value={item.closureEpisodeId}
+                />
+                <input
+                  type="hidden"
+                  name="operationId"
+                  value={`backup-${item.closureEpisodeId}-v${item.closureVersion}`}
                 />
                 <label>
                   Backup review completed at (UTC)
@@ -213,19 +225,70 @@ export function PlatformRetentionOperations({
                   {item.blockReason ? label(item.blockReason) : 'No recorded block'}
                 </span>
                 <span>Version {item.version}</span>
+                {item.completedAt ? (
+                  <span>Completed {date(item.completedAt)}</span>
+                ) : null}
               </div>
-              <form action={actions.reviewRequest} className="platform-filters">
-                <input type="hidden" name="organisationId" value={item.organisationId} />
-                <input type="hidden" name="requestId" value={item.id} />
-                <input type="hidden" name="expectedVersion" value={item.version} />
-                <label>
-                  Review reason
-                  <input name="reason" required maxLength={500} />
-                </label>
-                <button className="button" type="submit">
-                  Re-evaluate safeguards
-                </button>
-              </form>
+              {item.completedAt ? (
+                <p>
+                  Export delivery reference: {item.completionReference ?? 'Recorded'}
+                </p>
+              ) : (
+                <>
+                  <form action={actions.reviewRequest} className="platform-filters">
+                    <input type="hidden" name="organisationId" value={item.organisationId} />
+                    <input type="hidden" name="requestId" value={item.id} />
+                    <input type="hidden" name="expectedVersion" value={item.version} />
+                    <input
+                      type="hidden"
+                      name="operationId"
+                      value={`review-${item.id}-v${item.version}`}
+                    />
+                    <label>
+                      Review reason
+                      <input name="reason" required maxLength={500} />
+                    </label>
+                    <button className="button" type="submit">
+                      Re-evaluate safeguards
+                    </button>
+                  </form>
+                  {item.requestType === 'EXPORT' &&
+                  ['VERIFIED', 'IN_REVIEW'].includes(item.status) ? (
+                    <div className="platform-page-stack">
+                      <Link
+                        className="button"
+                        href={`/platform-admin/organisations/${item.organisationId}/backup?requestId=${item.id}`}
+                      >
+                        Download request export
+                      </Link>
+                      <form
+                        action={actions.completeExportRequest}
+                        className="platform-filters"
+                      >
+                        <input type="hidden" name="organisationId" value={item.organisationId} />
+                        <input type="hidden" name="requestId" value={item.id} />
+                        <input type="hidden" name="expectedVersion" value={item.version} />
+                        <input
+                          type="hidden"
+                          name="operationId"
+                          value={`complete-${item.id}-v${item.version}`}
+                        />
+                        <label>
+                          Opaque delivery reference
+                          <input
+                            name="deliveryReference"
+                            required
+                            pattern="[A-Za-z0-9][A-Za-z0-9._-]*"
+                          />
+                        </label>
+                        <button className="button button--primary" type="submit">
+                          Mark export delivered
+                        </button>
+                      </form>
+                    </div>
+                  ) : null}
+                </>
+              )}
             </article>
           ))}
           {page.dataRequests.length === 0 ? (

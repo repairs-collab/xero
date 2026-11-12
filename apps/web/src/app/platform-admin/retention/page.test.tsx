@@ -24,6 +24,7 @@ vi.mock('../../../server/retention-operations-runtime.js', () => ({
 }));
 
 vi.mock('./actions.js', () => ({
+  completeExportRequestAction: vi.fn(),
   recordBackupExpiryVerificationAction: vi.fn(),
   recordVerifiedRequestAction: vi.fn(),
   reviewDataRequestAction: vi.fn()

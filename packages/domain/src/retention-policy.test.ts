@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   accountRetentionTransition,
-  accountPulseRetentionMatrix
+  accountPulseRetentionMatrix,
+  dataRequestReviewDecision
 } from './retention-policy.js';
 
 describe('AccountPulse retention policy', () => {
@@ -108,5 +109,44 @@ describe('AccountPulse retention policy', () => {
         (row) => row.category === 'PROCESSED_WEBHOOK_PAYLOAD'
       )?.duration
     ).toBe('90 days');
+  });
+
+  it('requires backup evidence from the current closure episode at or after eligibility', () => {
+    const base = {
+      requestType: 'DELETION' as const,
+      legalHold: false,
+      requestClosureEpisodeId: 'request-episode',
+      currentClosureEpisodeId: 'current-episode',
+      deletionEligibleAt: new Date('2026-08-01T00:00:00.000Z'),
+      backupExpiryClosureEpisodeId: 'current-episode',
+      now: new Date('2026-09-18T00:00:00.000Z')
+    };
+
+    expect(
+      dataRequestReviewDecision({
+        ...base,
+        backupExpiryVerifiedAt: new Date('2026-08-15T00:00:00.000Z')
+      })
+    ).toEqual({
+      status: 'BLOCKED',
+      blockReason: 'RETENTION_PERIOD_ACTIVE'
+    });
+    expect(
+      dataRequestReviewDecision({
+        ...base,
+        requestClosureEpisodeId: 'current-episode',
+        backupExpiryVerifiedAt: new Date('2026-07-31T23:59:59.999Z')
+      })
+    ).toEqual({
+      status: 'BLOCKED',
+      blockReason: 'BACKUP_AGEING_UNVERIFIED'
+    });
+    expect(
+      dataRequestReviewDecision({
+        ...base,
+        requestClosureEpisodeId: 'current-episode',
+        backupExpiryVerifiedAt: new Date('2026-08-01T00:00:00.000Z')
+      })
+    ).toEqual({ status: 'MANUAL_REVIEW_REQUIRED', blockReason: null });
   });
 });

@@ -13,6 +13,7 @@ import {
 } from '@bc5000/db';
 
 import { processSubscriptionLifecycle } from '../src/handlers/subscription-lifecycle.js';
+import { recordSubscriptionRetentionDeadline } from '../src/services/subscription-retention.js';
 
 const client = createDatabase(
   process.env.DATABASE_URL ??
@@ -41,6 +42,7 @@ describe('cancelled Solo subscription lifecycle', () => {
       cancelledAt: now
     });
     const disconnects: string[] = [];
+    let executionNow = now;
 
     const dependencies = {
       load: async (candidateOrganisationId: string) => {
@@ -53,12 +55,16 @@ describe('cancelled Solo subscription lifecycle', () => {
           .where(eq(subscriptions.organisationId, candidateOrganisationId));
         if (subscription === undefined) return null;
         const [recorded] = await client.db
-          .select({ organisationId: retentionCases.organisationId })
+          .select({
+            organisationId: retentionCases.organisationId,
+            closureEffectiveAt: retentionCases.closureEffectiveAt
+          })
           .from(retentionCases)
           .where(eq(retentionCases.organisationId, candidateOrganisationId));
         return {
           ...subscription,
-          retentionDeadlineRecorded: recorded !== undefined
+          retentionDeadlineRecorded: recorded !== undefined,
+          recordedCancellationAt: recorded?.closureEffectiveAt ?? null
         };
       },
       disconnectXero: (candidateOrganisationId: string) => {
@@ -71,30 +77,11 @@ describe('cancelled Solo subscription lifecycle', () => {
         disconnectedAt: Date;
         retentionDeadline: Date;
         deletionEligibleAt: Date | null;
+        closureEffectiveAt: Date;
       }) => {
-        await client.db.transaction(async (transaction) => {
-          await transaction.insert(retentionCases).values({
-            organisationId: input.organisationId,
-            source: 'SUBSCRIPTION_CANCELLED',
-            disconnectedAt: input.disconnectedAt,
-            reviewAfter: input.retentionDeadline,
-            deletionEligibleAt: input.deletionEligibleAt
-          });
-          await transaction.insert(auditEvents).values({
-            organisationId: input.organisationId,
-            eventType: 'SUBSCRIPTION_RETENTION_SCHEDULED',
-            entityType: 'SUBSCRIPTION',
-            entityId: input.organisationId,
-            afterValue: {
-              disconnectedAt: input.disconnectedAt.toISOString(),
-              retentionDeadline: input.retentionDeadline.toISOString(),
-              deletionEligibleAt: input.deletionEligibleAt?.toISOString() ?? null
-            },
-            occurredAt: input.disconnectedAt
-          });
-        });
+        await recordSubscriptionRetentionDeadline(client.db, input);
       },
-      clock: { now: () => now }
+      clock: { now: () => executionNow }
     };
 
     await expect(
@@ -120,10 +107,13 @@ describe('cancelled Solo subscription lifecycle', () => {
           eq(auditEvents.eventType, 'SUBSCRIPTION_RETENTION_SCHEDULED')
         )
       );
-    expect(audit?.afterValue).toEqual({
+    expect(audit?.afterValue).toMatchObject({
+      closureVersion: 1,
+      closureEffectiveAt: '2026-11-09T12:00:00.000Z',
       disconnectedAt: '2026-11-09T12:00:00.000Z',
       retentionDeadline: '2026-12-09T12:00:00.000Z',
-      deletionEligibleAt: '2031-11-09T12:00:00.000Z'
+      deletionEligibleAt: '2031-11-09T12:00:00.000Z',
+      staleBackupEvidenceCleared: false
     });
     expect(
       (
@@ -135,8 +125,64 @@ describe('cancelled Solo subscription lifecycle', () => {
     ).toMatchObject({
       source: 'SUBSCRIPTION_CANCELLED',
       status: 'SCHEDULED',
+      closureVersion: 1,
+      closureEffectiveAt: now,
       reviewAfter: new Date('2026-12-09T12:00:00.000Z'),
       deletionEligibleAt: new Date('2031-11-09T12:00:00.000Z')
     });
+
+    const firstCase = (
+      await client.db
+        .select()
+        .from(retentionCases)
+        .where(eq(retentionCases.organisationId, organisationId))
+    )[0]!;
+    await client.db
+      .update(retentionCases)
+      .set({
+        backupExpiryVerifiedAt: new Date('2031-11-10T00:00:00.000Z'),
+        backupExpiryEvidenceReference: 'old-episode-backup-evidence',
+        backupExpiryClosureEpisodeId: firstCase.closureEpisodeId
+      })
+      .where(eq(retentionCases.organisationId, organisationId));
+    const newerCancellation = new Date('2027-04-10T04:00:00.000Z');
+    executionNow = new Date('2027-04-11T00:00:00.000Z');
+    await client.db
+      .update(subscriptions)
+      .set({ cancelledAt: newerCancellation })
+      .where(eq(subscriptions.organisationId, organisationId));
+
+    await expect(
+      processSubscriptionLifecycle(dependencies, {
+        organisationId,
+        status: 'CANCELLED'
+      })
+    ).resolves.toBe('DISCONNECTED');
+
+    const [renewedCase] = await client.db
+      .select()
+      .from(retentionCases)
+      .where(eq(retentionCases.organisationId, organisationId));
+    expect(disconnects).toEqual([organisationId, organisationId]);
+    expect(renewedCase).toMatchObject({
+      closureVersion: 2,
+      closureEffectiveAt: newerCancellation,
+      deletionEligibleAt: new Date('2032-04-10T04:00:00.000Z'),
+      backupExpiryVerifiedAt: null,
+      backupExpiryEvidenceReference: null,
+      backupExpiryClosureEpisodeId: null
+    });
+    expect(renewedCase?.closureEpisodeId).not.toBe(firstCase.closureEpisodeId);
+    expect(
+      await client.db
+        .select()
+        .from(auditEvents)
+        .where(
+          and(
+            eq(auditEvents.organisationId, organisationId),
+            eq(auditEvents.eventType, 'SUBSCRIPTION_RETENTION_SCHEDULED')
+          )
+        )
+    ).toHaveLength(2);
   });
 });

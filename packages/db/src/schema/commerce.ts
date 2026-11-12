@@ -8,6 +8,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -517,6 +518,11 @@ export const retentionCases = pgTable(
     disconnectedAt: timestamp('disconnected_at', { withTimezone: true })
       .notNull(),
     reviewAfter: timestamp('review_after', { withTimezone: true }).notNull(),
+    closureEpisodeId: uuid('closure_episode_id').defaultRandom().notNull(),
+    closureVersion: integer('closure_version').notNull().default(1),
+    closureEffectiveAt: timestamp('closure_effective_at', {
+      withTimezone: true
+    }).notNull(),
     deletionEligibleAt: timestamp('deletion_eligible_at', {
       withTimezone: true
     }),
@@ -526,6 +532,9 @@ export const retentionCases = pgTable(
     backupExpiryEvidenceReference: varchar(
       'backup_expiry_evidence_reference',
       { length: 128 }
+    ),
+    backupExpiryClosureEpisodeId: uuid(
+      'backup_expiry_closure_episode_id'
     ),
     reviewAttempts: integer('review_attempts').notNull().default(0),
     lastReviewedAt: timestamp('last_reviewed_at', { withTimezone: true }),
@@ -560,8 +569,16 @@ export const retentionCases = pgTable(
       sql`${table.reviewAttempts} >= 0`
     ),
     check(
+      'retention_cases_closure_version_ck',
+      sql`${table.closureVersion} >= 1`
+    ),
+    check(
+      'retention_cases_deletion_eligibility_ck',
+      sql`${table.deletionEligibleAt} is null or ${table.deletionEligibleAt} >= ${table.closureEffectiveAt}`
+    ),
+    check(
       'retention_cases_backup_evidence_ck',
-      sql`(${table.backupExpiryVerifiedAt} is null and ${table.backupExpiryEvidenceReference} is null) or (${table.backupExpiryVerifiedAt} is not null and ${table.backupExpiryEvidenceReference} is not null)`
+      sql`(${table.backupExpiryVerifiedAt} is null and ${table.backupExpiryEvidenceReference} is null and ${table.backupExpiryClosureEpisodeId} is null) or (${table.backupExpiryVerifiedAt} is not null and ${table.backupExpiryEvidenceReference} is not null and ${table.backupExpiryClosureEpisodeId} = ${table.closureEpisodeId} and ${table.deletionEligibleAt} is not null and ${table.backupExpiryVerifiedAt} >= ${table.deletionEligibleAt})`
     )
   ]
 );
@@ -603,6 +620,7 @@ export const dataRequestCases = pgTable(
     idempotencyKey: varchar('idempotency_key', { length: 128 }).notNull(),
     verifiedAt: timestamp('verified_at', { withTimezone: true }).notNull(),
     targetAt: timestamp('target_at', { withTimezone: true }).notNull(),
+    retentionClosureEpisodeId: uuid('retention_closure_episode_id'),
     version: integer('version').notNull().default(0),
     blockReason: varchar('block_reason', { length: 32 }).$type<
       DataRequestBlockReason
@@ -613,6 +631,11 @@ export const dataRequestCases = pgTable(
       { onDelete: 'set null' }
     ),
     completedAt: timestamp('completed_at', { withTimezone: true }),
+    completedByUserId: uuid('completed_by_user_id').references(() => users.id, {
+      onDelete: 'restrict'
+    }),
+    completionReference: varchar('completion_reference', { length: 128 }),
+    completionExportAuditEventId: uuid('completion_export_audit_event_id'),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -653,7 +676,59 @@ export const dataRequestCases = pgTable(
     ),
     check(
       'data_request_cases_completed_ck',
-      sql`(${table.status} = 'COMPLETED' and ${table.completedAt} is not null) or (${table.status} <> 'COMPLETED' and ${table.completedAt} is null)`
+      sql`(${table.status} = 'COMPLETED' and ${table.completedAt} is not null and ${table.completedByUserId} is not null and ${table.completionReference} is not null and (${table.requestType} <> 'EXPORT' or ${table.completionExportAuditEventId} is not null)) or (${table.status} <> 'COMPLETED' and ${table.completedAt} is null and ${table.completedByUserId} is null and ${table.completionReference} is null and ${table.completionExportAuditEventId} is null)`
+    )
+  ]
+);
+
+export type RetentionOperationType =
+  | 'REVIEW_DATA_REQUEST'
+  | 'VERIFY_BACKUP_AGEING'
+  | 'COMPLETE_EXPORT_REQUEST';
+
+/**
+ * Exact operation receipts are the only stale-version retry escape hatch for
+ * owner retention mutations. Reusing an operation id with different input is
+ * always a conflict.
+ */
+export const retentionOperationReceipts = pgTable(
+  'retention_operation_receipts',
+  {
+    organisationId: uuid('organisation_id')
+      .notNull()
+      .references(() => organisations.id, { onDelete: 'cascade' }),
+    operationId: varchar('operation_id', { length: 128 }).notNull(),
+    operationType: varchar('operation_type', { length: 32 })
+      .$type<RetentionOperationType>()
+      .notNull(),
+    entityId: uuid('entity_id').notNull(),
+    inputHash: char('input_hash', { length: 64 }).notNull(),
+    resultVersion: integer('result_version').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow()
+  },
+  (table) => [
+    primaryKey({
+      name: 'retention_operation_receipts_pk',
+      columns: [table.organisationId, table.operationId]
+    }),
+    index('retention_operation_receipts_entity_idx').on(
+      table.organisationId,
+      table.entityId,
+      table.createdAt
+    ),
+    check(
+      'retention_operation_receipts_type_ck',
+      sql`${table.operationType} in ('REVIEW_DATA_REQUEST', 'VERIFY_BACKUP_AGEING', 'COMPLETE_EXPORT_REQUEST')`
+    ),
+    check(
+      'retention_operation_receipts_hash_ck',
+      sql`${table.inputHash} ~ '^[0-9a-f]{64}$'`
+    ),
+    check(
+      'retention_operation_receipts_version_ck',
+      sql`${table.resultVersion} >= 0`
     )
   ]
 );
