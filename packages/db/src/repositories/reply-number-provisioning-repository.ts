@@ -24,6 +24,29 @@ const activeRequestStatuses = [
 
 const activeNumberStatuses = ['RESERVED', 'READY', 'QUARANTINED'] as const;
 
+export type OrganisationReplyNumberProvisioningState =
+  | {
+      kind: 'ASSIGNED_READY';
+      numberId: string;
+      e164Number: string;
+    }
+  | {
+      kind: 'ASSIGNED_RESERVED';
+      numberId: string;
+      e164Number: string;
+    }
+  | {
+      kind: 'ASSIGNED_QUARANTINED';
+      numberId: string;
+      e164Number: string;
+    }
+  | {
+      kind: 'ACTIVE_REQUEST';
+      requestId: string;
+      status: (typeof activeRequestStatuses)[number];
+    }
+  | { kind: 'NONE' };
+
 export type ReplyNumberProvisioningFailureCode =
   | 'NOT_FOUND'
   | 'NOT_OWNER'
@@ -215,6 +238,58 @@ const isUniqueViolation = (error: unknown): boolean =>
 
 export class PostgresReplyNumberProvisioningRepository {
   constructor(private readonly database: Database) {}
+
+  async loadOrganisationProvisioningState(
+    organisationId: string
+  ): Promise<OrganisationReplyNumberProvisioningState> {
+    const [number] = await this.database
+      .select({
+        id: smsNumberPool.id,
+        e164Number: smsNumberPool.e164Number,
+        status: smsNumberPool.status
+      })
+      .from(smsNumberPool)
+      .where(
+        and(
+          eq(smsNumberPool.organisationId, organisationId),
+          inArray(smsNumberPool.status, activeNumberStatuses)
+        )
+      )
+      .limit(1);
+    if (number) {
+      return {
+        kind:
+          number.status === 'READY'
+            ? 'ASSIGNED_READY'
+            : number.status === 'RESERVED'
+              ? 'ASSIGNED_RESERVED'
+              : 'ASSIGNED_QUARANTINED',
+        numberId: number.id,
+        e164Number: number.e164Number
+      };
+    }
+
+    const [request] = await this.database
+      .select({
+        id: replyNumberProvisioningRequests.id,
+        status: replyNumberProvisioningRequests.status
+      })
+      .from(replyNumberProvisioningRequests)
+      .where(
+        and(
+          eq(replyNumberProvisioningRequests.organisationId, organisationId),
+          inArray(replyNumberProvisioningRequests.status, activeRequestStatuses)
+        )
+      )
+      .limit(1);
+    return request
+      ? {
+          kind: 'ACTIVE_REQUEST',
+          requestId: request.id,
+          status: request.status as (typeof activeRequestStatuses)[number]
+        }
+      : { kind: 'NONE' };
+  }
 
   async ensureRequestForPaidOrganisation(
     input: EnsureReplyNumberRequestInput

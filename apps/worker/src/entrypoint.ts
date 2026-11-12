@@ -6,6 +6,7 @@ import {
   migrateDatabase,
   operationalResetRuns,
   organisations,
+  PostgresReplyNumberProvisioningRepository,
   PostgresSmsCommerceRepository,
   PostgresXeroConnectionRepository,
   providerConnections,
@@ -381,6 +382,8 @@ async function main() {
   const smsCommerceRepository = new PostgresSmsCommerceRepository(
     databaseClient.db
   );
+  const replyNumberProvisioningRepository =
+    new PostgresReplyNumberProvisioningRepository(databaseClient.db);
   const voiceGateway = new VoiceGatewayClient({
     http,
     signingSecret: required('VOICE_GATEWAY_SIGNING_SECRET'),
@@ -502,7 +505,7 @@ async function main() {
         ).then(() => undefined),
       [jobNames.smsNumberProvision]: (payload) =>
         provisionPaidSmsNumber(
-          { repository: smsCommerceRepository, clock },
+          { repository: replyNumberProvisioningRepository, clock },
           payload
         ).then(() => undefined),
       [jobNames.voiceCallExecute]: (payload) =>

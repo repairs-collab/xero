@@ -2,63 +2,174 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { provisionPaidSmsNumber } from './sms-number-provision.js';
 
+const now = new Date('2026-11-12T02:30:00.000Z');
+
+const request = {
+  id: 'request-1',
+  organisationId: 'organisation-1',
+  provider: 'SINCH',
+  requestKey: 'reply-number:organisation-1:1',
+  attempt: 1,
+  version: 1,
+  status: 'AWAITING_QUOTE' as const,
+  quoteSetupFeeMinor: null,
+  quoteMonthlyFeeMinor: null,
+  quoteCurrency: null,
+  quoteExpiresAt: null,
+  quotedAt: null,
+  documentationStatus: 'UNKNOWN' as const,
+  documentationEvidenceReference: null,
+  approvedByUserId: null,
+  approvedAt: null,
+  approvalReason: null,
+  externalOrderReference: null,
+  manualOrderRecordedAt: null,
+  fulfilledNumberId: null,
+  failureCode: null,
+  failedAt: null,
+  expiredAt: null,
+  createdAt: now,
+  updatedAt: now
+};
+
 describe('paid SMS reply number provisioning', () => {
-  it('reserves one provider-owned number and records readiness evidence', async () => {
-    const markNumberReady = vi.fn(() => Promise.resolve());
+  it('completes without mutations when an assigned number is already ready', async () => {
+    const ensureRequestForPaidOrganisation = vi.fn();
+
     await expect(
       provisionPaidSmsNumber(
         {
           repository: {
-            reserveAvailableNumber: () =>
+            loadOrganisationProvisioningState: () =>
               Promise.resolve({
-                id: 'number-1',
-                e164Number: '+61400000009',
-                status: 'RESERVED' as const
+                kind: 'ASSIGNED_READY' as const,
+                numberId: 'number-1',
+                e164Number: '+61400000009'
               }),
-            markNumberReady
+            ensureRequestForPaidOrganisation
           },
-          clock: { now: () => new Date('2026-11-10T00:00:00.000Z') }
-        },
-        { organisationId: 'organisation-1' }
-      )
-    ).resolves.toBe('READY');
-    expect(markNumberReady).toHaveBeenCalledWith(
-      'organisation-1',
-      'number-1',
-      new Date('2026-11-10T00:00:00.000Z')
-    );
-  });
-
-  it('rechecks the time when promoting a number reserved before cancellation', async () => {
-    const boundary = new Date('2026-11-10T00:00:00.000Z');
-    const clock = { now: vi.fn().mockReturnValueOnce(new Date(boundary.getTime() - 1)).mockReturnValueOnce(boundary) };
-    await expect(provisionPaidSmsNumber({
-      repository: {
-        reserveAvailableNumber: () => Promise.resolve({ id: 'number-1', e164Number: '+61400000009', status: 'RESERVED' as const }),
-        markNumberReady: (_organisationId, _numberId, now) => now >= boundary ? Promise.reject(new Error('PAID_SUBSCRIPTION_REQUIRED')) : Promise.resolve()
-      }, clock
-    }, { organisationId: 'organisation-1' })).rejects.toThrow('PAID_SUBSCRIPTION_REQUIRED');
-  });
-
-  it('is idempotent when the number is already ready', async () => {
-    const markNumberReady = vi.fn();
-    await expect(
-      provisionPaidSmsNumber(
-        {
-          repository: {
-            reserveAvailableNumber: () =>
-              Promise.resolve({
-                id: 'number-1',
-                e164Number: '+61400000009',
-                status: 'READY' as const
-              }),
-            markNumberReady
-          },
-          clock: { now: () => new Date() }
+          clock: { now: () => now }
         },
         { organisationId: 'organisation-1' }
       )
     ).resolves.toBe('ALREADY_READY');
-    expect(markNumberReady).not.toHaveBeenCalled();
+    expect(ensureRequestForPaidOrganisation).not.toHaveBeenCalled();
+  });
+
+  it('completes as awaiting verification for an assigned reserved number', async () => {
+    const ensureRequestForPaidOrganisation = vi.fn();
+
+    await expect(
+      provisionPaidSmsNumber(
+        {
+          repository: {
+            loadOrganisationProvisioningState: () =>
+              Promise.resolve({
+                kind: 'ASSIGNED_RESERVED' as const,
+                numberId: 'number-1',
+                e164Number: '+61400000009'
+              }),
+            ensureRequestForPaidOrganisation
+          },
+          clock: { now: () => now }
+        },
+        { organisationId: 'organisation-1' }
+      )
+    ).resolves.toBe('AWAITING_VERIFICATION');
+    expect(ensureRequestForPaidOrganisation).not.toHaveBeenCalled();
+  });
+
+  it('completes with owner action required for an assigned quarantined number', async () => {
+    const ensureRequestForPaidOrganisation = vi.fn();
+
+    await expect(
+      provisionPaidSmsNumber(
+        {
+          repository: {
+            loadOrganisationProvisioningState: () =>
+              Promise.resolve({
+                kind: 'ASSIGNED_QUARANTINED' as const,
+                numberId: 'number-1',
+                e164Number: '+61400000009'
+              }),
+            ensureRequestForPaidOrganisation
+          },
+          clock: { now: () => now }
+        },
+        { organisationId: 'organisation-1' }
+      )
+    ).resolves.toBe('OWNER_ACTION_REQUIRED');
+    expect(ensureRequestForPaidOrganisation).not.toHaveBeenCalled();
+  });
+
+  it('idempotently preserves an existing active manual request', async () => {
+    const ensureRequestForPaidOrganisation = vi.fn(() =>
+      Promise.resolve({ ok: true as const, value: request })
+    );
+
+    await expect(
+      provisionPaidSmsNumber(
+        {
+          repository: {
+            loadOrganisationProvisioningState: () =>
+              Promise.resolve({
+                kind: 'ACTIVE_REQUEST' as const,
+                requestId: request.id,
+                status: request.status
+              }),
+            ensureRequestForPaidOrganisation
+          },
+          clock: { now: () => now }
+        },
+        { organisationId: 'organisation-1' }
+      )
+    ).resolves.toBe('OWNER_ACTION_REQUIRED');
+    expect(ensureRequestForPaidOrganisation).toHaveBeenCalledWith({
+      organisationId: 'organisation-1',
+      provider: 'SINCH',
+      now
+    });
+  });
+
+  it('creates the manual control-plane request when no number or request exists', async () => {
+    const ensureRequestForPaidOrganisation = vi.fn(() =>
+      Promise.resolve({ ok: true as const, value: request })
+    );
+
+    await expect(
+      provisionPaidSmsNumber(
+        {
+          repository: {
+            loadOrganisationProvisioningState: () =>
+              Promise.resolve({ kind: 'NONE' as const }),
+            ensureRequestForPaidOrganisation
+          },
+          clock: { now: () => now }
+        },
+        { organisationId: 'organisation-1' }
+      )
+    ).resolves.toBe('OWNER_ACTION_REQUIRED');
+    expect(ensureRequestForPaidOrganisation).toHaveBeenCalledWith({
+      organisationId: 'organisation-1',
+      provider: 'SINCH',
+      now
+    });
+  });
+
+  it('does not report owner action when strict paid eligibility rejects the request', async () => {
+    await expect(
+      provisionPaidSmsNumber(
+        {
+          repository: {
+            loadOrganisationProvisioningState: () =>
+              Promise.resolve({ kind: 'NONE' as const }),
+            ensureRequestForPaidOrganisation: () =>
+              Promise.resolve({ ok: false as const, code: 'NOT_ELIGIBLE' as const })
+          },
+          clock: { now: () => now }
+        },
+        { organisationId: 'organisation-1' }
+      )
+    ).rejects.toThrow('REPLY_NUMBER_PROVISIONING_NOT_ELIGIBLE');
   });
 });

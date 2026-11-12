@@ -136,6 +136,72 @@ const recordExternalOrder = async (organisationId: string) => {
 };
 
 describe('PostgresReplyNumberProvisioningRepository', () => {
+  it('distinguishes no request from an existing active manual request', async () => {
+    const organisationId = await seedOrganisation();
+
+    await expect(
+      repository.loadOrganisationProvisioningState(organisationId)
+    ).resolves.toEqual({ kind: 'NONE' });
+
+    const ensured = await repository.ensureRequestForPaidOrganisation({
+      organisationId,
+      provider: 'SINCH',
+      now
+    });
+    if (!ensured.ok) throw new Error(`ensure failed: ${ensured.code}`);
+
+    await expect(
+      repository.loadOrganisationProvisioningState(organisationId)
+    ).resolves.toEqual({
+      kind: 'ACTIVE_REQUEST',
+      requestId: ensured.value.id,
+      status: 'AWAITING_QUOTE'
+    });
+  });
+
+  it.each([
+    ['RESERVED', 'ASSIGNED_RESERVED'],
+    ['READY', 'ASSIGNED_READY'],
+    ['QUARANTINED', 'ASSIGNED_QUARANTINED']
+  ] as const)(
+    'reports an assigned %s number without claiming another number',
+    async (status, kind) => {
+      const organisationId = await seedOrganisation();
+      const [number] = await client.db
+        .insert(smsNumberPool)
+        .values({
+          e164Number: `+614${randomInt(10_000_000, 99_999_999)}`,
+          provider: 'SINCH',
+          providerNumberId: `sinch-${randomUUID()}`,
+          providerVerifiedAt:
+            status === 'RESERVED'
+              ? null
+              : new Date('2026-11-12T02:00:00.000Z'),
+          status,
+          organisationId,
+          reservedAt: now,
+          readyAt: status === 'READY' ? now : null,
+          quarantineUntil:
+            status === 'QUARANTINED'
+              ? new Date('2026-12-12T02:30:00.000Z')
+              : null
+        })
+        .returning({
+          id: smsNumberPool.id,
+          e164Number: smsNumberPool.e164Number
+        });
+      if (!number) throw new Error('number insert failed');
+
+      await expect(
+        repository.loadOrganisationProvisioningState(organisationId)
+      ).resolves.toEqual({
+        kind,
+        numberId: number.id,
+        e164Number: number.e164Number
+      });
+    }
+  );
+
   it('creates one idempotent request during concurrent paid provisioning', async () => {
     const organisationId = await seedOrganisation();
 
