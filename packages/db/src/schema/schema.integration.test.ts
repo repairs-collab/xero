@@ -322,6 +322,8 @@ describe('database invariants', () => {
     const immutableEvidenceUpdates: Array<
       Partial<typeof transactionalEmailOutbox.$inferInsert>
     > = [
+      { id: randomUUID() },
+      { createdAt: new Date('2026-11-12T00:04:00.000Z') },
       { organisationId: randomUUID() },
       { billingCaseId: randomUUID() },
       { recipient: 'other-billing@example.invalid' },

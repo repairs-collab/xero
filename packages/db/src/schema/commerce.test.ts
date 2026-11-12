@@ -290,6 +290,37 @@ describe('Solo commerce schema contract', () => {
     );
 
     for (const column of [
+      'id',
+      'created_at',
+      'organisation_id',
+      'billing_case_id',
+      'recipient',
+      'template',
+      'template_version',
+      'render_data',
+      'idempotency_key',
+      'source_event_id'
+    ]) {
+      expect(migration).toContain(
+        `OLD.${column} IS DISTINCT FROM NEW.${column}`
+      );
+    }
+    expect(migration).not.toMatch(/OLD\.status IS DISTINCT FROM NEW\.status/);
+    expect(migration).not.toMatch(/OLD\.attempts IS DISTINCT FROM NEW\.attempts/);
+  });
+
+  it('forwards the complete transactional-email evidence guard in migration 0028', async () => {
+    const migration = await readFile(
+      new URL(
+        '../../drizzle/0028_transactional_email_evidence_identity_hardening.sql',
+        import.meta.url
+      ),
+      'utf8'
+    );
+
+    for (const column of [
+      'id',
+      'created_at',
       'organisation_id',
       'billing_case_id',
       'recipient',

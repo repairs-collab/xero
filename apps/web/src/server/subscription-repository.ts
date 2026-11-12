@@ -593,6 +593,24 @@ export const createPostgresSubscriptionRepository = (
         ) {
           return 'REJECTED';
         }
+        const [lockedCurrentOwner] = await transaction
+          .select({
+            organisationId: subscriptions.organisationId,
+            stripeCustomerId: subscriptions.stripeCustomerId
+          })
+          .from(subscriptions)
+          .where(
+            eq(subscriptions.stripeSubscriptionId, input.stripeSubscriptionId)
+          )
+          .for('update')
+          .limit(1);
+        if (
+          lockedCurrentOwner !== undefined &&
+          (lockedCurrentOwner.organisationId !== organisation.id ||
+            lockedCurrentOwner.stripeCustomerId !== input.stripeCustomerId)
+        ) {
+          return 'REJECTED';
+        }
         const [retired] = await transaction
           .select({ organisationId: retiredStripeSubscriptions.organisationId })
           .from(retiredStripeSubscriptions)
@@ -604,8 +622,13 @@ export const createPostgresSubscriptionRepository = (
           )
           .for('update')
           .limit(1);
-        const currentMatch =
-          subscription.stripeSubscriptionId === input.stripeSubscriptionId;
+        if (
+          retired !== undefined &&
+          retired.organisationId !== organisation.id
+        ) {
+          return 'REJECTED';
+        }
+        const currentMatch = lockedCurrentOwner !== undefined;
         const retiredMatch = retired?.organisationId === organisation.id;
         if (currentMatch === retiredMatch) return 'REJECTED';
         const relation = currentMatch ? ('CURRENT' as const) : ('RETIRED' as const);

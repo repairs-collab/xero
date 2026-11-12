@@ -668,6 +668,88 @@ describe('operational Stripe event persistence', () => {
     expect(organisation?.platformStatus).toBe('ACTIVE');
   });
 
+  it('rejects a foreign retired owner committed while the current owner waits for its organisation lock', async () => {
+    const currentOwner = await seedOrganisation();
+    const foreignOwner = await seedOrganisation();
+    const invoiceId = `in_${randomUUID()}`;
+    const eventId = `evt_${randomUUID()}`;
+    const blocker = await client.pool.connect();
+    let committed = false;
+    try {
+      await blocker.query('begin');
+      await blocker.query(
+        'select id from organisations where id = $1 for update',
+        [currentOwner.organisationId]
+      );
+      const application = repository().applyOperationalEvent(
+        operationalEvent({
+          eventId,
+          providerObjectId: invoiceId,
+          stripeCustomerId: currentOwner.stripeCustomerId,
+          stripeSubscriptionId: currentOwner.stripeSubscriptionId
+        })
+      );
+
+      const deadline = Date.now() + 5_000;
+      let waiting = false;
+      while (!waiting && Date.now() < deadline) {
+        const result = await client.pool.query<{ waiting: boolean }>(
+          `select exists (
+             select 1
+             from pg_stat_activity
+             where datname = current_database()
+               and wait_event_type = 'Lock'
+               and state = 'active'
+               and query ilike '%organisations%for update%'
+           ) as waiting`
+        );
+        waiting = result.rows[0]?.waiting ?? false;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(waiting).toBe(true);
+
+      await blocker.query(
+        'insert into retired_stripe_subscriptions (stripe_subscription_id, organisation_id) values ($1, $2)',
+        [currentOwner.stripeSubscriptionId, foreignOwner.organisationId]
+      );
+      await blocker.query('commit');
+      committed = true;
+
+      await expect(application).resolves.toBe('REJECTED');
+    } finally {
+      if (!committed) await blocker.query('rollback');
+      blocker.release();
+    }
+
+    const organisationIds = [
+      currentOwner.organisationId,
+      foreignOwner.organisationId
+    ];
+    const cases = await client.db
+      .select()
+      .from(billingCases)
+      .where(inArray(billingCases.organisationId, organisationIds));
+    const notices = await client.db
+      .select()
+      .from(transactionalEmailOutbox)
+      .where(inArray(transactionalEmailOutbox.organisationId, organisationIds));
+    const organisationsAfter = await client.db
+      .select()
+      .from(organisations)
+      .where(inArray(organisations.id, organisationIds));
+    const events = await client.db
+      .select()
+      .from(subscriptionEvents)
+      .where(eq(subscriptionEvents.stripeEventId, eventId));
+
+    expect(cases).toEqual([]);
+    expect(notices).toEqual([]);
+    expect(organisationsAfter.every((row) => row.platformStatus === 'ACTIVE')).toBe(
+      true
+    );
+    expect(events).toEqual([]);
+  });
+
   it('records cumulative refunds for review without suspending the organisation', async () => {
     const seeded = await seedOrganisation();
     const chargeId = `ch_${randomUUID()}`;
