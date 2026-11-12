@@ -16,6 +16,19 @@ export interface StripeApi {
       create(parameters: Record<string, unknown>): Promise<unknown>;
     };
   };
+  readonly charges: {
+    retrieve(chargeId: string): Promise<unknown>;
+  };
+  readonly invoicePayments: {
+    list(parameters: {
+      payment: {
+        type: 'payment_intent';
+        payment_intent: string;
+      };
+      expand: string[];
+      limit: number;
+    }): Promise<unknown>;
+  };
   readonly webhooks: {
     constructEvent(
       rawBody: string | Buffer,
@@ -61,6 +74,11 @@ export interface StripeWebhookEvent {
   readonly data: { readonly object: unknown };
 }
 
+export interface StripeChargeOwnership {
+  readonly stripeCustomerId: string;
+  readonly stripeSubscriptionId: string;
+}
+
 export class StripeConfigurationFailure extends Error {
   readonly code = 'STRIPE_CONFIGURATION_INVALID';
 
@@ -74,7 +92,7 @@ export class StripeProviderFailure extends Error {
   readonly code = 'STRIPE_PROVIDER_FAILURE';
 
   constructor() {
-    super('Stripe could not create the requested billing session');
+    super('Stripe could not complete the requested billing operation');
     this.name = 'StripeProviderFailure';
   }
 }
@@ -158,6 +176,111 @@ const requireWebhookEvent = (value: unknown): StripeWebhookEvent => {
     type: value.type,
     created: value.created,
     data: { object: value.data.object }
+  };
+};
+
+const requireProviderId = (value: unknown): string => {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.trim() !== value
+  ) {
+    throw new StripeProviderFailure();
+  }
+  return value;
+};
+
+const requireChargePaymentIdentity = (
+  value: unknown,
+  expectedChargeId: string
+): { customerId: string; paymentIntentId: string } => {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('object' in value) ||
+    value.object !== 'charge' ||
+    !('id' in value) ||
+    value.id !== expectedChargeId ||
+    !('customer' in value) ||
+    !('payment_intent' in value)
+  ) {
+    throw new StripeProviderFailure();
+  }
+
+  return {
+    customerId: requireProviderId(value.customer),
+    paymentIntentId: requireProviderId(value.payment_intent)
+  };
+};
+
+const requireChargeInvoiceOwnership = (
+  value: unknown,
+  chargeCustomerId: string,
+  paymentIntentId: string
+): StripeChargeOwnership => {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('object' in value) ||
+    value.object !== 'list' ||
+    !('data' in value) ||
+    !Array.isArray(value.data) ||
+    value.data.length !== 1 ||
+    !('has_more' in value) ||
+    value.has_more !== false
+  ) {
+    throw new StripeProviderFailure();
+  }
+
+  const invoicePayment: unknown = value.data[0];
+  if (
+    typeof invoicePayment !== 'object' ||
+    invoicePayment === null ||
+    !('object' in invoicePayment) ||
+    invoicePayment.object !== 'invoice_payment' ||
+    !('id' in invoicePayment) ||
+    typeof invoicePayment.id !== 'string' ||
+    invoicePayment.id.trim().length === 0 ||
+    !('payment' in invoicePayment) ||
+    typeof invoicePayment.payment !== 'object' ||
+    invoicePayment.payment === null ||
+    !('type' in invoicePayment.payment) ||
+    invoicePayment.payment.type !== 'payment_intent' ||
+    !('payment_intent' in invoicePayment.payment) ||
+    requireProviderId(invoicePayment.payment.payment_intent) !==
+      paymentIntentId ||
+    !('invoice' in invoicePayment)
+  ) {
+    throw new StripeProviderFailure();
+  }
+
+  const invoice: unknown = invoicePayment.invoice;
+  if (
+    typeof invoice !== 'object' ||
+    invoice === null ||
+    !('object' in invoice) ||
+    invoice.object !== 'invoice' ||
+    ('deleted' in invoice && invoice.deleted === true) ||
+    !('customer' in invoice) ||
+    requireProviderId(invoice.customer) !== chargeCustomerId ||
+    !('parent' in invoice) ||
+    typeof invoice.parent !== 'object' ||
+    invoice.parent === null ||
+    !('type' in invoice.parent) ||
+    invoice.parent.type !== 'subscription_details' ||
+    !('subscription_details' in invoice.parent) ||
+    typeof invoice.parent.subscription_details !== 'object' ||
+    invoice.parent.subscription_details === null ||
+    !('subscription' in invoice.parent.subscription_details)
+  ) {
+    throw new StripeProviderFailure();
+  }
+
+  return {
+    stripeCustomerId: chargeCustomerId,
+    stripeSubscriptionId: requireProviderId(
+      invoice.parent.subscription_details.subscription
+    )
   };
 };
 
@@ -252,6 +375,41 @@ export class StripeBillingClient {
       throw new StripeProviderFailure();
     }
     return requireHostedSession(session);
+  }
+
+  async loadChargeOwnership(chargeId: string): Promise<StripeChargeOwnership> {
+    const normalizedChargeId = requireNonEmpty(chargeId);
+
+    let charge: unknown;
+    try {
+      charge = await this.#api.charges.retrieve(normalizedChargeId);
+    } catch {
+      throw new StripeProviderFailure();
+    }
+    const { customerId, paymentIntentId } = requireChargePaymentIdentity(
+      charge,
+      normalizedChargeId
+    );
+
+    let invoicePayments: unknown;
+    try {
+      invoicePayments = await this.#api.invoicePayments.list({
+        payment: {
+          type: 'payment_intent',
+          payment_intent: paymentIntentId
+        },
+        expand: ['data.invoice'],
+        limit: 2
+      });
+    } catch {
+      throw new StripeProviderFailure();
+    }
+
+    return requireChargeInvoiceOwnership(
+      invoicePayments,
+      customerId,
+      paymentIntentId
+    );
   }
 
   verifyWebhook(
