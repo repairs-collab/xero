@@ -19,4 +19,12 @@ describe('subscription repository safety wiring', () => {
     expect(source).toContain('retiredStripeSubscriptions');
     expect(source).toContain('incomingStatus: input.status');
   });
+  it('takes the shared subscription ownership lock in every mutating Stripe path', () => {
+    expect(source).toContain('pg_advisory_xact_lock');
+    expect(source).toContain('hashtextextended');
+    expect(source).toMatch(/orderedIds[\s\S]*\.sort\(\)/);
+    expect(
+      source.match(/await lockStripeSubscriptionOwnership\(/g)
+    ).toHaveLength(3);
+  });
 });

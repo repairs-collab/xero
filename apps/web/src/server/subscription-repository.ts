@@ -158,6 +158,19 @@ const noticeIdempotencyKey = (
 ): string =>
   `stripe:${eventId}:${template}:v1:${createHash('sha256').update(recipient).digest('hex')}`;
 
+const lockStripeSubscriptionOwnership = async (
+  transaction: DbTransaction,
+  subscriptionIds: Array<string | null>
+): Promise<void> => {
+  const orderedIds = [...new Set(subscriptionIds.filter((id): id is string => id !== null))]
+    .sort();
+  for (const subscriptionId of orderedIds) {
+    await transaction.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${subscriptionId}, 0::bigint))`
+    );
+  }
+};
+
 export const createPostgresSubscriptionRepository = (
   database: Database,
   clock: { now(): Date }
@@ -254,6 +267,11 @@ export const createPostgresSubscriptionRepository = (
           await insertEvent(transaction, input, 'REJECTED');
           return 'REJECTED';
         }
+
+        await lockStripeSubscriptionOwnership(transaction, [
+          input.stripeSubscriptionId,
+          subscription.stripeSubscriptionId
+        ]);
 
         const [retired] = await transaction.select({ id: retiredStripeSubscriptions.stripeSubscriptionId })
           .from(retiredStripeSubscriptions)
@@ -380,6 +398,11 @@ export const createPostgresSubscriptionRepository = (
           await insertEvent(transaction, input, 'REJECTED');
           return 'REJECTED';
         }
+
+        await lockStripeSubscriptionOwnership(transaction, [
+          input.stripeSubscriptionId,
+          subscription.stripeSubscriptionId
+        ]);
 
         const [ownedElsewhere] = await transaction
           .select({ organisationId: subscriptions.organisationId })
@@ -593,6 +616,9 @@ export const createPostgresSubscriptionRepository = (
         ) {
           return 'REJECTED';
         }
+        await lockStripeSubscriptionOwnership(transaction, [
+          input.stripeSubscriptionId
+        ]);
         const [lockedCurrentOwner] = await transaction
           .select({
             organisationId: subscriptions.organisationId,
@@ -646,6 +672,43 @@ export const createPostgresSubscriptionRepository = (
           )
           .for('update')
           .limit(1);
+        const [finalCurrentOwner] = await transaction
+          .select({
+            organisationId: subscriptions.organisationId,
+            stripeCustomerId: subscriptions.stripeCustomerId
+          })
+          .from(subscriptions)
+          .where(
+            eq(subscriptions.stripeSubscriptionId, input.stripeSubscriptionId)
+          )
+          .limit(1);
+        const [finalRetiredOwner] = await transaction
+          .select({ organisationId: retiredStripeSubscriptions.organisationId })
+          .from(retiredStripeSubscriptions)
+          .where(
+            eq(
+              retiredStripeSubscriptions.stripeSubscriptionId,
+              input.stripeSubscriptionId
+            )
+          )
+          .limit(1);
+        if (
+          (finalCurrentOwner !== undefined &&
+            (finalCurrentOwner.organisationId !== organisation.id ||
+              finalCurrentOwner.stripeCustomerId !== input.stripeCustomerId)) ||
+          (finalRetiredOwner !== undefined &&
+            finalRetiredOwner.organisationId !== organisation.id)
+        ) {
+          return 'REJECTED';
+        }
+        const finalCurrentMatch = finalCurrentOwner !== undefined;
+        const finalRetiredMatch = finalRetiredOwner !== undefined;
+        if (
+          finalCurrentMatch === finalRetiredMatch ||
+          (relation === 'CURRENT') !== finalCurrentMatch
+        ) {
+          return 'REJECTED';
+        }
         const blocksSending = operationalEventBlocksSending(input, relation);
         const [latestAppliedEvidence] = await transaction
           .select({

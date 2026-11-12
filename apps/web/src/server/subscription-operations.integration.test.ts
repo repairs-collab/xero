@@ -750,6 +750,129 @@ describe('operational Stripe event persistence', () => {
     expect(events).toEqual([]);
   });
 
+  it('rejects a foreign retired owner committed after ownership reads while waiting on the billing case', async () => {
+    const currentOwner = await seedOrganisation();
+    const foreignOwner = await seedOrganisation();
+    const invoiceId = `in_${randomUUID()}`;
+    const eventId = `evt_${randomUUID()}`;
+    const previousEventId = `evt_${randomUUID()}`;
+    const openedAt = new Date('2026-11-11T22:00:00.000Z');
+    const [seedCase] = await client.db
+      .insert(billingCases)
+      .values({
+        organisationId: currentOwner.organisationId,
+        kind: 'PAYMENT_FAILURE',
+        status: 'RESOLVED',
+        providerObjectType: 'INVOICE',
+        providerObjectId: invoiceId,
+        providerStatus: 'paid',
+        stripeSubscriptionId: currentOwner.stripeSubscriptionId,
+        subscriptionRelation: 'CURRENT',
+        amountMinor: 0,
+        currency: 'aud',
+        blocksSending: false,
+        latestProviderEventId: previousEventId,
+        latestProviderEventCreatedAt: openedAt,
+        openedAt,
+        resolvedAt: openedAt
+      })
+      .returning({ id: billingCases.id });
+    const blocker = await client.pool.connect();
+    let committed = false;
+    try {
+      await blocker.query('begin');
+      await blocker.query('select id from billing_cases where id = $1 for update', [
+        seedCase!.id
+      ]);
+      const application = repository().applyOperationalEvent(
+        operationalEvent({
+          eventId,
+          providerObjectId: invoiceId,
+          stripeCustomerId: currentOwner.stripeCustomerId,
+          stripeSubscriptionId: currentOwner.stripeSubscriptionId
+        })
+      );
+
+      const deadline = Date.now() + 5_000;
+      let waiting = false;
+      while (!waiting && Date.now() < deadline) {
+        const result = await client.pool.query<{ waiting: boolean }>(
+          `select exists (
+             select 1
+             from pg_stat_activity
+             where datname = current_database()
+               and wait_event_type = 'Lock'
+               and state = 'active'
+               and query ilike '%billing_cases%for update%'
+           ) as waiting`
+        );
+        waiting = result.rows[0]?.waiting ?? false;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(waiting).toBe(true);
+
+      const lockProbe = await client.pool.connect();
+      try {
+        await lockProbe.query('begin');
+        const lockResult = await lockProbe.query<{ acquired: boolean }>(
+          `select pg_try_advisory_xact_lock(
+             hashtextextended($1, 0::bigint)
+           ) as acquired`,
+          [currentOwner.stripeSubscriptionId]
+        );
+        expect(lockResult.rows[0]?.acquired).toBe(false);
+        await lockProbe.query('rollback');
+      } finally {
+        lockProbe.release();
+      }
+
+      await blocker.query(
+        'insert into retired_stripe_subscriptions (stripe_subscription_id, organisation_id) values ($1, $2)',
+        [currentOwner.stripeSubscriptionId, foreignOwner.organisationId]
+      );
+      await blocker.query('commit');
+      committed = true;
+
+      await expect(application).resolves.toBe('REJECTED');
+    } finally {
+      if (!committed) await blocker.query('rollback');
+      blocker.release();
+    }
+
+    const [caseAfter] = await client.db
+      .select()
+      .from(billingCases)
+      .where(eq(billingCases.id, seedCase!.id));
+    const notices = await client.db
+      .select()
+      .from(transactionalEmailOutbox)
+      .where(eq(transactionalEmailOutbox.billingCaseId, seedCase!.id));
+    const organisationsAfter = await client.db
+      .select()
+      .from(organisations)
+      .where(
+        inArray(organisations.id, [
+          currentOwner.organisationId,
+          foreignOwner.organisationId
+        ])
+      );
+    const events = await client.db
+      .select()
+      .from(subscriptionEvents)
+      .where(eq(subscriptionEvents.stripeEventId, eventId));
+
+    expect(caseAfter).toMatchObject({
+      status: 'RESOLVED',
+      blocksSending: false,
+      latestProviderEventId: previousEventId
+    });
+    expect(notices).toEqual([]);
+    expect(organisationsAfter.every((row) => row.platformStatus === 'ACTIVE')).toBe(
+      true
+    );
+    expect(events).toEqual([]);
+  });
+
   it('records cumulative refunds for review without suspending the organisation', async () => {
     const seeded = await seedOrganisation();
     const chargeId = `ch_${randomUUID()}`;
