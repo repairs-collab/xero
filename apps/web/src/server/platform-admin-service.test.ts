@@ -453,4 +453,74 @@ describe('platform administration read service', () => {
     expect(recordManualOrderReference).not.toHaveBeenCalled();
     expect(recordFulfilledNumber).not.toHaveBeenCalled();
   });
+
+  it('rejects non-opaque or overlong documentation references before persistence', async () => {
+    const recordQuote = vi.fn();
+    const recordDocumentationComplete = vi.fn();
+    const service = createPlatformAdminService({
+      verifyOwner: () => Promise.resolve(true),
+      repository: {} as never,
+      provisioningRepository: {
+        recordQuote,
+        recordDocumentationComplete
+      } as never,
+      clock: { now: () => new Date('2026-11-12T00:00:00.000Z') }
+    });
+    const target = {
+      organisationId: '22222222-2222-4222-8222-222222222222',
+      requestId: '33333333-3333-4333-8333-333333333333',
+      expectedVersion: 2,
+      reason: 'Written evidence reviewed'
+    };
+
+    await expect(service.recordReplyNumberQuote('owner-user', {
+      ...target,
+      setupFeeMinor: 1_135,
+      monthlyFeeMinor: 1_530,
+      quoteExpiresAt: new Date('2026-11-30T00:00:00.000Z'),
+      documentationStatus: 'REQUIRED',
+      documentationEvidenceReference: 'case/reference with spaces'
+    })).resolves.toEqual({ ok: false, code: 'VALIDATION' });
+    await expect(service.completeReplyNumberDocumentation('owner-user', {
+      ...target,
+      documentationEvidenceReference: `A${'x'.repeat(128)}`
+    })).resolves.toEqual({ ok: false, code: 'VALIDATION' });
+
+    expect(recordQuote).not.toHaveBeenCalled();
+    expect(recordDocumentationComplete).not.toHaveBeenCalled();
+  });
+
+  it('accepts only a bounded opaque external order reference', async () => {
+    const recordManualOrderReference = vi
+      .fn()
+      .mockResolvedValue({ ok: true, value: {} });
+    const service = createPlatformAdminService({
+      verifyOwner: () => Promise.resolve(true),
+      repository: {} as never,
+      provisioningRepository: { recordManualOrderReference } as never,
+      clock: { now: () => new Date('2026-11-12T00:00:00.000Z') }
+    });
+    const target = {
+      organisationId: '22222222-2222-4222-8222-222222222222',
+      requestId: '33333333-3333-4333-8333-333333333333',
+      expectedVersion: 4,
+      reason: 'Order placed outside AccountPulse'
+    };
+
+    await expect(service.recordManualReplyNumberOrder('owner-user', {
+      ...target,
+      externalOrderReference: 'order reference 123'
+    })).resolves.toEqual({ ok: false, code: 'VALIDATION' });
+    await expect(service.recordManualReplyNumberOrder('owner-user', {
+      ...target,
+      externalOrderReference: ' order.ref-123_AU '
+    })).resolves.toEqual({ ok: true, value: {} });
+
+    expect(recordManualOrderReference).toHaveBeenCalledWith({
+      ...target,
+      actorUserId: 'owner-user',
+      externalOrderReference: 'order.ref-123_AU',
+      now: new Date('2026-11-12T00:00:00.000Z')
+    });
+  });
 });

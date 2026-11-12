@@ -104,6 +104,14 @@ export const createPlatformAdminService = (
       !/[\r\n\0]/u.test(cleaned)
     );
   };
+  const validOpaqueReference = (value: string) => {
+    const cleaned = value.trim();
+    return (
+      cleaned.length > 0 &&
+      cleaned.length <= 128 &&
+      /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(cleaned)
+    );
+  };
   const validRequestTarget = (input: {
     organisationId: string;
     requestId: string;
@@ -561,8 +569,7 @@ export const createPlatformAdminService = (
       !['NOT_REQUIRED', 'REQUIRED', 'COMPLETE'].includes(
         input.documentationStatus
       ) ||
-      (evidenceReference !== null &&
-        !validReference(evidenceReference, 256)) ||
+      (evidenceReference !== null && !validOpaqueReference(evidenceReference)) ||
       (input.documentationStatus === 'COMPLETE' && evidenceReference === null)
     ) {
       return { ok: false, code: 'VALIDATION' } as const;
@@ -597,7 +604,7 @@ export const createPlatformAdminService = (
     if (
       !validRequestTarget(input) ||
       !validReason(input.reason) ||
-      !validReference(input.documentationEvidenceReference, 256)
+      !validOpaqueReference(input.documentationEvidenceReference)
     ) {
       return { ok: false, code: 'VALIDATION' } as const;
     }
@@ -665,7 +672,7 @@ export const createPlatformAdminService = (
     if (
       !validRequestTarget(input) ||
       !validReason(input.reason) ||
-      !validReference(input.externalOrderReference, 256)
+      !validOpaqueReference(input.externalOrderReference)
     ) {
       return { ok: false, code: 'VALIDATION' } as const;
     }

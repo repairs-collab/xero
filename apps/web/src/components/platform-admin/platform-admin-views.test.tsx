@@ -362,9 +362,22 @@ describe('platform owner views', () => {
               status: 'APPROVED_FOR_MANUAL_ORDER',
               documentationStatus: 'COMPLETE',
               quoteExpiresAt: new Date('2026-11-10T00:00:00.000Z')
+            },
+            {
+              ...requestBase,
+              id: '77777777-7777-4777-8777-777777777777',
+              version: 1,
+              status: 'AWAITING_QUOTE',
+              quoteSetupFeeMinor: null,
+              quoteMonthlyFeeMinor: null,
+              quoteCurrency: null,
+              quoteExpiresAt: null,
+              quotedAt: null,
+              documentationStatus: 'UNKNOWN',
+              documentationEvidenceReference: null
             }
           ],
-          total: 3,
+          total: 5,
           page: 1,
           pageSize: 25
         }}
@@ -410,6 +423,11 @@ describe('platform owner views', () => {
     expect(html).toContain('name="approvalPhrase"');
     expect(html).toContain('APPROVE EXACT QUOTE');
     expect(html).toContain('name="documentationEvidenceReference"');
+    expect(html).toContain(
+      'Use an opaque reference only: letters, numbers, full stops, underscores or hyphens (maximum 128).'
+    );
+    expect(html).not.toContain('maxLength="256"');
+    expect(html.match(/pattern="\[A-Za-z0-9\]\[A-Za-z0-9\._-\]\*"/g)).toHaveLength(3);
     expect(html).toContain('Record external order reference');
     expect(html.match(/Record external order reference/g)).toHaveLength(1);
     expect(html).toContain('Expired approved quote — do not place an order.');

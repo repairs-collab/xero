@@ -52,6 +52,8 @@ const aud = (minor: number | null): string =>
         currency: 'AUD'
       }).format(minor / 100);
 const audInput = (minor: number): string => (minor / 100).toFixed(2);
+const opaqueReferenceHelp =
+  'Use an opaque reference only: letters, numbers, full stops, underscores or hyphens (maximum 128).';
 
 type ProvisioningRequest =
   PlatformReplyNumberProvisioningPage['items'][number];
@@ -274,7 +276,8 @@ export function PlatformSmsAdministration({
                       <label>Written quote expires (Sydney time)<input type="datetime-local" name="quoteExpiresLocal" required /></label>
                       <label>Sydney UTC offset at expiry<select name="quoteUtcOffset" required defaultValue=""><option value="" disabled>Select offset</option><option value="+11:00">Daylight saving (+11:00)</option><option value="+10:00">Standard time (+10:00)</option></select></label>
                       <label>Documentation status<select name="documentationStatus" required defaultValue="NOT_REQUIRED"><option value="NOT_REQUIRED">Not required</option><option value="REQUIRED">Required</option><option value="COMPLETE">Complete</option></select></label>
-                      <label>Redacted evidence reference<input name="documentationEvidenceReference" maxLength={256} /></label>
+                      <label>Redacted evidence reference<input name="documentationEvidenceReference" maxLength={128} pattern="[A-Za-z0-9][A-Za-z0-9._-]*" /></label>
+                      <small>{opaqueReferenceHelp} Do not paste credentials, links or document contents.</small>
                       <label>Reason<input name="reason" maxLength={500} required /></label>
                       <button className="button button--primary" type="submit">Record written quote</button>
                     </form>
@@ -283,9 +286,9 @@ export function PlatformSmsAdministration({
                   {request.documentationStatus === 'REQUIRED' && ['AWAITING_OWNER_APPROVAL', 'APPROVED_FOR_MANUAL_ORDER'].includes(request.status) ? (
                     <form action={actions.completeDocumentation as never}>
                       <RequestIdentityFields request={request} />
-                      <label>Completed documentation reference<input name="documentationEvidenceReference" maxLength={256} required /></label>
+                      <label>Completed documentation reference<input name="documentationEvidenceReference" maxLength={128} pattern="[A-Za-z0-9][A-Za-z0-9._-]*" required /></label>
                       <label>Reason<input name="reason" maxLength={500} required /></label>
-                      <small>Record a redacted case or evidence reference only. Do not upload or paste the document.</small>
+                      <small>{opaqueReferenceHelp} Do not upload or paste the document.</small>
                       <button className="button button--primary" type="submit">Mark required documents complete</button>
                     </form>
                   ) : null}
@@ -314,9 +317,9 @@ export function PlatformSmsAdministration({
                   {request.status === 'APPROVED_FOR_MANUAL_ORDER' && documentationReady && !quoteExpired ? (
                     <form action={actions.recordOrder as never}>
                       <RequestIdentityFields request={request} />
-                      <label>Redacted external order reference<input name="externalOrderReference" maxLength={256} required /></label>
+                      <label>Redacted external order reference<input name="externalOrderReference" maxLength={128} pattern="[A-Za-z0-9][A-Za-z0-9._-]*" required /></label>
                       <label>Reason<input name="reason" maxLength={500} defaultValue="Order placed outside AccountPulse" required /></label>
-                      <small>Complete the Sinch order outside AccountPulse first. This control records the reference only.</small>
+                      <small>{opaqueReferenceHelp} Complete the Sinch order outside AccountPulse first; this control records the reference only.</small>
                       <button className="button button--primary" type="submit">Record external order reference</button>
                     </form>
                   ) : null}
