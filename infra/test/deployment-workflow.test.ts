@@ -4,6 +4,10 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync(resolve(process.cwd(), '.github/workflows/deploy.yml'), 'utf8');
+const ovhCompose = readFileSync(
+  resolve(process.cwd(), 'deploy/ovh/docker-compose.yml'),
+  'utf8'
+);
 
 describe('AccountPulse OVH deployment workflow', () => {
   it('has no AWS application deployment path', () => {
@@ -70,5 +74,27 @@ describe('AccountPulse OVH deployment workflow', () => {
   it('serialises releases and never cancels an in-flight production change', () => {
     expect(workflow).toContain('group: accountpulse-ovh-release');
     expect(workflow).toContain('cancel-in-progress: false');
+  });
+
+  it('gives the web container only a read-only sanitized server-health snapshot', () => {
+    expect(ovhCompose).toContain(
+      'SERVER_HEALTH_SNAPSHOT_PATH: /run/accountpulse-server-health/server-health.json'
+    );
+    expect(ovhCompose).toContain(
+      '/var/lib/accountpulse/server-health:/run/accountpulse-server-health:ro'
+    );
+    expect(ovhCompose).not.toContain('/var/run/docker.sock');
+  });
+
+  it('transfers the reviewed host health collector and timer without executing them', () => {
+    for (const file of [
+      'deploy/ovh/collect-server-health.sh',
+      'deploy/ovh/install-server-health-monitor.sh',
+      'deploy/ovh/accountpulse-server-health.service',
+      'deploy/ovh/accountpulse-server-health.timer'
+    ]) {
+      expect(workflow).toContain(file);
+    }
+    expect(workflow).not.toContain('install-server-health-monitor.sh"');
   });
 });

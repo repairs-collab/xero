@@ -62,6 +62,9 @@ services:
       WEBHOOK_ORGANISATION_ID: ${WEBHOOK_ORGANISATION_ID:-}
       VOICE_GATEWAY_URL: ${VOICE_GATEWAY_URL:-http://voice-gateway:3105}
       VOICE_GATEWAY_SIGNING_SECRET: ${VOICE_GATEWAY_SIGNING_SECRET:?VOICE_GATEWAY_SIGNING_SECRET is required}
+      SERVER_HEALTH_SNAPSHOT_PATH: /run/accountpulse-server-health/server-health.json
+    volumes:
+      - /var/lib/accountpulse/server-health:/run/accountpulse-server-health:ro
     networks: [private]
 
   worker:

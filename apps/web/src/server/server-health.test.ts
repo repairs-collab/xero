@@ -44,9 +44,9 @@ describe('server health snapshot', () => {
     expect(health.status).toBe('HEALTHY');
     expect(health.checkedAt).toBe(checkedAt);
     expect(health.ageSeconds).toBe(300);
-    expect(health.memory.usedPercent).toBe(50);
-    expect(health.disk.usedPercent).toBe(50);
-    expect(health.host.loadPerCorePercent).toBe(30);
+    expect(health.memory?.usedPercent).toBe(50);
+    expect(health.disk?.usedPercent).toBe(50);
+    expect(health.host?.loadPerCorePercent).toBe(30);
     expect(health.services).toEqual([
       { name: 'web', label: 'Web app', status: 'HEALTHY' },
       { name: 'worker', label: 'Worker', status: 'HEALTHY' },
@@ -64,8 +64,8 @@ describe('server health snapshot', () => {
     const health = evaluateServerHealth(snapshot, now);
 
     expect(health.status).toBe('WARNING');
-    expect(health.memory.usedPercent).toBe(80);
-    expect(health.host.loadPerCorePercent).toBe(100);
+    expect(health.memory?.usedPercent).toBe(80);
+    expect(health.host?.loadPerCorePercent).toBe(100);
   });
 
   it('grades critical capacity and service failures at the fixed boundaries', () => {
@@ -77,7 +77,7 @@ describe('server health snapshot', () => {
     const health = evaluateServerHealth(snapshot, now);
 
     expect(health.status).toBe('CRITICAL');
-    expect(health.disk.usedPercent).toBe(90);
+    expect(health.disk?.usedPercent).toBe(90);
     expect(health.services[1]).toEqual({
       name: 'worker',
       label: 'Worker',
@@ -95,6 +95,16 @@ describe('server health snapshot', () => {
     expect(health.message).toBe('Server health data is out of date.');
   });
 
+  it('fails closed when the host timestamp is materially in the future', () => {
+    const snapshot = healthySnapshot();
+    snapshot.checkedAt = '2026-11-13T01:10:01.000Z';
+
+    const health = evaluateServerHealth(snapshot, now);
+
+    expect(health.status).toBe('UNAVAILABLE');
+    expect(health.message).toBe('Server health data is not available.');
+  });
+
   it('returns an unavailable view for malformed, incomplete, or oversized input', async () => {
     for (const raw of [
       '{not-json',
@@ -103,7 +113,7 @@ describe('server health snapshot', () => {
     ]) {
       const health = await loadServerHealthSnapshot({
         now,
-        readText: async () => raw
+        readText: () => Promise.resolve(raw)
       });
 
       expect(health.status).toBe('UNAVAILABLE');
@@ -124,7 +134,7 @@ describe('server health snapshot', () => {
 
     const health = await loadServerHealthSnapshot({
       now,
-      readText: async () => raw
+      readText: () => Promise.resolve(raw)
     });
 
     expect(health.status).toBe('HEALTHY');
@@ -137,9 +147,9 @@ describe('server health snapshot', () => {
     const health = await loadServerHealthSnapshot({
       now,
       path: '/sensitive/host/path/server-health.json',
-      readText: async () => {
-        throw new Error('permission denied at /sensitive/host/path/server-health.json');
-      }
+      readText: () => Promise.reject(
+        new Error('permission denied at /sensitive/host/path/server-health.json')
+      )
     });
 
     expect(health).toEqual({

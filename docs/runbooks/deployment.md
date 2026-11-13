@@ -95,6 +95,37 @@ If a database restore is genuinely required, stop and use the separate restore p
 
 Pre-release backups are stored in `${OVH_DEPLOY_PATH}/backups` and named with the candidate SHA and UTC timestamp. Release and rollback metadata live under `${OVH_DEPLOY_PATH}/releases/FULL_SHA`. Apply the organisation's retention and encrypted off-host backup policy to both directories.
 
+## Owner-only server health snapshot
+
+The AccountPulse Owner console reads a sanitized host snapshot from a read-only
+mount. It never receives the Docker socket, a shell, host credentials or a host
+filesystem path. The snapshot contains only uptime, CPU load, memory and disk
+capacity, a UTC check time, and the health of the fixed `web`, `worker`,
+`postgres` and `caddy` containers.
+
+After the reviewed monitor files have been transferred to the OVH deploy path,
+install the collector through a separately approved host change:
+
+```bash
+cd /the/protected/OVH_DEPLOY_PATH
+sudo ./install-server-health-monitor.sh
+```
+
+The installer runs one collection, then enables a five-minute systemd timer.
+Verify it without changing application state:
+
+```bash
+systemctl status accountpulse-server-health.timer --no-pager
+systemctl status accountpulse-server-health.service --no-pager
+test -r /var/lib/accountpulse/server-health/server-health.json
+```
+
+Do not add the Docker socket to the web container. Do not extend the snapshot
+with hostnames, IP addresses, environment values, credentials, process command
+lines, customer data or provider secrets. If the collector is absent, fails, or
+has not refreshed for more than 15 minutes, the Owner console must show
+**Unavailable** rather than reusing old values.
+
 ## Secret rotation
 
 Edit the protected `accountpulse.env` on staging first, run a staging release of the currently approved SHA, and verify integration health. Then repeat through the protected production environment. Keep the previous Xero encryption key in `XERO_TOKEN_ENCRYPTION_KEYS_JSON` during key rotation until every stored envelope has been re-encrypted with the active key.

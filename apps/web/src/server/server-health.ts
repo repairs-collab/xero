@@ -193,7 +193,9 @@ export const evaluateServerHealth = (
 ): ServerHealthView => {
   const checkedAtMs = Date.parse(snapshot.checkedAt);
   if (!Number.isFinite(checkedAtMs)) return unavailable();
-  const ageSeconds = Math.max(0, Math.floor((now.getTime() - checkedAtMs) / 1_000));
+  const clockDifferenceSeconds = Math.floor((now.getTime() - checkedAtMs) / 1_000);
+  if (clockDifferenceSeconds < -300) return unavailable();
+  const ageSeconds = Math.max(0, clockDifferenceSeconds);
   if (ageSeconds > STALE_AFTER_SECONDS) {
     return unavailable('Server health data is out of date.');
   }
