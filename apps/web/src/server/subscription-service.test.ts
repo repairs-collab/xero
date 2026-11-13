@@ -262,10 +262,15 @@ class FakeRepository implements SubscriptionRepository {
   }
 
   applyCheckoutCompleted(
-    input: Parameters<SubscriptionRepository['applyCheckoutCompleted']>[0]
+    input: Parameters<SubscriptionRepository['applyCheckoutCompleted']>[0],
+    effects?: Parameters<SubscriptionRepository['applyCheckoutCompleted']>[1]
   ): ReturnType<SubscriptionRepository['applyCheckoutCompleted']> {
     this.checkoutInputs.push(input);
-    return Promise.resolve(this.applyOutcome);
+    if (this.applyOutcome !== 'APPLIED') return Promise.resolve(this.applyOutcome);
+    return (async () => {
+      await effects?.onApplied({} as never);
+      return 'APPLIED' as const;
+    })();
   }
 
   applyOperationalEvent(
@@ -1221,8 +1226,8 @@ describe('subscription webhooks', () => {
     expect(repository.rejectedInputs).toHaveLength(1);
   });
 
-  it('records Checkout completion without granting an active subscription', async () => {
-    const { service, stripe, repository } = createService();
+  it('records Checkout completion and queues idempotent number provisioning without granting an active subscription', async () => {
+    const { service, stripe, repository, numberProvisionJobs } = createService();
     stripe.event = {
       id: 'evt_checkout_completed',
       type: 'checkout.session.completed',
@@ -1257,6 +1262,7 @@ describe('subscription webhooks', () => {
     });
     expect(repository.lifecycleInputs).toEqual([]);
     expect(repository.currentAccount?.status).toBe('TRIALING');
+    expect(numberProvisionJobs).toEqual([{ organisationId: 'org_solo' }]);
   });
 
   it.each([

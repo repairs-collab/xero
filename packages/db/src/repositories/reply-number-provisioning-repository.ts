@@ -266,6 +266,12 @@ export class PostgresReplyNumberProvisioningRepository {
         organisationId: organisations.id,
         subscriptionStatus: subscriptions.status,
         stripeProviderStatus: subscriptions.trustedStripeProviderStatus,
+        stripeSubscriptionId: subscriptions.stripeSubscriptionId,
+        initialCardStripeSubscriptionId:
+          subscriptions.initialCardStripeSubscriptionId,
+        initialCardInvoiceId: subscriptions.initialCardInvoiceId,
+        initialCardPaymentSucceededAt:
+          subscriptions.initialCardPaymentSucceededAt,
         currentPeriodStart: subscriptions.currentPeriodStart,
         currentPeriodEnd: subscriptions.currentPeriodEnd,
         cancelAt: subscriptions.cancelAt
@@ -286,6 +292,12 @@ export class PostgresReplyNumberProvisioningRepository {
     for (const candidate of candidates) {
       if (
         candidate.stripeProviderStatus !== 'active' ||
+        candidate.stripeSubscriptionId === null ||
+        candidate.initialCardStripeSubscriptionId !==
+          candidate.stripeSubscriptionId ||
+        candidate.initialCardInvoiceId === null ||
+        candidate.initialCardPaymentSucceededAt === null ||
+        candidate.initialCardPaymentSucceededAt.getTime() > now.getTime() ||
         candidate.currentPeriodStart === null ||
         candidate.currentPeriodEnd === null ||
         candidate.currentPeriodStart.getTime() > now.getTime() ||
@@ -401,6 +413,13 @@ export class PostgresReplyNumberProvisioningRepository {
         if (
           !subscription ||
           subscription.trustedStripeProviderStatus !== 'active' ||
+          subscription.stripeSubscriptionId === null ||
+          subscription.initialCardStripeSubscriptionId !==
+            subscription.stripeSubscriptionId ||
+          subscription.initialCardInvoiceId === null ||
+          subscription.initialCardPaymentSucceededAt === null ||
+          subscription.initialCardPaymentSucceededAt.getTime() >
+            input.now.getTime() ||
           !subscription.currentPeriodStart ||
           !subscription.currentPeriodEnd ||
           subscription.currentPeriodStart.getTime() > input.now.getTime() ||

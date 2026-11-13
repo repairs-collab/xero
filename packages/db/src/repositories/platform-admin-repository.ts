@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, inArray, lt, or, sql, type SQL } from 'drizzle-orm';
 
-import { summariseSmsUsage } from '@bc5000/domain';
+import { soloIncludedSmsParts, summariseSmsUsage } from '@bc5000/domain';
 
 import type { Database, DbTransaction } from '../connection.js';
 import {
@@ -569,7 +569,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
         smsUsage: {
           billingPeriodStart: subscription?.currentPeriodStart ?? null,
           billingPeriodEnd: subscription?.currentPeriodEnd ?? null,
-          includedParts: allowance?.includedParts ?? 2_000,
+          includedParts: allowance?.includedParts ?? soloIncludedSmsParts,
           warningPercent: allowance?.warningPercent ?? 80,
           committedParts: usage.committedParts,
           reservedParts: usage.reservedParts,

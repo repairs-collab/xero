@@ -37,6 +37,24 @@ export interface StripeApi {
       limit: number;
     }): Promise<unknown>;
   };
+  readonly invoices: {
+    create(
+      parameters: Record<string, unknown>,
+      options: { idempotencyKey: string }
+    ): Promise<unknown>;
+    finalizeInvoice(
+      invoiceId: string,
+      parameters: Record<string, unknown>,
+      options: { idempotencyKey: string }
+    ): Promise<unknown>;
+    retrieve(invoiceId: string): Promise<unknown>;
+  };
+  readonly invoiceItems: {
+    create(
+      parameters: Record<string, unknown>,
+      options: { idempotencyKey: string }
+    ): Promise<unknown>;
+  };
   readonly webhooks: {
     constructEvent(
       rawBody: string | Buffer,
@@ -50,6 +68,7 @@ export interface StripeApi {
 export interface StripeBillingConfiguration {
   readonly soloMonthlyPriceId: string;
   readonly soloAnnualPriceId?: string;
+  readonly soloSmsOveragePriceId: string;
   readonly priceCurrency: 'aud';
   readonly automaticTaxEnabled: boolean;
   readonly portalConfigurationId: string;
@@ -116,6 +135,15 @@ export interface StripeHostedSession {
 
 export interface StripeHostedSetupSession extends StripeHostedSession {
   readonly expiresAt: Date;
+}
+
+export interface StripeSmsOverageInvoice {
+  readonly id: string;
+  readonly status: 'draft' | 'open' | 'paid' | 'void' | 'uncollectible';
+}
+
+export interface StripeSmsOverageInvoiceItem {
+  readonly id: string;
 }
 
 export interface StripeWebhookEvent {
@@ -285,6 +313,31 @@ const requireProviderId = (value: unknown): string => {
   return value;
 };
 
+const requireSmsOverageInvoice = (value: unknown): StripeSmsOverageInvoice => {
+  const invoice = record(value);
+  const status = invoice.status;
+  if (
+    invoice.object !== 'invoice' ||
+    !['draft', 'open', 'paid', 'void', 'uncollectible'].includes(
+      String(status)
+    )
+  ) {
+    throw new StripeProviderFailure();
+  }
+  return {
+    id: requireProviderId(invoice.id),
+    status: status as StripeSmsOverageInvoice['status']
+  };
+};
+
+const requireSmsOverageInvoiceItem = (
+  value: unknown
+): StripeSmsOverageInvoiceItem => {
+  const item = record(value);
+  if (item.object !== 'invoiceitem') throw new StripeProviderFailure();
+  return { id: requireProviderId(item.id) };
+};
+
 const record = (value: unknown): Record<string, unknown> => {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new StripeProviderFailure();
@@ -438,6 +491,7 @@ export class StripeBillingClient {
   readonly #api: StripeApi;
   readonly #soloMonthlyPriceId: string;
   readonly #soloAnnualPriceId: string | null;
+  readonly #soloSmsOveragePriceId: string;
   readonly #automaticTaxEnabled: boolean;
   readonly #portalConfigurationId: string;
   readonly #publicOrigin: string;
@@ -453,7 +507,14 @@ export class StripeBillingClient {
       configuration.soloAnnualPriceId === undefined
         ? null
         : requireNonEmpty(configuration.soloAnnualPriceId);
-    if (this.#soloAnnualPriceId === this.#soloMonthlyPriceId) {
+    this.#soloSmsOveragePriceId = requireNonEmpty(
+      configuration.soloSmsOveragePriceId
+    );
+    if (
+      this.#soloAnnualPriceId === this.#soloMonthlyPriceId ||
+      this.#soloSmsOveragePriceId === this.#soloMonthlyPriceId ||
+      this.#soloSmsOveragePriceId === this.#soloAnnualPriceId
+    ) {
       throw new StripeConfigurationFailure();
     }
     if (configuration.priceCurrency !== 'aud') {
@@ -620,6 +681,124 @@ export class StripeBillingClient {
       throw new StripeProviderFailure();
     }
     return requireHostedSetupSession(session);
+  }
+
+  async createSmsOverageInvoice(input: {
+    organisationId: string;
+    statementId: string;
+    stripeCustomerId: string;
+    stripeSubscriptionId: string;
+    idempotencyKey: string;
+  }): Promise<StripeSmsOverageInvoice> {
+    const organisationId = requireNonEmpty(input.organisationId);
+    const statementId = requireNonEmpty(input.statementId);
+    const customer = requireNonEmpty(input.stripeCustomerId);
+    const subscription = requireNonEmpty(input.stripeSubscriptionId);
+    const idempotencyKey = requireNonEmpty(input.idempotencyKey);
+    try {
+      return requireSmsOverageInvoice(
+        await this.#api.invoices.create(
+          {
+            customer,
+            subscription,
+            collection_method: 'charge_automatically',
+            automatic_tax: { enabled: true },
+            auto_advance: false,
+            pending_invoice_items_behavior: 'exclude',
+            currency: 'aud',
+            metadata: {
+              purpose: 'ACCOUNT_PULSE_SMS_OVERAGE',
+              organisation_id: organisationId,
+              statement_id: statementId
+            }
+          },
+          { idempotencyKey }
+        )
+      );
+    } catch (error) {
+      if (error instanceof StripeProviderFailure) throw error;
+      throw new StripeProviderFailure();
+    }
+  }
+
+  async createSmsOverageInvoiceItem(input: {
+    organisationId: string;
+    statementId: string;
+    stripeCustomerId: string;
+    stripeSubscriptionId: string;
+    stripeInvoiceId: string;
+    billableParts: number;
+    idempotencyKey: string;
+  }): Promise<StripeSmsOverageInvoiceItem> {
+    const organisationId = requireNonEmpty(input.organisationId);
+    const statementId = requireNonEmpty(input.statementId);
+    const customer = requireNonEmpty(input.stripeCustomerId);
+    const subscription = requireNonEmpty(input.stripeSubscriptionId);
+    const invoice = requireNonEmpty(input.stripeInvoiceId);
+    const idempotencyKey = requireNonEmpty(input.idempotencyKey);
+    if (!Number.isSafeInteger(input.billableParts) || input.billableParts < 1) {
+      throw new StripeConfigurationFailure();
+    }
+    try {
+      return requireSmsOverageInvoiceItem(
+        await this.#api.invoiceItems.create(
+          {
+            customer,
+            subscription,
+            invoice,
+            pricing: { price: this.#soloSmsOveragePriceId },
+            quantity: input.billableParts,
+            metadata: {
+              purpose: 'ACCOUNT_PULSE_SMS_OVERAGE',
+              organisation_id: organisationId,
+              statement_id: statementId
+            }
+          },
+          { idempotencyKey }
+        )
+      );
+    } catch (error) {
+      if (error instanceof StripeProviderFailure) throw error;
+      throw new StripeProviderFailure();
+    }
+  }
+
+  async finalizeSmsOverageInvoice(input: {
+    stripeInvoiceId: string;
+    idempotencyKey: string;
+  }): Promise<StripeSmsOverageInvoice> {
+    const invoiceId = requireNonEmpty(input.stripeInvoiceId);
+    const idempotencyKey = requireNonEmpty(input.idempotencyKey);
+    try {
+      const invoice = requireSmsOverageInvoice(
+        await this.#api.invoices.finalizeInvoice(
+          invoiceId,
+          {},
+          { idempotencyKey }
+        )
+      );
+      if (invoice.id !== invoiceId) throw new StripeProviderFailure();
+      return invoice;
+    } catch (error) {
+      if (error instanceof StripeProviderFailure) throw error;
+      throw new StripeProviderFailure();
+    }
+  }
+
+  async retrieveSmsOverageInvoice(
+    stripeInvoiceId: string
+  ): Promise<StripeSmsOverageInvoice> {
+    const invoiceId = requireNonEmpty(stripeInvoiceId);
+    try {
+      const invoice = requireSmsOverageInvoice(
+        await this.#api.invoices.retrieve(invoiceId)
+      );
+      if (invoice.id !== invoiceId) throw new StripeProviderFailure();
+      return invoice;
+    } catch (error) {
+      if (error instanceof StripeProviderFailure) throw error;
+      throw new StripeProviderFailure();
+    }
   }
 
   async activateDirectDebit(

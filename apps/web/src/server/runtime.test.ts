@@ -18,6 +18,7 @@ describe.sequential('Stripe web runtime configuration', () => {
     delete process.env.STRIPE_WEBHOOK_SECRET;
     delete process.env.STRIPE_SOLO_MONTHLY_PRICE_ID;
     delete process.env.STRIPE_SOLO_ANNUAL_PRICE_ID;
+    delete process.env.STRIPE_SMS_OVERAGE_PRICE_ID;
     delete process.env.STRIPE_PORTAL_CONFIGURATION_ID;
     delete process.env.PUBLIC_BASE_URL;
 
@@ -29,6 +30,7 @@ describe.sequential('Stripe web runtime configuration', () => {
     process.env.STRIPE_WEBHOOK_SECRET = 'whsec_accountpulse';
     process.env.STRIPE_SOLO_MONTHLY_PRICE_ID = 'price_solo_monthly';
     process.env.STRIPE_SOLO_ANNUAL_PRICE_ID = 'price_solo_annual';
+    process.env.STRIPE_SMS_OVERAGE_PRICE_ID = 'price_solo_sms_overage';
     process.env.STRIPE_PORTAL_CONFIGURATION_ID = 'bpc_solo';
     process.env.PUBLIC_BASE_URL = 'http://ap.motts.com.au';
     expect(() => getStripeConfiguration()).toThrow(
@@ -41,6 +43,7 @@ describe.sequential('Stripe web runtime configuration', () => {
       webhookSecret: 'whsec_accountpulse',
       soloMonthlyPriceId: 'price_solo_monthly',
       soloAnnualPriceId: 'price_solo_annual',
+      soloSmsOveragePriceId: 'price_solo_sms_overage',
       portalConfigurationId: 'bpc_solo',
       publicBaseUrl: 'https://ap.motts.com.au',
       priceCurrency: 'aud',
@@ -50,7 +53,7 @@ describe.sequential('Stripe web runtime configuration', () => {
 
     process.env.STRIPE_SOLO_ANNUAL_PRICE_ID = 'price_solo_monthly';
     expect(() => getStripeConfiguration()).toThrow(
-      'Stripe monthly and annual Price IDs must be distinct'
+      'Stripe billing Price IDs must be distinct'
     );
   });
 });

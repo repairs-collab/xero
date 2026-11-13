@@ -975,11 +975,11 @@ export const smsAllowanceSettings = pgTable(
     organisationId: uuid('organisation_id')
       .primaryKey()
       .references(() => organisations.id, { onDelete: 'cascade' }),
-    includedParts: integer('included_parts').notNull().default(2_000),
+    includedParts: integer('included_parts').notNull().default(1_000),
     warningPercent: integer('warning_percent').notNull().default(80),
-    overageEnabled: boolean('overage_enabled').notNull().default(false),
+    overageEnabled: boolean('overage_enabled').notNull().default(true),
     overageCapCents: integer('overage_cap_cents'),
-    overageCentsPerPart: integer('overage_cents_per_part'),
+    overageCentsPerPart: integer('overage_cents_per_part').default(11),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -1064,6 +1064,92 @@ export const smsUsageLedger = pgTable(
     check(
       'sms_usage_ledger_period_ck',
       sql`${table.billingPeriodEnd} > ${table.billingPeriodStart}`
+    )
+  ]
+);
+
+export type SmsOverageStatementStatus =
+  | 'OPEN'
+  | 'PENDING'
+  | 'PROCESSING'
+  | 'INVOICED'
+  | 'FAILED'
+  | 'VOID';
+
+/**
+ * Durable billing statement for one organisation and one monthly SMS
+ * allowance period. OPEN rows are updated idempotently as committed sends
+ * cross the included allowance; a billing worker seals and invoices them only
+ * after billingPeriodEnd.
+ */
+export const smsOverageStatements = pgTable(
+  'sms_overage_statements',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    organisationId: uuid('organisation_id')
+      .notNull()
+      .references(() => organisations.id, { onDelete: 'restrict' }),
+    stripeCustomerId: varchar('stripe_customer_id', { length: 128 }).notNull(),
+    stripeSubscriptionId: varchar('stripe_subscription_id', {
+      length: 128
+    }).notNull(),
+    billingPeriodStart: timestamp('billing_period_start', {
+      withTimezone: true
+    }).notNull(),
+    billingPeriodEnd: timestamp('billing_period_end', {
+      withTimezone: true
+    }).notNull(),
+    committedParts: integer('committed_parts').notNull(),
+    includedParts: integer('included_parts').notNull(),
+    billableParts: integer('billable_parts').notNull(),
+    unitCents: integer('unit_cents').notNull(),
+    subtotalCents: integer('subtotal_cents').notNull(),
+    status: varchar('status', { length: 16 })
+      .$type<SmsOverageStatementStatus>()
+      .notNull()
+      .default('OPEN'),
+    stripeInvoiceItemId: varchar('stripe_invoice_item_id', { length: 128 }),
+    stripeInvoiceId: varchar('stripe_invoice_id', { length: 128 }),
+    attemptCount: integer('attempt_count').notNull().default(0),
+    lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }),
+    lastErrorCode: varchar('last_error_code', { length: 64 }),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow()
+  },
+  (table) => [
+    uniqueIndex('sms_overage_statements_org_period_uq').on(
+      table.organisationId,
+      table.billingPeriodStart,
+      table.billingPeriodEnd
+    ),
+    index('sms_overage_statements_due_idx').on(
+      table.status,
+      table.billingPeriodEnd,
+      table.updatedAt
+    ),
+    check(
+      'sms_overage_statements_period_ck',
+      sql`${table.billingPeriodEnd} > ${table.billingPeriodStart}`
+    ),
+    check(
+      'sms_overage_statements_amounts_ck',
+      sql`${table.committedParts} >= 0 and ${table.includedParts} >= 1 and ${table.billableParts} = greatest(0, ${table.committedParts} - ${table.includedParts}) and ${table.unitCents} = 11 and ${table.subtotalCents} = ${table.billableParts} * ${table.unitCents}`
+    ),
+    check(
+      'sms_overage_statements_status_ck',
+      sql`${table.status} in ('OPEN', 'PENDING', 'PROCESSING', 'INVOICED', 'FAILED', 'VOID')`
+    ),
+    check(
+      'sms_overage_statements_attempts_ck',
+      sql`${table.attemptCount} >= 0`
+    ),
+    check(
+      'sms_overage_statements_invoice_ck',
+      sql`${table.status} <> 'INVOICED' or (${table.stripeInvoiceItemId} is not null and ${table.stripeInvoiceId} is not null)`
     )
   ]
 );

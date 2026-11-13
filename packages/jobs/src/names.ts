@@ -12,6 +12,7 @@ export const jobNames = {
   testSmsExecute: 'test-sms.execute',
   smsNumberProvision: 'sms-number.provision',
   smsNumberProvisionReconcile: 'sms-number.provision-reconcile',
+  smsOverageInvoiceReconcile: 'sms-overage.invoice-reconcile',
   voiceCallExecute: 'voice-call.execute',
   voiceCallReconcile: 'voice-call.reconcile',
   providerConnectionTest: 'provider.connection-test',

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 
 import { AuthorizationFailure, type AppSession } from '@bc5000/auth';
+import { soloSmsOverageCentsPerPart } from '@bc5000/domain';
 import {
   auditEvents,
   type Database,
@@ -76,7 +77,9 @@ export const createPostgresPlatformCustomerProvisioningRepository = (
         organisationId: organisation.id,
         includedParts: input.includedSmsParts,
         warningPercent: input.warningPercent,
-        overageEnabled: false
+        overageEnabled: true,
+        overageCapCents: null,
+        overageCentsPerPart: soloSmsOverageCentsPerPart
       });
       const afterValue = {
         edition: 'SOLO',

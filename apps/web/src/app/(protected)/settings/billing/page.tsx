@@ -16,6 +16,7 @@ import {
 } from './actions.js';
 
 const monthlyPriceExcludingGstCents = 29_900;
+const smsOverageCentsPerPart = 11;
 const annualPriceExcludingGstCents =
   (monthlyPriceExcludingGstCents * 12 * 95) / 100;
 const gstCents = (excludingGstCents: number): number =>
@@ -86,6 +87,8 @@ export default async function BillingSettingsPage({
       : smsUsage.committedParts + smsUsage.reservedParts;
   const includedSmsParts = smsAllowance.includedParts;
   const remainingSmsParts = smsUsage?.remainingParts ?? includedSmsParts;
+  const overageSmsParts = Math.max(0, usedSmsParts - includedSmsParts);
+  const estimatedOverageCents = overageSmsParts * smsOverageCentsPerPart;
 
   return (
     <div className="page-stack">
@@ -225,7 +228,9 @@ export default async function BillingSettingsPage({
             })}
           </div>
           <p className="muted-copy">
-            Each plan includes 2,000 included SMS parts reset every month.
+            Each plan includes{' '}
+            {includedSmsParts.toLocaleString('en-AU')} included SMS parts reset
+            every month. Additional parts cost A$0.11 each excluding GST.
             Unused parts do not roll over. First payment is collected by card
             on signup.
           </p>
@@ -270,7 +275,7 @@ export default async function BillingSettingsPage({
               {includedSmsParts.toLocaleString('en-AU')} parts used
             </h2>
           </div>
-          <span className="status-pill">Hard allowance</span>
+          <span className="status-pill">Paid overage enabled</span>
         </div>
         <progress
           max={includedSmsParts}
@@ -298,11 +303,21 @@ export default async function BillingSettingsPage({
             <dt>Remaining this monthly allowance period</dt>
             <dd>{remainingSmsParts.toLocaleString('en-AU')}</dd>
           </div>
+          <div>
+            <dt>Overage parts this monthly allowance period</dt>
+            <dd>{overageSmsParts.toLocaleString('en-AU')}</dd>
+          </div>
+          <div>
+            <dt>Estimated overage excluding GST</dt>
+            <dd>{aud(estimatedOverageCents)}</dd>
+          </div>
         </dl>
         <p className="muted-copy">
-          Sends that would exceed the included allowance are blocked and are
-          not submitted for delivery. Blocked sends are not automatically
-          replayed.
+          The first {includedSmsParts.toLocaleString('en-AU')} outbound SMS
+          parts are included in each monthly allowance period. Additional
+          outbound parts are billed at A$0.11 excluding GST per additional SMS
+          part. Reserved parts are included in this estimate until their
+          delivery outcome is resolved. Unused included parts do not roll over.
         </p>
         {smsUsage !== null &&
         usedSmsParts * 100 >=
@@ -310,8 +325,8 @@ export default async function BillingSettingsPage({
           <div className="callout callout--warning">
             <strong>SMS allowance is running low</strong>
             <p>
-              A message is blocked when its full SMS part count would exceed
-              the remaining included allowance.
+              Additional outbound SMS parts are billed as paid overage after
+              the included allowance is used.
             </p>
           </div>
         ) : null}

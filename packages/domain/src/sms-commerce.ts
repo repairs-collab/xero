@@ -1,6 +1,10 @@
-export const soloIncludedSmsParts = 2_000;
+export const soloIncludedSmsParts = 1_000;
+export const soloSmsOverageCentsPerPart = 11;
 
-export type SmsAllowanceBlocker = 'SMS_ALLOWANCE_EXHAUSTED';
+export type SmsAllowanceBlocker =
+  | 'SMS_ALLOWANCE_EXHAUSTED'
+  | 'SMS_OVERAGE_BILLING_NOT_READY'
+  | 'SMS_OVERAGE_CAP_REACHED';
 
 export type SmsUsageEntryType = 'RESERVE' | 'COMMIT' | 'RELEASE' | 'ADJUST';
 
@@ -41,6 +45,8 @@ export type SmsAllowanceDecision =
   | {
       kind: 'allowed';
       projectedParts: number;
+      projectedOverageParts: number;
+      projectedOverageCents: number;
       warningThresholdReached: boolean;
     }
   | {
@@ -56,6 +62,9 @@ export const decideSmsAllowance = (input: {
   requestedPartsAlreadyReserved?: boolean;
   includedParts: number;
   warningPercent: number;
+  overageEnabled?: boolean;
+  overageCapCents?: number | null;
+  overageCentsPerPart?: number | null;
 }): SmsAllowanceDecision => {
   const integerFields = [
     input.committedParts,
@@ -80,10 +89,40 @@ export const decideSmsAllowance = (input: {
     input.committedParts +
     input.reservedParts +
     (input.requestedPartsAlreadyReserved === true ? 0 : input.requestedParts);
-  if (projectedParts > input.includedParts) {
+  const projectedOverageParts = Math.max(
+    0,
+    projectedParts - input.includedParts
+  );
+  if (projectedOverageParts > 0 && input.overageEnabled !== true) {
     return {
       kind: 'blocked',
       reason: 'SMS_ALLOWANCE_EXHAUSTED',
+      projectedParts
+    };
+  }
+  if (
+    projectedOverageParts > 0 &&
+    input.overageCentsPerPart !== soloSmsOverageCentsPerPart
+  ) {
+    return {
+      kind: 'blocked',
+      reason: 'SMS_OVERAGE_BILLING_NOT_READY',
+      projectedParts
+    };
+  }
+  const projectedOverageCents =
+    projectedOverageParts * soloSmsOverageCentsPerPart;
+  if (
+    projectedOverageParts > 0 &&
+    input.overageCapCents !== null &&
+    input.overageCapCents !== undefined &&
+    (!Number.isInteger(input.overageCapCents) ||
+      input.overageCapCents < 0 ||
+      projectedOverageCents > input.overageCapCents)
+  ) {
+    return {
+      kind: 'blocked',
+      reason: 'SMS_OVERAGE_CAP_REACHED',
       projectedParts
     };
   }
@@ -91,6 +130,8 @@ export const decideSmsAllowance = (input: {
   return {
     kind: 'allowed',
     projectedParts,
+    projectedOverageParts,
+    projectedOverageCents,
     warningThresholdReached:
       projectedParts * 100 >= input.includedParts * input.warningPercent
   };

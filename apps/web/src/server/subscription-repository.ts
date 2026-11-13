@@ -716,7 +716,8 @@ export const createPostgresSubscriptionRepository = (
   };
 
   const applyCheckoutCompleted = async (
-    input: StripeCheckoutCompletedInput
+    input: StripeCheckoutCompletedInput,
+    effects?: StripeLifecycleEventEffects
   ): Promise<StripeEventApplicationOutcome> => {
     try {
       return await database.transaction(async (transaction) => {
@@ -875,6 +876,7 @@ export const createPostgresSubscriptionRepository = (
           afterValue: { planCode: 'SOLO_AU_2000' },
           occurredAt: clock.now()
         });
+        await effects?.onApplied(transaction);
         return 'APPLIED';
       });
     } catch (error) {

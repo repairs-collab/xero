@@ -30,6 +30,20 @@ class FakeStripeApi implements StripeApi {
   invoicePaymentCalls: Array<Record<string, unknown>> = [];
   chargeFailure: Error | undefined;
   invoicePaymentFailure: Error | undefined;
+  invoiceCreateCalls: Array<{
+    parameters: Record<string, unknown>;
+    options: { idempotencyKey: string };
+  }> = [];
+  invoiceItemCreateCalls: Array<{
+    parameters: Record<string, unknown>;
+    options: { idempotencyKey: string };
+  }> = [];
+  invoiceFinalizeCalls: Array<{
+    invoiceId: string;
+    parameters: Record<string, unknown>;
+    options: { idempotencyKey: string };
+  }> = [];
+  invoiceRetrieveCalls: string[] = [];
   chargeResponse: unknown = {
     id: 'ch_invoice_payment',
     object: 'charge',
@@ -151,6 +165,53 @@ class FakeStripeApi implements StripeApi {
     }
   };
 
+  invoices = {
+    create: (
+      parameters: Record<string, unknown>,
+      options: { idempotencyKey: string }
+    ) => {
+      this.invoiceCreateCalls.push({ parameters, options });
+      return Promise.resolve({
+        id: 'in_sms_overage',
+        object: 'invoice',
+        status: 'draft',
+        customer: parameters.customer,
+        subscription: parameters.subscription,
+        metadata: parameters.metadata
+      });
+    },
+    finalizeInvoice: (
+      invoiceId: string,
+      parameters: Record<string, unknown>,
+      options: { idempotencyKey: string }
+    ) => {
+      this.invoiceFinalizeCalls.push({ invoiceId, parameters, options });
+      return Promise.resolve({
+        id: invoiceId,
+        object: 'invoice',
+        status: 'open'
+      });
+    },
+    retrieve: (invoiceId: string) => {
+      this.invoiceRetrieveCalls.push(invoiceId);
+      return Promise.resolve({
+        id: invoiceId,
+        object: 'invoice',
+        status: 'open'
+      });
+    }
+  };
+
+  invoiceItems = {
+    create: (
+      parameters: Record<string, unknown>,
+      options: { idempotencyKey: string }
+    ) => {
+      this.invoiceItemCreateCalls.push({ parameters, options });
+      return Promise.resolve({ id: 'ii_sms_overage', object: 'invoiceitem' });
+    }
+  };
+
   webhooks = {
     constructEvent: (
       rawBody: string | Buffer,
@@ -174,6 +235,7 @@ const createClient = (api: StripeApi): StripeBillingClient =>
   new StripeBillingClient(api, {
     soloMonthlyPriceId: 'price_solo_monthly',
     soloAnnualPriceId: 'price_solo_annual',
+    soloSmsOveragePriceId: 'price_solo_sms_overage',
     priceCurrency: 'aud',
     automaticTaxEnabled: true,
     portalConfigurationId: 'bpc_solo',
@@ -308,6 +370,7 @@ describe('StripeBillingClient checkout', () => {
     const unavailableApi = new FakeStripeApi();
     const unavailable = new StripeBillingClient(unavailableApi, {
       soloMonthlyPriceId: 'price_solo_monthly',
+      soloSmsOveragePriceId: 'price_solo_sms_overage',
       priceCurrency: 'aud',
       automaticTaxEnabled: true,
       portalConfigurationId: 'bpc_solo',
@@ -405,6 +468,7 @@ describe('StripeBillingClient checkout', () => {
         new StripeBillingClient(api, {
           soloMonthlyPriceId: 'price_solo_monthly',
           soloAnnualPriceId: 'price_solo_annual',
+          soloSmsOveragePriceId: 'price_solo_sms_overage',
           priceCurrency: 'aud',
           automaticTaxEnabled: true,
           portalConfigurationId: 'bpc_solo',
@@ -412,6 +476,96 @@ describe('StripeBillingClient checkout', () => {
           webhookSecret: 'whsec_test_only'
         })
     ).toThrow(StripeConfigurationFailure);
+  });
+});
+
+describe('StripeBillingClient SMS overage invoices', () => {
+  it('creates one aud overage invoice, attaches the priced parts, and finalizes it idempotently', async () => {
+    const api = new FakeStripeApi();
+    const client = createClient(api);
+
+    await expect(
+      client.createSmsOverageInvoice({
+        organisationId: 'org_solo',
+        statementId: 'statement_2026_11',
+        stripeCustomerId: 'cus_solo',
+        stripeSubscriptionId: 'sub_solo',
+        idempotencyKey: 'sms-overage:statement_2026_11:invoice'
+      })
+    ).resolves.toEqual({ id: 'in_sms_overage', status: 'draft' });
+    await expect(
+      client.createSmsOverageInvoiceItem({
+        organisationId: 'org_solo',
+        statementId: 'statement_2026_11',
+        stripeCustomerId: 'cus_solo',
+        stripeSubscriptionId: 'sub_solo',
+        stripeInvoiceId: 'in_sms_overage',
+        billableParts: 37,
+        idempotencyKey: 'sms-overage:statement_2026_11:item'
+      })
+    ).resolves.toEqual({ id: 'ii_sms_overage' });
+    await expect(
+      client.finalizeSmsOverageInvoice({
+        stripeInvoiceId: 'in_sms_overage',
+        idempotencyKey: 'sms-overage:statement_2026_11:finalize'
+      })
+    ).resolves.toEqual({ id: 'in_sms_overage', status: 'open' });
+
+    expect(api.invoiceCreateCalls).toEqual([{
+      parameters: {
+        customer: 'cus_solo',
+        subscription: 'sub_solo',
+        collection_method: 'charge_automatically',
+        automatic_tax: { enabled: true },
+        auto_advance: false,
+        pending_invoice_items_behavior: 'exclude',
+        currency: 'aud',
+        metadata: {
+          purpose: 'ACCOUNT_PULSE_SMS_OVERAGE',
+          organisation_id: 'org_solo',
+          statement_id: 'statement_2026_11'
+        }
+      },
+      options: { idempotencyKey: 'sms-overage:statement_2026_11:invoice' }
+    }]);
+    expect(api.invoiceItemCreateCalls).toEqual([{
+      parameters: {
+        customer: 'cus_solo',
+        subscription: 'sub_solo',
+        invoice: 'in_sms_overage',
+        pricing: { price: 'price_solo_sms_overage' },
+        quantity: 37,
+        metadata: {
+          purpose: 'ACCOUNT_PULSE_SMS_OVERAGE',
+          organisation_id: 'org_solo',
+          statement_id: 'statement_2026_11'
+        }
+      },
+      options: { idempotencyKey: 'sms-overage:statement_2026_11:item' }
+    }]);
+    expect(api.invoiceFinalizeCalls).toEqual([{
+      invoiceId: 'in_sms_overage',
+      parameters: {},
+      options: { idempotencyKey: 'sms-overage:statement_2026_11:finalize' }
+    }]);
+  });
+
+  it('rejects zero parts and keeps provider failures opaque', async () => {
+    const api = new FakeStripeApi();
+    const client = createClient(api);
+
+    await expect(
+      client.createSmsOverageInvoiceItem({
+        organisationId: 'org_solo',
+        statementId: 'statement_2026_11',
+        stripeCustomerId: 'cus_solo',
+        stripeSubscriptionId: 'sub_solo',
+        stripeInvoiceId: 'in_sms_overage',
+        billableParts: 0,
+        idempotencyKey: 'sms-overage:statement_2026_11:item'
+      })
+    ).rejects.toBeInstanceOf(StripeConfigurationFailure);
+    expect(api.invoiceItemCreateCalls).toEqual([]);
   });
 });
 
@@ -773,6 +927,7 @@ describe('paid Checkout attempts', () => {
     api.checkoutResponse = sessionObject;
     const changedConfiguration = new StripeBillingClient(api, {
       soloMonthlyPriceId: 'price_changed',
+      soloSmsOveragePriceId: 'price_solo_sms_overage',
       priceCurrency: 'aud',
       automaticTaxEnabled: false,
       portalConfigurationId: 'bpc_solo',

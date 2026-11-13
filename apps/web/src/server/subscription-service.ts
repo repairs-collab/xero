@@ -267,7 +267,8 @@ export interface SubscriptionRepository {
     effects?: StripeLifecycleEventEffects
   ): Promise<StripeEventApplicationOutcome>;
   applyCheckoutCompleted(
-    input: StripeCheckoutCompletedInput
+    input: StripeCheckoutCompletedInput,
+    effects?: StripeLifecycleEventEffects
   ): Promise<StripeEventApplicationOutcome>;
   applyOperationalEvent(
     input: StripeOperationalEventInput
@@ -1369,9 +1370,14 @@ export const createSubscriptionService = (dependencies: {
           parseDirectDebitSetupCheckout(event, hash)
         );
       }
-      return dependencies.repository.applyCheckoutCompleted(
-        parseCheckoutCompleted(event, hash)
-      );
+      const input = parseCheckoutCompleted(event, hash);
+      return dependencies.repository.applyCheckoutCompleted(input, {
+        onApplied: (transaction) =>
+          dependencies.enqueueNumberProvision(transaction, {
+            organisationId: input.organisationId,
+            eventId: input.eventId
+          })
+      });
     }
     if (event.type === 'setup_intent.succeeded') {
       return dependencies.repository.confirmDirectDebitMandate(

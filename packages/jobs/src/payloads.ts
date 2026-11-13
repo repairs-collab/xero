@@ -40,6 +40,7 @@ export const jobPayloadSchemas = {
   }),
   [jobNames.smsNumberProvision]: organisationPayload,
   [jobNames.smsNumberProvisionReconcile]: z.object({}).strict(),
+  [jobNames.smsOverageInvoiceReconcile]: z.object({}).strict(),
   [jobNames.voiceCallExecute]: voiceCallPayload,
   [jobNames.voiceCallReconcile]: voiceCallPayload,
   [jobNames.providerConnectionTest]: z.object({

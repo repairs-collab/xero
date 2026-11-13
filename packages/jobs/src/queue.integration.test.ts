@@ -365,5 +365,11 @@ describe('durable job queue', () => {
         (schedule) => schedule.key === 'sms-number.provision-reconcile'
       )
     ).toHaveLength(1);
+    expect(
+      schedules.filter(
+        (schedule) =>
+          schedule.key === jobNames.smsOverageInvoiceReconcile
+      )
+    ).toHaveLength(1);
   });
 });
