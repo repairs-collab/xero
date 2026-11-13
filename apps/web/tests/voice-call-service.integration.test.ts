@@ -335,6 +335,10 @@ describe('voice call service', () => {
       organisationId: seeded.organisationId,
       planCode: 'SOLO_AU_2000',
       status: 'ACTIVE',
+      stripeProviderStatus: 'active',
+      trustedStripeProviderStatus: 'active',
+      currentPeriodStart: new Date('2026-10-01T00:00:00.000Z'),
+      currentPeriodEnd: new Date('2026-11-01T00:00:00.000Z'),
       trialEndsAt: null
     });
     const idempotencyKey = `voice-paid-then-blocked-${randomUUID()}`;

@@ -46,6 +46,8 @@ const seedPaidOrganisation = async (options: {
     organisationId,
     planCode: 'SOLO_AU_2000',
     status: 'ACTIVE',
+    stripeProviderStatus: 'active',
+    trustedStripeProviderStatus: 'active',
     currentPeriodStart: options.currentPeriodStart ?? periodStart,
     currentPeriodEnd: options.currentPeriodEnd ?? periodEnd
   });
