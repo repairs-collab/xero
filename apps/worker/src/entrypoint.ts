@@ -57,6 +57,7 @@ import {
 } from './operations/inbound-reply-recovery.js';
 import { createOperationalResetService } from './operations/operational-reset.js';
 import { backfillPaidSmsNumberProvisioning } from './operations/sms-number-provisioning-backfill.js';
+import { reconcileCancelledSubscriptionLifecycles } from './operations/subscription-lifecycle-reconciliation.js';
 import { evaluateVoiceMonitor } from './operations/voice-monitor.js';
 import {
   createDatabaseXeroOAuthReadinessLoader,
@@ -65,6 +66,7 @@ import {
 } from './operations/xero-oauth-readiness.js';
 import { processInboundReply } from './services/inbound-reply-service.js';
 import {
+  listCancelledSubscriptionsNeedingLifecycle,
   loadSubscriptionRetentionState,
   recordSubscriptionRetentionDeadline
 } from './services/subscription-retention.js';
@@ -416,22 +418,35 @@ async function main() {
             .from(organisations);
     }
   });
-
-  await queue.start();
-  const provisioningBackfillCount = await backfillPaidSmsNumberProvisioning({
-    repository: replyNumberProvisioningRepository,
-    publisher: queue,
-    clock
-  });
-  console.info('Paid SMS number provisioning backfill completed', {
-    queued: provisioningBackfillCount
-  });
+  const subscriptionLifecycleReconciliationRepository = {
+    listCancelledSubscriptionsNeedingLifecycle: () =>
+      listCancelledSubscriptionsNeedingLifecycle(databaseClient.db)
+  };
 
   await startWorker({
     queue,
     database: { close: () => databaseClient.pool.end() },
     organisationIds: allRows.map((row) => row.id),
     logger: console,
+    bootstrap: async () => {
+      const provisioningCandidateCount =
+        await backfillPaidSmsNumberProvisioning({
+          repository: replyNumberProvisioningRepository,
+          publisher: queue,
+          clock
+        });
+      console.info('Paid SMS number provisioning reconciliation completed', {
+        candidates: provisioningCandidateCount
+      });
+      const cancellationCandidateCount =
+        await reconcileCancelledSubscriptionLifecycles({
+          repository: subscriptionLifecycleReconciliationRepository,
+          publisher: queue
+        });
+      console.info('Cancelled subscription lifecycle reconciliation completed', {
+        candidates: cancellationCandidateCount
+      });
+    },
     handlers: {
       [jobNames.xeroInitialSync]: async (payload) =>
         runInitialSync(
@@ -585,6 +600,10 @@ async function main() {
               if (connection === null || connection.status === 'DISCONNECTED') {
                 return;
               }
+              if (connection.status === 'REAUTH_REQUIRED') {
+                await xeroConnections.disconnect(organisationId, clock.now());
+                return;
+              }
               const session = await new XeroOAuthSessionProvider({
                 organisationId,
                 store: xeroConnections,
@@ -619,6 +638,16 @@ async function main() {
           },
           payload
         ).then(() => undefined),
+      [jobNames.subscriptionLifecycleReconcile]: () =>
+        reconcileCancelledSubscriptionLifecycles({
+          repository: subscriptionLifecycleReconciliationRepository,
+          publisher: queue
+        }).then((candidateCount) => {
+          console.info(
+            'Cancelled subscription lifecycle reconciliation completed',
+            { candidates: candidateCount }
+          );
+        }),
       [jobNames.subscriptionTrialExpiry]: (payload) =>
         processTrialExpiry(
           {

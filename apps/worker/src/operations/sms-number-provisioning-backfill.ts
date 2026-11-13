@@ -6,7 +6,7 @@ export const backfillPaidSmsNumberProvisioning = async (dependencies: {
     PostgresReplyNumberProvisioningRepository,
     'listPaidOrganisationsNeedingProvisioning'
   >;
-  publisher: Pick<DurableJobQueue, 'enqueueUnique'>;
+  publisher: Pick<DurableJobQueue, 'publish'>;
   clock: { now(): Date };
 }): Promise<number> => {
   const candidates =
@@ -14,16 +14,19 @@ export const backfillPaidSmsNumberProvisioning = async (dependencies: {
       dependencies.clock.now()
     );
   for (const candidate of candidates) {
-    await dependencies.publisher.enqueueUnique(
+    await dependencies.publisher.publish(
       jobNames.smsNumberProvision,
       { organisationId: candidate.organisationId },
-      [
-        jobNames.smsNumberProvision,
-        'paid-backfill',
-        candidate.organisationId,
-        candidate.currentPeriodStart.toISOString(),
-        candidate.currentPeriodEnd.toISOString()
-      ].join(':')
+      {
+        singletonKey: [
+          jobNames.smsNumberProvision,
+          'paid-backfill',
+          candidate.organisationId,
+          candidate.currentPeriodStart.toISOString(),
+          candidate.currentPeriodEnd.toISOString()
+        ].join(':'),
+        deduplicateWhileActive: true
+      }
     );
   }
   return candidates.length;

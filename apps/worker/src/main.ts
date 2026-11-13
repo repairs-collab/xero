@@ -20,6 +20,7 @@ export interface WorkerRuntimeOptions {
   database: CloseableDatabase;
   handlers: JobHandlers;
   organisationIds: string[];
+  bootstrap?: () => Promise<void>;
   logger?: ShutdownLogger;
 }
 
@@ -31,14 +32,23 @@ export async function startWorker(
   options: WorkerRuntimeOptions
 ): Promise<RunningWorker> {
   const inFlight = new InFlightJobs();
-  await options.queue.start();
-  await ensureRecurringSchedules(options.queue, options.organisationIds);
-  await registerHandlers(
-    options.queue,
-    options.handlers,
-    inFlight,
-    options.logger
-  );
+  try {
+    await options.queue.start();
+    await options.bootstrap?.();
+    await ensureRecurringSchedules(options.queue, options.organisationIds);
+    await registerHandlers(
+      options.queue,
+      options.handlers,
+      inFlight,
+      options.logger
+    );
+  } catch (error) {
+    await Promise.allSettled([
+      options.queue.stop(),
+      options.database.close()
+    ]);
+    throw error;
+  }
 
   let shutdownPromise: Promise<ShutdownResult> | undefined;
   const shutdown = (): Promise<ShutdownResult> => {

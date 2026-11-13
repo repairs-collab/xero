@@ -17,6 +17,7 @@ export const jobNames = {
   webhookProcess: 'webhook.process',
   retentionApply: 'retention.apply',
   subscriptionLifecycle: 'subscription.lifecycle',
+  subscriptionLifecycleReconcile: 'subscription.lifecycle-reconcile',
   subscriptionTrialExpiry: 'subscription.trial-expiry'
 } as const;
 

@@ -9,12 +9,15 @@ import {
   migrateDatabase,
   organisations,
   retentionCases,
-  subscriptions
+  smsNumberPool,
+  subscriptions,
+  xeroConnections
 } from '@bc5000/db';
 
 import { processSubscriptionLifecycle } from '../src/handlers/subscription-lifecycle.js';
 import { placeRetentionLegalHold } from '../src/services/retention-legal-hold.js';
 import {
+  listCancelledSubscriptionsNeedingLifecycle,
   loadSubscriptionRetentionState,
   recordSubscriptionRetentionDeadline
 } from '../src/services/subscription-retention.js';
@@ -57,6 +60,166 @@ const waitForBlockedRetentionWrite = async (): Promise<void> => {
 };
 
 describe('cancelled Solo subscription lifecycle', () => {
+  it('lists only cancellation episodes without current cleanup evidence', async () => {
+    const missingOrganisationId = randomUUID();
+    const staleOrganisationId = randomUUID();
+    const completeOrganisationId = randomUUID();
+    const connectedXeroOrganisationId = randomUUID();
+    const readyNumberOrganisationId = randomUUID();
+    const activeOrganisationId = randomUUID();
+    const cancellationAt = new Date('2027-04-10T04:00:00.000Z');
+    const olderCancellationAt = new Date('2026-11-09T12:00:00.000Z');
+    await client.db.insert(organisations).values(
+      [
+        [missingOrganisationId, 'Missing cleanup evidence'],
+        [staleOrganisationId, 'Stale cleanup evidence'],
+        [completeOrganisationId, 'Complete cleanup evidence'],
+        [connectedXeroOrganisationId, 'Reconnected Xero after cancellation'],
+        [readyNumberOrganisationId, 'Ready number after cancellation'],
+        [activeOrganisationId, 'Active subscription']
+      ].map(([id, name]) => ({
+        id: id!,
+        xeroOrganisationId: randomUUID(),
+        name: name!,
+        timeZone: 'Australia/Sydney',
+        baseCurrency: 'AUD',
+        edition: 'SOLO' as const
+      }))
+    );
+    await client.db.insert(subscriptions).values([
+      {
+        organisationId: missingOrganisationId,
+        planCode: 'SOLO_AU_2000',
+        status: 'CANCELLED',
+        cancelledAt: cancellationAt
+      },
+      {
+        organisationId: staleOrganisationId,
+        planCode: 'SOLO_AU_2000',
+        status: 'CANCELLED',
+        cancelledAt: cancellationAt
+      },
+      {
+        organisationId: completeOrganisationId,
+        planCode: 'SOLO_AU_2000',
+        status: 'CANCELLED',
+        cancelledAt: cancellationAt
+      },
+      {
+        organisationId: connectedXeroOrganisationId,
+        planCode: 'SOLO_AU_2000',
+        status: 'CANCELLED',
+        cancelledAt: cancellationAt
+      },
+      {
+        organisationId: readyNumberOrganisationId,
+        planCode: 'SOLO_AU_2000',
+        status: 'CANCELLED',
+        cancelledAt: cancellationAt
+      },
+      {
+        organisationId: activeOrganisationId,
+        planCode: 'SOLO_AU_2000',
+        status: 'ACTIVE',
+        cancelledAt: null
+      }
+    ]);
+    await client.db.insert(retentionCases).values([
+      {
+        organisationId: staleOrganisationId,
+        source: 'SUBSCRIPTION_CANCELLED',
+        status: 'SCHEDULED',
+        disconnectedAt: olderCancellationAt,
+        reviewAfter: new Date('2026-12-09T12:00:00.000Z'),
+        closureEffectiveAt: olderCancellationAt
+      },
+      {
+        organisationId: completeOrganisationId,
+        source: 'SUBSCRIPTION_CANCELLED',
+        status: 'SCHEDULED',
+        disconnectedAt: cancellationAt,
+        reviewAfter: new Date('2027-05-10T04:00:00.000Z'),
+        closureEffectiveAt: cancellationAt
+      },
+      {
+        organisationId: connectedXeroOrganisationId,
+        source: 'SUBSCRIPTION_CANCELLED',
+        status: 'SCHEDULED',
+        disconnectedAt: cancellationAt,
+        reviewAfter: new Date('2027-05-10T04:00:00.000Z'),
+        closureEffectiveAt: cancellationAt
+      },
+      {
+        organisationId: readyNumberOrganisationId,
+        source: 'SUBSCRIPTION_CANCELLED',
+        status: 'SCHEDULED',
+        disconnectedAt: cancellationAt,
+        reviewAfter: new Date('2027-05-10T04:00:00.000Z'),
+        closureEffectiveAt: cancellationAt
+      }
+    ]);
+    await client.db.insert(xeroConnections).values({
+      organisationId: connectedXeroOrganisationId,
+      connectionId: randomUUID(),
+      tenantId: randomUUID(),
+      status: 'CONNECTED',
+      encryptedRefreshToken: {
+        version: 1,
+        keyId: 'primary',
+        iv: Buffer.alloc(12, 1).toString('base64'),
+        ciphertext: Buffer.from('refresh-token').toString('base64'),
+        tag: Buffer.alloc(16, 2).toString('base64')
+      },
+      grantedScopes: ['accounting.transactions']
+    });
+    await client.db.insert(smsNumberPool).values({
+      e164Number: `+614${Math.floor(Math.random() * 100_000_000)
+        .toString()
+        .padStart(8, '0')}`,
+      provider: 'SINCH',
+      providerNumberId: randomUUID(),
+      providerVerifiedAt: cancellationAt,
+      status: 'READY',
+      organisationId: readyNumberOrganisationId,
+      reservedAt: olderCancellationAt,
+      readyAt: cancellationAt
+    });
+
+    const candidates = await listCancelledSubscriptionsNeedingLifecycle(
+      client.db
+    );
+
+    expect(candidates).toEqual(
+      expect.arrayContaining([
+        { organisationId: missingOrganisationId, cancelledAt: cancellationAt },
+        { organisationId: staleOrganisationId, cancelledAt: cancellationAt },
+        {
+          organisationId: connectedXeroOrganisationId,
+          cancelledAt: cancellationAt
+        },
+        {
+          organisationId: readyNumberOrganisationId,
+          cancelledAt: cancellationAt
+        }
+      ])
+    );
+    expect(candidates).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ organisationId: completeOrganisationId }),
+        expect.objectContaining({ organisationId: activeOrganisationId })
+      ])
+    );
+    await expect(
+      loadSubscriptionRetentionState(client.db, completeOrganisationId)
+    ).resolves.toMatchObject({ retentionDeadlineRecorded: true });
+    await expect(
+      loadSubscriptionRetentionState(client.db, connectedXeroOrganisationId)
+    ).resolves.toMatchObject({ retentionDeadlineRecorded: false });
+    await expect(
+      loadSubscriptionRetentionState(client.db, readyNumberOrganisationId)
+    ).resolves.toMatchObject({ retentionDeadlineRecorded: false });
+  });
+
   it('disconnects once and persists an auditable retention deadline', async () => {
     const organisationId = randomUUID();
     await client.db.insert(organisations).values({

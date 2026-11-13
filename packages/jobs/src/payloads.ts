@@ -57,6 +57,7 @@ export const jobPayloadSchemas = {
       status: z.literal('CANCELLED')
     })
     .strict(),
+  [jobNames.subscriptionLifecycleReconcile]: z.object({}).strict(),
   [jobNames.subscriptionTrialExpiry]: organisationPayload
 } satisfies Record<JobName, z.ZodType>;
 

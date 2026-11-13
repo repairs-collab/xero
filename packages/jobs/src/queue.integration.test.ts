@@ -165,6 +165,46 @@ describe('durable job queue', () => {
     expect(nextManualId).not.toBe(scheduledId);
   });
 
+  it('replaces an exhausted failed provisioning job on the next startup publish', async () => {
+    const organisationId = randomUUID();
+    const singletonKey = `paid-backfill:${organisationId}`;
+    const testPriority = Date.now() % 2_000_000_000;
+    const failedId = await queueController.send(
+      jobNames.smsNumberProvision,
+      { organisationId },
+      { singletonKey, priority: testPriority, retryLimit: 0 }
+    );
+    expect(failedId).not.toBeNull();
+    if (failedId === null) throw new Error('Failed job was not created');
+    const [active] = await queueController.fetch(
+      jobNames.smsNumberProvision,
+      { minPriority: testPriority, maxPriority: testPriority }
+    );
+    expect(active?.id).toBe(failedId);
+    await queueController.fail(jobNames.smsNumberProvision, failedId, {
+      message: 'exhausted'
+    });
+    const [failed] = await queue.findJobs(jobNames.smsNumberProvision, {
+      id: failedId
+    });
+    expect(failed?.state).toBe('failed');
+
+    const replacementId = await queue.publish(
+      jobNames.smsNumberProvision,
+      { organisationId },
+      { singletonKey, deduplicateWhileActive: true }
+    );
+
+    expect(replacementId).not.toBe(failedId);
+    const jobs = await queue.findJobs(jobNames.smsNumberProvision, {
+      key: singletonKey
+    });
+    expect(jobs.filter((job) => job.state === 'failed')).toHaveLength(1);
+    expect(
+      jobs.filter((job) => ['created', 'retry', 'active'].includes(job.state))
+    ).toHaveLength(1);
+  });
+
   it('settles overlapping scheduled and manual sync inserts to one in-flight job', async () => {
     const organisationId = randomUUID();
     const singletonKey = `${jobNames.xeroIncrementalSync}:${organisationId}`;
@@ -312,6 +352,12 @@ describe('durable job queue', () => {
     expect(
       schedules.filter(
         (schedule) => schedule.key === jobNames.xeroOAuthCleanup
+      )
+    ).toHaveLength(1);
+    expect(
+      schedules.filter(
+        (schedule) =>
+          schedule.key === jobNames.subscriptionLifecycleReconcile
       )
     ).toHaveLength(1);
   });

@@ -71,26 +71,30 @@ const stableJobId = (name: JobName, singletonKey: string): string => {
   return `${hex.slice(0, 8).join('')}-${hex.slice(8, 12).join('')}-${hex.slice(12, 16).join('')}-${hex.slice(16, 20).join('')}-${hex.slice(20).join('')}`;
 };
 
-const fromDrizzleTransaction = (transaction: DbTransaction): Db => ({
+export const createTransactionalPgBossDatabase = (
+  transaction: DbTransaction
+): Db => ({
   executeSql: async (text, values = []) => {
-    const chunks: SQL[] = [];
-    const referenced = new Set<number>();
-    const placeholder = /\$(\d+)/g;
-    let cursor = 0;
-    for (const match of text.matchAll(placeholder)) {
-      const index = Number.parseInt(match[1] ?? '', 10) - 1;
-      if (!Number.isSafeInteger(index) || index < 0 || index >= values.length) {
-        throw new Error('PG_BOSS_TRANSACTION_PARAMETER_INVALID');
-      }
-      chunks.push(sql.raw(text.slice(cursor, match.index)));
-      chunks.push(sql`${values[index]}`);
-      referenced.add(index);
-      cursor = (match.index ?? 0) + match[0].length;
+    const placeholders = [...text.matchAll(/\$(\d+)/g)];
+    const supportedInsertShape =
+      values.length === 1 &&
+      placeholders.length === 1 &&
+      placeholders[0]?.[0] === '$1' &&
+      /\bfrom\s+json_to_recordset\(\$1::text::json\)\s+as\s+x\s*\(/i.test(
+        text
+      );
+    if (!supportedInsertShape) {
+      throw new Error('PG_BOSS_TRANSACTION_SQL_UNSUPPORTED');
     }
-    chunks.push(sql.raw(text.slice(cursor)));
-    if (referenced.size !== values.length) {
-      throw new Error('PG_BOSS_TRANSACTION_PARAMETER_UNUSED');
+    const placeholderIndex = placeholders[0]?.index;
+    if (placeholderIndex === undefined) {
+      throw new Error('PG_BOSS_TRANSACTION_SQL_UNSUPPORTED');
     }
+    const chunks: SQL[] = [
+      sql.raw(text.slice(0, placeholderIndex)),
+      sql`${values[0]}`,
+      sql.raw(text.slice(placeholderIndex + 2))
+    ];
     const result = await transaction.execute(sql.join(chunks));
     return { rows: result.rows };
   }
@@ -115,6 +119,7 @@ export class DurableJobQueue implements JobPublisher {
   readonly #databaseUrl: string;
   readonly #logger: JobQueueLogger;
   readonly #workers = new Map<JobName, string>();
+  #bossRunning = false;
   #started = false;
 
   constructor(options: DurableJobQueueOptions) {
@@ -134,20 +139,38 @@ export class DurableJobQueue implements JobPublisher {
 
   async start(): Promise<void> {
     if (this.#started) return;
-    await this.#boss.start();
-    for (const name of allJobNames) {
-      await this.#boss.createQueue(name, {
-        policy: 'stately',
-        ...optionsFor(name)
-      });
+    this.#bossRunning = true;
+    try {
+      await this.#boss.start();
+      for (const name of allJobNames) {
+        await this.#boss.createQueue(name, {
+          policy: 'stately',
+          ...optionsFor(name)
+        });
+      }
+      this.#started = true;
+    } catch (error) {
+      let cleanupSucceeded = false;
+      try {
+        await this.#boss.stop({ graceful: false, timeout: 5_000 });
+        cleanupSucceeded = true;
+      } catch (stopError) {
+        this.#logger.error(
+          'pg-boss cleanup failed after queue startup failure',
+          stopError
+        );
+      }
+      this.#bossRunning = !cleanupSucceeded;
+      this.#started = false;
+      throw error;
     }
-    this.#started = true;
   }
 
   async stop(): Promise<void> {
-    if (!this.#started) return;
+    if (!this.#started && !this.#bossRunning) return;
     await this.#boss.stop({ graceful: false, timeout: 5_000 });
     this.#started = false;
+    this.#bossRunning = false;
   }
 
   async stopClaiming(): Promise<void> {
@@ -204,7 +227,7 @@ export class DurableJobQueue implements JobPublisher {
       ...startOptions,
       id,
       singletonKey,
-      db: fromDrizzleTransaction(transaction)
+      db: createTransactionalPgBossDatabase(transaction)
     });
     return inserted ?? id;
   }

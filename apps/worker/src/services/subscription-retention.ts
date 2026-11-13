@@ -1,13 +1,24 @@
 import { randomUUID } from 'node:crypto';
 
-import { eq } from 'drizzle-orm';
+import {
+  and,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  ne,
+  or
+} from 'drizzle-orm';
 
 import {
   auditEvents,
   type Database,
   retentionCases,
+  smsNumberPool,
   type SubscriptionStatus,
-  subscriptions
+  subscriptions,
+  xeroConnections
 } from '@bc5000/db';
 
 import { lockRetentionOrganisation } from './retention-legal-hold.js';
@@ -25,6 +36,57 @@ export interface SubscriptionRetentionState {
   cancelledAt: Date | null;
   retentionDeadlineRecorded: boolean;
   recordedCancellationAt: Date | null;
+}
+
+export interface CancelledSubscriptionLifecycleCandidate {
+  organisationId: string;
+  cancelledAt: Date;
+}
+
+export async function listCancelledSubscriptionsNeedingLifecycle(
+  database: Database
+): Promise<CancelledSubscriptionLifecycleCandidate[]> {
+  const rows = await database
+    .select({
+      organisationId: subscriptions.organisationId,
+      cancelledAt: subscriptions.cancelledAt
+    })
+    .from(subscriptions)
+    .leftJoin(
+      retentionCases,
+      eq(retentionCases.organisationId, subscriptions.organisationId)
+    )
+    .leftJoin(
+      xeroConnections,
+      eq(xeroConnections.organisationId, subscriptions.organisationId)
+    )
+    .leftJoin(
+      smsNumberPool,
+      eq(smsNumberPool.organisationId, subscriptions.organisationId)
+    )
+    .where(
+      and(
+        eq(subscriptions.status, 'CANCELLED'),
+        isNotNull(subscriptions.cancelledAt),
+        or(
+          isNull(retentionCases.organisationId),
+          ne(retentionCases.source, 'SUBSCRIPTION_CANCELLED'),
+          lt(retentionCases.closureEffectiveAt, subscriptions.cancelledAt),
+          inArray(xeroConnections.status, ['CONNECTED', 'REAUTH_REQUIRED']),
+          inArray(smsNumberPool.status, ['RESERVED', 'READY'])
+        )
+      )
+    );
+  const candidates = new Map<string, CancelledSubscriptionLifecycleCandidate>();
+  for (const row of rows) {
+    if (row.cancelledAt !== null) {
+      candidates.set(row.organisationId, {
+        organisationId: row.organisationId,
+        cancelledAt: row.cancelledAt
+      });
+    }
+  }
+  return [...candidates.values()];
 }
 
 export async function loadSubscriptionRetentionState(
@@ -48,12 +110,31 @@ export async function loadSubscriptionRetentionState(
     .from(retentionCases)
     .where(eq(retentionCases.organisationId, organisationId))
     .limit(1);
-  const cancellationRecorded =
+  const [xeroConnection] = await database
+    .select({ status: xeroConnections.status })
+    .from(xeroConnections)
+    .where(eq(xeroConnections.organisationId, organisationId))
+    .limit(1);
+  const [activeReplyNumber] = await database
+    .select({ status: smsNumberPool.status })
+    .from(smsNumberPool)
+    .where(
+      and(
+        eq(smsNumberPool.organisationId, organisationId),
+        inArray(smsNumberPool.status, ['RESERVED', 'READY'])
+      )
+    )
+    .limit(1);
+  const retentionRecorded =
     retentionCase?.source === 'SUBSCRIPTION_CANCELLED';
+  const cancellationRecorded =
+    retentionRecorded &&
+    (xeroConnection === undefined || xeroConnection.status === 'DISCONNECTED') &&
+    activeReplyNumber === undefined;
   return {
     ...subscription,
     retentionDeadlineRecorded: cancellationRecorded,
-    recordedCancellationAt: cancellationRecorded
+    recordedCancellationAt: retentionRecorded
       ? retentionCase.closureEffectiveAt
       : null
   };
