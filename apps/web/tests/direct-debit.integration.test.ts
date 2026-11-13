@@ -465,13 +465,16 @@ describe('request-only direct debit persistence', () => {
     }
   }, 15_000);
 
-  it('keeps migrated card evidence only when Checkout identity matches the current subscription episode', async () => {
+  it('quarantines unprovable migrated card evidence and every advanced direct-debit state on the exact upgrade path', async () => {
     const connection = await client.pool.connect();
     const schemaName = `card_episode_forward_${randomUUID().replaceAll('-', '_')}`;
-    const crossEpisodeOrganisationId = randomUUID();
-    const validEpisodeOrganisationId = randomUUID();
-    const crossEpisodeUserId = randomUUID();
-    const validEpisodeUserId = randomUUID();
+    const unprovenOrganisationId = randomUUID();
+    const globallyRetiredOrganisationId = randomUUID();
+    const previouslyQuarantinedOrganisationId = randomUUID();
+    const unprovenUserId = randomUUID();
+    const globallyRetiredUserId = randomUUID();
+    const previouslyQuarantinedUserId = randomUUID();
+    const existingRequestedId = randomUUID();
     const paidAt = new Date('2026-11-09T10:00:00.000Z');
     const periodEnd = new Date('2026-12-09T10:00:00.000Z');
     try {
@@ -503,6 +506,13 @@ describe('request-only direct debit persistence', () => {
           after_value jsonb,
           occurred_at timestamp with time zone not null default now()
         );
+        create table rollout_reconciliations (
+          id uuid default gen_random_uuid() primary key,
+          organisation_id uuid not null,
+          sync_completed_at timestamp with time zone not null
+        );
+        create unique index rollout_reconciliations_org_sync_uq
+          on rollout_reconciliations (organisation_id, sync_completed_at);
       `);
       const applyMigration = async (name: string) => {
         const migration = await readFile(
@@ -522,27 +532,36 @@ describe('request-only direct debit persistence', () => {
 
       await connection.query(
         `insert into organisations (id, edition)
-         values ($1, 'SOLO'), ($2, 'SOLO')`,
-        [crossEpisodeOrganisationId, validEpisodeOrganisationId]
+         values ($1, 'SOLO'), ($2, 'SOLO'), ($3, 'SOLO')`,
+        [
+          unprovenOrganisationId,
+          globallyRetiredOrganisationId,
+          previouslyQuarantinedOrganisationId
+        ]
       );
       await connection.query(
         `insert into users (id, email)
-         values ($1, $3), ($2, $4)`,
+         values ($1, $4), ($2, $5), ($3, $6)`,
         [
-          crossEpisodeUserId,
-          validEpisodeUserId,
-          `${crossEpisodeUserId}@example.invalid`,
-          `${validEpisodeUserId}@example.invalid`
+          unprovenUserId,
+          globallyRetiredUserId,
+          previouslyQuarantinedUserId,
+          `${unprovenUserId}@example.invalid`,
+          `${globallyRetiredUserId}@example.invalid`,
+          `${previouslyQuarantinedUserId}@example.invalid`
         ]
       );
       await connection.query(
         `insert into memberships (organisation_id, user_id, role)
-         values ($1, $2, 'ADMIN'), ($3, $4, 'ADMIN')`,
+         values ($1, $2, 'ADMIN'), ($3, $4, 'ADMIN'),
+                ($5, $6, 'ADMIN')`,
         [
-          crossEpisodeOrganisationId,
-          crossEpisodeUserId,
-          validEpisodeOrganisationId,
-          validEpisodeUserId
+          unprovenOrganisationId,
+          unprovenUserId,
+          globallyRetiredOrganisationId,
+          globallyRetiredUserId,
+          previouslyQuarantinedOrganisationId,
+          previouslyQuarantinedUserId
         ]
       );
       await connection.query(
@@ -553,16 +572,20 @@ describe('request-only direct debit persistence', () => {
            initial_card_invoice_id, initial_card_payment_succeeded_at
          ) values
            ($1, 'SOLO_AU_2000', 'ACTIVE', 'active', 'active',
-            'cus_cross_episode', 'sub_cross_current', $3, $4,
-            'in_cross_old', $3),
+            'cus_unproven', 'sub_unproven_current', $3, $4,
+            'in_unproven_current', $3),
            ($2, 'SOLO_AU_2000', 'ACTIVE', 'active', 'active',
-            'cus_valid_episode', 'sub_valid_current', $3, $4,
-            'in_valid_current', $3)`,
+            'cus_global_retired', 'sub_global_retired', $3, $4,
+            'in_global_retired', $3),
+           ($5, 'SOLO_AU_2000', 'ACTIVE', 'active', 'active',
+            'cus_previously_quarantined', 'sub_previously_quarantined', $3, $4,
+            'in_previously_quarantined', $3)`,
         [
-          crossEpisodeOrganisationId,
-          validEpisodeOrganisationId,
+          unprovenOrganisationId,
+          globallyRetiredOrganisationId,
           paidAt,
-          periodEnd
+          periodEnd,
+          previouslyQuarantinedOrganisationId
         ]
       );
       await connection.query(
@@ -570,11 +593,18 @@ describe('request-only direct debit persistence', () => {
            organisation_id, stripe_event_id, event_type,
            stripe_event_created_at, payload_hash, outcome
          ) values
-           ($1, 'evt_cross_old', 'checkout.session.completed', $3,
+           ($1, 'evt_unproven', 'checkout.session.completed', $3,
             repeat('a', 64), 'APPLIED'),
-           ($2, 'evt_valid_current', 'checkout.session.completed', $3,
-            repeat('b', 64), 'APPLIED')`,
-        [crossEpisodeOrganisationId, validEpisodeOrganisationId, paidAt]
+           ($2, 'evt_global_retired', 'checkout.session.completed', $3,
+            repeat('b', 64), 'APPLIED'),
+           ($4, 'evt_previously_quarantined', 'checkout.session.completed', $3,
+            repeat('e', 64), 'APPLIED')`,
+        [
+          unprovenOrganisationId,
+          globallyRetiredOrganisationId,
+          paidAt,
+          previouslyQuarantinedOrganisationId
+        ]
       );
 
       await applyMigration('0037_watery_tombstone');
@@ -588,21 +618,43 @@ describe('request-only direct debit persistence', () => {
            expires_at, stripe_session_id, stripe_session_status,
            stripe_customer_id, stripe_subscription_id, created_at, updated_at
          ) values
-           ($1, $2, 'cus_cross_episode', 'MONTHLY', $3, 'price_monthly',
+           ($1, $2, 'cus_unproven', 'MONTHLY', $3, 'price_monthly',
             true, 'https://ap.motts.com.au', repeat('c', 64), $8,
-            'cs_cross_old', 'complete', 'cus_cross_episode', 'sub_cross_old',
+            'cs_unproven', 'complete', 'cus_unproven',
+            'sub_unproven_current',
             $7, $7),
-           ($4, $5, 'cus_valid_episode', 'MONTHLY', $6, 'price_monthly',
+           ($4, $5, 'cus_global_retired', 'MONTHLY', $6, 'price_monthly',
             true, 'https://ap.motts.com.au', repeat('d', 64), $8,
-            'cs_valid_current', 'complete', 'cus_valid_episode',
-            'sub_valid_current', $7, $7)`,
+            'cs_global_retired', 'complete', 'cus_global_retired',
+            'sub_global_retired', $7, $7)`,
         [
           randomUUID(),
-          crossEpisodeOrganisationId,
-          crossEpisodeUserId,
+          unprovenOrganisationId,
+          unprovenUserId,
           randomUUID(),
-          validEpisodeOrganisationId,
-          validEpisodeUserId,
+          globallyRetiredOrganisationId,
+          globallyRetiredUserId,
+          paidAt,
+          periodEnd
+        ]
+      );
+
+      await connection.query(
+        `insert into direct_debit_requests (
+           organisation_id, stripe_subscription_id, status,
+           requested_by_user_id, requested_at, setup_attempt_version,
+           setup_session_id, setup_session_expires_at,
+           setup_checkout_completed_at, setup_intent_id,
+           stripe_payment_method_id, stripe_mandate_id,
+           mandate_confirmed_at, activated_by_user_id, activated_at
+         ) values
+           ($1, 'sub_previously_quarantined', 'ACTIVE', $2, $3, 1,
+            'cs_previously_quarantined', $4, $3,
+            'seti_previously_quarantined', 'pm_previously_quarantined',
+            'mandate_previously_quarantined', $3, $2, $3)`,
+        [
+          previouslyQuarantinedOrganisationId,
+          previouslyQuarantinedUserId,
           paidAt,
           periodEnd
         ]
@@ -617,10 +669,72 @@ describe('request-only direct debit persistence', () => {
       const episodeEvidenceMigration = migrations.find((name) =>
         /^0042_.*\.sql$/.test(name)
       );
+      const syncGenerationMigration = migrations.find((name) =>
+        /^0041_.*\.sql$/.test(name)
+      );
+      const repairMigration = migrations.find((name) =>
+        /^0043_.*\.sql$/.test(name)
+      );
       expect(reconciliationMigration).toBeDefined();
+      expect(syncGenerationMigration).toBeDefined();
       expect(episodeEvidenceMigration).toBeDefined();
+      expect(repairMigration).toBeDefined();
       await applyMigration(reconciliationMigration!.replace(/\.sql$/, ''));
+      await applyMigration(syncGenerationMigration!.replace(/\.sql$/, ''));
       await applyMigration(episodeEvidenceMigration!.replace(/\.sql$/, ''));
+
+      const previouslyQuarantinedEvidence = await connection.query<{
+        initial_card_stripe_subscription_id: string | null;
+      }>(
+        `select initial_card_stripe_subscription_id
+           from subscriptions
+          where organisation_id = $1`,
+        [previouslyQuarantinedOrganisationId]
+      );
+      expect(previouslyQuarantinedEvidence.rows).toEqual([
+        { initial_card_stripe_subscription_id: null }
+      ]);
+
+      await connection.query(
+        `insert into retired_stripe_subscriptions (
+           stripe_subscription_id, organisation_id
+         ) values ('sub_global_retired', $1)`,
+        [unprovenOrganisationId]
+      );
+      await connection.query(
+        `insert into direct_debit_requests (
+           organisation_id, stripe_subscription_id, status,
+           requested_by_user_id, requested_at, setup_attempt_version,
+           setup_session_id, setup_session_expires_at,
+           setup_checkout_completed_at, setup_intent_id,
+           stripe_payment_method_id, stripe_mandate_id,
+           mandate_confirmed_at, activated_by_user_id, activated_at
+         ) values
+           ($1, 'sub_setup_pending', 'SETUP_PENDING', $2, $3, 1,
+            'cs_setup_pending', $4, null, null,
+            null, null, null, null, null),
+           ($1, 'sub_mandate_confirmed', 'MANDATE_CONFIRMED', $2, $3, 1,
+            'cs_mandate_confirmed', $4, $3, 'seti_mandate_confirmed',
+            'pm_mandate_confirmed', 'mandate_confirmed', $3, null, null),
+           ($1, 'sub_active', 'ACTIVE', $2, $3, 1,
+            'cs_active', $4, $3, 'seti_active', 'pm_active',
+            'mandate_active', $3, $2, $3)`,
+        [unprovenOrganisationId, unprovenUserId, paidAt, periodEnd]
+      );
+      await connection.query(
+        `insert into direct_debit_requests (
+           id, organisation_id, stripe_subscription_id, status,
+           requested_by_user_id, requested_at
+         ) values ($1, $2, 'sub_global_retired', 'REQUESTED', $3, $4)`,
+        [
+          existingRequestedId,
+          globallyRetiredOrganisationId,
+          globallyRetiredUserId,
+          paidAt
+        ]
+      );
+
+      await applyMigration(repairMigration!.replace(/\.sql$/, ''));
 
       const evidence = await connection.query<{
         organisation_id: string;
@@ -638,23 +752,23 @@ describe('request-only direct debit persistence', () => {
       );
       expect(
         evidence.rows.find(
-          (row) => row.organisation_id === crossEpisodeOrganisationId
+          (row) => row.organisation_id === unprovenOrganisationId
         )
       ).toMatchObject({
         initial_card_stripe_subscription_id: null,
         initial_card_invoice_id: null,
-        legacy_initial_card_stripe_subscription_id: 'sub_cross_current',
-        legacy_initial_card_invoice_id: 'in_cross_old'
+        legacy_initial_card_stripe_subscription_id: 'sub_unproven_current',
+        legacy_initial_card_invoice_id: 'in_unproven_current'
       });
       expect(
         evidence.rows.find(
-          (row) => row.organisation_id === validEpisodeOrganisationId
+          (row) => row.organisation_id === globallyRetiredOrganisationId
         )
       ).toMatchObject({
-        initial_card_stripe_subscription_id: 'sub_valid_current',
-        initial_card_invoice_id: 'in_valid_current',
-        legacy_initial_card_stripe_subscription_id: null,
-        legacy_initial_card_invoice_id: null
+        initial_card_stripe_subscription_id: null,
+        initial_card_invoice_id: null,
+        legacy_initial_card_stripe_subscription_id: 'sub_global_retired',
+        legacy_initial_card_invoice_id: 'in_global_retired'
       });
       const quarantineAudit = await connection.query<{
         before_value: {
@@ -671,23 +785,154 @@ describe('request-only direct debit persistence', () => {
            from audit_events
           where organisation_id = $1
             and event_type = 'INITIAL_CARD_EVIDENCE_QUARANTINED'
-            and correlation_id = 'migration:0042'`,
-        [crossEpisodeOrganisationId]
+            and correlation_id = 'migration:0043'`,
+        [unprovenOrganisationId]
       );
-      expect(quarantineAudit.rows).toEqual([
+      expect(quarantineAudit.rows).toContainEqual({
+        before_value: {
+          stripeCustomerId: 'cus_unproven',
+          stripeSubscriptionId: 'sub_unproven_current',
+          invoiceId: 'in_unproven_current',
+          paymentSucceededAt: '2026-11-09T10:00:00+00:00'
+        },
+        after_value: {
+          reason: 'IMMUTABLE_CHECKOUT_PAYMENT_CORRELATION_NOT_PROVEN',
+          eligibleForDirectDebit: false
+        }
+      });
+      const retiredAudit = await connection.query<{
+        after_value: { reason: string; eligibleForDirectDebit: boolean };
+      }>(
+        `select after_value
+           from audit_events
+          where organisation_id = $1
+            and event_type = 'INITIAL_CARD_EVIDENCE_QUARANTINED'
+            and correlation_id = 'migration:0043'`,
+        [globallyRetiredOrganisationId]
+      );
+      expect(retiredAudit.rows).toEqual([
         {
-          before_value: {
-            stripeCustomerId: 'cus_cross_episode',
-            stripeSubscriptionId: 'sub_cross_current',
-            invoiceId: 'in_cross_old',
-            paymentSucceededAt: '2026-11-09T10:00:00+00:00'
-          },
           after_value: {
-            reason: 'CHECKOUT_EPISODE_IDENTITY_NOT_PROVEN',
+            reason: 'RETIRED_SUBSCRIPTION_ID_REUSED',
             eligibleForDirectDebit: false
           }
         }
       ]);
+
+      const quarantinedRequests = await connection.query<{
+        status: string;
+        legacy_status: string;
+        stripe_subscription_id: string | null;
+      }>(
+        `select status, legacy_status, stripe_subscription_id
+           from direct_debit_requests
+          where organisation_id = $1
+          order by legacy_status`,
+        [unprovenOrganisationId]
+      );
+      expect(quarantinedRequests.rows).toEqual([
+        {
+          status: 'LEGACY_UNBOUND',
+          legacy_status: 'ACTIVE',
+          stripe_subscription_id: null
+        },
+        {
+          status: 'LEGACY_UNBOUND',
+          legacy_status: 'MANDATE_CONFIRMED',
+          stripe_subscription_id: null
+        },
+        {
+          status: 'LEGACY_UNBOUND',
+          legacy_status: 'SETUP_PENDING',
+          stripe_subscription_id: null
+        }
+      ]);
+      const requestAudit = await connection.query<{
+        before_value: { status: string };
+        after_value: { status: string; reason: string };
+      }>(
+        `select before_value, after_value
+           from audit_events
+          where organisation_id = $1
+            and event_type = 'DIRECT_DEBIT_EVIDENCE_QUARANTINED'
+            and correlation_id = 'migration:0043'
+          order by before_value->>'status'`,
+        [unprovenOrganisationId]
+      );
+      expect(requestAudit.rows).toHaveLength(3);
+      expect(requestAudit.rows.map((row) => row.before_value.status)).toEqual([
+        'ACTIVE',
+        'MANDATE_CONFIRMED',
+        'SETUP_PENDING'
+      ]);
+      expect(
+        requestAudit.rows.every(
+          (row) =>
+            row.after_value.status === 'LEGACY_UNBOUND' &&
+            row.after_value.reason === 'INITIAL_CARD_EVIDENCE_QUARANTINED'
+        )
+      ).toBe(true);
+
+      const previouslyQuarantinedRequest = await connection.query<{
+        status: string;
+        legacy_status: string;
+        stripe_subscription_id: string | null;
+      }>(
+        `select status, legacy_status, stripe_subscription_id
+           from direct_debit_requests
+          where organisation_id = $1`,
+        [previouslyQuarantinedOrganisationId]
+      );
+      expect(previouslyQuarantinedRequest.rows).toEqual([
+        {
+          status: 'LEGACY_UNBOUND',
+          legacy_status: 'ACTIVE',
+          stripe_subscription_id: null
+        }
+      ]);
+      const previouslyQuarantinedRequestAudit = await connection.query<{
+        before_value: { setupSessionExpiresAt: string };
+        after_value: { status: string; reason: string };
+      }>(
+        `select before_value, after_value
+           from audit_events
+          where organisation_id = $1
+            and event_type = 'DIRECT_DEBIT_EVIDENCE_QUARANTINED'
+            and correlation_id = 'migration:0043'`,
+        [previouslyQuarantinedOrganisationId]
+      );
+      expect(previouslyQuarantinedRequestAudit.rows).toHaveLength(1);
+      expect(
+        previouslyQuarantinedRequestAudit.rows[0]?.before_value
+          .setupSessionExpiresAt
+      ).toBe('2026-12-09T10:00:00+00:00');
+      expect(previouslyQuarantinedRequestAudit.rows[0]?.after_value).toEqual({
+        status: 'LEGACY_UNBOUND',
+        legacyStatus: 'ACTIVE',
+        reason: 'INITIAL_CARD_EVIDENCE_QUARANTINED'
+      });
+
+      await expect(
+        connection.query(
+          `update direct_debit_requests
+              set status = 'SETUP_PENDING',
+                  setup_attempt_version = 1,
+                  setup_session_id = 'cs_blocked_existing_request',
+                  setup_session_expires_at = $1
+            where id = $2`,
+          [periodEnd, existingRequestedId]
+        )
+      ).rejects.toMatchObject({ code: 'P0001' });
+
+      await expect(
+        connection.query(
+          `insert into direct_debit_requests (
+             organisation_id, stripe_subscription_id, status,
+             requested_by_user_id, requested_at
+           ) values ($1, 'sub_global_retired', 'REQUESTED', $2, $3)`,
+          [globallyRetiredOrganisationId, globallyRetiredUserId, now]
+        )
+      ).rejects.toMatchObject({ code: 'P0001' });
 
       const scopedDatabase = drizzle(connection, { schema: databaseSchema });
       const repository = createPostgresSubscriptionRepository(scopedDatabase, {
@@ -695,22 +940,18 @@ describe('request-only direct debit persistence', () => {
       });
       await expect(
         repository.requestDirectDebit({
-          organisationId: crossEpisodeOrganisationId,
-          requestedByUserId: crossEpisodeUserId,
+          organisationId: unprovenOrganisationId,
+          requestedByUserId: unprovenUserId,
           requestedAt: now
         })
       ).rejects.toThrow('DIRECT_DEBIT_CARD_PAYMENT_REQUIRED');
       await expect(
         repository.requestDirectDebit({
-          organisationId: validEpisodeOrganisationId,
-          requestedByUserId: validEpisodeUserId,
+          organisationId: globallyRetiredOrganisationId,
+          requestedByUserId: globallyRetiredUserId,
           requestedAt: now
         })
-      ).resolves.toMatchObject({
-        organisationId: validEpisodeOrganisationId,
-        stripeSubscriptionId: 'sub_valid_current',
-        status: 'REQUESTED'
-      });
+      ).rejects.toThrow('DIRECT_DEBIT_CARD_PAYMENT_REQUIRED');
     } finally {
       await connection.query('set search_path to public');
       await connection.query(`drop schema if exists "${schemaName}" cascade`);
