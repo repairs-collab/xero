@@ -234,25 +234,31 @@ class FakeRepository implements SubscriptionRepository {
   }
 
   applyLifecycleEvent(
-    input: Parameters<SubscriptionRepository['applyLifecycleEvent']>[0]
+    input: Parameters<SubscriptionRepository['applyLifecycleEvent']>[0],
+    effects?: Parameters<SubscriptionRepository['applyLifecycleEvent']>[1]
   ): ReturnType<SubscriptionRepository['applyLifecycleEvent']> {
     this.lifecycleInputs.push(input);
-    if (this.applyOutcome === 'APPLIED' && this.currentAccount !== null) {
-      this.currentAccount = {
-        ...this.currentAccount,
-        status: input.status,
-        billingCadence: input.billingCadence,
-        stripeCustomerId: input.stripeCustomerId,
-        stripeSubscriptionId: input.stripeSubscriptionId,
-        currentPeriodStart: input.currentPeriodStart,
-        currentPeriodEnd: input.currentPeriodEnd,
-        trialEndsAt: input.trialEndsAt,
-        cancelAt: input.cancelAt,
-        cancelledAt: input.cancelledAt,
-        lastStripeEventCreatedAt: input.eventCreatedAt
-      };
-    }
-    return Promise.resolve(this.applyOutcome);
+    return (async () => {
+      if (this.applyOutcome === 'APPLIED') {
+        await effects?.onApplied({} as never);
+        if (this.currentAccount !== null) {
+          this.currentAccount = {
+            ...this.currentAccount,
+            status: input.status,
+            billingCadence: input.billingCadence,
+            stripeCustomerId: input.stripeCustomerId,
+            stripeSubscriptionId: input.stripeSubscriptionId,
+            currentPeriodStart: input.currentPeriodStart,
+            currentPeriodEnd: input.currentPeriodEnd,
+            trialEndsAt: input.trialEndsAt,
+            cancelAt: input.cancelAt,
+            cancelledAt: input.cancelledAt,
+            lastStripeEventCreatedAt: input.eventCreatedAt
+          };
+        }
+      }
+      return this.applyOutcome;
+    })();
   }
 
   applyCheckoutCompleted(
@@ -443,12 +449,15 @@ const createService = (
       verifyPlatformOwner: (userId: string) =>
         Promise.resolve(userId === 'platform_owner'),
       clock,
-      publishLifecycle: (job) => {
-        lifecycleJobs.push(job);
+      enqueueLifecycle: (_transaction, job) => {
+        lifecycleJobs.push({
+          organisationId: job.organisationId,
+          status: job.status
+        });
         return Promise.resolve();
       },
-      publishNumberProvision: (job) => {
-        numberProvisionJobs.push(job);
+      enqueueNumberProvision: (_transaction, job) => {
+        numberProvisionJobs.push({ organisationId: job.organisationId });
         return Promise.resolve();
       }
     })
@@ -1151,7 +1160,7 @@ describe('subscription webhooks', () => {
     expect(numberProvisionJobs).toHaveLength(count);
   });
 
-  it('re-publishes an idempotent cancellation job when Stripe retries the event', async () => {
+  it('does not publish a second cancellation job when Stripe retries an atomically applied event', async () => {
     const { service, stripe, repository, lifecycleJobs } = createService();
     repository.applyOutcome = 'DUPLICATE';
     stripe.event = subscriptionEvent({
@@ -1168,9 +1177,7 @@ describe('subscription webhooks', () => {
     await expect(service.handleWebhook('{}', 'valid-signature')).resolves.toBe(
       'DUPLICATE'
     );
-    expect(lifecycleJobs).toEqual([
-      { organisationId: 'org_solo', status: 'CANCELLED' }
-    ]);
+    expect(lifecycleJobs).toEqual([]);
   });
 
   it.each([

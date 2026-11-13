@@ -211,6 +211,46 @@ const seed = async () => {
 };
 
 describe('AccountPulse Solo subscription persistence', () => {
+  it('rolls back the paid lifecycle event when provisioning cannot be enqueued', async () => {
+    const seeded = await seed();
+    currentOrganisationId = seeded.organisationId;
+    const stripe = new FakeStripe();
+    const eventId = `evt_atomic_${randomUUID()}`;
+    const service = createSubscriptionService({
+      stripe,
+      repository: createPostgresSubscriptionRepository(client.db, {
+        now: () => now
+      }),
+      soloMonthlyPriceId: 'price_solo_au_2000',
+      soloAnnualPriceId: 'price_solo_annual',
+      verifyPlatformOwner: () => Promise.resolve(false),
+      clock: { now: () => now },
+      enqueueLifecycle: () => Promise.resolve(),
+      enqueueNumberProvision: () =>
+        Promise.reject(new Error('PROVISIONING_QUEUE_UNAVAILABLE'))
+    });
+    stripe.event = stripeEvent({
+      id: eventId,
+      created: 1_794_201_600,
+      status: 'active'
+    });
+
+    await expect(service.handleWebhook('{}', 'signed')).rejects.toThrow(
+      'PROVISIONING_QUEUE_UNAVAILABLE'
+    );
+
+    await expect(
+      client.db.query.subscriptions.findFirst({
+        where: (table, { eq }) => eq(table.organisationId, seeded.organisationId)
+      })
+    ).resolves.toMatchObject({ status: 'TRIALING' });
+    await expect(
+      client.db.query.subscriptionEvents.findFirst({
+        where: (table, { eq }) => eq(table.stripeEventId, eventId)
+      })
+    ).resolves.toBeUndefined();
+  });
+
   it('deduplicates and orders webhooks while pausing sends on billing risk', async () => {
     const seeded = await seed();
     currentOrganisationId = seeded.organisationId;
@@ -225,11 +265,11 @@ describe('AccountPulse Solo subscription persistence', () => {
       soloAnnualPriceId: 'price_solo_annual',
       verifyPlatformOwner: () => Promise.resolve(false),
       clock: { now: () => now },
-      publishLifecycle: (job) => {
+      enqueueLifecycle: (_transaction, job) => {
         lifecycleJobs.push(job.organisationId);
         return Promise.resolve();
       },
-      publishNumberProvision: () => Promise.resolve()
+      enqueueNumberProvision: () => Promise.resolve()
     });
 
     stripe.event = stripeEvent({
@@ -289,8 +329,8 @@ describe('AccountPulse Solo subscription persistence', () => {
       soloAnnualPriceId: 'price_solo_annual',
       verifyPlatformOwner: () => Promise.resolve(false),
       clock: { now: () => now },
-      publishLifecycle: () => Promise.resolve(),
-      publishNumberProvision: (job) => { provisionJobs.push(job.organisationId); return Promise.resolve(); }
+      enqueueLifecycle: () => Promise.resolve(),
+      enqueueNumberProvision: (_transaction, job) => { provisionJobs.push(job.organisationId); return Promise.resolve(); }
     });
     stripe.event = stripeEvent({ id: 'evt_' + randomUUID(), created: 1_794_201_600, status, cancelAtPeriodEnd: true });
     await expect(service.handleWebhook('{}', 'signed')).resolves.toBe('APPLIED');
@@ -314,8 +354,8 @@ describe('AccountPulse Solo subscription persistence', () => {
       soloAnnualPriceId: 'price_solo_annual',
       verifyPlatformOwner: () => Promise.resolve(false),
       clock: { now: () => now },
-      publishLifecycle: () => Promise.resolve(),
-      publishNumberProvision: () => Promise.resolve()
+      enqueueLifecycle: () => Promise.resolve(),
+      enqueueNumberProvision: () => Promise.resolve()
     });
     const eventId = `evt_${randomUUID()}`;
     stripe.event = stripeEvent({
@@ -587,8 +627,8 @@ describe('single paid Checkout across cadences', () => {
         soloAnnualPriceId: 'price_solo_annual',
         verifyPlatformOwner: () => Promise.resolve(false),
         clock,
-        publishLifecycle: () => Promise.resolve(),
-        publishNumberProvision: () => Promise.resolve()
+        enqueueLifecycle: () => Promise.resolve(),
+        enqueueNumberProvision: () => Promise.resolve()
       })
     );
     return {

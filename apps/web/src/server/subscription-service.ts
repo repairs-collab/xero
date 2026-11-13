@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import { authorise, type AppSession } from '@bc5000/auth';
+import type { DbTransaction } from '@bc5000/db';
 import { hasPaidSubscriptionAccess } from '@bc5000/domain';
 import type {
   AccountPulseSubscriptionStatus,
@@ -262,7 +263,8 @@ export interface SubscriptionRepository {
   }): Promise<boolean>;
   applyCheckoutExpired(input: StripeCheckoutExpiredInput): Promise<StripeEventApplicationOutcome>;
   applyLifecycleEvent(
-    input: StripeLifecycleEventInput
+    input: StripeLifecycleEventInput,
+    effects?: StripeLifecycleEventEffects
   ): Promise<StripeEventApplicationOutcome>;
   applyCheckoutCompleted(
     input: StripeCheckoutCompletedInput
@@ -336,6 +338,10 @@ export interface SubscriptionRepository {
     };
     occurredAt: Date;
   }): Promise<void>;
+}
+
+export interface StripeLifecycleEventEffects {
+  onApplied(transaction: DbTransaction): Promise<void>;
 }
 
 export class SubscriptionFailure extends Error {
@@ -922,11 +928,15 @@ export const createSubscriptionService = (dependencies: {
   soloAnnualPriceId: string | null;
   verifyPlatformOwner(userId: string): Promise<boolean>;
   clock: { now(): Date };
-  publishLifecycle(input: {
+  enqueueLifecycle(transaction: DbTransaction, input: {
     organisationId: string;
     status: 'CANCELLED';
+    eventId: string;
   }): Promise<void>;
-  publishNumberProvision(input: { organisationId: string }): Promise<void>;
+  enqueueNumberProvision(transaction: DbTransaction, input: {
+    organisationId: string;
+    eventId: string;
+  }): Promise<void>;
 }) => {
   const definiteCheckoutRejection = (
     error: unknown
@@ -1403,25 +1413,36 @@ export const createSubscriptionService = (dependencies: {
       }
       throw error;
     }
-    const outcome = await dependencies.repository.applyLifecycleEvent(input);
-    if (
-      (outcome === 'APPLIED' || outcome === 'DUPLICATE') &&
-      input.status === 'CANCELLED'
-    ) {
-      await dependencies.publishLifecycle({
-        organisationId: input.organisationId,
-        status: 'CANCELLED'
-      });
-    }
-    if (
-      (outcome === 'APPLIED' || outcome === 'DUPLICATE') &&
-      hasPaidSubscriptionAccess({ subscriptionStatus: input.status, stripeProviderStatus: input.stripeProviderStatus, currentPeriodEnd: input.currentPeriodEnd, cancelAt: input.cancelAt, now: dependencies.clock.now() })
-    ) {
-      await dependencies.publishNumberProvision({
-        organisationId: input.organisationId
-      });
-    }
-    return outcome;
+    const enqueueCancellation = input.status === 'CANCELLED';
+    const enqueueProvisioning = hasPaidSubscriptionAccess({
+      subscriptionStatus: input.status,
+      stripeProviderStatus: input.stripeProviderStatus,
+      currentPeriodEnd: input.currentPeriodEnd,
+      cancelAt: input.cancelAt,
+      now: dependencies.clock.now()
+    });
+    return dependencies.repository.applyLifecycleEvent(
+      input,
+      enqueueCancellation || enqueueProvisioning
+        ? {
+            onApplied: async (transaction) => {
+              if (enqueueCancellation) {
+                await dependencies.enqueueLifecycle(transaction, {
+                  organisationId: input.organisationId,
+                  status: 'CANCELLED',
+                  eventId: input.eventId
+                });
+              }
+              if (enqueueProvisioning) {
+                await dependencies.enqueueNumberProvision(transaction, {
+                  organisationId: input.organisationId,
+                  eventId: input.eventId
+                });
+              }
+            }
+          }
+        : undefined
+    );
   };
 
   const getBillingAccount = async (

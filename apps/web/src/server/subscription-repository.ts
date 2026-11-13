@@ -33,6 +33,7 @@ import {
   type StripeCheckoutCompletedInput,
   type StripeEventApplicationOutcome,
   type StripeEventReplayResult,
+  type StripeLifecycleEventEffects,
   type StripeLifecycleEventInput,
   type StripeOperationalEventInput,
   type SubscriptionRepository
@@ -892,7 +893,8 @@ export const createPostgresSubscriptionRepository = (
   };
 
   const applyLifecycleEvent = async (
-    input: StripeLifecycleEventInput
+    input: StripeLifecycleEventInput,
+    effects?: StripeLifecycleEventEffects
   ): Promise<StripeEventApplicationOutcome> => {
     try {
       return await database.transaction(async (transaction) => {
@@ -1073,6 +1075,7 @@ export const createPostgresSubscriptionRepository = (
           },
           occurredAt: now
         });
+        await effects?.onApplied(transaction);
         return 'APPLIED';
       });
     } catch (error) {

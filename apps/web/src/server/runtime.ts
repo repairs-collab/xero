@@ -325,8 +325,9 @@ export const getSubscriptionService = () => {
   if (subscriptionServicePromise === undefined) {
     const configuration = getStripeConfiguration();
     const clock = { now: () => new Date() };
-    subscriptionServicePromise = Promise.resolve(
-      createSubscriptionService({
+    const starting = (async () => {
+      const queue = await getJobQueue();
+      return createSubscriptionService({
         stripe: createStripeBillingClient(configuration),
         repository: createPostgresSubscriptionRepository(
           getDatabaseClient().db,
@@ -343,22 +344,31 @@ export const getSubscriptionService = () => {
           return user?.platformRole === 'OWNER';
         },
         clock,
-        publishLifecycle: async (input) => {
-          const queue = await getJobQueue();
-          await queue.publish(jobNames.subscriptionLifecycle, input, {
-            singletonKey: `${jobNames.subscriptionLifecycle}:${input.organisationId}:${input.status}`,
-            deduplicateWhileActive: true
-          });
+        enqueueLifecycle: async (transaction, input) => {
+          await queue.enqueueUniqueInTransaction(
+            transaction,
+            jobNames.subscriptionLifecycle,
+            { organisationId: input.organisationId, status: input.status },
+            `${jobNames.subscriptionLifecycle}:${input.organisationId}:${input.status}:${input.eventId}`
+          );
         },
-        publishNumberProvision: async (input) => {
-          const queue = await getJobQueue();
-          await queue.publish(jobNames.smsNumberProvision, input, {
-            singletonKey: `${jobNames.smsNumberProvision}:${input.organisationId}`,
-            deduplicateWhileActive: true
-          });
+        enqueueNumberProvision: async (transaction, input) => {
+          await queue.enqueueUniqueInTransaction(
+            transaction,
+            jobNames.smsNumberProvision,
+            { organisationId: input.organisationId },
+            `${jobNames.smsNumberProvision}:${input.organisationId}:${input.eventId}`
+          );
         }
-      })
-    );
+      });
+    })();
+    const cached = starting.catch((error: unknown) => {
+      if (subscriptionServicePromise === cached) {
+        subscriptionServicePromise = undefined;
+      }
+      throw error;
+    });
+    subscriptionServicePromise = cached;
   }
   return subscriptionServicePromise;
 };
