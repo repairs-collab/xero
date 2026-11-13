@@ -12,6 +12,7 @@ type DirectDebitActionState =
       setupUrl: string;
     }
   | { kind: 'ACTIVATED' }
+  | { kind: 'RECONCILED' }
   | { kind: 'VALIDATION' }
   | { kind: 'INVALID_STATE' }
   | { kind: 'FAILED' };
@@ -32,6 +33,9 @@ const dateTime = (value: Date | null): string =>
 
 const stateMessage = (state: DirectDebitActionState): string | null => {
   if (state.kind === 'ACTIVATED') return 'Direct debit is now active.';
+  if (state.kind === 'RECONCILED') {
+    return 'Provider reconciliation recorded. Review any remaining legacy records before inviting a fresh request.';
+  }
   if (state.kind === 'VALIDATION') return 'Confirm the owner action first.';
   if (state.kind === 'INVALID_STATE') {
     return 'The request is no longer in the required state. Refresh and review it.';
@@ -46,21 +50,31 @@ export function PlatformDirectDebitOperationsView({
   snapshot,
   setupState,
   activationState,
+  reconciliationState,
   createSetupLinkAction,
   activateDirectDebitAction,
+  reconcileLegacyDirectDebitAction,
   setupPending = false,
   activationPending = false
 }: {
   snapshot: DirectDebitOwnerSnapshot;
   setupState: DirectDebitActionState;
   activationState: DirectDebitActionState;
+  reconciliationState: DirectDebitActionState;
   createSetupLinkAction: (formData: FormData) => void;
   activateDirectDebitAction: (formData: FormData) => void;
+  reconcileLegacyDirectDebitAction: (formData: FormData) => void;
   setupPending?: boolean;
   activationPending?: boolean;
 }) {
   const request = snapshot.request;
-  const message = stateMessage(activationState) ?? stateMessage(setupState);
+  const legacy = snapshot.legacyReconciliation;
+  const reconciliationRequired =
+    legacy !== null && legacy.providerReconciledAt === null;
+  const message =
+    stateMessage(reconciliationState) ??
+    stateMessage(activationState) ??
+    stateMessage(setupState);
   return (
     <article className="panel platform-control-card">
       <span className="eyebrow">Request-only payment method</span>
@@ -84,7 +98,11 @@ export function PlatformDirectDebitOperationsView({
         </div>
         <div>
           <dt>Direct-debit state</dt>
-          <dd>{request?.status ?? 'NOT_REQUESTED'}</dd>
+          <dd>
+            {reconciliationRequired
+              ? 'RECONCILIATION_REQUIRED'
+              : (request?.status ?? 'NOT_REQUESTED')}
+          </dd>
         </div>
         <div>
           <dt>Requesting customer</dt>
@@ -103,6 +121,58 @@ export function PlatformDirectDebitOperationsView({
           <dd>{request?.stripeMandateId ?? '—'}</dd>
         </div>
       </dl>
+
+      {reconciliationRequired ? (
+        <form action={reconcileLegacyDirectDebitAction}>
+          <input
+            type="hidden"
+            name="organisationId"
+            value={snapshot.organisationId}
+          />
+          <div className="callout callout--warning">
+            <strong>Provider reconciliation required</strong>
+            <p>
+              Historical state ({legacy.legacyStatus}) cannot be treated as a
+              current customer request. Inspect the Stripe subscription’s
+              default payment method and resolve or record the result before
+              allowing another direct-debit request.
+            </p>
+          </div>
+          <label>
+            Resolved provider outcome
+            <select name="reconciliationOutcome" required defaultValue="">
+              <option value="" disabled>
+                Select the verified result
+              </option>
+              <option value="NO_LEGACY_DEFAULT">
+                No legacy default payment method remains
+              </option>
+              <option value="LEGACY_DEFAULT_REMOVED">
+                Legacy default payment method was removed
+              </option>
+            </select>
+          </label>
+          <p className="muted-copy">
+            AccountPulse records only this outcome, the owner, and the time. It
+            does not store bank account, BSB, card, or other payment details.
+          </p>
+          <label className="platform-confirm">
+            <input
+              type="checkbox"
+              name="confirmation"
+              value="confirmed"
+              required
+            />
+            <span>
+              I inspected the Stripe subscription default payment method and
+              confirm the selected safe outcome is true.
+            </span>
+          </label>
+          <button className="button button--primary">
+            Record provider reconciliation
+          </button>
+        </form>
+      ) : null}
 
       {request?.status === 'REQUESTED' ||
       request?.status === 'SETUP_PENDING' ? (
@@ -201,6 +271,7 @@ export function PlatformDirectDebitOperations({
   actions: {
     createSetupLink: StateAction;
     activate: StateAction;
+    reconcileLegacy: StateAction;
   };
 }) {
   const [setupState, createSetupLinkAction, setupPending] = useActionState(
@@ -209,13 +280,17 @@ export function PlatformDirectDebitOperations({
   );
   const [activationState, activateDirectDebitAction, activationPending] =
     useActionState(actions.activate, { kind: 'IDLE' });
+  const [reconciliationState, reconcileLegacyDirectDebitAction] =
+    useActionState(actions.reconcileLegacy, { kind: 'IDLE' });
   return (
     <PlatformDirectDebitOperationsView
       snapshot={snapshot}
       setupState={setupState}
       activationState={activationState}
+      reconciliationState={reconciliationState}
       createSetupLinkAction={createSetupLinkAction}
       activateDirectDebitAction={activateDirectDebitAction}
+      reconcileLegacyDirectDebitAction={reconcileLegacyDirectDebitAction}
       setupPending={setupPending}
       activationPending={activationPending}
     />

@@ -19,6 +19,7 @@ export type PlatformDirectDebitActionState =
       setupUrl: string;
     }
   | { kind: 'ACTIVATED' }
+  | { kind: 'RECONCILED' }
   | { kind: 'VALIDATION' }
   | { kind: 'INVALID_STATE' }
   | { kind: 'FAILED' };
@@ -28,7 +29,9 @@ export interface PlatformDirectDebitActionDependencies {
   getService(): Promise<
     Pick<
       SubscriptionService,
-      'createDirectDebitSetup' | 'activateDirectDebit'
+      | 'createDirectDebitSetup'
+      | 'activateDirectDebit'
+      | 'reconcileLegacyDirectDebit'
     >
   >;
   revalidate(path: string): void;
@@ -49,13 +52,24 @@ const confirmedOrganisationId = (formData: FormData): string => {
   return text(formData, 'organisationId');
 };
 
+const reconciliationOutcomeFrom = (
+  formData: FormData
+): 'NO_LEGACY_DEFAULT' | 'LEGACY_DEFAULT_REMOVED' => {
+  const value = formData.get('reconciliationOutcome');
+  if (value !== 'NO_LEGACY_DEFAULT' && value !== 'LEGACY_DEFAULT_REMOVED') {
+    throw new Error('VALIDATION');
+  }
+  return value;
+};
+
 const failure = (error: unknown): PlatformDirectDebitActionState => {
   const message = error instanceof Error ? error.message : '';
   if (message === 'VALIDATION') return { kind: 'VALIDATION' };
   if (
     message.includes('DIRECT_DEBIT_REQUEST_REQUIRED') ||
     message.includes('DIRECT_DEBIT_MANDATE_REQUIRED') ||
-    message.includes('DIRECT_DEBIT_CARD_PAYMENT_REQUIRED')
+    message.includes('DIRECT_DEBIT_CARD_PAYMENT_REQUIRED') ||
+    message.includes('DIRECT_DEBIT_RECONCILIATION')
   ) {
     return { kind: 'INVALID_STATE' };
   }
@@ -106,6 +120,29 @@ export const createPlatformDirectDebitActions = (
     } catch (error) {
       return failure(error);
     }
+  },
+
+  async reconcileLegacyAction(
+    _previous: PlatformDirectDebitActionState,
+    formData: FormData
+  ): Promise<PlatformDirectDebitActionState> {
+    try {
+      const organisationId = confirmedOrganisationId(formData);
+      const outcome = reconciliationOutcomeFrom(formData);
+      const session = await dependencies.getOwnerSession();
+      const service = await dependencies.getService();
+      await service.reconcileLegacyDirectDebit(
+        session,
+        organisationId,
+        outcome
+      );
+      dependencies.revalidate(
+        `/platform-admin/organisations/${encodeURIComponent(organisationId)}`
+      );
+      return { kind: 'RECONCILED' };
+    } catch (error) {
+      return failure(error);
+    }
   }
 });
 
@@ -132,4 +169,11 @@ export async function activateDirectDebitAction(
   formData: FormData
 ): Promise<PlatformDirectDebitActionState> {
   return actions.activateDirectDebitAction(previous, formData);
+}
+
+export async function reconcileLegacyDirectDebitAction(
+  previous: PlatformDirectDebitActionState,
+  formData: FormData
+): Promise<PlatformDirectDebitActionState> {
+  return actions.reconcileLegacyAction(previous, formData);
 }

@@ -167,7 +167,8 @@ describe('Solo commerce schema contract', () => {
     expect(subscription.checks.map((constraint) => constraint.name)).toEqual(
       expect.arrayContaining([
         'subscriptions_billing_cadence_ck',
-        'subscriptions_initial_card_evidence_ck'
+        'subscriptions_initial_card_evidence_ck',
+        'subscriptions_legacy_initial_card_evidence_ck'
       ])
     );
     expect(directDebit.columns.map((column) => column.name)).toEqual(
@@ -177,6 +178,9 @@ describe('Solo commerce schema contract', () => {
         'stripe_subscription_id',
         'status',
         'legacy_status',
+        'provider_reconciled_at',
+        'provider_reconciled_by_user_id',
+        'provider_reconciliation_outcome',
         'requested_by_user_id',
         'requested_at',
         'setup_attempt_version',
@@ -198,6 +202,7 @@ describe('Solo commerce schema contract', () => {
       expect.arrayContaining([
         'direct_debit_requests_status_ck',
         'direct_debit_requests_episode_ck',
+        'direct_debit_requests_reconciliation_ck',
         'direct_debit_requests_state_ck'
       ])
     );
@@ -424,23 +429,42 @@ describe('Solo commerce schema contract', () => {
     expect(migration).not.toMatch(/bank_(?:account|details)|bsb|account_number/i);
   });
 
-  it('adds subscription episode identity and retains the legacy request status', async () => {
-    const migration = await readFile(
+  it('keeps published 0037 immutable and forwards legacy quarantine in 0038', async () => {
+    const publishedMigration = await readFile(
       new URL('../../drizzle/0037_watery_tombstone.sql', import.meta.url),
       'utf8'
     );
+    const forwardMigration = await readFile(
+      new URL('../../drizzle/0038_flawless_talon.sql', import.meta.url),
+      'utf8'
+    );
 
-    expect(migration).toContain(
+    expect(publishedMigration).toContain(
       'DROP CONSTRAINT "direct_debit_requests_pkey"'
     );
-    expect(migration).toContain('ADD COLUMN "legacy_status" varchar(24)');
-    expect(migration).toContain(
+    expect(publishedMigration).not.toContain('legacy_status');
+    expect(publishedMigration).toContain(
       'ADD CONSTRAINT "direct_debit_requests_pkey" PRIMARY KEY ("id")'
     );
-    expect(migration).toContain(
+    expect(publishedMigration).toContain(
       'direct_debit_requests_org_subscription_uq'
     );
-    expect(migration).toContain('direct_debit_requests_episode_ck');
-    expect(migration).not.toMatch(/bank_(?:account|details)|bsb|account_number/i);
+    expect(forwardMigration).toContain(
+      'ADD COLUMN IF NOT EXISTS "legacy_status" varchar(24)'
+    );
+    expect(forwardMigration).toContain('provider_reconciled_at');
+    expect(forwardMigration).toContain('provider_reconciliation_outcome');
+    expect(forwardMigration).toContain(
+      'legacy_initial_card_invoice_id'
+    );
+    expect(forwardMigration).toContain(
+      'SET\n  "legacy_status" = "status",\n  "status" = \'LEGACY_UNBOUND\''
+    );
+    expect(forwardMigration).toContain(
+      'direct_debit_requests_reconciliation_ck'
+    );
+    expect(forwardMigration).not.toMatch(
+      /bank_(?:account|details)|bsb|account_number/i
+    );
   });
 });

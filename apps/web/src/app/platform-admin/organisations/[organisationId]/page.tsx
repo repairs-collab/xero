@@ -20,7 +20,8 @@ import {
 } from './user-actions.js';
 import {
   activateDirectDebitAction,
-  createDirectDebitSetupLinkAction
+  createDirectDebitSetupLinkAction,
+  reconcileLegacyDirectDebitAction
 } from './direct-debit-actions.js';
 
 type RouteParams = Promise<{ organisationId: string }>;
@@ -60,7 +61,8 @@ export default async function PlatformOrganisationPage({
             snapshot={directDebit}
             actions={{
               createSetupLink: createDirectDebitSetupLinkAction,
-              activate: activateDirectDebitAction
+              activate: activateDirectDebitAction,
+              reconcileLegacy: reconcileLegacyDirectDebitAction
             }}
           />
         )

@@ -18,6 +18,7 @@ import {
   retainedTrialEnd,
   type BillingAccount,
   type DirectDebitRequestRecord,
+  type LegacyDirectDebitReconciliation,
   type StripeBillingGateway,
   type SubscriptionRepository
 } from './subscription-service.js';
@@ -153,6 +154,11 @@ class FakeRepository implements SubscriptionRepository {
   directDebitActivationCalls: Array<Record<string, unknown>> = [];
   directDebitRequesterEmail = 'owner@example.com';
   directDebitRequesterEmailResponses: Array<string | null> = [];
+  legacyDirectDebitReconciliation: LegacyDirectDebitReconciliation | null =
+    null;
+  reconciliationCalls: Parameters<
+    SubscriptionRepository['reconcileLegacyDirectDebit']
+  >[0][] = [];
 
   loadBillingAccount(
     organisationId: string
@@ -257,6 +263,31 @@ class FakeRepository implements SubscriptionRepository {
         ? (this.directDebitRequesterEmailResponses.shift() ?? null)
         : this.directDebitRequesterEmail
     );
+  }
+
+  loadLegacyDirectDebitReconciliation() {
+    return Promise.resolve(this.legacyDirectDebitReconciliation);
+  }
+
+  reconcileLegacyDirectDebit(
+    input: Parameters<SubscriptionRepository['reconcileLegacyDirectDebit']>[0]
+  ) {
+    this.reconciliationCalls.push(input);
+    if (this.legacyDirectDebitReconciliation === null) {
+      return Promise.reject(
+        new Error('DIRECT_DEBIT_RECONCILIATION_NOT_REQUIRED')
+      );
+    }
+    this.legacyDirectDebitReconciliation = {
+      ...this.legacyDirectDebitReconciliation,
+      providerReconciledAt: input.reconciledAt,
+      providerReconciledByUserId: input.reconciledByUserId,
+      providerReconciliationOutcome: input.outcome
+    };
+    if (this.currentAccount !== null) {
+      this.currentAccount = { ...this.currentAccount, directDebitStatus: null };
+    }
+    return Promise.resolve(this.legacyDirectDebitReconciliation);
   }
 
   markDirectDebitSetupPending(
@@ -571,6 +602,78 @@ describe('subscription checkout and portal', () => {
 });
 
 describe('request-only direct debit', () => {
+  it('blocks every customer and provider action until an owner records provider reconciliation', async () => {
+    const { service, repository, stripe } = createService();
+    Object.assign(repository.currentAccount!, {
+      stripeCustomerId: 'cus_solo',
+      stripeSubscriptionId: 'sub_solo',
+      initialCardStripeSubscriptionId: 'sub_solo',
+      initialCardInvoiceId: 'in_initial_card',
+      initialCardPaymentSucceededAt: new Date('2026-11-09T11:00:00.000Z'),
+      directDebitStatus: 'RECONCILIATION_REQUIRED'
+    });
+    repository.legacyDirectDebitReconciliation = {
+      id: 'ddr_legacy',
+      organisationId: 'org_solo',
+      legacyStatus: 'ACTIVE',
+      requestedAt: new Date('2026-10-01T10:00:00.000Z'),
+      providerReconciledAt: null,
+      providerReconciledByUserId: null,
+      providerReconciliationOutcome: null
+    };
+
+    await expect(
+      service.requestDirectDebit(adminSession, 'org_solo')
+    ).rejects.toMatchObject({ code: 'DIRECT_DEBIT_RECONCILIATION_REQUIRED' });
+    await expect(
+      service.createDirectDebitSetup(platformOwnerSession, 'org_solo')
+    ).rejects.toMatchObject({ code: 'DIRECT_DEBIT_RECONCILIATION_REQUIRED' });
+    await expect(
+      service.activateDirectDebit(platformOwnerSession, 'org_solo')
+    ).rejects.toMatchObject({ code: 'DIRECT_DEBIT_RECONCILIATION_REQUIRED' });
+    expect(repository.directDebitRequestCalls).toEqual([]);
+    expect(stripe.directDebitSetupRequests).toEqual([]);
+    expect(stripe.directDebitActivationRequests).toEqual([]);
+
+    await expect(
+      service.reconcileLegacyDirectDebit(
+        adminSession,
+        'org_solo',
+        'NO_LEGACY_DEFAULT'
+      )
+    ).rejects.toMatchObject({ code: 'PLATFORM_OWNER_REQUIRED' });
+    await expect(
+      service.reconcileLegacyDirectDebit(
+        platformOwnerSession,
+        'org_solo',
+        'LEGACY_DEFAULT_STILL_ACTIVE' as never
+      )
+    ).rejects.toMatchObject({
+      code: 'DIRECT_DEBIT_RECONCILIATION_OUTCOME_REQUIRED'
+    });
+    expect(repository.reconciliationCalls).toEqual([]);
+    expect(repository.currentAccount?.directDebitStatus).toBe(
+      'RECONCILIATION_REQUIRED'
+    );
+    await expect(
+      service.reconcileLegacyDirectDebit(
+        platformOwnerSession,
+        'org_solo',
+        'LEGACY_DEFAULT_REMOVED'
+      )
+    ).resolves.toMatchObject({
+      providerReconciledByUserId: 'platform_owner',
+      providerReconciliationOutcome: 'LEGACY_DEFAULT_REMOVED'
+    });
+    expect(repository.reconciliationCalls).toEqual([
+      expect.objectContaining({
+        organisationId: 'org_solo',
+        reconciledByUserId: 'platform_owner',
+        outcome: 'LEGACY_DEFAULT_REMOVED'
+      })
+    ]);
+  });
+
   it('accepts a customer Admin request only after signed initial-card evidence', async () => {
     const { service, repository } = createService();
 

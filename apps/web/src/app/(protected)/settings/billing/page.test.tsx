@@ -133,6 +133,24 @@ describe('billing SMS hard-cap copy', () => {
     expect(markup).not.toMatch(/name="(?:bsb|accountNumber|bankAccount)"/i);
   });
 
+  it('surfaces legacy provider reconciliation without exposing legacy payment evidence', async () => {
+    getBillingAccountSnapshot.mockResolvedValue({
+      ...(await getBillingAccountSnapshot()),
+      initialCardInvoiceId: null,
+      initialCardPaymentSucceededAt: null,
+      directDebitStatus: 'RECONCILIATION_REQUIRED'
+    });
+
+    const markup = renderToStaticMarkup(await BillingSettingsPage());
+
+    expect(markup).toContain('Reconciliation required');
+    expect(markup).toContain(
+      'A previous direct-debit record needs review before another request can be made. Contact support.'
+    );
+    expect(markup).not.toContain('Request direct debit');
+    expect(markup).not.toMatch(/(?:mandate|payment method)_[a-z0-9]/i);
+  });
+
   it('uses the configured trial allowance before Stripe supplies a billing period', async () => {
     getBillingAccountSnapshot.mockResolvedValue({
       organisationId: 'org-solo',

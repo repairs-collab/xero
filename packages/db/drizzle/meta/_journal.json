@@ -267,6 +267,13 @@
       "when": 1794460000014,
       "tag": "0037_watery_tombstone",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1794535474311,
+      "tag": "0038_flawless_talon",
+      "breakpoints": true
     }
   ]
 }

@@ -234,7 +234,7 @@ const seedVoiceCall = async (
 };
 
 describe('database invariants', () => {
-  it('migrates first-card evidence only for a provable current episode and preserves legacy mandates as history', async () => {
+  it('forwards a database already at published 0037 and quarantines ambiguous legacy direct-debit evidence', async () => {
     const client = await database.pool.connect();
     const schemaName = `billing_upgrade_${randomUUID().replaceAll('-', '_')}`;
     const firstEpisode = randomUUID();
@@ -310,10 +310,14 @@ describe('database invariants', () => {
       );
 
       await applyMigration('0037_watery_tombstone');
+      await applyMigration('0038_flawless_talon');
 
       const card = await client.query(
         `select stripe_subscription_id, initial_card_stripe_subscription_id,
-                initial_card_invoice_id, initial_card_payment_succeeded_at
+                initial_card_invoice_id, initial_card_payment_succeeded_at,
+                legacy_initial_card_stripe_subscription_id,
+                legacy_initial_card_invoice_id,
+                legacy_initial_card_payment_succeeded_at
            from subscriptions order by stripe_subscription_id`
       );
       expect(card.rows).toEqual([
@@ -321,19 +325,28 @@ describe('database invariants', () => {
           stripe_subscription_id: 'sub_first',
           initial_card_stripe_subscription_id: 'sub_first',
           initial_card_invoice_id: 'in_first',
-          initial_card_payment_succeeded_at: paidAt
+          initial_card_payment_succeeded_at: paidAt,
+          legacy_initial_card_stripe_subscription_id: null,
+          legacy_initial_card_invoice_id: null,
+          legacy_initial_card_payment_succeeded_at: null
         },
         {
           stripe_subscription_id: 'sub_replacement',
           initial_card_stripe_subscription_id: null,
           initial_card_invoice_id: null,
-          initial_card_payment_succeeded_at: null
+          initial_card_payment_succeeded_at: null,
+          legacy_initial_card_stripe_subscription_id: 'sub_replacement',
+          legacy_initial_card_invoice_id: 'in_old',
+          legacy_initial_card_payment_succeeded_at: paidAt
         },
         {
           stripe_subscription_id: 'sub_tied',
           initial_card_stripe_subscription_id: null,
           initial_card_invoice_id: null,
-          initial_card_payment_succeeded_at: null
+          initial_card_payment_succeeded_at: null,
+          legacy_initial_card_stripe_subscription_id: 'sub_tied',
+          legacy_initial_card_invoice_id: 'in_tied',
+          legacy_initial_card_payment_succeeded_at: paidAt
         }
       ]);
       const currentRequests = await client.query(
@@ -343,7 +356,9 @@ describe('database invariants', () => {
       expect(currentRequests.rows).toEqual([]);
       const history = await client.query(
         `select status, legacy_status, setup_session_id, setup_intent_id,
-                stripe_mandate_id, setup_checkout_completed_at, activated_at
+                stripe_mandate_id, setup_checkout_completed_at, activated_at,
+                provider_reconciled_at, provider_reconciled_by_user_id,
+                provider_reconciliation_outcome
            from direct_debit_requests order by setup_session_id`
       );
       expect(history.rows).toEqual([
@@ -354,7 +369,10 @@ describe('database invariants', () => {
           setup_intent_id: 'seti_first',
           stripe_mandate_id: 'mandate_first',
           setup_checkout_completed_at: null,
-          activated_at: null
+          activated_at: null,
+          provider_reconciled_at: null,
+          provider_reconciled_by_user_id: null,
+          provider_reconciliation_outcome: null
         },
         {
           status: 'LEGACY_UNBOUND',
@@ -363,9 +381,23 @@ describe('database invariants', () => {
           setup_intent_id: 'seti_old',
           stripe_mandate_id: 'mandate_old',
           setup_checkout_completed_at: null,
-          activated_at: requestedAt
+          activated_at: requestedAt,
+          provider_reconciled_at: null,
+          provider_reconciled_by_user_id: null,
+          provider_reconciliation_outcome: null
         }
       ]);
+      await expect(
+        client.query(
+          `update direct_debit_requests
+              set provider_reconciled_at = now(),
+                  provider_reconciled_by_user_id = $1
+            where organisation_id = $2`,
+          [requester, firstEpisode]
+        )
+      ).rejects.toMatchObject({
+        constraint: 'direct_debit_requests_reconciliation_ck'
+      });
     } finally {
       await client.query('rollback');
       client.release();

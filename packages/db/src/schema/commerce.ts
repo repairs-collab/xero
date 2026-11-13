@@ -70,6 +70,17 @@ export const subscriptions = pgTable(
       'initial_card_payment_succeeded_at',
       { withTimezone: true }
     ),
+    legacyInitialCardStripeSubscriptionId: varchar(
+      'legacy_initial_card_stripe_subscription_id',
+      { length: 128 }
+    ),
+    legacyInitialCardInvoiceId: varchar('legacy_initial_card_invoice_id', {
+      length: 128
+    }),
+    legacyInitialCardPaymentSucceededAt: timestamp(
+      'legacy_initial_card_payment_succeeded_at',
+      { withTimezone: true }
+    ),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -100,6 +111,10 @@ export const subscriptions = pgTable(
       sql`(${table.initialCardStripeSubscriptionId} is null and ${table.initialCardInvoiceId} is null and ${table.initialCardPaymentSucceededAt} is null) or (${table.initialCardStripeSubscriptionId} is not null and ${table.initialCardInvoiceId} is not null and ${table.initialCardPaymentSucceededAt} is not null)`
     ),
     check(
+      'subscriptions_legacy_initial_card_evidence_ck',
+      sql`(${table.legacyInitialCardStripeSubscriptionId} is null and ${table.legacyInitialCardInvoiceId} is null and ${table.legacyInitialCardPaymentSucceededAt} is null) or (${table.legacyInitialCardStripeSubscriptionId} is not null and ${table.legacyInitialCardInvoiceId} is not null and ${table.legacyInitialCardPaymentSucceededAt} is not null)`
+    ),
+    check(
       'subscriptions_period_ck',
       sql`(${table.currentPeriodStart} is null and ${table.currentPeriodEnd} is null) or (${table.currentPeriodStart} is not null and ${table.currentPeriodEnd} is not null and ${table.currentPeriodEnd} > ${table.currentPeriodStart})`
     )
@@ -111,6 +126,9 @@ export type DirectDebitRequestStatus =
   | 'SETUP_PENDING'
   | 'MANDATE_CONFIRMED'
   | 'ACTIVE';
+export type DirectDebitProviderReconciliationOutcome =
+  | 'NO_LEGACY_DEFAULT'
+  | 'LEGACY_DEFAULT_REMOVED';
 
 /**
  * Direct debit is an explicit, customer-initiated exception to card billing.
@@ -133,6 +151,16 @@ export const directDebitRequests = pgTable(
       .default('REQUESTED'),
     legacyStatus: varchar('legacy_status', { length: 24 })
       .$type<DirectDebitRequestStatus>(),
+    providerReconciledAt: timestamp('provider_reconciled_at', {
+      withTimezone: true
+    }),
+    providerReconciledByUserId: uuid(
+      'provider_reconciled_by_user_id'
+    ).references(() => users.id, { onDelete: 'restrict' }),
+    providerReconciliationOutcome: varchar(
+      'provider_reconciliation_outcome',
+      { length: 32 }
+    ).$type<DirectDebitProviderReconciliationOutcome>(),
     requestedByUserId: uuid('requested_by_user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'restrict' }),
@@ -201,6 +229,28 @@ export const directDebitRequests = pgTable(
         ${table.status} <> 'LEGACY_UNBOUND' and
         ${table.stripeSubscriptionId} is not null and
         ${table.legacyStatus} is null
+      )`
+    ),
+    check(
+      'direct_debit_requests_reconciliation_ck',
+      sql`(
+        ${table.status} = 'LEGACY_UNBOUND' and (
+          (
+            ${table.providerReconciledAt} is null and
+            ${table.providerReconciledByUserId} is null and
+            ${table.providerReconciliationOutcome} is null
+          ) or (
+            ${table.providerReconciledAt} is not null and
+            ${table.providerReconciledByUserId} is not null and
+            ${table.providerReconciliationOutcome} is not null and
+            ${table.providerReconciliationOutcome} in ('NO_LEGACY_DEFAULT', 'LEGACY_DEFAULT_REMOVED')
+          )
+        )
+      ) or (
+        ${table.status} <> 'LEGACY_UNBOUND' and
+        ${table.providerReconciledAt} is null and
+        ${table.providerReconciledByUserId} is null and
+        ${table.providerReconciliationOutcome} is null
       )`
     ),
     check(

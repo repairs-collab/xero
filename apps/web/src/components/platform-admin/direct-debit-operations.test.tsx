@@ -8,6 +8,7 @@ const snapshot = {
   billingCadence: 'ANNUAL' as const,
   initialCardInvoiceId: 'in_initial_card',
   initialCardPaymentSucceededAt: new Date('2026-11-09T10:00:00.000Z'),
+  legacyReconciliation: null,
   request: {
     id: 'direct-debit-request-1',
     organisationId: 'organisation-1',
@@ -34,8 +35,10 @@ describe('platform direct-debit operations', () => {
         snapshot={snapshot}
         setupState={{ kind: 'IDLE' }}
         activationState={{ kind: 'IDLE' }}
+        reconciliationState={{ kind: 'IDLE' }}
         createSetupLinkAction={vi.fn()}
         activateDirectDebitAction={vi.fn()}
+        reconcileLegacyDirectDebitAction={vi.fn()}
       />
     );
 
@@ -66,8 +69,10 @@ describe('platform direct-debit operations', () => {
         }}
         setupState={{ kind: 'IDLE' }}
         activationState={{ kind: 'IDLE' }}
+        reconciliationState={{ kind: 'IDLE' }}
         createSetupLinkAction={vi.fn()}
         activateDirectDebitAction={vi.fn()}
+        reconcileLegacyDirectDebitAction={vi.fn()}
       />
     );
 
@@ -88,8 +93,10 @@ describe('platform direct-debit operations', () => {
           setupUrl: 'https://checkout.stripe.test/customer-becs-setup'
         }}
         activationState={{ kind: 'IDLE' }}
+        reconciliationState={{ kind: 'IDLE' }}
         createSetupLinkAction={vi.fn()}
         activateDirectDebitAction={vi.fn()}
+        reconcileLegacyDirectDebitAction={vi.fn()}
       />
     );
 
@@ -99,5 +106,39 @@ describe('platform direct-debit operations', () => {
       'value="https://checkout.stripe.test/customer-becs-setup"'
     );
     expect(html).toContain('The platform owner must not complete this form');
+  });
+
+  it('requires a deliberate owner reconciliation before any new direct-debit action', () => {
+    const html = renderToStaticMarkup(
+      <PlatformDirectDebitOperationsView
+        snapshot={{
+          ...snapshot,
+          request: null,
+          legacyReconciliation: {
+            id: 'legacy-request-1',
+            organisationId: 'organisation-1',
+            legacyStatus: 'ACTIVE',
+            requestedAt: new Date('2026-10-01T10:00:00.000Z'),
+            providerReconciledAt: null,
+            providerReconciledByUserId: null,
+            providerReconciliationOutcome: null
+          }
+        }}
+        setupState={{ kind: 'IDLE' }}
+        activationState={{ kind: 'IDLE' }}
+        reconciliationState={{ kind: 'IDLE' }}
+        createSetupLinkAction={vi.fn()}
+        activateDirectDebitAction={vi.fn()}
+        reconcileLegacyDirectDebitAction={vi.fn()}
+      />
+    );
+
+    expect(html).toContain('Provider reconciliation required');
+    expect(html).toContain('name="reconciliationOutcome"');
+    expect(html).toContain(
+      'I inspected the Stripe subscription default payment method'
+    );
+    expect(html).not.toContain('Generate customer setup link');
+    expect(html).not.toContain('Activate direct debit');
   });
 });

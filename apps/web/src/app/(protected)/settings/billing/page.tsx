@@ -296,8 +296,9 @@ export default async function BillingSettingsPage() {
       ) : null}
 
       {!legacySmsExempt &&
-      account.initialCardInvoiceId !== null &&
-      account.initialCardPaymentSucceededAt !== null ? (
+      ((account.initialCardInvoiceId !== null &&
+        account.initialCardPaymentSucceededAt !== null) ||
+        account.directDebitStatus === 'RECONCILIATION_REQUIRED') ? (
         <section className="panel">
           <div className="panel__header">
             <div>
@@ -305,7 +306,9 @@ export default async function BillingSettingsPage() {
               <h2>Australian direct debit</h2>
             </div>
             <span className="status-pill">
-              {account.directDebitStatus ?? 'Not requested'}
+              {account.directDebitStatus === 'RECONCILIATION_REQUIRED'
+                ? 'Reconciliation required'
+                : (account.directDebitStatus ?? 'Not requested')}
             </span>
           </div>
           <p>
@@ -316,6 +319,15 @@ export default async function BillingSettingsPage() {
             automatically, and AccountPulse never receives or stores bank
             details.
           </p>
+          {account.directDebitStatus === 'RECONCILIATION_REQUIRED' ? (
+            <div className="callout callout--warning">
+              <strong>Reconciliation required</strong>
+              <p>
+                A previous direct-debit record needs review before another
+                request can be made. Contact support.
+              </p>
+            </div>
+          ) : null}
           {admin && account.directDebitStatus === null ? (
             <form action={requestDirectDebit}>
               <input

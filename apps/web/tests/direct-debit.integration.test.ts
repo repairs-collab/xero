@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 
 import { eq } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/node-postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
@@ -12,6 +14,7 @@ import {
   subscriptions,
   users
 } from '@bc5000/db';
+import * as databaseSchema from '@bc5000/db';
 
 import { createPostgresSubscriptionRepository } from '../src/server/subscription-repository.js';
 
@@ -76,7 +79,7 @@ const seed = async (withInitialCardEvidence = false) => {
 };
 
 describe('request-only direct debit persistence', () => {
-  it('excludes legacy mandates from current billing and requires a fresh explicit request', async () => {
+  it('requires explicit owner reconciliation before a legacy mandate can be replaced', async () => {
     const seeded = await seed(true);
     const repository = createPostgresSubscriptionRepository(client.db, {
       now: () => now
@@ -124,7 +127,9 @@ describe('request-only direct debit persistence', () => {
 
     await expect(
       repository.loadBillingAccount(seeded.organisationId, seeded.userId)
-    ).resolves.toMatchObject({ directDebitStatus: null });
+    ).resolves.toMatchObject({
+      directDebitStatus: 'RECONCILIATION_REQUIRED'
+    });
     await expect(
       repository.loadDirectDebitRequest(seeded.organisationId)
     ).resolves.toBeNull();
@@ -142,7 +147,7 @@ describe('request-only direct debit persistence', () => {
         setupSessionExpiresAt: new Date('2026-11-10T12:00:00.000Z'),
         occurredAt: now
       })
-    ).rejects.toThrow('DIRECT_DEBIT_REQUEST_REQUIRED');
+    ).rejects.toThrow('DIRECT_DEBIT_RECONCILIATION_REQUIRED');
     await expect(
       repository.activateDirectDebit({
         organisationId: seeded.organisationId,
@@ -153,7 +158,31 @@ describe('request-only direct debit persistence', () => {
         stripePaymentMethodId,
         stripeMandateId
       })
-    ).rejects.toThrow('DIRECT_DEBIT_MANDATE_REQUIRED');
+    ).rejects.toThrow('DIRECT_DEBIT_RECONCILIATION_REQUIRED');
+
+    await expect(
+      repository.requestDirectDebit({
+        organisationId: seeded.organisationId,
+        requestedByUserId: seeded.userId,
+        requestedAt: now
+      })
+    ).rejects.toThrow('DIRECT_DEBIT_RECONCILIATION_REQUIRED');
+
+    await expect(
+      repository.reconcileLegacyDirectDebit({
+        organisationId: seeded.organisationId,
+        reconciledByUserId: seeded.userId,
+        reconciledAt: now,
+        outcome: 'LEGACY_DEFAULT_REMOVED'
+      })
+    ).resolves.toMatchObject({
+      id: legacyId,
+      providerReconciledByUserId: seeded.userId,
+      providerReconciledAt: now
+    });
+    await expect(
+      repository.loadBillingAccount(seeded.organisationId, seeded.userId)
+    ).resolves.toMatchObject({ directDebitStatus: null });
 
     const request = await repository.requestDirectDebit({
       organisationId: seeded.organisationId,
@@ -171,6 +200,158 @@ describe('request-only direct debit persistence', () => {
     await expect(
       repository.loadDirectDebitRequesterEmail(seeded.organisationId)
     ).resolves.toBe(`${seeded.userId}@example.invalid`);
+  });
+
+  it('runs the current repository fail-closed on a real published-0037 upgrade', async () => {
+    const connection = await client.pool.connect();
+    const schemaName = `direct_debit_forward_${randomUUID().replaceAll('-', '_')}`;
+    const organisationId = randomUUID();
+    const userId = randomUUID();
+    const paidAt = new Date('2026-11-09T10:00:00.000Z');
+    try {
+      await connection.query(`create schema "${schemaName}"`);
+      await connection.query(`set search_path to "${schemaName}"`);
+      await connection.query(`
+        create table organisations (
+          id uuid primary key
+        );
+        create table users (
+          id uuid primary key,
+          email text not null,
+          disabled_at timestamp with time zone
+        );
+        create table memberships (
+          organisation_id uuid not null,
+          user_id uuid not null,
+          role varchar(16) not null,
+          disabled_at timestamp with time zone,
+          primary key (organisation_id, user_id)
+        );
+        create table audit_events (
+          id uuid default gen_random_uuid() primary key,
+          organisation_id uuid not null,
+          actor_user_id uuid,
+          event_type varchar(64) not null,
+          entity_type varchar(64) not null,
+          entity_id text not null,
+          correlation_id text,
+          before_value jsonb,
+          after_value jsonb,
+          occurred_at timestamp with time zone not null default now()
+        );
+      `);
+      const applyMigration = async (name: string) => {
+        const migration = await readFile(
+          new URL(`../../../packages/db/drizzle/${name}.sql`, import.meta.url),
+          'utf8'
+        );
+        for (const statement of migration.split('--> statement-breakpoint')) {
+          await connection.query(
+            statement.replaceAll('"public".', `"${schemaName}".`)
+          );
+        }
+      };
+      await applyMigration('0014_accountpulse_solo_commerce');
+      await applyMigration('0023_reconcile_ambiguous_cancellations');
+      await applyMigration('0024_lyrical_may_parker');
+      await applyMigration('0035_same_azazel');
+
+      await connection.query(
+        `insert into organisations (id, edition) values ($1, 'SOLO')`,
+        [organisationId]
+      );
+      await connection.query(
+        `insert into users (id, email) values ($1, $2)`,
+        [userId, `${userId}@example.invalid`]
+      );
+      await connection.query(
+        `insert into memberships (organisation_id, user_id, role)
+         values ($1, $2, 'ADMIN')`,
+        [organisationId, userId]
+      );
+      await connection.query(
+        `insert into subscriptions (
+           organisation_id, plan_code, status, stripe_provider_status,
+           trusted_stripe_provider_status, stripe_customer_id,
+           stripe_subscription_id, current_period_start, current_period_end,
+           initial_card_invoice_id, initial_card_payment_succeeded_at
+         ) values (
+           $1, 'SOLO_AU_2000', 'ACTIVE', 'active', 'active', 'cus_forward',
+           'sub_forward', $2, $3, 'in_forward', $2
+         )`,
+        [
+          organisationId,
+          paidAt,
+          new Date('2026-12-09T10:00:00.000Z')
+        ]
+      );
+      await connection.query(
+        `insert into subscription_events (
+           organisation_id, stripe_event_id, event_type,
+           stripe_event_created_at, payload_hash, outcome
+         ) values (
+           $1, 'evt_forward', 'checkout.session.completed', $2,
+           repeat('f', 64), 'APPLIED'
+         )`,
+        [organisationId, paidAt]
+      );
+      await connection.query(
+        `insert into direct_debit_requests (
+           organisation_id, status, requested_by_user_id, requested_at,
+           setup_session_id, setup_intent_id, stripe_payment_method_id,
+           stripe_mandate_id, mandate_confirmed_at, activated_by_user_id,
+           activated_at
+         ) values (
+           $1, 'ACTIVE', $2, $3, 'cs_legacy_forward', 'seti_legacy_forward',
+           'pm_legacy_forward', 'mandate_legacy_forward', $3, $2, $3
+         )`,
+        [organisationId, userId, paidAt]
+      );
+      await applyMigration('0037_watery_tombstone');
+      await applyMigration('0038_flawless_talon');
+
+      const scopedDatabase = drizzle(connection, { schema: databaseSchema });
+      const repository = createPostgresSubscriptionRepository(scopedDatabase, {
+        now: () => now
+      });
+      await expect(
+        repository.loadBillingAccount(organisationId, userId)
+      ).resolves.toMatchObject({
+        directDebitStatus: 'RECONCILIATION_REQUIRED'
+      });
+      await expect(
+        repository.loadDirectDebitRequesterEmail(organisationId)
+      ).resolves.toBeNull();
+      await expect(
+        repository.requestDirectDebit({
+          organisationId,
+          requestedByUserId: userId,
+          requestedAt: now
+        })
+      ).rejects.toThrow('DIRECT_DEBIT_RECONCILIATION_REQUIRED');
+      await expect(
+        repository.reconcileLegacyDirectDebit({
+          organisationId,
+          reconciledByUserId: userId,
+          reconciledAt: now,
+          outcome: 'NO_LEGACY_DEFAULT'
+        })
+      ).resolves.toMatchObject({
+        legacyStatus: 'ACTIVE',
+        providerReconciliationOutcome: 'NO_LEGACY_DEFAULT'
+      });
+      await expect(
+        repository.requestDirectDebit({
+          organisationId,
+          requestedByUserId: userId,
+          requestedAt: now
+        })
+      ).resolves.toMatchObject({ status: 'REQUESTED' });
+    } finally {
+      await connection.query('set search_path to public');
+      await connection.query(`drop schema if exists "${schemaName}" cascade`);
+      connection.release();
+    }
   });
 
   it('requires a positive paid card Checkout before allowing an idempotent request', async () => {

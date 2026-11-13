@@ -23,6 +23,7 @@ import {
   shouldRetireIgnoredReplacementCandidate,
   type BillingAccount,
   type DirectDebitRequestRecord,
+  type LegacyDirectDebitReconciliation,
   type StripeCheckoutCompletedInput,
   type StripeEventApplicationOutcome,
   type StripeEventReplayResult,
@@ -197,6 +198,23 @@ const toDirectDebitRequestRecord = (
   };
 };
 
+const toLegacyDirectDebitReconciliation = (
+  row: typeof directDebitRequests.$inferSelect
+): LegacyDirectDebitReconciliation => {
+  if (row.status !== 'LEGACY_UNBOUND' || row.legacyStatus === null) {
+    throw new Error('DIRECT_DEBIT_RECONCILIATION_NOT_LEGACY');
+  }
+  return {
+    id: row.id,
+    organisationId: row.organisationId,
+    legacyStatus: row.legacyStatus,
+    requestedAt: row.requestedAt,
+    providerReconciledAt: row.providerReconciledAt,
+    providerReconciledByUserId: row.providerReconciledByUserId,
+    providerReconciliationOutcome: row.providerReconciliationOutcome
+  };
+};
+
 export const createPostgresSubscriptionRepository = (
   database: Database,
   clock: { now(): Date }
@@ -254,8 +272,23 @@ export const createPostgresSubscriptionRepository = (
       )
       .limit(1);
     if (row === undefined) return null;
+    const [unreconciledLegacy] = await database
+      .select({ id: directDebitRequests.id })
+      .from(directDebitRequests)
+      .where(
+        and(
+          eq(directDebitRequests.organisationId, organisationId),
+          eq(directDebitRequests.status, 'LEGACY_UNBOUND'),
+          isNull(directDebitRequests.providerReconciledAt)
+        )
+      )
+      .limit(1);
     const directDebitStatus =
-      row.directDebitStatus === 'LEGACY_UNBOUND' ? null : row.directDebitStatus;
+      unreconciledLegacy !== undefined
+        ? ('RECONCILIATION_REQUIRED' as const)
+        : row.directDebitStatus === 'LEGACY_UNBOUND'
+          ? null
+          : row.directDebitStatus;
     return { ...row, directDebitStatus };
   };
 
@@ -1189,6 +1222,21 @@ export const createPostgresSubscriptionRepository = (
         ) {
           throw new Error('DIRECT_DEBIT_CARD_PAYMENT_REQUIRED');
         }
+        const [unreconciledLegacy] = await transaction
+          .select({ id: directDebitRequests.id })
+          .from(directDebitRequests)
+          .where(
+            and(
+              eq(directDebitRequests.organisationId, input.organisationId),
+              eq(directDebitRequests.status, 'LEGACY_UNBOUND'),
+              isNull(directDebitRequests.providerReconciledAt)
+            )
+          )
+          .for('update')
+          .limit(1);
+        if (unreconciledLegacy !== undefined) {
+          throw new Error('DIRECT_DEBIT_RECONCILIATION_REQUIRED');
+        }
         const [existing] = await transaction
           .select()
           .from(directDebitRequests)
@@ -1256,6 +1304,18 @@ export const createPostgresSubscriptionRepository = (
 
   const loadDirectDebitRequesterEmail: SubscriptionRepository['loadDirectDebitRequesterEmail'] =
     async (organisationId) => {
+      const [unreconciledLegacy] = await database
+        .select({ id: directDebitRequests.id })
+        .from(directDebitRequests)
+        .where(
+          and(
+            eq(directDebitRequests.organisationId, organisationId),
+            eq(directDebitRequests.status, 'LEGACY_UNBOUND'),
+            isNull(directDebitRequests.providerReconciledAt)
+          )
+        )
+        .limit(1);
+      if (unreconciledLegacy !== undefined) return null;
       const [requester] = await database
         .select({ email: users.email })
         .from(directDebitRequests)
@@ -1292,6 +1352,84 @@ export const createPostgresSubscriptionRepository = (
       return requester?.email ?? null;
     };
 
+  const loadLegacyDirectDebitReconciliation: SubscriptionRepository['loadLegacyDirectDebitReconciliation'] =
+    async (organisationId) => {
+      const [row] = await database
+        .select()
+        .from(directDebitRequests)
+        .where(
+          and(
+            eq(directDebitRequests.organisationId, organisationId),
+            eq(directDebitRequests.status, 'LEGACY_UNBOUND')
+          )
+        )
+        .orderBy(
+          sql`${directDebitRequests.providerReconciledAt} asc nulls first`,
+          desc(directDebitRequests.requestedAt)
+        )
+        .limit(1);
+      return row === undefined
+        ? null
+        : toLegacyDirectDebitReconciliation(row);
+    };
+
+  const reconcileLegacyDirectDebit: SubscriptionRepository['reconcileLegacyDirectDebit'] =
+    async (input) =>
+      database.transaction(async (transaction) => {
+        if (
+          input.outcome !== 'NO_LEGACY_DEFAULT' &&
+          input.outcome !== 'LEGACY_DEFAULT_REMOVED'
+        ) {
+          throw new Error('DIRECT_DEBIT_RECONCILIATION_OUTCOME_REQUIRED');
+        }
+        const [legacy] = await transaction
+          .select()
+          .from(directDebitRequests)
+          .where(
+            and(
+              eq(directDebitRequests.organisationId, input.organisationId),
+              eq(directDebitRequests.status, 'LEGACY_UNBOUND'),
+              isNull(directDebitRequests.providerReconciledAt)
+            )
+          )
+          .orderBy(desc(directDebitRequests.requestedAt))
+          .for('update')
+          .limit(1);
+        if (legacy === undefined) {
+          throw new Error('DIRECT_DEBIT_RECONCILIATION_NOT_REQUIRED');
+        }
+        const [updated] = await transaction
+          .update(directDebitRequests)
+          .set({
+            providerReconciledAt: input.reconciledAt,
+            providerReconciledByUserId: input.reconciledByUserId,
+            providerReconciliationOutcome: input.outcome,
+            updatedAt: input.reconciledAt
+          })
+          .where(eq(directDebitRequests.id, legacy.id))
+          .returning();
+        if (updated === undefined) {
+          throw new Error('DIRECT_DEBIT_RECONCILIATION_WRITE_FAILED');
+        }
+        await transaction.insert(auditEvents).values({
+          organisationId: input.organisationId,
+          actorUserId: input.reconciledByUserId,
+          eventType: 'DIRECT_DEBIT_PROVIDER_RECONCILED',
+          entityType: 'DIRECT_DEBIT_REQUEST',
+          entityId: legacy.id,
+          beforeValue: {
+            status: 'RECONCILIATION_REQUIRED',
+            legacyStatus: legacy.legacyStatus
+          },
+          afterValue: {
+            status: 'RECONCILED',
+            providerReconciliationOutcome: input.outcome
+          },
+          occurredAt: input.reconciledAt
+        });
+        return toLegacyDirectDebitReconciliation(updated);
+      });
+
   const markDirectDebitSetupPending: SubscriptionRepository['markDirectDebitSetupPending'] =
     async (input) => {
       await database.transaction(async (transaction) => {
@@ -1316,6 +1454,21 @@ export const createPostgresSubscriptionRepository = (
           )
           .for('update')
           .limit(1);
+        const [unreconciledLegacy] = await transaction
+          .select({ id: directDebitRequests.id })
+          .from(directDebitRequests)
+          .where(
+            and(
+              eq(directDebitRequests.organisationId, input.organisationId),
+              eq(directDebitRequests.status, 'LEGACY_UNBOUND'),
+              isNull(directDebitRequests.providerReconciledAt)
+            )
+          )
+          .for('update')
+          .limit(1);
+        if (unreconciledLegacy !== undefined) {
+          throw new Error('DIRECT_DEBIT_RECONCILIATION_REQUIRED');
+        }
         if (
           subscription?.stripeSubscriptionId !== input.stripeSubscriptionId ||
           request === undefined
@@ -1423,7 +1576,20 @@ export const createPostgresSubscriptionRepository = (
             )
             .for('update')
             .limit(1);
+          const [unreconciledLegacy] = await transaction
+            .select({ id: directDebitRequests.id })
+            .from(directDebitRequests)
+            .where(
+              and(
+                eq(directDebitRequests.organisationId, input.organisationId),
+                eq(directDebitRequests.status, 'LEGACY_UNBOUND'),
+                isNull(directDebitRequests.providerReconciledAt)
+              )
+            )
+            .for('update')
+            .limit(1);
           const matchesStoredSetup =
+            unreconciledLegacy === undefined &&
             subscription?.stripeCustomerId === input.stripeCustomerId &&
             subscription.stripeSubscriptionId === input.stripeSubscriptionId &&
             request?.status === 'SETUP_PENDING' &&
@@ -1521,7 +1687,20 @@ export const createPostgresSubscriptionRepository = (
             )
             .for('update')
             .limit(1);
+          const [unreconciledLegacy] = await transaction
+            .select({ id: directDebitRequests.id })
+            .from(directDebitRequests)
+            .where(
+              and(
+                eq(directDebitRequests.organisationId, input.organisationId),
+                eq(directDebitRequests.status, 'LEGACY_UNBOUND'),
+                isNull(directDebitRequests.providerReconciledAt)
+              )
+            )
+            .for('update')
+            .limit(1);
           if (
+            unreconciledLegacy !== undefined ||
             subscription === undefined ||
             subscription.stripeCustomerId !== input.stripeCustomerId ||
             subscription.stripeSubscriptionId !== input.stripeSubscriptionId ||
@@ -1613,6 +1792,21 @@ export const createPostgresSubscriptionRepository = (
           )
           .for('update')
           .limit(1);
+        const [unreconciledLegacy] = await transaction
+          .select({ id: directDebitRequests.id })
+          .from(directDebitRequests)
+          .where(
+            and(
+              eq(directDebitRequests.organisationId, input.organisationId),
+              eq(directDebitRequests.status, 'LEGACY_UNBOUND'),
+              isNull(directDebitRequests.providerReconciledAt)
+            )
+          )
+          .for('update')
+          .limit(1);
+        if (unreconciledLegacy !== undefined) {
+          throw new Error('DIRECT_DEBIT_RECONCILIATION_REQUIRED');
+        }
         if (
           subscription?.stripeSubscriptionId !== input.stripeSubscriptionId ||
           request === undefined ||
@@ -1719,6 +1913,8 @@ export const createPostgresSubscriptionRepository = (
     requestDirectDebit,
     loadDirectDebitRequest,
     loadDirectDebitRequesterEmail,
+    loadLegacyDirectDebitReconciliation,
+    reconcileLegacyDirectDebit,
     markDirectDebitSetupPending,
     bindDirectDebitSetupCheckout,
     confirmDirectDebitMandate,

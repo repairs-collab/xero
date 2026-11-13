@@ -38,6 +38,7 @@ export interface BillingAccount {
     | 'SETUP_PENDING'
     | 'MANDATE_CONFIRMED'
     | 'ACTIVE'
+    | 'RECONCILIATION_REQUIRED'
     | null;
   createdAt: Date;
 }
@@ -146,12 +147,30 @@ export interface DirectDebitSetupLink extends StripeHostedSetupSession {
   customerEmail: string;
 }
 
+export interface LegacyDirectDebitReconciliation {
+  id: string;
+  organisationId: string;
+  legacyStatus:
+    | 'REQUESTED'
+    | 'SETUP_PENDING'
+    | 'MANDATE_CONFIRMED'
+    | 'ACTIVE';
+  requestedAt: Date;
+  providerReconciledAt: Date | null;
+  providerReconciledByUserId: string | null;
+  providerReconciliationOutcome:
+    | 'NO_LEGACY_DEFAULT'
+    | 'LEGACY_DEFAULT_REMOVED'
+    | null;
+}
+
 export interface DirectDebitOwnerSnapshot {
   organisationId: string;
   billingCadence: 'MONTHLY' | 'ANNUAL';
   initialCardInvoiceId: string | null;
   initialCardPaymentSucceededAt: Date | null;
   request: (DirectDebitRequestRecord & { requesterEmail: string }) | null;
+  legacyReconciliation: LegacyDirectDebitReconciliation | null;
 }
 
 export interface StripeDirectDebitMandateInput {
@@ -207,6 +226,15 @@ export interface SubscriptionRepository {
     organisationId: string
   ): Promise<DirectDebitRequestRecord | null>;
   loadDirectDebitRequesterEmail(organisationId: string): Promise<string | null>;
+  loadLegacyDirectDebitReconciliation(
+    organisationId: string
+  ): Promise<LegacyDirectDebitReconciliation | null>;
+  reconcileLegacyDirectDebit(input: {
+    organisationId: string;
+    reconciledByUserId: string;
+    reconciledAt: Date;
+    outcome: 'NO_LEGACY_DEFAULT' | 'LEGACY_DEFAULT_REMOVED';
+  }): Promise<LegacyDirectDebitReconciliation>;
   markDirectDebitSetupPending(input: {
     organisationId: string;
     directDebitRequestId: string;
@@ -882,6 +910,9 @@ export const createSubscriptionService = (dependencies: {
         session.userId
       )
     );
+    if (account.directDebitStatus === 'RECONCILIATION_REQUIRED') {
+      throw new SubscriptionFailure('DIRECT_DEBIT_RECONCILIATION_REQUIRED');
+    }
     if (
       account.stripeCustomerId === null ||
       account.stripeSubscriptionId === null ||
@@ -916,6 +947,9 @@ export const createSubscriptionService = (dependencies: {
         session.userId
       )
     );
+    if (account.directDebitStatus === 'RECONCILIATION_REQUIRED') {
+      throw new SubscriptionFailure('DIRECT_DEBIT_RECONCILIATION_REQUIRED');
+    }
     if (
       account.stripeCustomerId === null ||
       account.stripeSubscriptionId === null ||
@@ -996,6 +1030,9 @@ export const createSubscriptionService = (dependencies: {
         session.userId
       )
     );
+    if (account.directDebitStatus === 'RECONCILIATION_REQUIRED') {
+      throw new SubscriptionFailure('DIRECT_DEBIT_RECONCILIATION_REQUIRED');
+    }
     const request =
       await dependencies.repository.loadDirectDebitRequest(organisationId);
     if (request?.status === 'ACTIVE') return request;
@@ -1025,6 +1062,28 @@ export const createSubscriptionService = (dependencies: {
     });
   };
 
+  const reconcileLegacyDirectDebit = async (
+    session: AppSession,
+    organisationId: string,
+    outcome: 'NO_LEGACY_DEFAULT' | 'LEGACY_DEFAULT_REMOVED'
+  ): Promise<LegacyDirectDebitReconciliation> => {
+    await requirePlatformOwner(session);
+    if (
+      outcome !== 'NO_LEGACY_DEFAULT' &&
+      outcome !== 'LEGACY_DEFAULT_REMOVED'
+    ) {
+      throw new SubscriptionFailure(
+        'DIRECT_DEBIT_RECONCILIATION_OUTCOME_REQUIRED'
+      );
+    }
+    return dependencies.repository.reconcileLegacyDirectDebit({
+      organisationId,
+      reconciledByUserId: session.userId,
+      reconciledAt: dependencies.clock.now(),
+      outcome
+    });
+  };
+
   const getDirectDebitOwnerSnapshot = async (
     session: AppSession,
     organisationId: string
@@ -1040,14 +1099,22 @@ export const createSubscriptionService = (dependencies: {
     if (account.edition !== 'SOLO') return null;
     const request =
       await dependencies.repository.loadDirectDebitRequest(organisationId);
-    if (request === null) {
+    const legacyReconciliation =
+      await dependencies.repository.loadLegacyDirectDebitReconciliation(
+        organisationId
+      );
+    if (
+      request === null ||
+      legacyReconciliation?.providerReconciledAt === null
+    ) {
       return {
         organisationId,
         billingCadence: account.billingCadence,
         initialCardInvoiceId: account.initialCardInvoiceId,
         initialCardPaymentSucceededAt:
           account.initialCardPaymentSucceededAt,
-        request: null
+        request: null,
+        legacyReconciliation
       };
     }
     const requesterEmail =
@@ -1062,7 +1129,8 @@ export const createSubscriptionService = (dependencies: {
       billingCadence: account.billingCadence,
       initialCardInvoiceId: account.initialCardInvoiceId,
       initialCardPaymentSucceededAt: account.initialCardPaymentSucceededAt,
-      request: { ...request, requesterEmail }
+      request: { ...request, requesterEmail },
+      legacyReconciliation
     };
   };
 
@@ -1176,6 +1244,7 @@ export const createSubscriptionService = (dependencies: {
     requestDirectDebit,
     createDirectDebitSetup,
     activateDirectDebit,
+    reconcileLegacyDirectDebit,
     getDirectDebitOwnerSnapshot,
     handleWebhook,
     getBillingAccount

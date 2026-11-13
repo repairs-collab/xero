@@ -20,6 +20,12 @@ const form = (organisationId = 'organisation-1') => {
   return data;
 };
 
+const reconciliationForm = (organisationId = 'organisation-1') => {
+  const data = form(organisationId);
+  data.set('reconciliationOutcome', 'LEGACY_DEFAULT_REMOVED');
+  return data;
+};
+
 describe('platform direct-debit owner actions', () => {
   it('returns a customer-delivery setup link without redirecting the owner', async () => {
     const createDirectDebitSetup = vi.fn().mockResolvedValue({
@@ -84,5 +90,31 @@ describe('platform direct-debit owner actions', () => {
       actions.createSetupLinkAction({ kind: 'IDLE' }, form())
     ).resolves.toEqual({ kind: 'FAILED' });
     expect(getService).not.toHaveBeenCalled();
+  });
+
+  it('records reconciliation only through the verified owner session', async () => {
+    const reconcileLegacyDirectDebit = vi.fn().mockResolvedValue(undefined);
+    const revalidate = vi.fn();
+    const actions = createPlatformDirectDebitActions({
+      getOwnerSession: () => Promise.resolve(ownerSession),
+      getService: () =>
+        Promise.resolve({ reconcileLegacyDirectDebit } as never),
+      revalidate
+    });
+
+    await expect(
+      actions.reconcileLegacyAction(
+        { kind: 'IDLE' },
+        reconciliationForm('organisation-target')
+      )
+    ).resolves.toEqual({ kind: 'RECONCILED' });
+    expect(reconcileLegacyDirectDebit).toHaveBeenCalledWith(
+      ownerSession,
+      'organisation-target',
+      'LEGACY_DEFAULT_REMOVED'
+    );
+    expect(revalidate).toHaveBeenCalledWith(
+      '/platform-admin/organisations/organisation-target'
+    );
   });
 });
