@@ -135,7 +135,10 @@ describe('platform customer provisioning', () => {
     'Australia/Adelaide',
     'Australia/Darwin',
     'Australia/Perth',
-    'Australia/Lord_Howe'
+    'Australia/Lord_Howe',
+    'Australia/Broken_Hill',
+    'Australia/Lindeman',
+    'Australia/Eucla'
   ])('accepts the Australian customer zone %s', async (timeZone) => {
     const repository = {
       createWorkspace: vi.fn().mockResolvedValue({ organisationId: 'org-1' }),

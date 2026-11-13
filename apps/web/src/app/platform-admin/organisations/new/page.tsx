@@ -12,7 +12,10 @@ const timeZoneLabels = {
   'Australia/Adelaide': 'Adelaide (South Australia)',
   'Australia/Darwin': 'Darwin (Northern Territory)',
   'Australia/Perth': 'Perth (Western Australia)',
-  'Australia/Lord_Howe': 'Lord Howe Island'
+  'Australia/Lord_Howe': 'Lord Howe Island',
+  'Australia/Broken_Hill': 'Broken Hill (New South Wales)',
+  'Australia/Lindeman': 'Lindeman Island (Queensland)',
+  'Australia/Eucla': 'Eucla (Western Australia)'
 } as const;
 
 export default async function NewPlatformCustomerPage({

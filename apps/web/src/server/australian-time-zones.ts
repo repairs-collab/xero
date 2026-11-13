@@ -6,7 +6,10 @@ export const australianTimeZones = [
   'Australia/Adelaide',
   'Australia/Darwin',
   'Australia/Perth',
-  'Australia/Lord_Howe'
+  'Australia/Lord_Howe',
+  'Australia/Broken_Hill',
+  'Australia/Lindeman',
+  'Australia/Eucla'
 ] as const;
 
 export type AustralianTimeZone = (typeof australianTimeZones)[number];
