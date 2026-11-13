@@ -13,7 +13,7 @@ import {
   type DataRequestType,
   type Database,
   type DbTransaction
-} from '@bc5000/db';
+} from '@bc5000/db/web';
 import { dataRequestReviewDecision } from '@bc5000/domain';
 
 export interface RetentionMutationResult {

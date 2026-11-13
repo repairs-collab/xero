@@ -1,5 +1,3 @@
-'use server';
-
 import { revalidatePath } from 'next/cache';
 import { headers } from 'next/headers';
 
@@ -168,6 +166,7 @@ export async function createDirectDebitSetupLinkAction(
   previous: PlatformDirectDebitActionState,
   formData: FormData
 ): Promise<PlatformDirectDebitActionState> {
+  'use server';
   return actions.createSetupLinkAction(previous, formData);
 }
 
@@ -175,6 +174,7 @@ export async function activateDirectDebitAction(
   previous: PlatformDirectDebitActionState,
   formData: FormData
 ): Promise<PlatformDirectDebitActionState> {
+  'use server';
   return actions.activateDirectDebitAction(previous, formData);
 }
 
@@ -182,5 +182,6 @@ export async function reconcileLegacyDirectDebitAction(
   previous: PlatformDirectDebitActionState,
   formData: FormData
 ): Promise<PlatformDirectDebitActionState> {
+  'use server';
   return actions.reconcileLegacyAction(previous, formData);
 }

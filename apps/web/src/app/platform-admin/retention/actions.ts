@@ -1,11 +1,9 @@
-'use server';
-
 import { revalidatePath } from 'next/cache';
 import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 
 import type { AppSession } from '@bc5000/auth';
-import type { DataRequestType } from '@bc5000/db';
+import type { DataRequestType } from '@bc5000/db/web';
 
 import { requirePlatformOwner } from '../../../server/platform-authorization.js';
 import { getRetentionOperationsService } from '../../../server/retention-operations-runtime.js';
@@ -152,17 +150,28 @@ const productionActions = () =>
 
 export const recordVerifiedRequestAction = async (
   formData: FormData
-): Promise<void> => productionActions().recordVerifiedRequest(formData);
+): Promise<void> => {
+  'use server';
+  return productionActions().recordVerifiedRequest(formData);
+};
 
 export const reviewDataRequestAction = async (
   formData: FormData
-): Promise<void> => productionActions().reviewRequest(formData);
+): Promise<void> => {
+  'use server';
+  return productionActions().reviewRequest(formData);
+};
 
 export const recordBackupExpiryVerificationAction = async (
   formData: FormData
-): Promise<void> =>
-  productionActions().recordBackupExpiryVerification(formData);
+): Promise<void> => {
+  'use server';
+  return productionActions().recordBackupExpiryVerification(formData);
+};
 
 export const completeExportRequestAction = async (
   formData: FormData
-): Promise<void> => productionActions().completeExportRequest(formData);
+): Promise<void> => {
+  'use server';
+  return productionActions().completeExportRequest(formData);
+};

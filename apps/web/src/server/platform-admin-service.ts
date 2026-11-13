@@ -1,7 +1,7 @@
 import { AuthorizationFailure } from '@bc5000/auth';
-import { PostgresReplyNumberProvisioningRepository } from '@bc5000/db';
 import {
   PostgresPlatformAdminRepository,
+  PostgresReplyNumberProvisioningRepository,
   type PlatformAdminRepository,
   type PlatformAuditListInput,
   type PlatformBillingOperationsListInput,

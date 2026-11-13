@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import { authorise, type AppSession } from '@bc5000/auth';
-import type { DbTransaction } from '@bc5000/db';
+import type { DbTransaction } from '@bc5000/db/web';
 import { hasPaidSubscriptionAccess } from '@bc5000/domain';
 import type {
   AccountPulseSubscriptionStatus,
