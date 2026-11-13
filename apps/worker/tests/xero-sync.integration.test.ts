@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createDatabase, migrateDatabase } from '@bc5000/db';
 import {
   approvals,
+  auditEvents,
   contactChannels,
   contacts,
   invoiceChases,
@@ -270,7 +271,7 @@ describe('targeted Xero invoice refresh', () => {
     ['INTERNAL_LEGACY', 'nightly', reconcileNightly]
   ] as const)(
     'prevents a pre-reconnect $edition $label sync from overwriting newer imported data',
-    async (edition, _, sync) => {
+    async (edition, label, sync) => {
     const organisationId = await seedOrganisation();
     await database.db.update(organisations)
       .set({ edition, operationalState: 'SYNC_REQUIRED' })
@@ -350,6 +351,24 @@ describe('targeted Xero invoice refresh', () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
     );
     expect(successfulGeneration?.xeroConnectionId).toBe(currentConnection?.id);
+    if (label === 'nightly') {
+      const completionEvents = await database.db
+        .select({ afterValue: auditEvents.afterValue })
+        .from(auditEvents)
+        .where(
+          and(
+            eq(auditEvents.organisationId, organisationId),
+            eq(auditEvents.eventType, 'XERO_RECONCILIATION_COMPLETED')
+          )
+        );
+      expect(completionEvents).toHaveLength(1);
+      expect(completionEvents[0]?.afterValue?.syncId).toBe(
+        successfulGeneration?.syncId
+      );
+      expect(completionEvents[0]?.afterValue?.xeroConnectionId).toBe(
+        currentConnection?.id
+      );
+    }
     }
   );
 
@@ -502,6 +521,115 @@ describe('targeted Xero invoice refresh', () => {
       .where(eq(organisations.id, organisationId));
     expect(storedInvoice).toMatchObject({ amountDue: '80.0000' });
     expect(storedOrganisation?.lastSuccessfulXeroConnectionId).toBeNull();
+  });
+
+  it.each(['DISCONNECTED', 'REAUTH_REQUIRED'] as const)(
+    'rejects legacy client-credentials sync while an OAuth row is %s',
+    async (status) => {
+      const organisationId = await seedOrganisation();
+      const xeroContactId = randomUUID();
+      const xeroInvoiceId = randomUUID();
+      const xero = new FakeXeroSyncClient();
+      xero.listedInvoices = [xeroInvoice(xeroInvoiceId, xeroContactId)];
+      xero.contacts.set(xeroContactId, xeroContact(xeroContactId));
+      const connections = new PostgresXeroConnectionRepository(database.db);
+      await connections.upsertConnection({
+        organisationId,
+        connectionId: randomUUID(),
+        tenantId: randomUUID(),
+        encryptedRefreshToken: {
+          version: 1,
+          keyId: 'test',
+          iv: 'iv',
+          ciphertext: 'ciphertext',
+          tag: 'tag'
+        },
+        grantedScopes: ['offline_access', 'accounting.invoices'],
+        now: new Date('2026-09-18T01:00:00.000Z')
+      });
+      if (status === 'DISCONNECTED') {
+        await connections.disconnect(
+          organisationId,
+          new Date('2026-09-18T01:01:00.000Z')
+        );
+      } else {
+        await connections.markReauthRequired(
+          organisationId,
+          new Date('2026-09-18T01:01:00.000Z')
+        );
+      }
+
+      await expect(
+        runInitialSync(
+          { database: database.db, xero, clock: fixedClock },
+          { organisationId }
+        )
+      ).rejects.toThrow('XERO_CONNECTION_REQUIRED');
+
+      const storedInvoices = await database.db
+        .select({ id: invoices.id })
+        .from(invoices)
+        .where(eq(invoices.organisationId, organisationId));
+      expect(storedInvoices).toEqual([]);
+      expect(xero.listOptions).toEqual([]);
+    }
+  );
+
+  it('rejects a legacy targeted refresh when OAuth connects during lazy client resolution', async () => {
+    const seeded = await seedApprovedReminder();
+    const legacyXero = new FakeXeroSyncClient();
+    legacyXero.invoices.set(
+      seeded.xeroInvoiceId,
+      xeroInvoice(seeded.xeroInvoiceId, seeded.xeroContactId, {
+        amountDue: '70.00'
+      })
+    );
+    legacyXero.contacts.set(
+      seeded.xeroContactId,
+      xeroContact(seeded.xeroContactId)
+    );
+    const loadStarted = deferred();
+    const returnLegacyClient = deferred();
+    const outcome = runInvoiceRefresh(
+      {
+        database: database.db,
+        loadXero: async () => {
+          loadStarted.resolve();
+          await returnLegacyClient.promise;
+          return legacyXero;
+        },
+        clock: fixedClock
+      },
+      {
+        organisationId: seeded.organisationId,
+        invoiceId: seeded.xeroInvoiceId
+      }
+    ).then(() => null, (error: unknown) => error);
+    await loadStarted.promise;
+    await new PostgresXeroConnectionRepository(database.db).upsertConnection({
+      organisationId: seeded.organisationId,
+      connectionId: randomUUID(),
+      tenantId: randomUUID(),
+      encryptedRefreshToken: {
+        version: 1,
+        keyId: 'test',
+        iv: 'iv',
+        ciphertext: 'ciphertext',
+        tag: 'tag'
+      },
+      grantedScopes: ['offline_access', 'accounting.invoices'],
+      now: new Date('2026-09-18T01:01:00.000Z')
+    });
+    returnLegacyClient.resolve();
+
+    expect(await outcome).toMatchObject({
+      message: 'XERO_SYNC_CONNECTION_CHANGED'
+    });
+    const [storedInvoice] = await database.db
+      .select({ amountDue: invoices.amountDue })
+      .from(invoices)
+      .where(eq(invoices.id, seeded.invoiceId));
+    expect(storedInvoice?.amountDue).toBe('120.0000');
   });
 
   it('upserts changed invoices and invalidates stale approvals', async () => {

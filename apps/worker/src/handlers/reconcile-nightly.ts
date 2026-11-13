@@ -1,6 +1,6 @@
 import { and, eq, gt } from 'drizzle-orm';
 
-import { auditEvents, invoices } from '@bc5000/db';
+import { invoices } from '@bc5000/db';
 import type { XeroInvoice } from '@bc5000/integrations/xero';
 import type { JobPayloads } from '@bc5000/jobs';
 
@@ -27,15 +27,20 @@ export async function reconcileNightly(dependencies: XeroSyncJobDependencies, pa
     const confirmed = await sync.xero.getInvoice(local.xeroInvoiceId);
     confirmedInvoices.push(confirmed.data);
   });
+  const upserted = listed.data.length + confirmedInvoices.length;
+  const confirmedTerminal = confirmedInvoices.filter(terminal).length;
+  const summary = { remoteEligible: listed.data.length, localEligible: localEligible.length, missingLocally: listed.data.filter((invoice) => !localEligible.some((local) => local.xeroInvoiceId === invoice.id)).length, targetedConfirmations: missing.length, confirmedTerminal, upserted, apiHeadroom: listed.rateLimit.remaining };
   await commitXeroSync(
     sync,
     payload.organisationId,
     connection,
-    [...listed.data, ...confirmedInvoices]
+    [...listed.data, ...confirmedInvoices],
+    {
+      completionAudit: {
+        eventType: 'XERO_RECONCILIATION_COMPLETED',
+        afterValue: summary
+      }
+    }
   );
-  const upserted = listed.data.length + confirmedInvoices.length;
-  const confirmedTerminal = confirmedInvoices.filter(terminal).length;
-  const summary = { remoteEligible: listed.data.length, localEligible: localEligible.length, missingLocally: listed.data.filter((invoice) => !localEligible.some((local) => local.xeroInvoiceId === invoice.id)).length, targetedConfirmations: missing.length, confirmedTerminal, upserted, apiHeadroom: listed.rateLimit.remaining };
-  await dependencies.database.insert(auditEvents).values({ organisationId: payload.organisationId, eventType: 'XERO_RECONCILIATION_COMPLETED', entityType: 'ORGANISATION', entityId: payload.organisationId, afterValue: summary, occurredAt: dependencies.clock.now() });
   return summary;
 }

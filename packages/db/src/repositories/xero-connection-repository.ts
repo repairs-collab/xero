@@ -129,7 +129,8 @@ async function lockOrganisationForConnectionChange(
 
 async function clearOAuthSyncEvidence(
   transaction: DbTransaction,
-  organisationId: string
+  organisationId: string,
+  now: Date
 ): Promise<void> {
   await transaction
     .update(organisations)
@@ -138,7 +139,19 @@ async function clearOAuthSyncEvidence(
       lastSuccessfulSyncAt: null,
       lastSuccessfulSyncId: null,
       lastSuccessfulXeroConnectionId: null,
-      latestReconciledSyncAt: null
+      latestReconciledSyncAt: null,
+      operationalState: sql`case
+        when ${organisations.operationalState} in (
+          'RESET_PREPARING',
+          'RESET_IN_PROGRESS',
+          'RESET_FAILED'
+        ) then ${organisations.operationalState}
+        else 'SYNC_REQUIRED'
+      end`,
+      operationalStateVersion: sql`${organisations.operationalStateVersion} + 1`,
+      rolloutScope: 'CONTROLLED',
+      liveSendAcknowledged: false,
+      updatedAt: now
     })
     .where(eq(organisations.id, organisationId));
 }
@@ -320,7 +333,11 @@ export class PostgresXeroConnectionRepository {
         connection = updated;
       }
 
-      await clearOAuthSyncEvidence(transaction, input.organisationId);
+      await clearOAuthSyncEvidence(
+        transaction,
+        input.organisationId,
+        input.now
+      );
       await transaction
         .delete(xeroPendingAuthorisations)
         .where(eq(xeroPendingAuthorisations.id, pending.id));
@@ -379,7 +396,11 @@ export class PostgresXeroConnectionRepository {
           })
           .returning();
         if (inserted === undefined) throw new Error('XERO_CONNECTION_CREATE_FAILED');
-        await clearOAuthSyncEvidence(transaction, input.organisationId);
+        await clearOAuthSyncEvidence(
+          transaction,
+          input.organisationId,
+          input.now
+        );
         return inserted;
       }
       if (
@@ -406,7 +427,11 @@ export class PostgresXeroConnectionRepository {
         .where(eq(xeroConnections.id, existing.id))
         .returning();
       if (updated === undefined) throw new Error('XERO_CONNECTION_UPDATE_FAILED');
-        await clearOAuthSyncEvidence(transaction, input.organisationId);
+        await clearOAuthSyncEvidence(
+          transaction,
+          input.organisationId,
+          input.now
+        );
         return updated;
       });
     } catch (error) {

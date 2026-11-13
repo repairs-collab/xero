@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { Database, DbTransaction } from '@bc5000/db';
 import {
   approvals,
+  auditEvents,
   contactChannels,
   contacts,
   invoiceChases,
@@ -74,8 +75,8 @@ export async function startXeroSync(
     .where(eq(xeroConnections.organisationId, organisationId))
     .limit(1);
   if (
-    organisation.edition === 'SOLO' &&
-    connection?.status !== 'CONNECTED'
+    (connection !== undefined && connection.status !== 'CONNECTED') ||
+    (organisation.edition === 'SOLO' && connection === undefined)
   ) {
     throw new Error('XERO_CONNECTION_REQUIRED');
   }
@@ -449,7 +450,7 @@ const assertCurrentXeroGeneration = async (
   if (
     current?.id !== connection.id ||
     current.status !== connection.status ||
-    (organisation.edition === 'SOLO' && current.status !== 'CONNECTED')
+    current.status !== 'CONNECTED'
   ) {
     throw new Error('XERO_SYNC_CONNECTION_CHANGED');
   }
@@ -459,13 +460,20 @@ export async function commitXeroSync(
   dependencies: XeroSyncDependencies,
   organisationId: string,
   connection: XeroSyncConnection | null,
-  invoiceSnapshots: XeroInvoice[]
+  invoiceSnapshots: XeroInvoice[],
+  options: {
+    completionAudit?: {
+      eventType: string;
+      afterValue: Record<string, unknown>;
+    };
+  } = {}
 ): Promise<void> {
   const contactsById = await loadContactsForInvoices(
     dependencies,
     invoiceSnapshots
   );
   const now = dependencies.clock.now();
+  const syncId = randomUUID();
   const safety = new PostgresOrganisationSafetyRepository(
     dependencies.database
   );
@@ -508,7 +516,7 @@ export async function commitXeroSync(
       .set({
         xeroSyncCursor: now.toISOString(),
         lastSuccessfulSyncAt: now,
-        lastSuccessfulSyncId: randomUUID(),
+        lastSuccessfulSyncId: syncId,
         lastSuccessfulXeroConnectionId: connection?.id ?? null,
         latestReconciledSyncAt: null,
         ...(invalidatesReconciliation
@@ -520,11 +528,25 @@ export async function commitXeroSync(
         updatedAt: now
       })
       .where(eq(organisations.id, organisationId));
+    if (options.completionAudit !== undefined) {
+      await transaction.insert(auditEvents).values({
+        organisationId,
+        eventType: options.completionAudit.eventType,
+        entityType: 'ORGANISATION',
+        entityId: organisationId,
+        afterValue: {
+          ...options.completionAudit.afterValue,
+          syncId,
+          xeroConnectionId: connection?.id ?? null
+        },
+        occurredAt: now
+      });
+    }
   });
 }
 
 export async function runInvoiceRefresh(
-  dependencies: XeroSyncDependencies,
+  dependencies: XeroSyncJobDependencies,
   payload: XeroInvoiceRefreshJob
 ): Promise<void> {
   const { sync, connection } = await startXeroSync(

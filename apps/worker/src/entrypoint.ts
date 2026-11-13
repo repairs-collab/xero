@@ -469,7 +469,7 @@ async function main() {
         runInvoiceRefresh(
           {
             database: databaseClient.db,
-            xero: await xeroFactory.forOrganisation(payload.organisationId),
+            loadXero: () => xeroFactory.forOrganisation(payload.organisationId),
             clock
           },
           payload

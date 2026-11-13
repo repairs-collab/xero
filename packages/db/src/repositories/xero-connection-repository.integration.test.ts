@@ -305,7 +305,12 @@ describe('PostgresXeroConnectionRepository', () => {
       lastSuccessfulSyncAt: syncAt,
       lastSuccessfulSyncId: randomUUID(),
       lastSuccessfulXeroConnectionId: first.id,
-      latestReconciledSyncAt: syncAt
+      latestReconciledSyncAt: syncAt,
+      operationalState: 'RECONCILED',
+      operationalStateVersion: 7,
+      sendMode: 'live',
+      rolloutScope: 'CUSTOMER',
+      liveSendAcknowledged: true
     }).where(eq(organisations.id, organisationId));
     const pendingAuthorisationId = await firstRepository.createPendingAuthorisation({
       userId,
@@ -333,10 +338,60 @@ describe('PostgresXeroConnectionRepository', () => {
       lastSuccessfulSyncAt: null,
       lastSuccessfulSyncId: null,
       lastSuccessfulXeroConnectionId: null,
-      latestReconciledSyncAt: null
+      latestReconciledSyncAt: null,
+      operationalState: 'SYNC_REQUIRED',
+      operationalStateVersion: 8,
+      sendMode: 'live',
+      rolloutScope: 'CONTROLLED',
+      liveSendAcknowledged: false
     });
     }
   );
+
+  it('preserves an active operational reset while invalidating reconnect readiness', async () => {
+    const organisationId = await seedOrganisation('Reconnect during reset');
+    const connection = {
+      organisationId,
+      connectionId: randomUUID(),
+      tenantId: randomUUID(),
+      encryptedRefreshToken: envelope('reset-first-token'),
+      grantedScopes: ['offline_access']
+    };
+    const startedAt = new Date('2026-11-09T02:30:00.000Z');
+    await firstRepository.upsertConnection({ ...connection, now: startedAt });
+    await firstClient.db
+      .update(organisations)
+      .set({
+        operationalState: 'RESET_IN_PROGRESS',
+        operationalStateVersion: 10,
+        sendMode: 'live',
+        rolloutScope: 'CUSTOMER',
+        liveSendAcknowledged: true,
+        lastSuccessfulSyncAt: startedAt,
+        latestReconciledSyncAt: startedAt
+      })
+      .where(eq(organisations.id, organisationId));
+
+    await firstRepository.upsertConnection({
+      ...connection,
+      encryptedRefreshToken: envelope('reset-reconnect-token'),
+      now: new Date(startedAt.getTime() + 1000)
+    });
+
+    const [organisation] = await firstClient.db
+      .select()
+      .from(organisations)
+      .where(eq(organisations.id, organisationId));
+    expect(organisation).toMatchObject({
+      operationalState: 'RESET_IN_PROGRESS',
+      operationalStateVersion: 11,
+      sendMode: 'live',
+      rolloutScope: 'CONTROLLED',
+      liveSendAcknowledged: false,
+      lastSuccessfulSyncAt: null,
+      latestReconciledSyncAt: null
+    });
+  });
 
   it('finds, marks, disconnects and reconnects without decrypting token material', async () => {
     const organisationId = await seedOrganisation('Connection lifecycle');
