@@ -360,5 +360,10 @@ describe('durable job queue', () => {
           schedule.key === jobNames.subscriptionLifecycleReconcile
       )
     ).toHaveLength(1);
+    expect(
+      schedules.filter(
+        (schedule) => schedule.key === 'sms-number.provision-reconcile'
+      )
+    ).toHaveLength(1);
   });
 });

@@ -14,6 +14,8 @@ import {
 import {
   auditEvents,
   type Database,
+  type DbTransaction,
+  organisationOnboarding,
   retentionCases,
   smsNumberPool,
   type SubscriptionStatus,
@@ -33,6 +35,7 @@ export interface SubscriptionRetentionDeadlineInput {
 
 export interface SubscriptionRetentionState {
   status: SubscriptionStatus;
+  stripeSubscriptionId: string | null;
   cancelledAt: Date | null;
   retentionDeadlineRecorded: boolean;
   recordedCancellationAt: Date | null;
@@ -40,7 +43,20 @@ export interface SubscriptionRetentionState {
 
 export interface CancelledSubscriptionLifecycleCandidate {
   organisationId: string;
+  stripeSubscriptionId: string;
   cancelledAt: Date;
+}
+
+export interface PreparedXeroCancellationDisconnect {
+  recordId: string;
+  connectionId: string;
+  accessToken: string;
+}
+
+export interface ApplySubscriptionCancellationEpisodeInput
+  extends SubscriptionRetentionDeadlineInput {
+  stripeSubscriptionId: string;
+  quarantineUntil: Date;
 }
 
 export async function listCancelledSubscriptionsNeedingLifecycle(
@@ -49,6 +65,7 @@ export async function listCancelledSubscriptionsNeedingLifecycle(
   const rows = await database
     .select({
       organisationId: subscriptions.organisationId,
+      stripeSubscriptionId: subscriptions.stripeSubscriptionId,
       cancelledAt: subscriptions.cancelledAt
     })
     .from(subscriptions)
@@ -67,6 +84,7 @@ export async function listCancelledSubscriptionsNeedingLifecycle(
     .where(
       and(
         eq(subscriptions.status, 'CANCELLED'),
+        isNotNull(subscriptions.stripeSubscriptionId),
         isNotNull(subscriptions.cancelledAt),
         or(
           isNull(retentionCases.organisationId),
@@ -79,9 +97,10 @@ export async function listCancelledSubscriptionsNeedingLifecycle(
     );
   const candidates = new Map<string, CancelledSubscriptionLifecycleCandidate>();
   for (const row of rows) {
-    if (row.cancelledAt !== null) {
+    if (row.cancelledAt !== null && row.stripeSubscriptionId !== null) {
       candidates.set(row.organisationId, {
         organisationId: row.organisationId,
+        stripeSubscriptionId: row.stripeSubscriptionId,
         cancelledAt: row.cancelledAt
       });
     }
@@ -96,6 +115,7 @@ export async function loadSubscriptionRetentionState(
   const [subscription] = await database
     .select({
       status: subscriptions.status,
+      stripeSubscriptionId: subscriptions.stripeSubscriptionId,
       cancelledAt: subscriptions.cancelledAt
     })
     .from(subscriptions)
@@ -145,104 +165,241 @@ export async function loadSubscriptionRetentionState(
  * makes concurrent lifecycle jobs converge, while the audit event preserves
  * the superseded episode after the current-row pointer advances.
  */
-export async function recordSubscriptionRetentionDeadline(
-  database: Database,
+export async function writeSubscriptionRetentionDeadline(
+  transaction: DbTransaction,
   input: SubscriptionRetentionDeadlineInput
 ): Promise<'RECORDED' | 'STALE'> {
-  return database.transaction(async (transaction) => {
-    await lockRetentionOrganisation(transaction, input.organisationId);
+  await lockRetentionOrganisation(transaction, input.organisationId);
 
-    const [current] = await transaction
-      .select()
-      .from(retentionCases)
-      .where(eq(retentionCases.organisationId, input.organisationId))
-      .for('update')
-      .limit(1);
-    const currentIsUnboundLegalHold =
-      current?.status === 'LEGAL_HOLD' &&
-      current.source === 'CUSTOMER_REQUEST' &&
-      current.deletionEligibleAt === null;
-    if (
-      current !== undefined &&
-      !currentIsUnboundLegalHold &&
-      current.closureEffectiveAt >= input.closureEffectiveAt
-    ) {
-      return 'STALE';
-    }
+  const [current] = await transaction
+    .select()
+    .from(retentionCases)
+    .where(eq(retentionCases.organisationId, input.organisationId))
+    .for('update')
+    .limit(1);
+  const currentIsUnboundLegalHold =
+    current?.status === 'LEGAL_HOLD' &&
+    current.source === 'CUSTOMER_REQUEST' &&
+    current.deletionEligibleAt === null;
+  if (
+    current !== undefined &&
+    !currentIsUnboundLegalHold &&
+    current.closureEffectiveAt >= input.closureEffectiveAt
+  ) {
+    return 'STALE';
+  }
 
-    const closureEpisodeId = randomUUID();
-    const closureVersion = (current?.closureVersion ?? 0) + 1;
-    if (current === undefined) {
-      await transaction.insert(retentionCases).values({
-        organisationId: input.organisationId,
+  const closureEpisodeId = randomUUID();
+  const closureVersion = (current?.closureVersion ?? 0) + 1;
+  if (current === undefined) {
+    await transaction.insert(retentionCases).values({
+      organisationId: input.organisationId,
+      source: 'SUBSCRIPTION_CANCELLED',
+      status: 'SCHEDULED',
+      disconnectedAt: input.disconnectedAt,
+      reviewAfter: input.retentionDeadline,
+      closureEpisodeId,
+      closureVersion,
+      closureEffectiveAt: input.closureEffectiveAt,
+      deletionEligibleAt: input.deletionEligibleAt,
+      createdAt: input.disconnectedAt,
+      updatedAt: input.disconnectedAt
+    });
+  } else {
+    await transaction
+      .update(retentionCases)
+      .set({
         source: 'SUBSCRIPTION_CANCELLED',
-        status: 'SCHEDULED',
+        status: current.status === 'LEGAL_HOLD' ? 'LEGAL_HOLD' : 'SCHEDULED',
         disconnectedAt: input.disconnectedAt,
         reviewAfter: input.retentionDeadline,
         closureEpisodeId,
         closureVersion,
         closureEffectiveAt: input.closureEffectiveAt,
         deletionEligibleAt: input.deletionEligibleAt,
-        createdAt: input.disconnectedAt,
+        backupExpiryVerifiedAt: null,
+        backupExpiryEvidenceReference: null,
+        backupExpiryClosureEpisodeId: null,
+        reviewAttempts: 0,
+        lastReviewedAt: null,
+        lastReviewError: null,
         updatedAt: input.disconnectedAt
-      });
-    } else {
-      await transaction
-        .update(retentionCases)
-        .set({
-          source: 'SUBSCRIPTION_CANCELLED',
-          status:
-            current.status === 'LEGAL_HOLD' ? 'LEGAL_HOLD' : 'SCHEDULED',
-          disconnectedAt: input.disconnectedAt,
-          reviewAfter: input.retentionDeadline,
-          closureEpisodeId,
-          closureVersion,
-          closureEffectiveAt: input.closureEffectiveAt,
-          deletionEligibleAt: input.deletionEligibleAt,
-          backupExpiryVerifiedAt: null,
-          backupExpiryEvidenceReference: null,
-          backupExpiryClosureEpisodeId: null,
-          reviewAttempts: 0,
-          lastReviewedAt: null,
-          lastReviewError: null,
-          updatedAt: input.disconnectedAt
-        })
-        .where(eq(retentionCases.organisationId, input.organisationId));
+      })
+      .where(eq(retentionCases.organisationId, input.organisationId));
+  }
+
+  await transaction.insert(auditEvents).values({
+    organisationId: input.organisationId,
+    eventType: 'SUBSCRIPTION_RETENTION_SCHEDULED',
+    entityType: 'RETENTION_EPISODE',
+    entityId: closureEpisodeId,
+    beforeValue:
+      current === undefined
+        ? null
+        : {
+            closureEpisodeId: current.closureEpisodeId,
+            closureVersion: current.closureVersion,
+            closureEffectiveAt: current.closureEffectiveAt.toISOString(),
+            deletionEligibleAt:
+              current.deletionEligibleAt?.toISOString() ?? null,
+            backupExpiryVerifiedAt:
+              current.backupExpiryVerifiedAt?.toISOString() ?? null,
+            backupExpiryEvidenceReference:
+              current.backupExpiryEvidenceReference,
+            status: current.status
+          },
+    afterValue: {
+      closureEpisodeId,
+      closureVersion,
+      closureEffectiveAt: input.closureEffectiveAt.toISOString(),
+      disconnectedAt: input.disconnectedAt.toISOString(),
+      retentionDeadline: input.retentionDeadline.toISOString(),
+      deletionEligibleAt: input.deletionEligibleAt?.toISOString() ?? null,
+      staleBackupEvidenceCleared:
+        current?.backupExpiryVerifiedAt !== undefined &&
+        current.backupExpiryVerifiedAt !== null
+    },
+    occurredAt: input.disconnectedAt
+  });
+  return 'RECORDED';
+}
+
+export async function recordSubscriptionRetentionDeadline(
+  database: Database,
+  input: SubscriptionRetentionDeadlineInput
+): Promise<'RECORDED' | 'STALE'> {
+  return database.transaction((transaction) =>
+    writeSubscriptionRetentionDeadline(transaction, input)
+  );
+}
+
+export async function applySubscriptionCancellationEpisode(
+  database: Database,
+  input: ApplySubscriptionCancellationEpisodeInput,
+  dependencies: {
+    prepareXeroDisconnect(
+      organisationId: string
+    ): Promise<PreparedXeroCancellationDisconnect | null>;
+    deleteXeroConnection(
+      accessToken: string,
+      connectionId: string
+    ): Promise<void>;
+  }
+): Promise<'APPLIED' | 'STALE'> {
+  const dates = [
+    input.closureEffectiveAt,
+    input.disconnectedAt,
+    input.retentionDeadline,
+    input.quarantineUntil,
+    ...(input.deletionEligibleAt === null ? [] : [input.deletionEligibleAt])
+  ];
+  if (
+    input.stripeSubscriptionId.trim().length === 0 ||
+    dates.some((value) => !Number.isFinite(value.getTime())) ||
+    input.quarantineUntil <= input.disconnectedAt
+  ) {
+    throw new Error('SUBSCRIPTION_CANCELLATION_EPISODE_INVALID');
+  }
+
+  const preparedXero = await dependencies.prepareXeroDisconnect(
+    input.organisationId
+  );
+  return database.transaction(async (transaction) => {
+    await lockRetentionOrganisation(transaction, input.organisationId);
+    const [subscription] = await transaction
+      .select({
+        status: subscriptions.status,
+        stripeSubscriptionId: subscriptions.stripeSubscriptionId,
+        cancelledAt: subscriptions.cancelledAt
+      })
+      .from(subscriptions)
+      .where(eq(subscriptions.organisationId, input.organisationId))
+      .for('update')
+      .limit(1);
+    if (
+      subscription === undefined ||
+      subscription.status !== 'CANCELLED' ||
+      subscription.stripeSubscriptionId !== input.stripeSubscriptionId ||
+      subscription.cancelledAt?.getTime() !== input.closureEffectiveAt.getTime()
+    ) {
+      return 'STALE';
     }
 
-    await transaction.insert(auditEvents).values({
-      organisationId: input.organisationId,
-      eventType: 'SUBSCRIPTION_RETENTION_SCHEDULED',
-      entityType: 'RETENTION_EPISODE',
-      entityId: closureEpisodeId,
-      beforeValue:
-        current === undefined
-          ? null
-          : {
-              closureEpisodeId: current.closureEpisodeId,
-              closureVersion: current.closureVersion,
-              closureEffectiveAt: current.closureEffectiveAt.toISOString(),
-              deletionEligibleAt:
-                current.deletionEligibleAt?.toISOString() ?? null,
-              backupExpiryVerifiedAt:
-                current.backupExpiryVerifiedAt?.toISOString() ?? null,
-              backupExpiryEvidenceReference:
-                current.backupExpiryEvidenceReference,
-              status: current.status
-            },
-      afterValue: {
-        closureEpisodeId,
-        closureVersion,
-        closureEffectiveAt: input.closureEffectiveAt.toISOString(),
-        disconnectedAt: input.disconnectedAt.toISOString(),
-        retentionDeadline: input.retentionDeadline.toISOString(),
-        deletionEligibleAt: input.deletionEligibleAt?.toISOString() ?? null,
-        staleBackupEvidenceCleared:
-          current?.backupExpiryVerifiedAt !== undefined &&
-          current.backupExpiryVerifiedAt !== null
-      },
-      occurredAt: input.disconnectedAt
-    });
-    return 'RECORDED';
+    const [connection] = await transaction
+      .select()
+      .from(xeroConnections)
+      .where(eq(xeroConnections.organisationId, input.organisationId))
+      .for('update')
+      .limit(1);
+    if (connection?.status === 'CONNECTED') {
+      if (
+        preparedXero === null ||
+        preparedXero.recordId !== connection.id ||
+        preparedXero.connectionId !== connection.connectionId
+      ) {
+        throw new Error('XERO_CONNECTION_CHANGED_DURING_CANCELLATION');
+      }
+      await dependencies.deleteXeroConnection(
+        preparedXero.accessToken,
+        preparedXero.connectionId
+      );
+    }
+
+    const quarantined = await transaction
+      .update(smsNumberPool)
+      .set({
+        status: 'QUARANTINED',
+        quarantineUntil: input.quarantineUntil,
+        updatedAt: input.disconnectedAt
+      })
+      .where(
+        and(
+          eq(smsNumberPool.organisationId, input.organisationId),
+          inArray(smsNumberPool.status, ['RESERVED', 'READY'])
+        )
+      )
+      .returning({ id: smsNumberPool.id });
+    await transaction
+      .update(organisationOnboarding)
+      .set({
+        replyNumberReadyAt: null,
+        updatedAt: input.disconnectedAt
+      })
+      .where(eq(organisationOnboarding.organisationId, input.organisationId));
+    for (const number of quarantined) {
+      await transaction.insert(auditEvents).values({
+        organisationId: input.organisationId,
+        eventType: 'SMS_REPLY_NUMBER_QUARANTINED',
+        entityType: 'SMS_NUMBER',
+        entityId: number.id,
+        afterValue: {
+          status: 'QUARANTINED',
+          quarantineUntil: input.quarantineUntil.toISOString()
+        },
+        occurredAt: input.disconnectedAt
+      });
+    }
+
+    if (
+      connection !== undefined &&
+      (connection.status === 'CONNECTED' ||
+        connection.status === 'REAUTH_REQUIRED')
+    ) {
+      await transaction
+        .update(xeroConnections)
+        .set({
+          status: 'DISCONNECTED',
+          encryptedRefreshToken: null,
+          grantedScopes: [],
+          refreshLeaseId: null,
+          refreshLeaseExpiresAt: null,
+          disconnectedAt: input.disconnectedAt,
+          updatedAt: input.disconnectedAt
+        })
+        .where(eq(xeroConnections.id, connection.id));
+    }
+
+    await writeSubscriptionRetentionDeadline(transaction, input);
+    return 'APPLIED';
   });
 }

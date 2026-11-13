@@ -7,7 +7,6 @@ import {
   operationalResetRuns,
   organisations,
   PostgresReplyNumberProvisioningRepository,
-  PostgresSmsCommerceRepository,
   PostgresXeroConnectionRepository,
   providerConnections,
   PostgresVoiceCallRepository,
@@ -66,9 +65,9 @@ import {
 } from './operations/xero-oauth-readiness.js';
 import { processInboundReply } from './services/inbound-reply-service.js';
 import {
+  applySubscriptionCancellationEpisode,
   listCancelledSubscriptionsNeedingLifecycle,
-  loadSubscriptionRetentionState,
-  recordSubscriptionRetentionDeadline
+  loadSubscriptionRetentionState
 } from './services/subscription-retention.js';
 import {
   databaseUrlFromEnvironment,
@@ -389,9 +388,6 @@ async function main() {
   const voiceCallRepository = new PostgresVoiceCallRepository(
     databaseClient.db
   );
-  const smsCommerceRepository = new PostgresSmsCommerceRepository(
-    databaseClient.db
-  );
   const replyNumberProvisioningRepository =
     new PostgresReplyNumberProvisioningRepository(databaseClient.db);
   const voiceGateway = new VoiceGatewayClient({
@@ -422,6 +418,17 @@ async function main() {
     listCancelledSubscriptionsNeedingLifecycle: () =>
       listCancelledSubscriptionsNeedingLifecycle(databaseClient.db)
   };
+  const reconcilePaidSmsNumberProvisioning = async (): Promise<number> => {
+    const candidates = await backfillPaidSmsNumberProvisioning({
+      repository: replyNumberProvisioningRepository,
+      publisher: queue,
+      clock
+    });
+    console.info('Paid SMS number provisioning reconciliation completed', {
+      candidates
+    });
+    return candidates;
+  };
 
   await startWorker({
     queue,
@@ -429,15 +436,7 @@ async function main() {
     organisationIds: allRows.map((row) => row.id),
     logger: console,
     bootstrap: async () => {
-      const provisioningCandidateCount =
-        await backfillPaidSmsNumberProvisioning({
-          repository: replyNumberProvisioningRepository,
-          publisher: queue,
-          clock
-        });
-      console.info('Paid SMS number provisioning reconciliation completed', {
-        candidates: provisioningCandidateCount
-      });
+      await reconcilePaidSmsNumberProvisioning();
       const cancellationCandidateCount =
         await reconcileCancelledSubscriptionLifecycles({
           repository: subscriptionLifecycleReconciliationRepository,
@@ -547,6 +546,8 @@ async function main() {
           { repository: replyNumberProvisioningRepository, clock },
           payload
         ).then(() => undefined),
+      [jobNames.smsNumberProvisionReconcile]: () =>
+        reconcilePaidSmsNumberProvisioning().then(() => undefined),
       [jobNames.voiceCallExecute]: (payload) =>
         executeVoiceCall(
           {
@@ -594,44 +595,49 @@ async function main() {
                 databaseClient.db,
                 organisationId
               ),
-            disconnectXero: async (organisationId) => {
-              const connection =
-                await xeroConnections.findByOrganisationId(organisationId);
-              if (connection === null || connection.status === 'DISCONNECTED') {
-                return;
-              }
-              if (connection.status === 'REAUTH_REQUIRED') {
-                await xeroConnections.disconnect(organisationId, clock.now());
-                return;
-              }
-              const session = await new XeroOAuthSessionProvider({
-                organisationId,
-                store: xeroConnections,
-                tokenCipher: xeroTokenCipher,
-                oauthClient: xeroOAuthClient
-              }).getSession();
-              await xeroOAuthClient.deleteConnection(
-                session.accessToken,
-                connection.connectionId
-              );
-              await xeroConnections.disconnect(organisationId, clock.now());
-            },
-            quarantineSmsNumber: async (organisationId, now) => {
+            applyCancellationEpisode: async (input) => {
               const quarantineDays = requiredPositiveInteger(
                 'SMS_NUMBER_QUARANTINE_DAYS'
               );
-              await smsCommerceRepository.quarantineNumber(
-                organisationId,
-                new Date(
-                  now.getTime() + quarantineDays * 24 * 60 * 60 * 1000
-                ),
-                now
-              );
-            },
-            recordRetentionDeadline: async (input) => {
-              await recordSubscriptionRetentionDeadline(
+              return applySubscriptionCancellationEpisode(
                 databaseClient.db,
-                input
+                {
+                  ...input,
+                  quarantineUntil: new Date(
+                    input.disconnectedAt.getTime() +
+                      quarantineDays * 24 * 60 * 60 * 1000
+                  )
+                },
+                {
+                  prepareXeroDisconnect: async (organisationId) => {
+                    const connection =
+                      await xeroConnections.findByOrganisationId(
+                        organisationId
+                      );
+                    if (
+                      connection === null ||
+                      connection.status !== 'CONNECTED'
+                    ) {
+                      return null;
+                    }
+                    const session = await new XeroOAuthSessionProvider({
+                      organisationId,
+                      store: xeroConnections,
+                      tokenCipher: xeroTokenCipher,
+                      oauthClient: xeroOAuthClient
+                    }).getSession();
+                    return {
+                      recordId: connection.id,
+                      connectionId: connection.connectionId,
+                      accessToken: session.accessToken
+                    };
+                  },
+                  deleteXeroConnection: (accessToken, connectionId) =>
+                    xeroOAuthClient.deleteConnection(
+                      accessToken,
+                      connectionId
+                    )
+                }
               );
             },
             clock

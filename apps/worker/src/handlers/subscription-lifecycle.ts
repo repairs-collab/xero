@@ -4,19 +4,19 @@ import type { JobPayloads } from '@bc5000/jobs';
 export interface SubscriptionLifecycleDependencies {
   load(organisationId: string): Promise<{
     status: SubscriptionStatus;
+    stripeSubscriptionId: string | null;
     cancelledAt: Date | null;
     retentionDeadlineRecorded: boolean;
     recordedCancellationAt?: Date | null;
   } | null>;
-  disconnectXero(organisationId: string): Promise<void>;
-  quarantineSmsNumber(organisationId: string, now: Date): Promise<void>;
-  recordRetentionDeadline(input: {
+  applyCancellationEpisode(input: {
     organisationId: string;
+    stripeSubscriptionId: string;
     disconnectedAt: Date;
     retentionDeadline: Date;
     deletionEligibleAt: Date | null;
     closureEffectiveAt: Date;
-  }): Promise<void>;
+  }): Promise<'APPLIED' | 'STALE'>;
   clock: { now(): Date };
 }
 
@@ -46,6 +46,12 @@ export const processSubscriptionLifecycle = async (
   if (current === null || current.status !== 'CANCELLED') return 'STALE';
   if (current.cancelledAt === null) return 'STALE';
   if (
+    current.stripeSubscriptionId !== payload.stripeSubscriptionId ||
+    current.cancelledAt.toISOString() !== payload.cancelledAt
+  ) {
+    return 'STALE';
+  }
+  if (
     current.retentionDeadlineRecorded &&
     (current.recordedCancellationAt === undefined ||
       current.recordedCancellationAt === null ||
@@ -55,21 +61,17 @@ export const processSubscriptionLifecycle = async (
   }
 
   const disconnectedAt = dependencies.clock.now();
-  await dependencies.quarantineSmsNumber(
-    payload.organisationId,
-    disconnectedAt
-  );
-  await dependencies.disconnectXero(payload.organisationId);
   const retentionDeadline = new Date(
     disconnectedAt.getTime() + 30 * 24 * 60 * 60 * 1000
   );
   const deletionEligibleAt = fiveYearAnniversary(current.cancelledAt);
-  await dependencies.recordRetentionDeadline({
+  const applied = await dependencies.applyCancellationEpisode({
     organisationId: payload.organisationId,
+    stripeSubscriptionId: payload.stripeSubscriptionId,
     disconnectedAt,
     retentionDeadline,
     deletionEligibleAt,
     closureEffectiveAt: current.cancelledAt
   });
-  return 'DISCONNECTED';
+  return applied === 'APPLIED' ? 'DISCONNECTED' : 'STALE';
 };

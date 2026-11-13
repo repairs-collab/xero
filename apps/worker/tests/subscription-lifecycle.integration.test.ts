@@ -17,6 +17,7 @@ import {
 import { processSubscriptionLifecycle } from '../src/handlers/subscription-lifecycle.js';
 import { placeRetentionLegalHold } from '../src/services/retention-legal-hold.js';
 import {
+  applySubscriptionCancellationEpisode,
   listCancelledSubscriptionsNeedingLifecycle,
   loadSubscriptionRetentionState,
   recordSubscriptionRetentionDeadline
@@ -59,7 +60,363 @@ const waitForBlockedRetentionWrite = async (): Promise<void> => {
   throw new Error('cancellation did not reach the controlled retention lock');
 };
 
+const waitForBlockedSubscriptionWrite = async (): Promise<void> => {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const result = await client.pool.query<{ blocked: boolean }>(`
+      select exists (
+        select 1
+          from pg_stat_activity
+         where datname = current_database()
+           and pid <> pg_backend_pid()
+           and state = 'active'
+           and wait_event_type = 'Lock'
+           and query like '%update "subscriptions"%'
+      ) as blocked
+    `);
+    if (result.rows[0]?.blocked === true) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('reactivation did not wait on the cancellation episode lock');
+};
+
 describe('cancelled Solo subscription lifecycle', () => {
+  it('leaves replacement subscription resources untouched when reactivation wins before teardown locks', async () => {
+    const organisationId = randomUUID();
+    const cancelledStripeSubscriptionId = `sub_${organisationId}`;
+    const replacementStripeSubscriptionId = `sub_replacement_${organisationId}`;
+    const cancelledAt = new Date('2027-04-10T04:00:00.000Z');
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: randomUUID(),
+      name: 'Reactivated cancellation race tenant',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD',
+      edition: 'SOLO'
+    });
+    await client.db.insert(subscriptions).values({
+      organisationId,
+      planCode: 'SOLO_AU_2000',
+      status: 'CANCELLED',
+      stripeSubscriptionId: cancelledStripeSubscriptionId,
+      cancelledAt
+    });
+    const [connection] = await client.db
+      .insert(xeroConnections)
+      .values({
+        organisationId,
+        connectionId: randomUUID(),
+        tenantId: randomUUID(),
+        status: 'CONNECTED',
+        encryptedRefreshToken: {
+          version: 1,
+          keyId: 'primary',
+          iv: Buffer.alloc(12, 1).toString('base64'),
+          ciphertext: Buffer.from('refresh-token').toString('base64'),
+          tag: Buffer.alloc(16, 2).toString('base64')
+        },
+        grantedScopes: ['accounting.transactions']
+      })
+      .returning();
+    const [number] = await client.db
+      .insert(smsNumberPool)
+      .values({
+        e164Number: `+614${Math.floor(Math.random() * 100_000_000)
+          .toString()
+          .padStart(8, '0')}`,
+        provider: 'SINCH',
+        providerNumberId: randomUUID(),
+        providerVerifiedAt: cancelledAt,
+        status: 'READY',
+        organisationId,
+        reservedAt: cancelledAt,
+        readyAt: cancelledAt
+      })
+      .returning();
+    let providerDeletes = 0;
+
+    const result = await applySubscriptionCancellationEpisode(
+      client.db,
+      {
+        organisationId,
+        stripeSubscriptionId: cancelledStripeSubscriptionId,
+        closureEffectiveAt: cancelledAt,
+        disconnectedAt: new Date('2027-04-10T05:00:00.000Z'),
+        retentionDeadline: new Date('2027-05-10T05:00:00.000Z'),
+        deletionEligibleAt: new Date('2032-04-10T04:00:00.000Z'),
+        quarantineUntil: new Date('2027-05-10T05:00:00.000Z')
+      },
+      {
+        prepareXeroDisconnect: async () => {
+          await client.db
+            .update(subscriptions)
+            .set({
+              status: 'ACTIVE',
+              stripeSubscriptionId: replacementStripeSubscriptionId,
+              cancelledAt: null
+            })
+            .where(eq(subscriptions.organisationId, organisationId));
+          return {
+            recordId: connection!.id,
+            connectionId: connection!.connectionId,
+            accessToken: 'replacement-access-token'
+          };
+        },
+        deleteXeroConnection: () => {
+          providerDeletes += 1;
+          return Promise.resolve();
+        }
+      }
+    );
+
+    expect(result).toBe('STALE');
+    expect(providerDeletes).toBe(0);
+    expect(
+      (
+        await client.db
+          .select({ status: xeroConnections.status })
+          .from(xeroConnections)
+          .where(eq(xeroConnections.organisationId, organisationId))
+      )[0]?.status
+    ).toBe('CONNECTED');
+    expect(
+      (
+        await client.db
+          .select({ status: smsNumberPool.status })
+          .from(smsNumberPool)
+          .where(eq(smsNumberPool.id, number!.id))
+      )[0]?.status
+    ).toBe('READY');
+    expect(
+      await client.db
+        .select()
+        .from(retentionCases)
+        .where(eq(retentionCases.organisationId, organisationId))
+    ).toHaveLength(0);
+  });
+
+  it('makes reactivation wait for an in-flight exact cancellation episode', async () => {
+    const organisationId = randomUUID();
+    const cancelledStripeSubscriptionId = `sub_${organisationId}`;
+    const replacementStripeSubscriptionId = `sub_replacement_${organisationId}`;
+    const cancelledAt = new Date('2027-04-10T04:00:00.000Z');
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: randomUUID(),
+      name: 'Cancellation lock ordering tenant',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD',
+      edition: 'SOLO'
+    });
+    await client.db.insert(subscriptions).values({
+      organisationId,
+      planCode: 'SOLO_AU_2000',
+      status: 'CANCELLED',
+      stripeSubscriptionId: cancelledStripeSubscriptionId,
+      cancelledAt
+    });
+    const [connection] = await client.db
+      .insert(xeroConnections)
+      .values({
+        organisationId,
+        connectionId: randomUUID(),
+        tenantId: randomUUID(),
+        status: 'CONNECTED',
+        encryptedRefreshToken: {
+          version: 1,
+          keyId: 'primary',
+          iv: Buffer.alloc(12, 1).toString('base64'),
+          ciphertext: Buffer.from('refresh-token').toString('base64'),
+          tag: Buffer.alloc(16, 2).toString('base64')
+        },
+        grantedScopes: ['accounting.transactions']
+      })
+      .returning();
+    const deleteStarted = deferred<void>();
+    const releaseDelete = deferred<void>();
+
+    const cancellation = applySubscriptionCancellationEpisode(
+      client.db,
+      {
+        organisationId,
+        stripeSubscriptionId: cancelledStripeSubscriptionId,
+        closureEffectiveAt: cancelledAt,
+        disconnectedAt: new Date('2027-04-10T05:00:00.000Z'),
+        retentionDeadline: new Date('2027-05-10T05:00:00.000Z'),
+        deletionEligibleAt: new Date('2032-04-10T04:00:00.000Z'),
+        quarantineUntil: new Date('2027-05-10T05:00:00.000Z')
+      },
+      {
+        prepareXeroDisconnect: () =>
+          Promise.resolve({
+            recordId: connection!.id,
+            connectionId: connection!.connectionId,
+            accessToken: 'bounded-access-token'
+          }),
+        deleteXeroConnection: async () => {
+          deleteStarted.resolve();
+          await releaseDelete.promise;
+        }
+      }
+    );
+    await deleteStarted.promise;
+
+    let reactivationCompleted = false;
+    const reactivation = client.db
+      .update(subscriptions)
+      .set({
+        status: 'ACTIVE',
+        stripeSubscriptionId: replacementStripeSubscriptionId,
+        cancelledAt: null
+      })
+      .where(eq(subscriptions.organisationId, organisationId))
+      .then(() => {
+        reactivationCompleted = true;
+      });
+    await waitForBlockedSubscriptionWrite();
+    expect(reactivationCompleted).toBe(false);
+
+    releaseDelete.resolve();
+    await expect(cancellation).resolves.toBe('APPLIED');
+    await reactivation;
+    expect(reactivationCompleted).toBe(true);
+    await expect(
+      loadSubscriptionRetentionState(client.db, organisationId)
+    ).resolves.toMatchObject({
+      status: 'ACTIVE',
+      stripeSubscriptionId: replacementStripeSubscriptionId,
+      cancelledAt: null
+    });
+  }, 10_000);
+
+  it('retries after remote Xero deletion succeeds but the local transaction rolls back', async () => {
+    const organisationId = randomUUID();
+    const stripeSubscriptionId = `sub_${organisationId}`;
+    const cancelledAt = new Date('2027-04-10T04:00:00.000Z');
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: randomUUID(),
+      name: 'Cancellation retry convergence tenant',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD',
+      edition: 'SOLO'
+    });
+    await client.db.insert(subscriptions).values({
+      organisationId,
+      planCode: 'SOLO_AU_2000',
+      status: 'CANCELLED',
+      stripeSubscriptionId,
+      cancelledAt
+    });
+    const [connection] = await client.db
+      .insert(xeroConnections)
+      .values({
+        organisationId,
+        connectionId: randomUUID(),
+        tenantId: randomUUID(),
+        status: 'CONNECTED',
+        encryptedRefreshToken: {
+          version: 1,
+          keyId: 'primary',
+          iv: Buffer.alloc(12, 1).toString('base64'),
+          ciphertext: Buffer.from('refresh-token').toString('base64'),
+          tag: Buffer.alloc(16, 2).toString('base64')
+        },
+        grantedScopes: ['accounting.transactions']
+      })
+      .returning();
+    const [number] = await client.db
+      .insert(smsNumberPool)
+      .values({
+        e164Number: `+614${Math.floor(Math.random() * 100_000_000)
+          .toString()
+          .padStart(8, '0')}`,
+        provider: 'SINCH',
+        providerNumberId: randomUUID(),
+        providerVerifiedAt: cancelledAt,
+        status: 'READY',
+        organisationId,
+        reservedAt: cancelledAt,
+        readyAt: cancelledAt
+      })
+      .returning();
+    const episode = {
+      organisationId,
+      stripeSubscriptionId,
+      closureEffectiveAt: cancelledAt,
+      disconnectedAt: new Date('2027-04-10T05:00:00.000Z'),
+      retentionDeadline: new Date('2027-05-10T05:00:00.000Z'),
+      deletionEligibleAt: new Date('2032-04-10T04:00:00.000Z'),
+      quarantineUntil: new Date('2027-05-10T05:00:00.000Z')
+    };
+    const prepareXeroDisconnect = () =>
+      Promise.resolve({
+        recordId: connection!.id,
+        connectionId: connection!.connectionId,
+        accessToken: 'idempotent-access-token'
+      });
+    let remoteDeleted = false;
+
+    await expect(
+      applySubscriptionCancellationEpisode(client.db, episode, {
+        prepareXeroDisconnect,
+        deleteXeroConnection: () => {
+          remoteDeleted = true;
+          return Promise.reject(new Error('SIMULATED_LOCAL_FAILURE'));
+        }
+      })
+    ).rejects.toThrow('SIMULATED_LOCAL_FAILURE');
+    expect(remoteDeleted).toBe(true);
+    expect(
+      (
+        await client.db
+          .select({ status: xeroConnections.status })
+          .from(xeroConnections)
+          .where(eq(xeroConnections.id, connection!.id))
+      )[0]?.status
+    ).toBe('CONNECTED');
+    expect(
+      (
+        await client.db
+          .select({ status: smsNumberPool.status })
+          .from(smsNumberPool)
+          .where(eq(smsNumberPool.id, number!.id))
+      )[0]?.status
+    ).toBe('READY');
+
+    await expect(
+      applySubscriptionCancellationEpisode(client.db, episode, {
+        prepareXeroDisconnect,
+        deleteXeroConnection: () => {
+          expect(remoteDeleted).toBe(true);
+          return Promise.resolve();
+        }
+      })
+    ).resolves.toBe('APPLIED');
+    expect(
+      (
+        await client.db
+          .select({ status: xeroConnections.status })
+          .from(xeroConnections)
+          .where(eq(xeroConnections.id, connection!.id))
+      )[0]?.status
+    ).toBe('DISCONNECTED');
+    expect(
+      (
+        await client.db
+          .select({ status: smsNumberPool.status })
+          .from(smsNumberPool)
+          .where(eq(smsNumberPool.id, number!.id))
+      )[0]?.status
+    ).toBe('QUARANTINED');
+    await expect(
+      client.db
+        .select()
+        .from(retentionCases)
+        .where(eq(retentionCases.organisationId, organisationId))
+    ).resolves.toHaveLength(1);
+  });
+
   it('lists only cancellation episodes without current cleanup evidence', async () => {
     const missingOrganisationId = randomUUID();
     const staleOrganisationId = randomUUID();
@@ -91,36 +448,42 @@ describe('cancelled Solo subscription lifecycle', () => {
         organisationId: missingOrganisationId,
         planCode: 'SOLO_AU_2000',
         status: 'CANCELLED',
+        stripeSubscriptionId: `sub_${missingOrganisationId}`,
         cancelledAt: cancellationAt
       },
       {
         organisationId: staleOrganisationId,
         planCode: 'SOLO_AU_2000',
         status: 'CANCELLED',
+        stripeSubscriptionId: `sub_${staleOrganisationId}`,
         cancelledAt: cancellationAt
       },
       {
         organisationId: completeOrganisationId,
         planCode: 'SOLO_AU_2000',
         status: 'CANCELLED',
+        stripeSubscriptionId: `sub_${completeOrganisationId}`,
         cancelledAt: cancellationAt
       },
       {
         organisationId: connectedXeroOrganisationId,
         planCode: 'SOLO_AU_2000',
         status: 'CANCELLED',
+        stripeSubscriptionId: `sub_${connectedXeroOrganisationId}`,
         cancelledAt: cancellationAt
       },
       {
         organisationId: readyNumberOrganisationId,
         planCode: 'SOLO_AU_2000',
         status: 'CANCELLED',
+        stripeSubscriptionId: `sub_${readyNumberOrganisationId}`,
         cancelledAt: cancellationAt
       },
       {
         organisationId: activeOrganisationId,
         planCode: 'SOLO_AU_2000',
         status: 'ACTIVE',
+        stripeSubscriptionId: `sub_${activeOrganisationId}`,
         cancelledAt: null
       }
     ]);
@@ -191,14 +554,24 @@ describe('cancelled Solo subscription lifecycle', () => {
 
     expect(candidates).toEqual(
       expect.arrayContaining([
-        { organisationId: missingOrganisationId, cancelledAt: cancellationAt },
-        { organisationId: staleOrganisationId, cancelledAt: cancellationAt },
+        {
+          organisationId: missingOrganisationId,
+          stripeSubscriptionId: `sub_${missingOrganisationId}`,
+          cancelledAt: cancellationAt
+        },
+        {
+          organisationId: staleOrganisationId,
+          stripeSubscriptionId: `sub_${staleOrganisationId}`,
+          cancelledAt: cancellationAt
+        },
         {
           organisationId: connectedXeroOrganisationId,
+          stripeSubscriptionId: `sub_${connectedXeroOrganisationId}`,
           cancelledAt: cancellationAt
         },
         {
           organisationId: readyNumberOrganisationId,
+          stripeSubscriptionId: `sub_${readyNumberOrganisationId}`,
           cancelledAt: cancellationAt
         }
       ])
@@ -222,6 +595,7 @@ describe('cancelled Solo subscription lifecycle', () => {
 
   it('disconnects once and persists an auditable retention deadline', async () => {
     const organisationId = randomUUID();
+    const firstStripeSubscriptionId = `sub_${organisationId}`;
     await client.db.insert(organisations).values({
       id: organisationId,
       xeroOrganisationId: randomUUID(),
@@ -234,6 +608,7 @@ describe('cancelled Solo subscription lifecycle', () => {
       organisationId,
       planCode: 'SOLO_AU_2000',
       status: 'CANCELLED',
+      stripeSubscriptionId: firstStripeSubscriptionId,
       cancelledAt: now
     });
     const disconnects: string[] = [];
@@ -244,6 +619,7 @@ describe('cancelled Solo subscription lifecycle', () => {
         const [subscription] = await client.db
           .select({
             status: subscriptions.status,
+            stripeSubscriptionId: subscriptions.stripeSubscriptionId,
             cancelledAt: subscriptions.cancelledAt
           })
           .from(subscriptions)
@@ -262,19 +638,17 @@ describe('cancelled Solo subscription lifecycle', () => {
           recordedCancellationAt: recorded?.closureEffectiveAt ?? null
         };
       },
-      disconnectXero: (candidateOrganisationId: string) => {
-        disconnects.push(candidateOrganisationId);
-        return Promise.resolve();
-      },
-      quarantineSmsNumber: () => Promise.resolve(),
-      recordRetentionDeadline: async (input: {
+      applyCancellationEpisode: async (input: {
         organisationId: string;
+        stripeSubscriptionId: string;
         disconnectedAt: Date;
         retentionDeadline: Date;
         deletionEligibleAt: Date | null;
         closureEffectiveAt: Date;
       }) => {
+        disconnects.push(input.organisationId);
         await recordSubscriptionRetentionDeadline(client.db, input);
+        return 'APPLIED' as const;
       },
       clock: { now: () => executionNow }
     };
@@ -282,13 +656,17 @@ describe('cancelled Solo subscription lifecycle', () => {
     await expect(
       processSubscriptionLifecycle(dependencies, {
         organisationId,
-        status: 'CANCELLED'
+        status: 'CANCELLED',
+        stripeSubscriptionId: firstStripeSubscriptionId,
+        cancelledAt: now.toISOString()
       })
     ).resolves.toBe('DISCONNECTED');
     await expect(
       processSubscriptionLifecycle(dependencies, {
         organisationId,
-        status: 'CANCELLED'
+        status: 'CANCELLED',
+        stripeSubscriptionId: firstStripeSubscriptionId,
+        cancelledAt: now.toISOString()
       })
     ).resolves.toBe('ALREADY_APPLIED');
 
@@ -341,16 +719,22 @@ describe('cancelled Solo subscription lifecycle', () => {
       })
       .where(eq(retentionCases.organisationId, organisationId));
     const newerCancellation = new Date('2027-04-10T04:00:00.000Z');
+    const newerStripeSubscriptionId = `sub_newer_${organisationId}`;
     executionNow = new Date('2027-04-11T00:00:00.000Z');
     await client.db
       .update(subscriptions)
-      .set({ cancelledAt: newerCancellation })
+      .set({
+        stripeSubscriptionId: newerStripeSubscriptionId,
+        cancelledAt: newerCancellation
+      })
       .where(eq(subscriptions.organisationId, organisationId));
 
     await expect(
       processSubscriptionLifecycle(dependencies, {
         organisationId,
-        status: 'CANCELLED'
+        status: 'CANCELLED',
+        stripeSubscriptionId: newerStripeSubscriptionId,
+        cancelledAt: newerCancellation.toISOString()
       })
     ).resolves.toBe('DISCONNECTED');
 
@@ -448,6 +832,7 @@ describe('cancelled Solo subscription lifecycle', () => {
 
   it('runs the production cancellation lifecycle when an initial legal hold is unbound', async () => {
     const organisationId = randomUUID();
+    const stripeSubscriptionId = `sub_${organisationId}`;
     const cancellationAt = new Date('2027-04-10T04:00:00.000Z');
     await client.db.insert(organisations).values({
       id: organisationId,
@@ -461,6 +846,7 @@ describe('cancelled Solo subscription lifecycle', () => {
       organisationId,
       planCode: 'SOLO_AU_2000',
       status: 'CANCELLED',
+      stripeSubscriptionId,
       cancelledAt: cancellationAt
     });
     await placeRetentionLegalHold(client.db, {
@@ -478,21 +864,20 @@ describe('cancelled Solo subscription lifecycle', () => {
             client.db,
             candidateOrganisationId
           ),
-        disconnectXero: (candidateOrganisationId: string) => {
-          disconnects.push(candidateOrganisationId);
-          return Promise.resolve();
+        applyCancellationEpisode: async (input) => {
+          disconnects.push(input.organisationId);
+          quarantines.push(input.organisationId);
+          await recordSubscriptionRetentionDeadline(client.db, input);
+          return 'APPLIED';
         },
-        quarantineSmsNumber: (candidateOrganisationId: string) => {
-          quarantines.push(candidateOrganisationId);
-          return Promise.resolve();
-        },
-        recordRetentionDeadline: (input) =>
-          recordSubscriptionRetentionDeadline(client.db, input).then(
-            () => undefined
-          ),
         clock: { now: () => new Date('2027-04-11T01:00:00.000Z') }
       },
-      { organisationId, status: 'CANCELLED' }
+      {
+        organisationId,
+        status: 'CANCELLED',
+        stripeSubscriptionId,
+        cancelledAt: cancellationAt.toISOString()
+      }
     );
 
     expect(result).toBe('DISCONNECTED');

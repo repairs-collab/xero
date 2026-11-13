@@ -1,4 +1,8 @@
-import { jobNames, type DurableJobQueue } from '@bc5000/jobs';
+import {
+  jobNames,
+  subscriptionLifecycleSingletonKey,
+  type DurableJobQueue
+} from '@bc5000/jobs';
 
 import type { CancelledSubscriptionLifecycleCandidate } from '../services/subscription-retention.js';
 
@@ -17,15 +21,16 @@ export const reconcileCancelledSubscriptionLifecycles = async (dependencies: {
       jobNames.subscriptionLifecycle,
       {
         organisationId: candidate.organisationId,
-        status: 'CANCELLED'
+        status: 'CANCELLED',
+        stripeSubscriptionId: candidate.stripeSubscriptionId,
+        cancelledAt: candidate.cancelledAt.toISOString()
       },
       {
-        singletonKey: [
-          jobNames.subscriptionLifecycle,
-          'cancelled-reconcile',
-          candidate.organisationId,
-          candidate.cancelledAt.toISOString()
-        ].join(':'),
+        singletonKey: subscriptionLifecycleSingletonKey({
+          organisationId: candidate.organisationId,
+          stripeSubscriptionId: candidate.stripeSubscriptionId,
+          cancelledAt: candidate.cancelledAt.toISOString()
+        }),
         deduplicateWhileActive: true
       }
     );

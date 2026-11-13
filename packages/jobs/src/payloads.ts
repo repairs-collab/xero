@@ -39,6 +39,7 @@ export const jobPayloadSchemas = {
     outboundMessageId: identifier
   }),
   [jobNames.smsNumberProvision]: organisationPayload,
+  [jobNames.smsNumberProvisionReconcile]: z.object({}).strict(),
   [jobNames.voiceCallExecute]: voiceCallPayload,
   [jobNames.voiceCallReconcile]: voiceCallPayload,
   [jobNames.providerConnectionTest]: z.object({
@@ -54,7 +55,9 @@ export const jobPayloadSchemas = {
   [jobNames.subscriptionLifecycle]: z
     .object({
       organisationId: identifier,
-      status: z.literal('CANCELLED')
+      status: z.literal('CANCELLED'),
+      stripeSubscriptionId: identifier,
+      cancelledAt: z.iso.datetime({ offset: true })
     })
     .strict(),
   [jobNames.subscriptionLifecycleReconcile]: z.object({}).strict(),

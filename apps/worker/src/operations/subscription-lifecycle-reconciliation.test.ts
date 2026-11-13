@@ -24,6 +24,7 @@ describe('cancelled subscription lifecycle reconciliation', () => {
     const list = vi.fn().mockResolvedValue([
       {
         organisationId: '10000000-0000-4000-8000-000000000001',
+        stripeSubscriptionId: 'sub_cancelled',
         cancelledAt
       }
     ]);
@@ -40,11 +41,13 @@ describe('cancelled subscription lifecycle reconciliation', () => {
       jobNames.subscriptionLifecycle,
       {
         organisationId: '10000000-0000-4000-8000-000000000001',
-        status: 'CANCELLED'
+        status: 'CANCELLED',
+        stripeSubscriptionId: 'sub_cancelled',
+        cancelledAt: '2027-04-10T04:00:00.000Z'
       },
       {
         singletonKey:
-          'subscription.lifecycle:cancelled-reconcile:10000000-0000-4000-8000-000000000001:2027-04-10T04:00:00.000Z',
+          'subscription.lifecycle:10000000-0000-4000-8000-000000000001:sub_cancelled:2027-04-10T04:00:00.000Z',
         deduplicateWhileActive: true
       }
     );
@@ -58,6 +61,7 @@ describe('cancelled subscription lifecycle reconciliation', () => {
             Promise.resolve([
               {
                 organisationId: '10000000-0000-4000-8000-000000000001',
+                stripeSubscriptionId: 'sub_cancelled',
                 cancelledAt: new Date('2027-04-10T04:00:00.000Z')
               }
             ])

@@ -932,6 +932,8 @@ export const createSubscriptionService = (dependencies: {
     organisationId: string;
     status: 'CANCELLED';
     eventId: string;
+    stripeSubscriptionId: string;
+    cancelledAt: string;
   }): Promise<void>;
   enqueueNumberProvision(transaction: DbTransaction, input: {
     organisationId: string;
@@ -1427,10 +1429,15 @@ export const createSubscriptionService = (dependencies: {
         ? {
             onApplied: async (transaction) => {
               if (enqueueCancellation) {
+                if (input.cancelledAt === null) {
+                  throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
+                }
                 await dependencies.enqueueLifecycle(transaction, {
                   organisationId: input.organisationId,
                   status: 'CANCELLED',
-                  eventId: input.eventId
+                  eventId: input.eventId,
+                  stripeSubscriptionId: input.stripeSubscriptionId,
+                  cancelledAt: input.cancelledAt.toISOString()
                 });
               }
               if (enqueueProvisioning) {

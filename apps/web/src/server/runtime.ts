@@ -36,7 +36,11 @@ import {
   XeroOAuthSessionProvider,
   type TokenCipher
 } from '@bc5000/integrations/xero';
-import { ensureRecurringSchedules, jobNames } from '@bc5000/jobs';
+import {
+  ensureRecurringSchedules,
+  jobNames,
+  subscriptionLifecycleSingletonKey
+} from '@bc5000/jobs';
 
 import {
   createOnboardingService,
@@ -348,8 +352,13 @@ export const getSubscriptionService = () => {
           await queue.enqueueUniqueInTransaction(
             transaction,
             jobNames.subscriptionLifecycle,
-            { organisationId: input.organisationId, status: input.status },
-            `${jobNames.subscriptionLifecycle}:${input.organisationId}:${input.status}:${input.eventId}`
+            {
+              organisationId: input.organisationId,
+              status: input.status,
+              stripeSubscriptionId: input.stripeSubscriptionId,
+              cancelledAt: input.cancelledAt
+            },
+            subscriptionLifecycleSingletonKey(input)
           );
         },
         enqueueNumberProvision: async (transaction, input) => {

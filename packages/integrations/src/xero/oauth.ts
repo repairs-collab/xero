@@ -54,6 +54,7 @@ export interface XeroOAuthClientOptions {
   clientId: string;
   clientSecret: string;
   redirectUri: string;
+  disconnectTimeoutMilliseconds?: number;
 }
 
 interface RawTokenResponse {
@@ -107,7 +108,18 @@ const isConnection = (value: unknown): value is XeroOAuthConnection => {
 };
 
 export class XeroOAuthClient {
-  constructor(private readonly options: XeroOAuthClientOptions) {}
+  private readonly disconnectTimeoutMilliseconds: number;
+
+  constructor(private readonly options: XeroOAuthClientOptions) {
+    this.disconnectTimeoutMilliseconds =
+      options.disconnectTimeoutMilliseconds ?? 10_000;
+    if (
+      !Number.isSafeInteger(this.disconnectTimeoutMilliseconds) ||
+      this.disconnectTimeoutMilliseconds < 1
+    ) {
+      throw new Error('XERO_DISCONNECT_TIMEOUT_INVALID');
+    }
+  }
 
   createAuthorizationUrl(state: string): string {
     const url = new URL(AUTHORIZE_URL);
@@ -169,8 +181,10 @@ export class XeroOAuthClient {
       headers: {
         Authorization: `Bearer ${accessToken}`,
         Accept: 'application/json'
-      }
+      },
+      signal: AbortSignal.timeout(this.disconnectTimeoutMilliseconds)
     });
+    if (response.status === 404) return;
     this.assertSuccessful(response);
   }
 

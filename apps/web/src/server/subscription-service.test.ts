@@ -434,7 +434,12 @@ const createService = (
 ) => {
   const stripe = new FakeStripe();
   const repository = new FakeRepository();
-  const lifecycleJobs: Array<{ organisationId: string; status: string }> = [];
+  const lifecycleJobs: Array<{
+    organisationId: string;
+    status: string;
+    stripeSubscriptionId: string;
+    cancelledAt: string;
+  }> = [];
   const numberProvisionJobs: Array<{ organisationId: string }> = [];
   return {
     stripe,
@@ -452,7 +457,9 @@ const createService = (
       enqueueLifecycle: (_transaction, job) => {
         lifecycleJobs.push({
           organisationId: job.organisationId,
-          status: job.status
+          status: job.status,
+          stripeSubscriptionId: job.stripeSubscriptionId,
+          cancelledAt: job.cancelledAt
         });
         return Promise.resolve();
       },
@@ -1136,7 +1143,14 @@ describe('subscription webhooks', () => {
     }
     expect(lifecycleJobs).toEqual(
       expected === 'CANCELLED'
-        ? [{ organisationId: 'org_solo', status: 'CANCELLED' }]
+        ? [
+            {
+              organisationId: 'org_solo',
+              status: 'CANCELLED',
+              stripeSubscriptionId: 'sub_solo',
+              cancelledAt: '2026-11-09T05:20:00.000Z'
+            }
+          ]
         : []
     );
     expect(numberProvisionJobs).toEqual(
