@@ -13,14 +13,21 @@ import {
   invoices,
   migrateDatabase,
   operationalResetRuns,
+  organisationOnboarding,
   organisations,
   outboundMessages,
+  PostgresPlatformAdminRepository,
+  PostgresSmsCommerceRepository,
   providerConnections,
   reminderSequences,
   reminderSequenceVersions,
   rolloutReconciliations,
+  smsNumberPool,
   stageInstances,
-  users
+  subscriptions,
+  users,
+  xeroConnections,
+  xeroPendingAuthorisations
 } from '@bc5000/db';
 
 import {
@@ -32,6 +39,7 @@ import {
   LIVE_ACKNOWLEDGEMENT,
   RECONCILIATION_ACKNOWLEDGEMENT
 } from '../src/app/(protected)/settings/sending/sending-settings.js';
+import { createPostgresSoloProvisioningRepository } from '../src/server/solo-provisioning-service.js';
 
 const client = createDatabase(
   process.env.DATABASE_URL ??
@@ -112,10 +120,16 @@ async function seedCustomerRolloutReady() {
     }
   ]);
 
+  const imported = await seedImportedReceivables(seeded.organisationId);
+  const controlledSmsId = await recordTestSms(seeded, new Date(now.getTime() - 2 * 60 * 60_000));
+  return { ...seeded, ...imported, controlledSmsId };
+}
+
+async function seedImportedReceivables(organisationId: string) {
   const contactId = randomUUID();
   await client.db.insert(contacts).values({
     id: contactId,
-    organisationId: seeded.organisationId,
+    organisationId,
     xeroContactId: randomUUID(),
     name: 'Reconciliation customer',
     active: true
@@ -124,7 +138,7 @@ async function seedCustomerRolloutReady() {
   await client.db.insert(invoices).values([
     {
       id: audInvoiceId,
-      organisationId: seeded.organisationId,
+      organisationId,
       xeroInvoiceId: randomUUID(),
       contactId,
       invoiceNumber: `AUD-${randomUUID()}`,
@@ -137,7 +151,7 @@ async function seedCustomerRolloutReady() {
       syncVersion: 1
     },
     {
-      organisationId: seeded.organisationId,
+      organisationId,
       xeroInvoiceId: randomUUID(),
       contactId,
       invoiceNumber: `USD-${randomUUID()}`,
@@ -155,13 +169,13 @@ async function seedCustomerRolloutReady() {
   await client.db.insert(reminderSequences).values([
     {
       id: sequenceId,
-      organisationId: seeded.organisationId,
+      organisationId,
       name: `Review sequence ${randomUUID()}`,
       mode: 'REVIEW',
       enabled: true
     },
     {
-      organisationId: seeded.organisationId,
+      organisationId,
       name: `Disabled automatic ${randomUUID()}`,
       mode: 'AUTOMATIC',
       enabled: false
@@ -170,7 +184,7 @@ async function seedCustomerRolloutReady() {
   const [version] = await client.db
     .insert(reminderSequenceVersions)
     .values({
-      organisationId: seeded.organisationId,
+      organisationId,
       sequenceId,
       versionNumber: 1,
       status: 'ACTIVE'
@@ -180,7 +194,7 @@ async function seedCustomerRolloutReady() {
   const [chase] = await client.db
     .insert(invoiceChases)
     .values({
-      organisationId: seeded.organisationId,
+      organisationId,
       invoiceId: audInvoiceId,
       sequenceId,
       customerId: contactId,
@@ -191,7 +205,7 @@ async function seedCustomerRolloutReady() {
   const [stage] = await client.db
     .insert(stageInstances)
     .values({
-      organisationId: seeded.organisationId,
+      organisationId,
       invoiceChaseId: chase.id,
       sequenceVersionId: version.id,
       stageKey: 'due',
@@ -203,13 +217,20 @@ async function seedCustomerRolloutReady() {
     .returning({ id: stageInstances.id });
   if (!stage) throw new Error('TEST_STAGE_NOT_CREATED');
   await client.db.insert(approvals).values({
-    organisationId: seeded.organisationId,
+    organisationId,
     stageInstanceId: stage.id,
     renderedPreview: 'Not exposed in readiness or audit output',
     sourceVersion: 1,
     status: 'PENDING',
     expiresAt: new Date(now.getTime() + 60 * 60_000)
   });
+  return { contactId, sequenceId };
+}
+
+async function recordTestSms(
+  seeded: { organisationId: string; userId: string },
+  sentAt: Date
+) {
   const [controlledSms] = await client.db
     .insert(outboundMessages)
     .values({
@@ -221,18 +242,18 @@ async function seedCustomerRolloutReady() {
       content: 'Private test content',
       status: 'ACCEPTED',
       idempotencyKey: randomUUID(),
-      completedAt: new Date(now.getTime() - 2 * 60 * 60_000),
-      createdAt: new Date(now.getTime() - 2 * 60 * 60_000),
-      updatedAt: new Date(now.getTime() - 2 * 60 * 60_000)
+      completedAt: sentAt,
+      createdAt: sentAt,
+      updatedAt: sentAt
     })
     .returning({ id: outboundMessages.id });
   if (!controlledSms) throw new Error('TEST_SMS_NOT_CREATED');
 
-  return { ...seeded, contactId, sequenceId, controlledSmsId: controlledSms.id };
+  return controlledSms.id;
 }
 
 async function reconcile(
-  seeded: Awaited<ReturnType<typeof seedCustomerRolloutReady>>
+  seeded: { organisationId: string; session(role: 'ADMIN'): AppSession }
 ) {
   const service = createSendingSettings({
     database: client.db,
@@ -254,11 +275,334 @@ async function reconcile(
   return service;
 }
 
+const soloConnectedAt = new Date(now.getTime() - 3 * 24 * 60 * 60_000);
+const soloNumberReadyAt = new Date(now.getTime() - 2 * 24 * 60 * 60_000);
+const soloOnboardingCompletedAt = new Date(now.getTime() - 10 * 60_000);
+const dedicatedTestAt = new Date(now.getTime() - 60_000);
+const tokenEnvelope = {
+  version: 1,
+  keyId: 'integration-test',
+  iv: Buffer.alloc(12).toString('base64'),
+  ciphertext: Buffer.from('encrypted-refresh-token').toString('base64'),
+  tag: Buffer.alloc(16).toString('base64')
+};
+
+async function seedOwnerCreatedSolo() {
+  const owner = await seedBasic();
+  const connectionId = randomUUID();
+  const tenantId = randomUUID();
+  const [pending] = await client.db
+    .insert(xeroPendingAuthorisations)
+    .values({
+      userId: owner.userId,
+      flowPurpose: 'NEW_SOLO',
+      encryptedRefreshToken: tokenEnvelope,
+      candidateTenants: [{
+        connectionId,
+        tenantId,
+        tenantName: 'Solo workspace',
+        tenantType: 'ORGANISATION',
+        xeroOrganisationId: randomUUID(),
+        organisationName: 'Solo workspace',
+        baseCurrency: 'AUD',
+        timeZone: 'Australia/Sydney'
+      }],
+      grantedScopes: ['offline_access', 'accounting.invoices'],
+      expiresAt: now
+    })
+    .returning({ id: xeroPendingAuthorisations.id });
+  if (!pending) throw new Error('TEST_XERO_AUTHORISATION_NOT_CREATED');
+  const { organisationId } = await createPostgresSoloProvisioningRepository(client.db)
+    .provision({
+      userId: owner.userId,
+      pendingAuthorisationId: pending.id,
+      connectionId,
+      tenantId,
+      now: soloConnectedAt
+    });
+  const session = (): AppSession => ({
+    ...owner.session('ADMIN'),
+    memberships: [{ organisationId, role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }]
+  });
+  await client.db.update(organisations)
+    .set({
+      operationalState: 'RECONCILIATION_REQUIRED',
+      operationalStateVersion: 2,
+      recipientAllowlist: [controlledNumber],
+      lastSuccessfulSyncAt: syncCompletedAt
+    })
+    .where(eq(organisations.id, organisationId));
+
+  const numberSuffix = String(parseInt(randomUUID().slice(0, 8), 16))
+    .slice(-8).padStart(8, '0');
+  const [number] = await client.db.insert(smsNumberPool).values({
+    organisationId,
+    e164Number: '+614' + numberSuffix,
+    provider: 'SINCH',
+    status: 'RESERVED',
+    reservedAt: soloNumberReadyAt,
+    updatedAt: soloNumberReadyAt
+  }).returning({ id: smsNumberPool.id });
+  if (!number) throw new Error('TEST_REPLY_NUMBER_NOT_CREATED');
+  const result = await new PostgresPlatformAdminRepository(client.db).markSmsNumberReady({
+    organisationId,
+    numberId: number.id,
+    actorUserId: owner.userId,
+    providerNumberId: randomUUID(),
+    expectedStatus: 'RESERVED',
+    expectedUpdatedAt: soloNumberReadyAt,
+    reason: 'Verified test number',
+    now: soloNumberReadyAt
+  });
+  expect(result.ok).toBe(true);
+
+  await client.db.update(subscriptions)
+    .set({
+      status: 'ACTIVE',
+      stripeProviderStatus: 'active',
+      currentPeriodStart: new Date('2026-09-01T00:00:00.000Z'),
+      currentPeriodEnd: new Date('2026-10-01T00:00:00.000Z')
+    })
+    .where(eq(subscriptions.organisationId, organisationId));
+  await client.db.update(organisationOnboarding)
+    .set({
+      completedVersion: 1,
+      completedAt: soloOnboardingCompletedAt,
+      adminMobile: controlledNumber,
+      adminMobileVerifiedAt: soloNumberReadyAt
+    })
+    .where(eq(organisationOnboarding.organisationId, organisationId));
+
+  return { organisationId, userId: owner.userId, session, numberId: number.id };
+}
+
+async function recordDedicatedTestSms(
+  seeded: Awaited<ReturnType<typeof seedOwnerCreatedSolo>>,
+  sentAt: Date
+) {
+  const outboundMessageId = await recordTestSms(seeded, sentAt);
+  const smsCommerce = new PostgresSmsCommerceRepository(client.db);
+  expect(await smsCommerce.reserveUsage({
+    organisationId: seeded.organisationId,
+    outboundMessageId,
+    source: 'TEST_SMS',
+    partCount: 1,
+    now: sentAt
+  })).toMatchObject({ kind: 'reserved' });
+  await smsCommerce.commitUsage(seeded.organisationId, outboundMessageId, sentAt);
+  return outboundMessageId;
+}
+
+describe('owner-created Solo rollout', () => {
+  const sending = () => createSendingSettings({
+    database: client.db,
+    clock: { now: () => now }
+  });
+
+  const activate = (seeded: Awaited<ReturnType<typeof seedOwnerCreatedSolo>>) =>
+    sending().activateLive(seeded.session(), {
+      organisationId: seeded.organisationId,
+      acknowledgement: LIVE_ACKNOWLEDGEMENT,
+      expectedVersion: 2
+    });
+
+  const approve = (
+    seeded: Awaited<ReturnType<typeof seedOwnerCreatedSolo>>,
+    service = sending()
+  ) => service.activateCustomerRollout(seeded.session(), {
+    organisationId: seeded.organisationId,
+    acknowledgement: CUSTOMER_ROLLOUT_ACKNOWLEDGEMENT,
+    expectedVersion: 4
+  });
+
+  it('activates Controlled Live and Customer Live using only native evidence', async () => {
+    const seeded = await seedOwnerCreatedSolo();
+    await seedImportedReceivables(seeded.organisationId);
+    await expect(client.db.select().from(providerConnections)
+      .where(eq(providerConnections.organisationId, seeded.organisationId))).resolves.toEqual([]);
+
+    await activate(seeded);
+    const service = await reconcile(seeded);
+    const testId = await recordDedicatedTestSms(seeded, dedicatedTestAt);
+    await expect(getCustomerRolloutReadiness(client.db, {
+      organisationId: seeded.organisationId, now
+    })).resolves.toMatchObject({
+      readyForCustomerAcknowledgement: true,
+      gates: { controlledSmsEvidence: { evidence: { id: testId } } }
+    });
+    await approve(seeded, service);
+    const [organisation] = await client.db.select().from(organisations)
+      .where(eq(organisations.id, seeded.organisationId));
+    expect(organisation).toMatchObject({
+      edition: 'SOLO',
+      sendMode: 'live',
+      rolloutScope: 'CUSTOMER'
+    });
+  });
+
+  it.each([
+    ['disconnected', { status: 'DISCONNECTED', encryptedRefreshToken: null }],
+    ['owned by another workspace', { organisationId: 'other' }],
+    ['in need of reauthorisation', { status: 'REAUTH_REQUIRED' }]
+  ] as const)('refuses a Xero connection that is %s', async (_, change) => {
+    const seeded = await seedOwnerCreatedSolo();
+    const xeroChange = 'organisationId' in change
+      ? { organisationId: (await seedBasic()).organisationId }
+      : change;
+    await client.db.update(xeroConnections)
+      .set(xeroChange)
+      .where(eq(xeroConnections.organisationId, seeded.organisationId));
+
+    await expect(activate(seeded)).rejects.toThrow('PROVIDERS_UNHEALTHY');
+    const readiness = await getCustomerRolloutReadiness(client.db, {
+      organisationId: seeded.organisationId, now
+    });
+    expect(readiness.gates.providersHealthy.passed).toBe(false);
+  });
+
+  it.each([
+    ['no successful sync', null, soloConnectedAt, false],
+    ['sync before reconnect', syncCompletedAt, new Date(syncCompletedAt.getTime() + 1), false],
+    ['stale sync', new Date(now.getTime() - 15 * 60_000 - 1), soloConnectedAt, false],
+    ['future sync', new Date(now.getTime() + 1), soloConnectedAt, false],
+    ['sync exactly 15 minutes old and as recent as connection', new Date(now.getTime() - 15 * 60_000), new Date(now.getTime() - 15 * 60_000), true]
+  ] as const)('checks Xero freshness with %s', async (_, syncAt, connectedAt, expected) => {
+    const seeded = await seedOwnerCreatedSolo();
+    await client.db.update(xeroConnections)
+      .set({ connectedAt, lastRefreshedAt: now })
+      .where(eq(xeroConnections.organisationId, seeded.organisationId));
+    await client.db.update(organisations)
+      .set({ lastSuccessfulSyncAt: syncAt })
+      .where(eq(organisations.id, seeded.organisationId));
+
+    const readiness = await getCustomerRolloutReadiness(client.db, {
+      organisationId: seeded.organisationId, now
+    });
+    expect(readiness.gates.syncFresh.passed).toBe(expected);
+    if (expected) await expect(activate(seeded)).resolves.toBeUndefined();
+    else await expect(activate(seeded)).rejects.toThrow('XERO_SYNC_STALE');
+  });
+
+  it.each([
+    ['missing', { organisationId: null, status: 'AVAILABLE' }],
+    ['unverified', { providerVerifiedAt: null }],
+    ['quarantined', { status: 'QUARANTINED' }],
+    ['owned by another workspace', { organisationId: 'other' }],
+    ['missing ready time', { readyAt: null }],
+    ['missing provider ID', { providerNumberId: null, providerVerifiedAt: null }],
+    ['blank provider ID', { providerNumberId: '  ', provider: randomUUID().slice(0, 32) }],
+    ['blank provider name', { provider: '' }]
+  ] as const)('refuses a reply number that is %s', async (_, change) => {
+    const seeded = await seedOwnerCreatedSolo();
+    const numberChange = 'organisationId' in change && change.organisationId === 'other'
+      ? { organisationId: (await seedBasic()).organisationId }
+      : change;
+    await client.db.update(smsNumberPool)
+      .set(numberChange)
+      .where(eq(smsNumberPool.id, seeded.numberId));
+
+    await expect(activate(seeded)).rejects.toThrow('PROVIDERS_UNHEALTHY');
+    const readiness = await getCustomerRolloutReadiness(client.db, {
+      organisationId: seeded.organisationId, now
+    });
+    expect(readiness.gates.providersHealthy.passed).toBe(false);
+  });
+
+  it('requires a dedicated-number test after onboarding and retains the seven-day window', async () => {
+    const seeded = await seedOwnerCreatedSolo();
+    await seedImportedReceivables(seeded.organisationId);
+    await activate(seeded);
+    const service = await reconcile(seeded);
+    await recordTestSms(seeded, new Date(soloOnboardingCompletedAt.getTime() - 1));
+    await recordTestSms(seeded, dedicatedTestAt);
+    const before = await getCustomerRolloutReadiness(client.db, {
+      organisationId: seeded.organisationId, now
+    });
+    expect(before.gates.controlledSmsEvidence.passed).toBe(false);
+    await expect(approve(seeded, service)).rejects.toThrow(
+      'CUSTOMER_ROLLOUT_NOT_READY:controlledSmsEvidence'
+    );
+
+    const testId = await recordDedicatedTestSms(seeded, dedicatedTestAt);
+    const cutoff = dedicatedTestAt.getTime() + 7 * 24 * 60 * 60_000;
+    for (const [offset, expected] of [[0, true], [1, false]] as const) {
+      const readiness = await getCustomerRolloutReadiness(client.db, {
+        organisationId: seeded.organisationId, now: new Date(cutoff + offset)
+      });
+      expect(readiness.gates.controlledSmsEvidence).toEqual(expected
+        ? { passed: true, evidence: { id: testId, status: 'ACCEPTED', timestamp: dedicatedTestAt } }
+        : { passed: false, evidence: null });
+    }
+  });
+
+  it('keeps Customer Live gated on paid entitlement even with all native evidence', async () => {
+    const seeded = await seedOwnerCreatedSolo();
+    await seedImportedReceivables(seeded.organisationId);
+    await activate(seeded);
+    const service = await reconcile(seeded);
+    await recordDedicatedTestSms(seeded, dedicatedTestAt);
+    await client.db.update(subscriptions).set({ status: 'PAST_DUE' })
+      .where(eq(subscriptions.organisationId, seeded.organisationId));
+
+    await expect(approve(seeded, service)).rejects.toThrow('PAYMENT_PAST_DUE');
+  });
+
+  it('rechecks the connection after a concurrent reconnect takes the organisation lock', async () => {
+    const seeded = await seedOwnerCreatedSolo();
+    await seedImportedReceivables(seeded.organisationId);
+    await activate(seeded);
+    const service = await reconcile(seeded);
+    await recordDedicatedTestSms(seeded, dedicatedTestAt);
+
+    const connectionLocked = deferred();
+    const finishReconnect = deferred();
+    const reconnect = client.db.transaction(async (transaction) => {
+      await transaction.update(xeroConnections).set({ connectedAt: now })
+        .where(eq(xeroConnections.organisationId, seeded.organisationId));
+      connectionLocked.resolve();
+      await finishReconnect.promise;
+      await transaction.update(organisations).set({ updatedAt: now })
+        .where(eq(organisations.id, seeded.organisationId));
+    });
+    await connectionLocked.promise;
+    const outcome = approve(seeded, service).then(
+      () => null,
+      (error: unknown) => error
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    finishReconnect.resolve();
+    await reconnect;
+    expect(await outcome).toMatchObject({
+      message: 'CUSTOMER_ROLLOUT_NOT_READY:syncFresh'
+    });
+  });
+
+  it('rechecks number revocation at final approval and forbids a Solo override', async () => {
+    const seeded = await seedOwnerCreatedSolo();
+    await seedImportedReceivables(seeded.organisationId);
+    await activate(seeded);
+    const service = await reconcile(seeded);
+    await recordDedicatedTestSms(seeded, dedicatedTestAt);
+    await client.db.update(smsNumberPool).set({ status: 'QUARANTINED' })
+      .where(eq(smsNumberPool.id, seeded.numberId));
+
+    await expect(approve(seeded, service)).rejects.toThrow(
+      'CUSTOMER_ROLLOUT_NOT_READY:providersHealthy'
+    );
+    await expect(service.overrideCustomerRollout(seeded.session(), {
+      organisationId: seeded.organisationId,
+      acknowledgement: CUSTOMER_ROLLOUT_OVERRIDE_ACKNOWLEDGEMENT,
+      reason: 'Check the Solo gate',
+      expectedVersion: 4
+    })).rejects.toThrow('FORBIDDEN');
+  });
+});
+
 describe('global sending safeguards', () => {
   it('explains controlled-live refusals without exposing internal errors', () => {
     expect(liveActivationFeedback('PROVIDERS_UNHEALTHY')).toMatchObject({
       tone: 'error',
-      title: 'Provider checks are out of date'
+      title: 'Connection checks are out of date'
     });
     expect(liveActivationFeedback('XERO_SYNC_STALE')).toMatchObject({
       tone: 'error',

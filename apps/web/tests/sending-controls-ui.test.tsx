@@ -39,13 +39,16 @@ const readiness: CustomerRolloutReadiness = {
     },
     providersHealthy: {
       passed: false,
-      evidence: [
-        {
-          id: 'xero-connection-id',
-          provider: 'XERO',
-          authenticatedAt: now
-        }
-      ]
+      evidence: {
+        edition: 'INTERNAL_LEGACY',
+        authentications: [
+          {
+            id: 'xero-connection-id',
+            provider: 'XERO',
+            authenticatedAt: now
+          }
+        ]
+      }
     },
     syncFresh: { passed: true, evidence: { timestamp: now } },
     importedDataPresent: {
@@ -104,6 +107,27 @@ describe('final rollout controls', () => {
     expect(html).not.toContain('+61400000001');
     expect(html).not.toContain('Private message content');
     expect(html).not.toMatch(/test xero email/i);
+  });
+
+  it('explains the dedicated reply-number requirements for Solo rollout', () => {
+    const html = renderToStaticMarkup(
+      createElement(RolloutGateList, {
+        readiness: {
+          ...readiness,
+          gates: {
+            ...readiness.gates,
+            providersHealthy: {
+              passed: false,
+              evidence: { edition: 'SOLO', xeroConnectedAt: now, replyNumberReadyAt: null }
+            },
+            controlledSmsEvidence: { passed: false, evidence: null }
+          }
+        }
+      })
+    );
+    expect(html).toContain('Xero is connected and your reply number is ready');
+    expect(html).toContain('After completing onboarding, send a Test SMS from your dedicated reply number');
+    expect(html).not.toContain('Sinch');
   });
 
   it('renders reconciliation counts and currency totals without customer PII', () => {
