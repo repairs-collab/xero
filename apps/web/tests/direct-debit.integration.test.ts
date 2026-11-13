@@ -465,6 +465,259 @@ describe('request-only direct debit persistence', () => {
     }
   }, 15_000);
 
+  it('keeps migrated card evidence only when Checkout identity matches the current subscription episode', async () => {
+    const connection = await client.pool.connect();
+    const schemaName = `card_episode_forward_${randomUUID().replaceAll('-', '_')}`;
+    const crossEpisodeOrganisationId = randomUUID();
+    const validEpisodeOrganisationId = randomUUID();
+    const crossEpisodeUserId = randomUUID();
+    const validEpisodeUserId = randomUUID();
+    const paidAt = new Date('2026-11-09T10:00:00.000Z');
+    const periodEnd = new Date('2026-12-09T10:00:00.000Z');
+    try {
+      await connection.query(`create schema "${schemaName}"`);
+      await connection.query(`set search_path to "${schemaName}"`);
+      await connection.query(`
+        create table organisations (id uuid primary key);
+        create table users (
+          id uuid primary key,
+          email text not null,
+          disabled_at timestamp with time zone
+        );
+        create table memberships (
+          organisation_id uuid not null,
+          user_id uuid not null,
+          role varchar(16) not null,
+          disabled_at timestamp with time zone,
+          primary key (organisation_id, user_id)
+        );
+        create table audit_events (
+          id uuid default gen_random_uuid() primary key,
+          organisation_id uuid not null,
+          actor_user_id uuid,
+          event_type varchar(64) not null,
+          entity_type varchar(64) not null,
+          entity_id text not null,
+          correlation_id text,
+          before_value jsonb,
+          after_value jsonb,
+          occurred_at timestamp with time zone not null default now()
+        );
+      `);
+      const applyMigration = async (name: string) => {
+        const migration = await readFile(
+          new URL(`../../../packages/db/drizzle/${name}.sql`, import.meta.url),
+          'utf8'
+        );
+        for (const statement of migration.split('--> statement-breakpoint')) {
+          await connection.query(
+            statement.replaceAll('"public".', `"${schemaName}".`)
+          );
+        }
+      };
+      await applyMigration('0014_accountpulse_solo_commerce');
+      await applyMigration('0023_reconcile_ambiguous_cancellations');
+      await applyMigration('0024_lyrical_may_parker');
+      await applyMigration('0035_same_azazel');
+
+      await connection.query(
+        `insert into organisations (id, edition)
+         values ($1, 'SOLO'), ($2, 'SOLO')`,
+        [crossEpisodeOrganisationId, validEpisodeOrganisationId]
+      );
+      await connection.query(
+        `insert into users (id, email)
+         values ($1, $3), ($2, $4)`,
+        [
+          crossEpisodeUserId,
+          validEpisodeUserId,
+          `${crossEpisodeUserId}@example.invalid`,
+          `${validEpisodeUserId}@example.invalid`
+        ]
+      );
+      await connection.query(
+        `insert into memberships (organisation_id, user_id, role)
+         values ($1, $2, 'ADMIN'), ($3, $4, 'ADMIN')`,
+        [
+          crossEpisodeOrganisationId,
+          crossEpisodeUserId,
+          validEpisodeOrganisationId,
+          validEpisodeUserId
+        ]
+      );
+      await connection.query(
+        `insert into subscriptions (
+           organisation_id, plan_code, status, stripe_provider_status,
+           trusted_stripe_provider_status, stripe_customer_id,
+           stripe_subscription_id, current_period_start, current_period_end,
+           initial_card_invoice_id, initial_card_payment_succeeded_at
+         ) values
+           ($1, 'SOLO_AU_2000', 'ACTIVE', 'active', 'active',
+            'cus_cross_episode', 'sub_cross_current', $3, $4,
+            'in_cross_old', $3),
+           ($2, 'SOLO_AU_2000', 'ACTIVE', 'active', 'active',
+            'cus_valid_episode', 'sub_valid_current', $3, $4,
+            'in_valid_current', $3)`,
+        [
+          crossEpisodeOrganisationId,
+          validEpisodeOrganisationId,
+          paidAt,
+          periodEnd
+        ]
+      );
+      await connection.query(
+        `insert into subscription_events (
+           organisation_id, stripe_event_id, event_type,
+           stripe_event_created_at, payload_hash, outcome
+         ) values
+           ($1, 'evt_cross_old', 'checkout.session.completed', $3,
+            repeat('a', 64), 'APPLIED'),
+           ($2, 'evt_valid_current', 'checkout.session.completed', $3,
+            repeat('b', 64), 'APPLIED')`,
+        [crossEpisodeOrganisationId, validEpisodeOrganisationId, paidAt]
+      );
+
+      await applyMigration('0037_watery_tombstone');
+      await applyMigration('0038_flawless_talon');
+      await applyMigration('0039_amused_stranger');
+      await connection.query(
+        `insert into solo_checkout_attempts (
+           id, organisation_id, requested_stripe_customer_id,
+           billing_cadence, initiating_user_id, price_id,
+           automatic_tax_enabled, public_origin, request_fingerprint,
+           expires_at, stripe_session_id, stripe_session_status,
+           stripe_customer_id, stripe_subscription_id, created_at, updated_at
+         ) values
+           ($1, $2, 'cus_cross_episode', 'MONTHLY', $3, 'price_monthly',
+            true, 'https://ap.motts.com.au', repeat('c', 64), $8,
+            'cs_cross_old', 'complete', 'cus_cross_episode', 'sub_cross_old',
+            $7, $7),
+           ($4, $5, 'cus_valid_episode', 'MONTHLY', $6, 'price_monthly',
+            true, 'https://ap.motts.com.au', repeat('d', 64), $8,
+            'cs_valid_current', 'complete', 'cus_valid_episode',
+            'sub_valid_current', $7, $7)`,
+        [
+          randomUUID(),
+          crossEpisodeOrganisationId,
+          crossEpisodeUserId,
+          randomUUID(),
+          validEpisodeOrganisationId,
+          validEpisodeUserId,
+          paidAt,
+          periodEnd
+        ]
+      );
+
+      const migrations = await readdir(
+        new URL('../../../packages/db/drizzle/', import.meta.url)
+      );
+      const reconciliationMigration = migrations.find((name) =>
+        /^0040_.*\.sql$/.test(name)
+      );
+      const episodeEvidenceMigration = migrations.find((name) =>
+        /^0042_.*\.sql$/.test(name)
+      );
+      expect(reconciliationMigration).toBeDefined();
+      expect(episodeEvidenceMigration).toBeDefined();
+      await applyMigration(reconciliationMigration!.replace(/\.sql$/, ''));
+      await applyMigration(episodeEvidenceMigration!.replace(/\.sql$/, ''));
+
+      const evidence = await connection.query<{
+        organisation_id: string;
+        initial_card_stripe_subscription_id: string | null;
+        initial_card_invoice_id: string | null;
+        legacy_initial_card_stripe_subscription_id: string | null;
+        legacy_initial_card_invoice_id: string | null;
+      }>(
+        `select organisation_id, initial_card_stripe_subscription_id,
+                initial_card_invoice_id,
+                legacy_initial_card_stripe_subscription_id,
+                legacy_initial_card_invoice_id
+           from subscriptions
+          order by organisation_id`
+      );
+      expect(
+        evidence.rows.find(
+          (row) => row.organisation_id === crossEpisodeOrganisationId
+        )
+      ).toMatchObject({
+        initial_card_stripe_subscription_id: null,
+        initial_card_invoice_id: null,
+        legacy_initial_card_stripe_subscription_id: 'sub_cross_current',
+        legacy_initial_card_invoice_id: 'in_cross_old'
+      });
+      expect(
+        evidence.rows.find(
+          (row) => row.organisation_id === validEpisodeOrganisationId
+        )
+      ).toMatchObject({
+        initial_card_stripe_subscription_id: 'sub_valid_current',
+        initial_card_invoice_id: 'in_valid_current',
+        legacy_initial_card_stripe_subscription_id: null,
+        legacy_initial_card_invoice_id: null
+      });
+      const quarantineAudit = await connection.query<{
+        before_value: {
+          stripeCustomerId: string;
+          stripeSubscriptionId: string;
+          invoiceId: string;
+        };
+        after_value: {
+          reason: string;
+          eligibleForDirectDebit: boolean;
+        };
+      }>(
+        `select before_value, after_value
+           from audit_events
+          where organisation_id = $1
+            and event_type = 'INITIAL_CARD_EVIDENCE_QUARANTINED'
+            and correlation_id = 'migration:0042'`,
+        [crossEpisodeOrganisationId]
+      );
+      expect(quarantineAudit.rows).toEqual([
+        {
+          before_value: {
+            stripeCustomerId: 'cus_cross_episode',
+            stripeSubscriptionId: 'sub_cross_current',
+            invoiceId: 'in_cross_old',
+            paymentSucceededAt: '2026-11-09T10:00:00+00:00'
+          },
+          after_value: {
+            reason: 'CHECKOUT_EPISODE_IDENTITY_NOT_PROVEN',
+            eligibleForDirectDebit: false
+          }
+        }
+      ]);
+
+      const scopedDatabase = drizzle(connection, { schema: databaseSchema });
+      const repository = createPostgresSubscriptionRepository(scopedDatabase, {
+        now: () => now
+      });
+      await expect(
+        repository.requestDirectDebit({
+          organisationId: crossEpisodeOrganisationId,
+          requestedByUserId: crossEpisodeUserId,
+          requestedAt: now
+        })
+      ).rejects.toThrow('DIRECT_DEBIT_CARD_PAYMENT_REQUIRED');
+      await expect(
+        repository.requestDirectDebit({
+          organisationId: validEpisodeOrganisationId,
+          requestedByUserId: validEpisodeUserId,
+          requestedAt: now
+        })
+      ).resolves.toMatchObject({
+        organisationId: validEpisodeOrganisationId,
+        stripeSubscriptionId: 'sub_valid_current',
+        status: 'REQUESTED'
+      });
+    } finally {
+      await connection.query('set search_path to public');
+      await connection.query(`drop schema if exists "${schemaName}" cascade`);
+      connection.release();
+    }
+  }, 15_000);
+
   it('requires a positive paid card Checkout before allowing an idempotent request', async () => {
     const seeded = await seed();
     const repository = createPostgresSubscriptionRepository(client.db, {

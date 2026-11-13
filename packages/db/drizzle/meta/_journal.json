@@ -295,6 +295,13 @@
       "when": 1794538082752,
       "tag": "0041_careless_nemesis",
       "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1794538718408,
+      "tag": "0042_first-card-episode-evidence",
+      "breakpoints": true
     }
   ]
 }

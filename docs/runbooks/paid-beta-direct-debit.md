@@ -18,6 +18,15 @@ subscription default, the customer's invoice default or source fallback,
 historical subscription episodes, open invoices, and scheduled invoice retry
 state.
 
+Initial-card evidence is eligible only when AccountPulse has a validated paid
+Checkout attempt whose Session, Stripe customer and Stripe subscription all
+match the current billing episode. Migration `0042` moves evidence that cannot
+meet that identity test out of current eligibility, preserves the opaque values
+in legacy storage and the audit log, and blocks direct-debit requests. Do not
+copy the legacy values back or override this check. The customer must complete
+a fresh AccountPulse card Checkout for the current subscription episode before
+requesting direct debit.
+
 ## Read-only database preflight
 
 Run this query against the production database before admitting a paid beta
@@ -83,5 +92,8 @@ Record the following in the beta release evidence:
 - the Owner audit event IDs for every affected request;
 - confirmation that customer request/setup/activation remained blocked until
   all records for that organisation were resolved;
+- confirmation that any current initial-card evidence is backed by the matching
+  `solo_checkout_attempts` Session/customer/subscription episode, or that the
+  customer completed a fresh card Checkout after quarantine;
 - confirmation that no provider call or payment-method mutation was performed
   by the migration or rollback scripts.
