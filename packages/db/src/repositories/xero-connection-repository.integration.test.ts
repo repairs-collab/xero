@@ -273,13 +273,15 @@ describe('PostgresXeroConnectionRepository', () => {
     await expect(reconnect).resolves.toMatchObject({ status: 'CONNECTED' });
   });
 
-  it('invalidates a prior Solo sync on finalising a reconnect at the same timestamp', async () => {
+  it.each(['SOLO', 'INTERNAL_LEGACY'] as const)(
+    'invalidates prior %s OAuth sync evidence on finalising a reconnect at the same timestamp',
+    async (edition) => {
     const userId = await seedUser('Reconnect owner');
-    const organisationId = await seedOrganisation('Reconnect Solo workspace');
+    const organisationId = await seedOrganisation(`Reconnect ${edition} workspace`);
     const startedAt = new Date('2026-11-09T02:00:00.000Z');
     const syncAt = new Date(startedAt.getTime() + 5000);
     await firstClient.db.update(organisations).set({
-      edition: 'SOLO'
+      edition
     }).where(eq(organisations.id, organisationId));
     const candidate = {
       connectionId: randomUUID(),
@@ -333,7 +335,8 @@ describe('PostgresXeroConnectionRepository', () => {
       lastSuccessfulXeroConnectionId: null,
       latestReconciledSyncAt: null
     });
-  });
+    }
+  );
 
   it('finds, marks, disconnects and reconnects without decrypting token material', async () => {
     const organisationId = await seedOrganisation('Connection lifecycle');

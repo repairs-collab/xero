@@ -127,7 +127,7 @@ async function lockOrganisationForConnectionChange(
     .for('no key update');
 }
 
-async function clearSoloSyncEvidence(
+async function clearOAuthSyncEvidence(
   transaction: DbTransaction,
   organisationId: string
 ): Promise<void> {
@@ -140,7 +140,7 @@ async function clearSoloSyncEvidence(
       lastSuccessfulXeroConnectionId: null,
       latestReconciledSyncAt: null
     })
-    .where(and(eq(organisations.id, organisationId), eq(organisations.edition, 'SOLO')));
+    .where(eq(organisations.id, organisationId));
 }
 
 export class PostgresXeroConnectionRepository {
@@ -320,7 +320,7 @@ export class PostgresXeroConnectionRepository {
         connection = updated;
       }
 
-      await clearSoloSyncEvidence(transaction, input.organisationId);
+      await clearOAuthSyncEvidence(transaction, input.organisationId);
       await transaction
         .delete(xeroPendingAuthorisations)
         .where(eq(xeroPendingAuthorisations.id, pending.id));
@@ -379,7 +379,7 @@ export class PostgresXeroConnectionRepository {
           })
           .returning();
         if (inserted === undefined) throw new Error('XERO_CONNECTION_CREATE_FAILED');
-        await clearSoloSyncEvidence(transaction, input.organisationId);
+        await clearOAuthSyncEvidence(transaction, input.organisationId);
         return inserted;
       }
       if (
@@ -406,7 +406,7 @@ export class PostgresXeroConnectionRepository {
         .where(eq(xeroConnections.id, existing.id))
         .returning();
       if (updated === undefined) throw new Error('XERO_CONNECTION_UPDATE_FAILED');
-        await clearSoloSyncEvidence(transaction, input.organisationId);
+        await clearOAuthSyncEvidence(transaction, input.organisationId);
         return updated;
       });
     } catch (error) {

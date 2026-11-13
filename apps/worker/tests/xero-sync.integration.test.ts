@@ -262,13 +262,18 @@ const xeroInvoice = (
 
 describe('targeted Xero invoice refresh', () => {
   it.each([
-    ['initial', runInitialSync],
-    ['incremental', runIncrementalSync],
-    ['nightly', reconcileNightly]
-  ] as const)('prevents a pre-reconnect %s sync from overwriting newer imported data', async (_, sync) => {
+    ['SOLO', 'initial', runInitialSync],
+    ['SOLO', 'incremental', runIncrementalSync],
+    ['SOLO', 'nightly', reconcileNightly],
+    ['INTERNAL_LEGACY', 'initial', runInitialSync],
+    ['INTERNAL_LEGACY', 'incremental', runIncrementalSync],
+    ['INTERNAL_LEGACY', 'nightly', reconcileNightly]
+  ] as const)(
+    'prevents a pre-reconnect $edition $label sync from overwriting newer imported data',
+    async (edition, _, sync) => {
     const organisationId = await seedOrganisation();
     await database.db.update(organisations)
-      .set({ edition: 'SOLO', operationalState: 'SYNC_REQUIRED' })
+      .set({ edition, operationalState: 'SYNC_REQUIRED' })
       .where(eq(organisations.id, organisationId));
     const connections = new PostgresXeroConnectionRepository(database.db);
     const connection = {
@@ -345,6 +350,158 @@ describe('targeted Xero invoice refresh', () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
     );
     expect(successfulGeneration?.xeroConnectionId).toBe(currentConnection?.id);
+    }
+  );
+
+  it('prevents a pre-reconnect targeted OAuth refresh from overwriting newer imported data', async () => {
+    const seeded = await seedApprovedReminder();
+    const connections = new PostgresXeroConnectionRepository(database.db);
+    const connection = {
+      organisationId: seeded.organisationId,
+      connectionId: randomUUID(),
+      tenantId: randomUUID(),
+      encryptedRefreshToken: {
+        version: 1,
+        keyId: 'test',
+        iv: 'iv',
+        ciphertext: 'ciphertext',
+        tag: 'tag'
+      },
+      grantedScopes: ['offline_access', 'accounting.invoices']
+    };
+    await connections.upsertConnection({
+      ...connection,
+      now: new Date('2026-09-18T01:00:00.000Z')
+    });
+    const staleXero = new FakeXeroSyncClient();
+    const currentXero = new FakeXeroSyncClient();
+    staleXero.invoices.set(
+      seeded.xeroInvoiceId,
+      xeroInvoice(seeded.xeroInvoiceId, seeded.xeroContactId, {
+        amountDue: '80.00'
+      })
+    );
+    staleXero.contacts.set(seeded.xeroContactId, {
+      ...xeroContact(seeded.xeroContactId),
+      name: 'Stale customer name'
+    });
+    currentXero.invoices.set(
+      seeded.xeroInvoiceId,
+      xeroInvoice(seeded.xeroInvoiceId, seeded.xeroContactId, {
+        amountDue: '220.00',
+        updatedAt: '2026-09-18T01:59:30Z'
+      })
+    );
+    currentXero.contacts.set(seeded.xeroContactId, {
+      ...xeroContact(seeded.xeroContactId),
+      name: 'Current customer name'
+    });
+    const remoteStarted = deferred();
+    const finishRemote = deferred();
+    const originalGetInvoice = staleXero.getInvoice.bind(staleXero);
+    staleXero.getInvoice = async (invoiceId: string) => {
+      remoteStarted.resolve();
+      await finishRemote.promise;
+      return originalGetInvoice(invoiceId);
+    };
+    const payload = {
+      organisationId: seeded.organisationId,
+      invoiceId: seeded.xeroInvoiceId
+    };
+    const staleOutcome = runInvoiceRefresh(
+      { database: database.db, xero: staleXero, clock: fixedClock },
+      payload
+    ).then(() => null, (error: unknown) => error);
+    await remoteStarted.promise;
+    await connections.upsertConnection({
+      ...connection,
+      now: new Date('2026-09-18T01:59:00.000Z')
+    });
+    await runInvoiceRefresh(
+      { database: database.db, xero: currentXero, clock: fixedClock },
+      payload
+    );
+    finishRemote.resolve();
+
+    expect(await staleOutcome).toMatchObject({
+      message: 'XERO_SYNC_CONNECTION_CHANGED'
+    });
+    const [storedInvoice] = await database.db.select().from(invoices)
+      .where(eq(invoices.id, seeded.invoiceId));
+    const [storedContact] = await database.db.select().from(contacts)
+      .where(eq(contacts.id, seeded.contactId));
+    expect(storedInvoice).toMatchObject({ amountDue: '220.0000' });
+    expect(storedContact).toMatchObject({ name: 'Current customer name' });
+  });
+
+  it('applies a targeted OAuth refresh while its captured connection generation remains current', async () => {
+    const seeded = await seedApprovedReminder();
+    const connections = new PostgresXeroConnectionRepository(database.db);
+    const currentConnection = await connections.upsertConnection({
+      organisationId: seeded.organisationId,
+      connectionId: randomUUID(),
+      tenantId: randomUUID(),
+      encryptedRefreshToken: {
+        version: 1,
+        keyId: 'test',
+        iv: 'iv',
+        ciphertext: 'ciphertext',
+        tag: 'tag'
+      },
+      grantedScopes: ['offline_access', 'accounting.invoices'],
+      now: new Date('2026-09-18T01:00:00.000Z')
+    });
+    const xero = new FakeXeroSyncClient();
+    xero.invoices.set(
+      seeded.xeroInvoiceId,
+      xeroInvoice(seeded.xeroInvoiceId, seeded.xeroContactId, {
+        amountDue: '95.00'
+      })
+    );
+    xero.contacts.set(seeded.xeroContactId, {
+      ...xeroContact(seeded.xeroContactId),
+      name: 'Same-generation customer name'
+    });
+
+    await runInvoiceRefresh(
+      { database: database.db, xero, clock: fixedClock },
+      {
+        organisationId: seeded.organisationId,
+        invoiceId: seeded.xeroInvoiceId
+      }
+    );
+
+    const [storedInvoice] = await database.db.select().from(invoices)
+      .where(eq(invoices.id, seeded.invoiceId));
+    const [storedContact] = await database.db.select().from(contacts)
+      .where(eq(contacts.id, seeded.contactId));
+    const storedGeneration = await connections.findByOrganisationId(
+      seeded.organisationId
+    );
+    expect(storedInvoice).toMatchObject({ amountDue: '95.0000' });
+    expect(storedContact).toMatchObject({ name: 'Same-generation customer name' });
+    expect(storedGeneration?.id).toBe(currentConnection.id);
+  });
+
+  it('keeps nonempty client-credentials sync working for legacy organisations without an OAuth row', async () => {
+    const organisationId = await seedOrganisation();
+    const xeroContactId = randomUUID();
+    const xeroInvoiceId = randomUUID();
+    const xero = new FakeXeroSyncClient();
+    xero.listedInvoices = [xeroInvoice(xeroInvoiceId, xeroContactId)];
+    xero.contacts.set(xeroContactId, xeroContact(xeroContactId));
+
+    await runInitialSync(
+      { database: database.db, xero, clock: fixedClock },
+      { organisationId }
+    );
+
+    const [storedInvoice] = await database.db.select().from(invoices)
+      .where(eq(invoices.xeroInvoiceId, xeroInvoiceId));
+    const [storedOrganisation] = await database.db.select().from(organisations)
+      .where(eq(organisations.id, organisationId));
+    expect(storedInvoice).toMatchObject({ amountDue: '80.0000' });
+    expect(storedOrganisation?.lastSuccessfulXeroConnectionId).toBeNull();
   });
 
   it('upserts changed invoices and invalidates stale approvals', async () => {

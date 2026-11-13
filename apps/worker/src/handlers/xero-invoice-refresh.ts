@@ -58,29 +58,34 @@ const assertXeroSyncAllowed = async (
 export type XeroSyncJobDependencies = Pick<XeroSyncDependencies, 'database' | 'clock'> &
   ({ xero: XeroSyncClient } | { loadXero(): Promise<XeroSyncClient> });
 
-type XeroSyncConnection = Pick<typeof xeroConnections.$inferSelect, 'id'>;
+type XeroSyncConnection = Pick<
+  typeof xeroConnections.$inferSelect,
+  'id' | 'status'
+>;
 
 export async function startXeroSync(
   dependencies: XeroSyncJobDependencies,
   organisationId: string
 ): Promise<{ sync: XeroSyncDependencies; connection: XeroSyncConnection | null }> {
   const organisation = await assertXeroSyncAllowed(dependencies, organisationId);
-  let connection: XeroSyncConnection | null = null;
-  if (organisation.edition === 'SOLO') {
-    const [current] = await dependencies.database
-      .select({ id: xeroConnections.id })
-      .from(xeroConnections)
-      .where(and(
-        eq(xeroConnections.organisationId, organisationId),
-        eq(xeroConnections.status, 'CONNECTED')
-      ));
-    if (!current) throw new Error('XERO_CONNECTION_REQUIRED');
-    connection = current;
+  const [connection] = await dependencies.database
+    .select({ id: xeroConnections.id, status: xeroConnections.status })
+    .from(xeroConnections)
+    .where(eq(xeroConnections.organisationId, organisationId))
+    .limit(1);
+  if (
+    organisation.edition === 'SOLO' &&
+    connection?.status !== 'CONNECTED'
+  ) {
+    throw new Error('XERO_CONNECTION_REQUIRED');
   }
   // Resolve the client after capturing the generation, including the choice of
   // OAuth or legacy credentials. A reconnect from this point invalidates the job.
   const xero = 'xero' in dependencies ? dependencies.xero : await dependencies.loadXero();
-  return { sync: { database: dependencies.database, clock: dependencies.clock, xero }, connection };
+  return {
+    sync: { database: dependencies.database, clock: dependencies.clock, xero },
+    connection: connection ?? null
+  };
 }
 
 const money = (value: string): string => new Decimal(value).toFixed(4);
@@ -375,6 +380,7 @@ const applyInvoiceSnapshot = async (
 export async function synchroniseInvoiceSnapshot(
   dependencies: XeroSyncDependencies,
   organisationId: string,
+  connection: XeroSyncConnection | null,
   invoice: XeroInvoice,
   preloadedContact?: XeroContact
 ): Promise<void> {
@@ -384,9 +390,19 @@ export async function synchroniseInvoiceSnapshot(
   const now = dependencies.clock.now();
 
   await dependencies.database.transaction(async (transaction) => {
-    await new PostgresOrganisationSafetyRepository(
+    const organisation = await new PostgresOrganisationSafetyRepository(
       dependencies.database
-    ).assertOperationalMutationAllowed(transaction, organisationId);
+    ).assertOperationalMutationAllowed(
+      transaction,
+      organisationId,
+      'no key update'
+    );
+    await assertCurrentXeroGeneration(
+      transaction,
+      organisation,
+      organisationId,
+      connection
+    );
     await applyInvoiceSnapshot(
       transaction,
       dependencies,
@@ -411,6 +427,34 @@ const loadContactsForInvoices = async (
   );
 };
 
+const assertCurrentXeroGeneration = async (
+  transaction: DbTransaction,
+  organisation: typeof organisations.$inferSelect,
+  organisationId: string,
+  connection: XeroSyncConnection | null
+): Promise<void> => {
+  const [current] = await transaction
+    .select({ id: xeroConnections.id, status: xeroConnections.status })
+    .from(xeroConnections)
+    .where(eq(xeroConnections.organisationId, organisationId))
+    .for('share', { noWait: true })
+    .limit(1);
+
+  if (connection === null) {
+    if (organisation.edition === 'SOLO' || current !== undefined) {
+      throw new Error('XERO_SYNC_CONNECTION_CHANGED');
+    }
+    return;
+  }
+  if (
+    current?.id !== connection.id ||
+    current.status !== connection.status ||
+    (organisation.edition === 'SOLO' && current.status !== 'CONNECTED')
+  ) {
+    throw new Error('XERO_SYNC_CONNECTION_CHANGED');
+  }
+};
+
 export async function commitXeroSync(
   dependencies: XeroSyncDependencies,
   organisationId: string,
@@ -432,19 +476,12 @@ export async function commitXeroSync(
       organisationId,
       'no key update'
     );
-    if (organisation.edition === 'SOLO') {
-      if (!connection) throw new Error('XERO_SYNC_CONNECTION_CHANGED');
-      const [current] = await transaction
-        .select({ id: xeroConnections.id })
-        .from(xeroConnections)
-        .where(and(
-          eq(xeroConnections.organisationId, organisationId),
-          eq(xeroConnections.id, connection.id),
-          eq(xeroConnections.status, 'CONNECTED')
-        ))
-        .for('share', { noWait: true });
-      if (!current) throw new Error('XERO_SYNC_CONNECTION_CHANGED');
-    }
+    await assertCurrentXeroGeneration(
+      transaction,
+      organisation,
+      organisationId,
+      connection
+    );
 
     for (const invoice of invoiceSnapshots) {
       const contact = contactsById.get(invoice.contactId);
@@ -490,11 +527,15 @@ export async function runInvoiceRefresh(
   dependencies: XeroSyncDependencies,
   payload: XeroInvoiceRefreshJob
 ): Promise<void> {
-  await assertXeroSyncAllowed(dependencies, payload.organisationId);
-  const invoice = await dependencies.xero.getInvoice(payload.invoiceId);
-  await synchroniseInvoiceSnapshot(
+  const { sync, connection } = await startXeroSync(
     dependencies,
+    payload.organisationId
+  );
+  const invoice = await sync.xero.getInvoice(payload.invoiceId);
+  await synchroniseInvoiceSnapshot(
+    sync,
     payload.organisationId,
+    connection,
     invoice.data
   );
 }
