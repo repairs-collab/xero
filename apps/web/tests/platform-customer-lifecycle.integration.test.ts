@@ -69,7 +69,7 @@ describe('platform customer lifecycle', () => {
       adminDisplayName: 'Lifecycle Administrator',
       timeZone: 'Australia/Sydney',
       baseCurrency: 'AUD',
-      includedSmsParts: 2_000,
+      includedSmsParts: 1_000,
       warningPercent: 80,
       reason: 'Lifecycle integration test'
     });
@@ -122,9 +122,11 @@ describe('platform customer lifecycle', () => {
     });
     expect(onboarding).toMatchObject({ version: 1 });
     expect(allowance).toMatchObject({
-      includedParts: 2_000,
+      includedParts: 1_000,
       warningPercent: 80,
-      overageEnabled: false
+      overageEnabled: true,
+      overageCapCents: null,
+      overageCentsPerPart: 11
     });
   });
 

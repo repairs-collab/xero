@@ -190,6 +190,13 @@ describe('PostgresSmsCommerceRepository', () => {
 
   it('reserves and commits final rendered parts idempotently per tenant', async () => {
     const organisationId = await seedPaidOrganisation();
+    await client.db.insert(smsAllowanceSettings).values({
+      organisationId,
+      includedParts: 1_000,
+      warningPercent: 80,
+      overageEnabled: false,
+      overageCentsPerPart: 11
+    });
     await seedPoolNumber({ verified: true, createdAt: new Date(-Date.now()) });
     const number = await repository.reserveAvailableNumber(organisationId, now);
     await repository.markNumberReady(organisationId, number.id, now);
