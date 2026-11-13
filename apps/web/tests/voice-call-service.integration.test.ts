@@ -14,6 +14,7 @@ import {
   organisations,
   organisationVoiceSettings,
   reminderSequences,
+  subscriptions,
   users,
   voiceCallInvoices,
   voiceCallRequests
@@ -299,6 +300,72 @@ describe('voice call service', () => {
         idempotencyKey: `voice-page-${randomUUID()}`
       })
     ).rejects.toThrow('FORBIDDEN');
+  });
+
+  it('rejects manual customer-call preparation before paid activation', async () => {
+    const seeded = await seed();
+    await client.db
+      .update(organisations)
+      .set({ edition: 'SOLO' })
+      .where(eq(organisations.id, seeded.organisationId));
+    await client.db.insert(subscriptions).values({
+      organisationId: seeded.organisationId,
+      planCode: 'SOLO_AU_2000',
+      status: 'INCOMPLETE',
+      trialEndsAt: null
+    });
+
+    await expect(
+      seeded.service.prepare({
+        organisationId: seeded.organisationId,
+        customerId: seeded.customerId,
+        idempotencyKey: `voice-unpaid-${randomUUID()}`
+      })
+    ).rejects.toThrow('SUBSCRIPTION_REQUIRED');
+    expect(seeded.publisher.publish).not.toHaveBeenCalled();
+  });
+
+  it('rejects manual approval when paid access ends after preparation', async () => {
+    const seeded = await seed();
+    await client.db
+      .update(organisations)
+      .set({ edition: 'SOLO' })
+      .where(eq(organisations.id, seeded.organisationId));
+    await client.db.insert(subscriptions).values({
+      organisationId: seeded.organisationId,
+      planCode: 'SOLO_AU_2000',
+      status: 'ACTIVE',
+      stripeProviderStatus: 'active',
+      trustedStripeProviderStatus: 'active',
+      currentPeriodStart: new Date('2026-10-01T00:00:00.000Z'),
+      currentPeriodEnd: new Date('2026-11-01T00:00:00.000Z'),
+      trialEndsAt: null
+    });
+    const idempotencyKey = `voice-paid-then-blocked-${randomUUID()}`;
+    const prepared = await seeded.service.prepare({
+      organisationId: seeded.organisationId,
+      customerId: seeded.customerId,
+      idempotencyKey
+    });
+    if (prepared.voiceCallId === null) throw new Error('Expected a draft');
+    await client.db
+      .update(subscriptions)
+      .set({ status: 'PAST_DUE' })
+      .where(eq(subscriptions.organisationId, seeded.organisationId));
+
+    await expect(
+      seeded.service.approveAndQueue({
+        organisationId: seeded.organisationId,
+        customerId: seeded.customerId,
+        voiceCallId: prepared.voiceCallId,
+        idempotencyKey,
+        callFlowVersion: prepared.callFlowVersion,
+        callFlowHash: prepared.callFlowHash,
+        approvedFactsHash: prepared.approvedFactsHash ?? '',
+        confirmed: true
+      })
+    ).rejects.toThrow('SUBSCRIPTION_REQUIRED');
+    expect(seeded.publisher.publish).not.toHaveBeenCalled();
   });
 
   it('shows recent attempt counts and the exact next permitted time instead of scheduling', async () => {

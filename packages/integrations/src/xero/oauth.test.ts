@@ -170,6 +170,50 @@ describe('XeroOAuthClient', () => {
     ]);
   });
 
+  it('treats an already-absent Xero connection as an idempotent delete success', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push({
+      status: 404,
+      headers: {},
+      body: 'provider details must not escape'
+    });
+
+    await expect(
+      createClient(http).deleteConnection('access-token', 'missing-connection')
+    ).resolves.toBeUndefined();
+    expect(http.requests).toMatchObject([
+      {
+        method: 'DELETE',
+        url: 'https://api.xero.com/connections/missing-connection',
+        headers: { Authorization: 'Bearer access-token' }
+      }
+    ]);
+  });
+
+  it('bounds a Xero connection delete with an abort signal', async () => {
+    let deleteSignal: AbortSignal | undefined;
+    const http: HttpClient = {
+      request: (request) => {
+        deleteSignal = (
+          request as HttpRequest & { signal?: AbortSignal }
+        ).signal;
+        return Promise.resolve({ status: 204, headers: {}, body: '' });
+      }
+    };
+    const client = new XeroOAuthClient({
+      http,
+      clientId: 'customer-client-id',
+      clientSecret: 'customer-client-secret',
+      redirectUri: 'https://ap.motts.com.au/xero/callback',
+      disconnectTimeoutMilliseconds: 5
+    });
+
+    await client.deleteConnection('access-token', 'connection-id');
+    expect(deleteSignal).toBeInstanceOf(AbortSignal);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(deleteSignal?.aborted).toBe(true);
+  });
+
   it('maps malformed token and connection responses without exposing provider bodies', async () => {
     const malformedTokenHttp = new FakeHttpClient();
     malformedTokenHttp.responses.push({ status: 200, headers: {}, body: '{bad-json' });

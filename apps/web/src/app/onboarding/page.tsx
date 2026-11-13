@@ -88,10 +88,10 @@ export default async function SelfServiceOnboardingPage({
           ) : null}
           {status.trial.readOnly && (
             <div className="callout callout--warning" role="status">
-              <strong>Your trial is read-only</strong>
+              <strong>Payment is required to activate AccountPulse</strong>
               <p>
-                Subscribe to continue, export your data, or disconnect Xero.
-                Scheduled customer sending remains paused.
+                Subscribe to activate sending, export your data, or disconnect
+                Xero. Scheduled customer sending remains paused.
               </p>
               <div className="button-row">
                 <Link href="/settings/billing" className="button button--primary">
@@ -112,7 +112,7 @@ export default async function SelfServiceOnboardingPage({
           {parameters.mobile === 'verified' && (
             <div className="callout" role="status">
               <strong>Administrator mobile verified</strong>
-              <p>You can now send the trial test SMS to that number.</p>
+              <p>This number is now ready for eligible test messages.</p>
             </div>
           )}
         </section>

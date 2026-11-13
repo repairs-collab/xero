@@ -1,20 +1,96 @@
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 
 import { getTableConfig } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
 
 import {
+  billingCases,
+  directDebitRequests,
   smsAllowanceSettings,
   smsNumberPool,
   smsUsageLedger,
   soloAu2000PlanCode,
   subscriptionEvents,
-  subscriptions
+  subscriptions,
+  transactionalEmailOutbox
 } from './commerce.js';
 import { organisationOnboarding } from './onboarding.js';
 import { organisationEditions, organisations } from './organisation.js';
 
 describe('Solo commerce schema contract', () => {
+  it('defines durable billing cases and held transactional email records', () => {
+    const cases = getTableConfig(billingCases);
+    const emails = getTableConfig(transactionalEmailOutbox);
+
+    expect(cases.columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        'organisation_id',
+        'kind',
+        'status',
+        'provider_object_type',
+        'provider_object_id',
+        'provider_status',
+        'stripe_subscription_id',
+        'subscription_relation',
+        'amount_minor',
+        'currency',
+        'blocks_sending',
+        'latest_provider_event_id',
+        'latest_provider_event_created_at',
+        'opened_at',
+        'resolved_at',
+        'created_at',
+        'updated_at'
+      ])
+    );
+    expect(cases.indexes.map((index) => index.config.name)).toContain(
+      'billing_cases_org_kind_provider_uq'
+    );
+    expect(cases.checks.map((constraint) => constraint.name)).toEqual(
+      expect.arrayContaining([
+        'billing_cases_kind_ck',
+        'billing_cases_status_ck',
+        'billing_cases_provider_object_type_ck',
+        'billing_cases_subscription_relation_ck',
+        'billing_cases_amount_ck',
+        'billing_cases_currency_ck',
+        'billing_cases_resolution_ck'
+      ])
+    );
+
+    expect(emails.columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        'organisation_id',
+        'billing_case_id',
+        'recipient',
+        'template',
+        'template_version',
+        'render_data',
+        'idempotency_key',
+        'source_event_id',
+        'status',
+        'attempts',
+        'last_failure_code',
+        'last_attempted_at',
+        'sent_at',
+        'created_at',
+        'updated_at'
+      ])
+    );
+    expect(emails.indexes.map((index) => index.config.name)).toContain(
+      'transactional_email_outbox_org_idempotency_uq'
+    );
+    expect(emails.checks.map((constraint) => constraint.name)).toEqual(
+      expect.arrayContaining([
+        'transactional_email_outbox_template_ck',
+        'transactional_email_outbox_status_ck',
+        'transactional_email_outbox_template_version_ck',
+        'transactional_email_outbox_attempts_ck',
+        'transactional_email_outbox_sent_ck'
+      ])
+    );
+  });
+
   it('keeps the Australian Solo plan and organisation editions stable', () => {
     expect(soloAu2000PlanCode).toBe('SOLO_AU_2000');
     expect(organisationEditions).toEqual([
@@ -65,12 +141,14 @@ describe('Solo commerce schema contract', () => {
 
   it('defines subscriptions, idempotent events and versioned onboarding', () => {
     const subscription = getTableConfig(subscriptions);
+    const directDebit = getTableConfig(directDebitRequests);
     const event = getTableConfig(subscriptionEvents);
     const onboarding = getTableConfig(organisationOnboarding);
 
     expect(subscription.columns.map((column) => column.name)).toEqual(
       expect.arrayContaining([
         'plan_code',
+        'billing_cadence',
         'status',
         'stripe_customer_id',
         'stripe_subscription_id',
@@ -79,11 +157,72 @@ describe('Solo commerce schema contract', () => {
         'trial_ends_at',
         'cancel_at',
         'cancelled_at',
-        'last_stripe_event_created_at'
+        'last_stripe_event_created_at',
+        'initial_card_stripe_subscription_id',
+        'initial_card_invoice_id',
+        'initial_card_payment_succeeded_at'
+      ])
+    );
+    expect(subscriptions.billingCadence.default).toBe('MONTHLY');
+    expect(subscription.checks.map((constraint) => constraint.name)).toEqual(
+      expect.arrayContaining([
+        'subscriptions_billing_cadence_ck',
+        'subscriptions_initial_card_evidence_ck',
+        'subscriptions_legacy_initial_card_evidence_ck'
+      ])
+    );
+    expect(directDebit.columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        'id',
+        'organisation_id',
+        'stripe_subscription_id',
+        'status',
+        'legacy_status',
+        'provider_reconciled_at',
+        'provider_reconciled_by_user_id',
+        'provider_reconciliation_outcome',
+        'provider_reconciliation_reference',
+        'requested_by_user_id',
+        'requested_at',
+        'setup_attempt_version',
+        'setup_session_id',
+        'setup_session_expires_at',
+        'setup_checkout_completed_at',
+        'setup_intent_id',
+        'stripe_payment_method_id',
+        'stripe_mandate_id',
+        'mandate_confirmed_at',
+        'activated_by_user_id',
+        'activated_at'
+      ])
+    );
+    expect(directDebit.indexes.map((index) => index.config.name)).toContain(
+      'direct_debit_requests_org_subscription_uq'
+    );
+    expect(directDebit.checks.map((constraint) => constraint.name)).toEqual(
+      expect.arrayContaining([
+        'direct_debit_requests_status_ck',
+        'direct_debit_requests_episode_ck',
+        'direct_debit_requests_reconciliation_ck',
+        'direct_debit_requests_state_ck'
       ])
     );
     expect(event.indexes.map((index) => index.config.name)).toContain(
       'subscription_events_stripe_event_uq'
+    );
+    expect(event.columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        'provider_object_type',
+        'provider_object_id',
+        'billing_case_kind',
+        'billing_case_status',
+        'blocks_sending',
+        'amount_minor',
+        'held_template'
+      ])
+    );
+    expect(event.indexes.map((index) => index.config.name)).toContain(
+      'subscription_events_operational_order_idx'
     );
     expect(onboarding.columns.map((column) => column.name)).toEqual(
       expect.arrayContaining([
@@ -131,14 +270,122 @@ describe('Solo commerce schema contract', () => {
     expect(migration).toMatch(/CREATE TRIGGER z_subscription_normalize_cancellation BEFORE INSERT OR UPDATE ON subscriptions/i);
   });
 
-  it('orders migration journal timestamps strictly through the retired subscription migration', async () => {
+  it('orders migration journal timestamps strictly through the billing operations migration', async () => {
     const journal = JSON.parse(await readFile(new URL('../../drizzle/meta/_journal.json', import.meta.url), 'utf8')) as { entries: Array<{ idx: number; when: number; tag: string }> };
-    const entries = journal.entries.filter((entry) => entry.idx <= 24);
-    expect(entries.map((entry) => entry.idx)).toEqual(Array.from({ length: 25 }, (_, index) => index));
-    expect(entries[24]?.tag).toBe('0024_lyrical_may_parker');
+    const entries = journal.entries.filter((entry) => entry.idx <= 25);
+    expect(entries.map((entry) => entry.idx)).toEqual(Array.from({ length: 26 }, (_, index) => index));
+    expect(entries[25]?.tag).toBe('0025_orange_rattler');
     for (let index = 1; index < entries.length; index += 1) {
       expect(entries[index]!.when).toBeGreaterThan(entries[index - 1]!.when);
     }
+  });
+
+  it('creates billing cases and held email storage in migration 0025', async () => {
+    const migration = await readFile(
+      new URL('../../drizzle/0025_orange_rattler.sql', import.meta.url),
+      'utf8'
+    );
+
+    expect(migration).toContain('CREATE TABLE "billing_cases"');
+    expect(migration).toContain('CREATE TABLE "transactional_email_outbox"');
+    expect(migration).toContain('ON DELETE restrict');
+  });
+
+  it('adds operational ordering evidence and immutable email render data in migration 0026', async () => {
+    const migrationDirectory = new URL('../../drizzle/', import.meta.url);
+    const migrationName = (await readdir(migrationDirectory)).find((name) =>
+      /^0026_.*\.sql$/.test(name)
+    );
+    expect(migrationName).toBeDefined();
+    const migration = await readFile(
+      new URL(migrationName!, migrationDirectory),
+      'utf8'
+    );
+
+    expect(migration).toContain('subscription_events_operational_order_idx');
+    expect(migration).toContain('source_event_id');
+    expect(migration).toMatch(
+      /CREATE TRIGGER transactional_email_render_data_immutable/i
+    );
+    expect(migration).toMatch(
+      /OLD\.render_data IS DISTINCT FROM NEW\.render_data/i
+    );
+  });
+
+  it('keeps generated migration journal timestamps in strict execution order', async () => {
+    const journal = JSON.parse(
+      await readFile(
+        new URL('../../drizzle/meta/_journal.json', import.meta.url),
+        'utf8'
+      )
+    ) as { entries: Array<{ idx: number; when: number }> };
+
+    for (let index = 1; index < journal.entries.length; index += 1) {
+      expect(journal.entries[index]!.idx).toBeGreaterThan(
+        journal.entries[index - 1]!.idx
+      );
+      expect(journal.entries[index]!.when).toBeGreaterThan(
+        journal.entries[index - 1]!.when
+      );
+    }
+  });
+
+  it('makes every transactional-email evidence identity immutable in migration 0027', async () => {
+    const migration = await readFile(
+      new URL(
+        '../../drizzle/0027_transactional_email_evidence_immutability.sql',
+        import.meta.url
+      ),
+      'utf8'
+    );
+
+    for (const column of [
+      'id',
+      'created_at',
+      'organisation_id',
+      'billing_case_id',
+      'recipient',
+      'template',
+      'template_version',
+      'render_data',
+      'idempotency_key',
+      'source_event_id'
+    ]) {
+      expect(migration).toContain(
+        `OLD.${column} IS DISTINCT FROM NEW.${column}`
+      );
+    }
+    expect(migration).not.toMatch(/OLD\.status IS DISTINCT FROM NEW\.status/);
+    expect(migration).not.toMatch(/OLD\.attempts IS DISTINCT FROM NEW\.attempts/);
+  });
+
+  it('forwards the complete transactional-email evidence guard in migration 0028', async () => {
+    const migration = await readFile(
+      new URL(
+        '../../drizzle/0028_transactional_email_evidence_identity_hardening.sql',
+        import.meta.url
+      ),
+      'utf8'
+    );
+
+    for (const column of [
+      'id',
+      'created_at',
+      'organisation_id',
+      'billing_case_id',
+      'recipient',
+      'template',
+      'template_version',
+      'render_data',
+      'idempotency_key',
+      'source_event_id'
+    ]) {
+      expect(migration).toContain(
+        `OLD.${column} IS DISTINCT FROM NEW.${column}`
+      );
+    }
+    expect(migration).not.toMatch(/OLD\.status IS DISTINCT FROM NEW\.status/);
+    expect(migration).not.toMatch(/OLD\.attempts IS DISTINCT FROM NEW\.attempts/);
   });
 
   it('creates retired subscription storage and does not grant a future trial during backfill', async () => {
@@ -162,6 +409,63 @@ describe('Solo commerce schema contract', () => {
     expect(migration).toContain("'^[+]61[0-9]{9}$'");
     expect(migration).not.toMatch(
       /update\s+"organisations"\s+set\s+"(?:send_mode|rollout_scope|live_send_acknowledged|maintenance_mode|operational_state)"/i
+    );
+  });
+
+  it('adds cadence and request-only direct debit state with a safe monthly backfill', async () => {
+    const migration = await readFile(
+      new URL('../../drizzle/0035_same_azazel.sql', import.meta.url),
+      'utf8'
+    );
+
+    expect(migration).toContain(
+      `ADD COLUMN "billing_cadence" varchar(16) DEFAULT 'MONTHLY' NOT NULL`
+    );
+    expect(migration).toContain('CREATE TABLE "direct_debit_requests"');
+    expect(migration).toContain('"initial_card_invoice_id" varchar(128)');
+    expect(migration).toContain(
+      '"initial_card_payment_succeeded_at" timestamp with time zone'
+    );
+    expect(migration).toContain('direct_debit_requests_state_ck');
+    expect(migration).not.toMatch(/bank_(?:account|details)|bsb|account_number/i);
+  });
+
+  it('keeps published 0037 immutable and forwards legacy quarantine in 0038', async () => {
+    const publishedMigration = await readFile(
+      new URL('../../drizzle/0037_watery_tombstone.sql', import.meta.url),
+      'utf8'
+    );
+    const forwardMigration = await readFile(
+      new URL('../../drizzle/0038_flawless_talon.sql', import.meta.url),
+      'utf8'
+    );
+
+    expect(publishedMigration).toContain(
+      'DROP CONSTRAINT "direct_debit_requests_pkey"'
+    );
+    expect(publishedMigration).not.toContain('legacy_status');
+    expect(publishedMigration).toContain(
+      'ADD CONSTRAINT "direct_debit_requests_pkey" PRIMARY KEY ("id")'
+    );
+    expect(publishedMigration).toContain(
+      'direct_debit_requests_org_subscription_uq'
+    );
+    expect(forwardMigration).toContain(
+      'ADD COLUMN IF NOT EXISTS "legacy_status" varchar(24)'
+    );
+    expect(forwardMigration).toContain('provider_reconciled_at');
+    expect(forwardMigration).toContain('provider_reconciliation_outcome');
+    expect(forwardMigration).toContain(
+      'legacy_initial_card_invoice_id'
+    );
+    expect(forwardMigration).toContain(
+      'SET\n  "legacy_status" = "status",\n  "status" = \'LEGACY_UNBOUND\''
+    );
+    expect(forwardMigration).toContain(
+      'direct_debit_requests_reconciliation_ck'
+    );
+    expect(forwardMigration).not.toMatch(
+      /bank_(?:account|details)|bsb|account_number/i
     );
   });
 });

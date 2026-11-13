@@ -6,7 +6,7 @@ import {
   migrateDatabase,
   operationalResetRuns,
   organisations,
-  PostgresSmsCommerceRepository,
+  PostgresReplyNumberProvisioningRepository,
   PostgresXeroConnectionRepository,
   providerConnections,
   PostgresVoiceCallRepository,
@@ -55,6 +55,8 @@ import {
   createInboundReplyRecoveryService
 } from './operations/inbound-reply-recovery.js';
 import { createOperationalResetService } from './operations/operational-reset.js';
+import { backfillPaidSmsNumberProvisioning } from './operations/sms-number-provisioning-backfill.js';
+import { reconcileCancelledSubscriptionLifecycles } from './operations/subscription-lifecycle-reconciliation.js';
 import { evaluateVoiceMonitor } from './operations/voice-monitor.js';
 import {
   createDatabaseXeroOAuthReadinessLoader,
@@ -63,8 +65,14 @@ import {
 } from './operations/xero-oauth-readiness.js';
 import { processInboundReply } from './services/inbound-reply-service.js';
 import {
+  applySubscriptionCancellationEpisode,
+  listCancelledSubscriptionsNeedingLifecycle,
+  loadSubscriptionRetentionState
+} from './services/subscription-retention.js';
+import {
   databaseUrlFromEnvironment,
   parseApprovedSmsRecoveryCommand,
+  parseDebtContactHolidayDates,
   parseInboundReplyRecoveryCommand,
   parseOperationalResetCommand,
   parseProviderCredentials,
@@ -92,6 +100,8 @@ const requiredPositiveInteger = (name: string): number => {
 };
 
 async function main() {
+  const debtContactHolidayDates = parseDebtContactHolidayDates(process.env);
+  const debtContactHolidays = { list: () => debtContactHolidayDates };
   const databaseUrl = databaseUrlFromEnvironment(process.env);
   const voiceMonitorCommand = process.argv[2] === 'voice-monitor';
   const approvedSmsRecoveryCommand =
@@ -378,9 +388,8 @@ async function main() {
   const voiceCallRepository = new PostgresVoiceCallRepository(
     databaseClient.db
   );
-  const smsCommerceRepository = new PostgresSmsCommerceRepository(
-    databaseClient.db
-  );
+  const replyNumberProvisioningRepository =
+    new PostgresReplyNumberProvisioningRepository(databaseClient.db);
   const voiceGateway = new VoiceGatewayClient({
     http,
     signingSecret: required('VOICE_GATEWAY_SIGNING_SECRET'),
@@ -405,18 +414,44 @@ async function main() {
             .from(organisations);
     }
   });
+  const subscriptionLifecycleReconciliationRepository = {
+    listCancelledSubscriptionsNeedingLifecycle: () =>
+      listCancelledSubscriptionsNeedingLifecycle(databaseClient.db)
+  };
+  const reconcilePaidSmsNumberProvisioning = async (): Promise<number> => {
+    const candidates = await backfillPaidSmsNumberProvisioning({
+      repository: replyNumberProvisioningRepository,
+      publisher: queue,
+      clock
+    });
+    console.info('Paid SMS number provisioning reconciliation completed', {
+      candidates
+    });
+    return candidates;
+  };
 
   await startWorker({
     queue,
     database: { close: () => databaseClient.pool.end() },
     organisationIds: allRows.map((row) => row.id),
     logger: console,
+    bootstrap: async () => {
+      await reconcilePaidSmsNumberProvisioning();
+      const cancellationCandidateCount =
+        await reconcileCancelledSubscriptionLifecycles({
+          repository: subscriptionLifecycleReconciliationRepository,
+          publisher: queue
+        });
+      console.info('Cancelled subscription lifecycle reconciliation completed', {
+        candidates: cancellationCandidateCount
+      });
+    },
     handlers: {
       [jobNames.xeroInitialSync]: async (payload) =>
         runInitialSync(
           {
             database: databaseClient.db,
-            xero: await xeroFactory.forOrganisation(payload.organisationId),
+            loadXero: () => xeroFactory.forOrganisation(payload.organisationId),
             clock
           },
           payload
@@ -425,7 +460,7 @@ async function main() {
         runIncrementalSync(
           {
             database: databaseClient.db,
-            xero: await xeroFactory.forOrganisation(payload.organisationId),
+            loadXero: () => xeroFactory.forOrganisation(payload.organisationId),
             clock
           },
           payload
@@ -434,7 +469,7 @@ async function main() {
         runInvoiceRefresh(
           {
             database: databaseClient.db,
-            xero: await xeroFactory.forOrganisation(payload.organisationId),
+            loadXero: () => xeroFactory.forOrganisation(payload.organisationId),
             clock
           },
           payload
@@ -443,7 +478,7 @@ async function main() {
         reconcileNightly(
           {
             database: databaseClient.db,
-            xero: await xeroFactory.forOrganisation(payload.organisationId),
+            loadXero: () => xeroFactory.forOrganisation(payload.organisationId),
             clock
           },
           payload
@@ -454,13 +489,18 @@ async function main() {
             database: databaseClient.db,
             clock,
             xero: await xeroFactory.forOrganisation(payload.organisationId),
+            holidays: debtContactHolidays,
             publisher: queue
           },
           payload.organisationId
         ).then(() => undefined),
       [jobNames.voiceRemindersCalculate]: (payload) =>
         calculateVoiceReminderWork(
-          { database: databaseClient.db, clock, holidays: { list: () => [] } },
+          {
+            database: databaseClient.db,
+            clock,
+            holidays: debtContactHolidays
+          },
           payload.organisationId
         ).then(() => undefined),
       [jobNames.voiceRemindersDispatch]: (payload) =>
@@ -469,7 +509,7 @@ async function main() {
             database: databaseClient.db,
             repository: voiceCallRepository,
             clock,
-            holidays: { list: () => [] },
+            holidays: debtContactHolidays,
             publisher: queue,
             acceptCustomerVoiceCalls:
               process.env.VOICE_GATEWAY_ACCEPT_CALLS === 'true'
@@ -484,6 +524,7 @@ async function main() {
             xero: await xeroFactory.forOrganisation(payload.organisationId),
             sinch,
             callbackUrl,
+            holidays: debtContactHolidays,
             xeroEmailAllowance: {
               hasSafeHeadroom: () => Promise.resolve(true)
             }
@@ -502,9 +543,11 @@ async function main() {
         ).then(() => undefined),
       [jobNames.smsNumberProvision]: (payload) =>
         provisionPaidSmsNumber(
-          { repository: smsCommerceRepository, clock },
+          { repository: replyNumberProvisioningRepository, clock },
           payload
         ).then(() => undefined),
+      [jobNames.smsNumberProvisionReconcile]: () =>
+        reconcilePaidSmsNumberProvisioning().then(() => undefined),
       [jobNames.voiceCallExecute]: (payload) =>
         executeVoiceCall(
           {
@@ -514,7 +557,7 @@ async function main() {
             gateway: voiceGateway,
             gatewayCallbackUrl: voiceGatewayCallbackUrl,
             publisher: queue,
-            holidays: { list: () => [] },
+            holidays: debtContactHolidays,
             acceptCustomerVoiceCalls:
               process.env.VOICE_GATEWAY_ACCEPT_CALLS === 'true'
           },
@@ -547,87 +590,70 @@ async function main() {
       [jobNames.subscriptionLifecycle]: (payload) =>
         processSubscriptionLifecycle(
           {
-            load: async (organisationId) => {
-              const [subscription] = await databaseClient.db
-                .select({ status: subscriptions.status })
-                .from(subscriptions)
-                .where(eq(subscriptions.organisationId, organisationId))
-                .limit(1);
-              if (subscription === undefined) return null;
-              const [retentionCase] = await databaseClient.db
-                .select({ organisationId: retentionCases.organisationId })
-                .from(retentionCases)
-                .where(eq(retentionCases.organisationId, organisationId))
-                .limit(1);
-              return {
-                status: subscription.status,
-                retentionDeadlineRecorded: retentionCase !== undefined
-              };
-            },
-            disconnectXero: async (organisationId) => {
-              const connection =
-                await xeroConnections.findByOrganisationId(organisationId);
-              if (connection === null || connection.status === 'DISCONNECTED') {
-                return;
-              }
-              const session = await new XeroOAuthSessionProvider({
-                organisationId,
-                store: xeroConnections,
-                tokenCipher: xeroTokenCipher,
-                oauthClient: xeroOAuthClient
-              }).getSession();
-              await xeroOAuthClient.deleteConnection(
-                session.accessToken,
-                connection.connectionId
-              );
-              await xeroConnections.disconnect(organisationId, clock.now());
-            },
-            quarantineSmsNumber: async (organisationId, now) => {
+            load: (organisationId) =>
+              loadSubscriptionRetentionState(
+                databaseClient.db,
+                organisationId
+              ),
+            applyCancellationEpisode: async (input) => {
               const quarantineDays = requiredPositiveInteger(
                 'SMS_NUMBER_QUARANTINE_DAYS'
               );
-              await smsCommerceRepository.quarantineNumber(
-                organisationId,
-                new Date(
-                  now.getTime() + quarantineDays * 24 * 60 * 60 * 1000
-                ),
-                now
-              );
-            },
-            recordRetentionDeadline: async (input) => {
-              await databaseClient.db.transaction(async (transaction) => {
-                const inserted = await transaction
-                  .insert(retentionCases)
-                  .values({
-                    organisationId: input.organisationId,
-                    source: 'SUBSCRIPTION_CANCELLED',
-                    status: 'SCHEDULED',
-                    disconnectedAt: input.disconnectedAt,
-                    reviewAfter: input.retentionDeadline,
-                    updatedAt: input.disconnectedAt
-                  })
-                  .onConflictDoNothing({
-                    target: retentionCases.organisationId
-                  })
-                  .returning({ organisationId: retentionCases.organisationId });
-                if (inserted.length === 0) return;
-                await transaction.insert(auditEvents).values({
-                  organisationId: input.organisationId,
-                  eventType: 'SUBSCRIPTION_RETENTION_SCHEDULED',
-                  entityType: 'SUBSCRIPTION',
-                  entityId: input.organisationId,
-                  afterValue: {
-                    disconnectedAt: input.disconnectedAt.toISOString(),
-                    retentionDeadline: input.retentionDeadline.toISOString()
+              return applySubscriptionCancellationEpisode(
+                databaseClient.db,
+                {
+                  ...input,
+                  quarantineUntil: new Date(
+                    input.disconnectedAt.getTime() +
+                      quarantineDays * 24 * 60 * 60 * 1000
+                  )
+                },
+                {
+                  prepareXeroDisconnect: async (organisationId) => {
+                    const connection =
+                      await xeroConnections.findByOrganisationId(
+                        organisationId
+                      );
+                    if (
+                      connection === null ||
+                      connection.status !== 'CONNECTED'
+                    ) {
+                      return null;
+                    }
+                    const session = await new XeroOAuthSessionProvider({
+                      organisationId,
+                      store: xeroConnections,
+                      tokenCipher: xeroTokenCipher,
+                      oauthClient: xeroOAuthClient
+                    }).getSession();
+                    return {
+                      recordId: connection.id,
+                      connectionId: connection.connectionId,
+                      accessToken: session.accessToken
+                    };
                   },
-                  occurredAt: input.disconnectedAt
-                });
-              });
+                  deleteXeroConnection: (accessToken, connectionId) =>
+                    xeroOAuthClient.deleteConnection(
+                      accessToken,
+                      connectionId
+                    )
+                }
+              );
             },
             clock
           },
           payload
         ).then(() => undefined),
+      [jobNames.subscriptionLifecycleReconcile]: () =>
+        reconcileCancelledSubscriptionLifecycles({
+          repository: subscriptionLifecycleReconciliationRepository,
+          publisher: queue
+        }).then((candidateCount) => {
+          console.info(
+            'Cancelled subscription lifecycle reconciliation completed',
+            { candidates: candidateCount }
+          );
+        }),
       [jobNames.subscriptionTrialExpiry]: (payload) =>
         processTrialExpiry(
           {
@@ -690,6 +716,7 @@ async function main() {
                     status: 'SCHEDULED',
                     disconnectedAt: input.disconnectedAt,
                     reviewAfter: input.retentionDeadline,
+                    closureEffectiveAt: input.disconnectedAt,
                     updatedAt: input.disconnectedAt
                   })
                   .onConflictDoNothing({

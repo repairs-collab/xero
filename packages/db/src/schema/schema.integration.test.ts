@@ -8,6 +8,7 @@ import { createDatabase, migrateDatabase } from '../client.js';
 import {
   approvals,
   auditEvents,
+  billingCases,
   contactChannels,
   contacts,
   invoiceChases,
@@ -23,6 +24,7 @@ import {
   subscriptionEvents,
   subscriptions,
   tasks,
+  transactionalEmailOutbox,
   voiceCallEvents,
   voiceGatewaySessions,
   voiceCallInvoices,
@@ -232,6 +234,407 @@ const seedVoiceCall = async (
 };
 
 describe('database invariants', () => {
+  it('forwards a database already at published 0037 and quarantines ambiguous legacy direct-debit evidence', async () => {
+    const client = await database.pool.connect();
+    const schemaName = `billing_upgrade_${randomUUID().replaceAll('-', '_')}`;
+    const firstEpisode = randomUUID();
+    const replacement = randomUUID();
+    const tiedCheckouts = randomUUID();
+    const cardWithSetups = randomUUID();
+    const requester = randomUUID();
+    const paidAt = new Date('2026-11-09T10:00:00.000Z');
+    const requestedAt = new Date('2026-11-09T11:00:00.000Z');
+    try {
+      await client.query('begin');
+      await client.query(`create schema "${schemaName}"`);
+      await client.query(`set local search_path to "${schemaName}"`);
+      await client.query(`
+        create table organisations (id uuid primary key);
+        create table users (id uuid primary key);
+        create table audit_events (
+          id uuid default gen_random_uuid() primary key,
+          organisation_id uuid not null,
+          event_type varchar(64) not null,
+          entity_type varchar(64) not null,
+          entity_id text not null,
+          correlation_id text,
+          occurred_at timestamp with time zone not null default now()
+        );
+      `);
+      const applyMigration = async (name: string) => {
+        const migration = await readFile(
+          new URL(`../../drizzle/${name}.sql`, import.meta.url),
+          'utf8'
+        );
+        for (const statement of migration.split('--> statement-breakpoint')) {
+          await client.query(statement.replaceAll('"public".', `"${schemaName}".`));
+        }
+      };
+      await applyMigration('0014_accountpulse_solo_commerce');
+      await applyMigration('0024_lyrical_may_parker');
+      await applyMigration('0035_same_azazel');
+
+      await client.query('insert into organisations (id) values ($1), ($2), ($3), ($4)', [
+        firstEpisode,
+        replacement,
+        tiedCheckouts,
+        cardWithSetups
+      ]);
+      await client.query('insert into users (id) values ($1)', [requester]);
+      await client.query(
+        `insert into subscriptions (
+           organisation_id, plan_code, status, stripe_subscription_id,
+           initial_card_invoice_id, initial_card_payment_succeeded_at
+         ) values
+           ($1, 'SOLO_AU_2000', 'ACTIVE', 'sub_first', 'in_first', $5),
+           ($2, 'SOLO_AU_2000', 'ACTIVE', 'sub_replacement', 'in_old', $5),
+           ($3, 'SOLO_AU_2000', 'ACTIVE', 'sub_tied', 'in_tied', $5),
+           ($4, 'SOLO_AU_2000', 'ACTIVE', 'sub_card_setup', 'in_card_setup', $5)`,
+        [firstEpisode, replacement, tiedCheckouts, cardWithSetups, paidAt]
+      );
+      await client.query(
+        `insert into retired_stripe_subscriptions (stripe_subscription_id, organisation_id)
+         values ('sub_retired', $1)`,
+        [replacement]
+      );
+      await client.query(
+        `insert into subscription_events (
+           organisation_id, stripe_event_id, event_type,
+           stripe_event_created_at, payload_hash, outcome
+         ) values
+           ($1, 'evt_first', 'checkout.session.completed', $4, repeat('a', 64), 'APPLIED'),
+           ($2, 'evt_old', 'checkout.session.completed', $4, repeat('b', 64), 'APPLIED'),
+           ($3, 'evt_tied_1', 'checkout.session.completed', $4, repeat('c', 64), 'APPLIED'),
+           ($3, 'evt_tied_2', 'checkout.session.completed', $4, repeat('d', 64), 'APPLIED'),
+           ($5, 'evt_card_setup', 'checkout.session.completed', $4, repeat('e', 64), 'APPLIED'),
+           ($5, 'evt_setup_1', 'checkout.session.completed', $6, repeat('f', 64), 'APPLIED'),
+           ($5, 'evt_setup_2', 'checkout.session.completed', $7, repeat('0', 64), 'APPLIED')`,
+        [
+          firstEpisode,
+          replacement,
+          tiedCheckouts,
+          paidAt,
+          cardWithSetups,
+          new Date('2026-11-09T10:30:00.000Z'),
+          new Date('2026-11-09T10:45:00.000Z')
+        ]
+      );
+      await client.query(
+        `insert into audit_events (
+           organisation_id, event_type, entity_type, entity_id,
+           correlation_id, occurred_at
+         ) values
+           ($1, 'DIRECT_DEBIT_SETUP_COMPLETED', 'DIRECT_DEBIT_REQUEST', 'legacy-setup-1', 'evt_setup_1', $2),
+           ($1, 'DIRECT_DEBIT_SETUP_COMPLETED', 'DIRECT_DEBIT_REQUEST', 'legacy-setup-2', 'evt_setup_2', $3)`,
+        [
+          cardWithSetups,
+          new Date('2026-11-09T10:30:00.000Z'),
+          new Date('2026-11-09T10:45:00.000Z')
+        ]
+      );
+      await client.query(
+        `insert into direct_debit_requests (
+           organisation_id, status, requested_by_user_id, requested_at, setup_session_id,
+           setup_intent_id, stripe_payment_method_id, stripe_mandate_id,
+           mandate_confirmed_at, activated_by_user_id, activated_at
+         ) values
+           ($1, 'MANDATE_CONFIRMED', $3, $4, 'cs_first', 'seti_first', 'pm_first',
+            'mandate_first', $4, null, null),
+           ($2, 'ACTIVE', $3, $4, 'cs_old', 'seti_old', 'pm_old',
+            'mandate_old', $4, $3, $4)`,
+        [firstEpisode, replacement, requester, requestedAt]
+      );
+
+      await applyMigration('0037_watery_tombstone');
+      await applyMigration('0038_flawless_talon');
+
+      const card = await client.query(
+        `select stripe_subscription_id, initial_card_stripe_subscription_id,
+                initial_card_invoice_id, initial_card_payment_succeeded_at,
+                legacy_initial_card_stripe_subscription_id,
+                legacy_initial_card_invoice_id,
+                legacy_initial_card_payment_succeeded_at
+           from subscriptions order by stripe_subscription_id`
+      );
+      expect(card.rows).toEqual([
+        {
+          stripe_subscription_id: 'sub_card_setup',
+          initial_card_stripe_subscription_id: 'sub_card_setup',
+          initial_card_invoice_id: 'in_card_setup',
+          initial_card_payment_succeeded_at: paidAt,
+          legacy_initial_card_stripe_subscription_id: null,
+          legacy_initial_card_invoice_id: null,
+          legacy_initial_card_payment_succeeded_at: null
+        },
+        {
+          stripe_subscription_id: 'sub_first',
+          initial_card_stripe_subscription_id: 'sub_first',
+          initial_card_invoice_id: 'in_first',
+          initial_card_payment_succeeded_at: paidAt,
+          legacy_initial_card_stripe_subscription_id: null,
+          legacy_initial_card_invoice_id: null,
+          legacy_initial_card_payment_succeeded_at: null
+        },
+        {
+          stripe_subscription_id: 'sub_replacement',
+          initial_card_stripe_subscription_id: null,
+          initial_card_invoice_id: null,
+          initial_card_payment_succeeded_at: null,
+          legacy_initial_card_stripe_subscription_id: 'sub_replacement',
+          legacy_initial_card_invoice_id: 'in_old',
+          legacy_initial_card_payment_succeeded_at: paidAt
+        },
+        {
+          stripe_subscription_id: 'sub_tied',
+          initial_card_stripe_subscription_id: null,
+          initial_card_invoice_id: null,
+          initial_card_payment_succeeded_at: null,
+          legacy_initial_card_stripe_subscription_id: 'sub_tied',
+          legacy_initial_card_invoice_id: 'in_tied',
+          legacy_initial_card_payment_succeeded_at: paidAt
+        }
+      ]);
+      const currentRequests = await client.query(
+        `select d.id from direct_debit_requests d
+           join subscriptions s using (organisation_id, stripe_subscription_id)`
+      );
+      expect(currentRequests.rows).toEqual([]);
+      const history = await client.query(
+        `select status, legacy_status, setup_session_id, setup_intent_id,
+                stripe_mandate_id, setup_checkout_completed_at, activated_at,
+                provider_reconciled_at, provider_reconciled_by_user_id,
+                provider_reconciliation_outcome
+           from direct_debit_requests order by setup_session_id`
+      );
+      expect(history.rows).toEqual([
+        {
+          status: 'LEGACY_UNBOUND',
+          legacy_status: 'MANDATE_CONFIRMED',
+          setup_session_id: 'cs_first',
+          setup_intent_id: 'seti_first',
+          stripe_mandate_id: 'mandate_first',
+          setup_checkout_completed_at: null,
+          activated_at: null,
+          provider_reconciled_at: null,
+          provider_reconciled_by_user_id: null,
+          provider_reconciliation_outcome: null
+        },
+        {
+          status: 'LEGACY_UNBOUND',
+          legacy_status: 'ACTIVE',
+          setup_session_id: 'cs_old',
+          setup_intent_id: 'seti_old',
+          stripe_mandate_id: 'mandate_old',
+          setup_checkout_completed_at: null,
+          activated_at: requestedAt,
+          provider_reconciled_at: null,
+          provider_reconciled_by_user_id: null,
+          provider_reconciliation_outcome: null
+        }
+      ]);
+      await expect(
+        client.query(
+          `update direct_debit_requests
+              set provider_reconciled_at = now(),
+                  provider_reconciled_by_user_id = $1
+            where organisation_id = $2`,
+          [requester, firstEpisode]
+        )
+      ).rejects.toMatchObject({
+        constraint: 'direct_debit_requests_reconciliation_ck'
+      });
+    } finally {
+      await client.query('rollback');
+      client.release();
+    }
+  });
+
+  it('persists billing incidents and held notices with fail-closed constraints', async () => {
+    expect('billingCases' in schema).toBe(true);
+    expect('transactionalEmailOutbox' in schema).toBe(true);
+    expect(await tableColumns('billing_cases')).toEqual(
+      expect.arrayContaining([
+        'organisation_id',
+        'kind',
+        'status',
+        'provider_object_type',
+        'provider_object_id',
+        'provider_status',
+        'stripe_subscription_id',
+        'subscription_relation',
+        'amount_minor',
+        'currency',
+        'blocks_sending',
+        'latest_provider_event_id',
+        'latest_provider_event_created_at',
+        'opened_at',
+        'resolved_at'
+      ])
+    );
+    expect(await tableColumns('transactional_email_outbox')).toEqual(
+      expect.arrayContaining([
+        'organisation_id',
+        'billing_case_id',
+        'recipient',
+        'template',
+        'template_version',
+        'render_data',
+        'idempotency_key',
+        'source_event_id',
+        'status',
+        'attempts',
+        'last_failure_code',
+        'last_attempted_at',
+        'sent_at'
+      ])
+    );
+
+    const organisationId = randomUUID();
+    await database.db.insert(organisations).values({
+      id: organisationId,
+      name: 'Billing operations schema test',
+      xeroOrganisationId: randomUUID(),
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    const [billingCase] = await database.db
+      .insert(billingCases)
+      .values({
+        organisationId,
+        kind: 'PAYMENT_FAILURE',
+        status: 'OPEN',
+        providerObjectType: 'INVOICE',
+        providerObjectId: `in_${randomUUID()}`,
+        providerStatus: 'payment_failed',
+        stripeSubscriptionId: `sub_${randomUUID()}`,
+        subscriptionRelation: 'CURRENT',
+        amountMinor: 12_345,
+        currency: 'aud',
+        blocksSending: true,
+        latestProviderEventId: `evt_${randomUUID()}`,
+        latestProviderEventCreatedAt: new Date('2026-11-12T00:00:00.000Z'),
+        openedAt: new Date('2026-11-12T00:00:00.000Z')
+      })
+      .returning({ id: billingCases.id });
+
+    expect(billingCase?.id).toBeDefined();
+    const [notice] = await database.db
+      .insert(transactionalEmailOutbox)
+      .values({
+        organisationId,
+        billingCaseId: billingCase!.id,
+        recipient: 'billing@example.invalid',
+        template: 'PAYMENT_FAILED',
+        templateVersion: 1,
+        renderData: {
+          amountMinor: 12_345,
+          currency: 'aud'
+        },
+        idempotencyKey: `stripe:${randomUUID()}:PAYMENT_FAILED:v1`,
+        status: 'HELD'
+      })
+      .returning({ id: transactionalEmailOutbox.id });
+    const immutableEvidenceUpdates: Array<
+      Partial<typeof transactionalEmailOutbox.$inferInsert>
+    > = [
+      { id: randomUUID() },
+      { createdAt: new Date('2026-11-12T00:04:00.000Z') },
+      { organisationId: randomUUID() },
+      { billingCaseId: randomUUID() },
+      { recipient: 'other-billing@example.invalid' },
+      { template: 'PAYMENT_RECOVERED' },
+      { templateVersion: 2 },
+      { renderData: { amountMinor: 99_999, currency: 'aud' } },
+      { idempotencyKey: `stripe:${randomUUID()}:PAYMENT_FAILED:v1` },
+      { sourceEventId: `evt_${randomUUID()}` }
+    ];
+    for (const update of immutableEvidenceUpdates) {
+      await expect(
+        database.db
+          .update(transactionalEmailOutbox)
+          .set(update)
+          .where(eq(transactionalEmailOutbox.id, notice!.id))
+      ).rejects.toMatchObject({ cause: { code: '23514' } });
+    }
+    const deliveryAttemptedAt = new Date('2026-11-12T00:05:00.000Z');
+    await expect(
+      database.db
+        .update(transactionalEmailOutbox)
+        .set({
+          status: 'FAILED',
+          attempts: 1,
+          lastFailureCode: 'PROVIDER_TIMEOUT',
+          lastAttemptedAt: deliveryAttemptedAt,
+          updatedAt: deliveryAttemptedAt
+        })
+        .where(eq(transactionalEmailOutbox.id, notice!.id))
+    ).resolves.toBeDefined();
+    await expect(
+      database.db
+        .update(transactionalEmailOutbox)
+        .set({
+          status: 'SENT',
+          attempts: 2,
+          lastFailureCode: null,
+          lastAttemptedAt: deliveryAttemptedAt,
+          sentAt: deliveryAttemptedAt,
+          updatedAt: deliveryAttemptedAt
+        })
+        .where(eq(transactionalEmailOutbox.id, notice!.id))
+    ).resolves.toBeDefined();
+
+    const otherOrganisationId = randomUUID();
+    await database.db.insert(organisations).values({
+      id: otherOrganisationId,
+      name: 'Other billing operations tenant',
+      xeroOrganisationId: randomUUID(),
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await expect(
+      database.db.insert(transactionalEmailOutbox).values({
+        organisationId: otherOrganisationId,
+        billingCaseId: billingCase!.id,
+        recipient: 'other@example.invalid',
+        template: 'PAYMENT_FAILED',
+        templateVersion: 1,
+        renderData: {},
+        idempotencyKey: `stripe:${randomUUID()}:PAYMENT_FAILED:v1`,
+        status: 'HELD'
+      })
+    ).rejects.toMatchObject({ cause: { code: '23503' } });
+
+    await expect(
+      database.pool.query(
+        `insert into billing_cases (
+           organisation_id, kind, status, provider_object_type,
+           provider_object_id, provider_status, stripe_subscription_id,
+           subscription_relation, amount_minor, currency, blocks_sending,
+           latest_provider_event_id, latest_provider_event_created_at,
+           opened_at, resolved_at
+         ) values ($1, 'REFUND', 'RESOLVED', 'CHARGE', $2, 'refunded', $3,
+                   'CURRENT', 1, 'aud', false, $4, now(), now(), null)`,
+        [
+          organisationId,
+          `ch_${randomUUID()}`,
+          `sub_${randomUUID()}`,
+          `evt_${randomUUID()}`
+        ]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+
+    await expect(
+      database.pool.query(
+        `insert into transactional_email_outbox (
+           organisation_id, billing_case_id, recipient, template,
+           template_version, render_data, idempotency_key, status, attempts
+         ) values ($1, $2, 'billing@example.invalid', 'PAYMENT_FAILED',
+                   1, '{}'::jsonb, $3, 'HELD', -1)`,
+        [organisationId, billingCase!.id, `stripe:${randomUUID()}`]
+      )
+    ).rejects.toMatchObject({ code: '23514' });
+  });
+
   it('persists platform ownership and suspended-account metadata with safe defaults', async () => {
     expect(Object.keys(schema.users)).toContain('platformRole');
     expect(Object.keys(schema.organisations)).toEqual(
@@ -574,6 +977,16 @@ describe('database invariants', () => {
     expect(schema).toHaveProperty('rolloutReconciliations');
   });
 
+  it('stores immutable sync and Xero connection generations for rollout evidence', async () => {
+    expect(await tableColumns('organisations')).toEqual(
+      expect.arrayContaining([
+        'last_successful_sync_id',
+        'last_successful_xero_connection_id'
+      ])
+    );
+    expect(await tableColumns('rollout_reconciliations')).toContain('sync_id');
+  });
+
   it('exports the tenant-aware Xero OAuth tables without token leakage columns', async () => {
     expect(schema).toHaveProperty('xeroOAuthTransactions');
     expect(schema).toHaveProperty('xeroPendingAuthorisations');
@@ -628,6 +1041,9 @@ describe('database invariants', () => {
   it('keeps one Xero tenant per organisation and one organisation per tenant', async () => {
     const firstOrganisationId = await seedOAuthOrganisation('First OAuth owner');
     const secondOrganisationId = await seedOAuthOrganisation('Second OAuth owner');
+    const tenantSuffix = randomUUID();
+    const tenantOne = `tenant-one-${tenantSuffix}`;
+    const tenantTwo = `tenant-two-${tenantSuffix}`;
     const envelope = {
       version: 1,
       keyId: 'primary',
@@ -651,12 +1067,12 @@ describe('database invariants', () => {
         ]
       );
 
-    await insertConnection(firstOrganisationId, 'tenant-one');
+    await insertConnection(firstOrganisationId, tenantOne);
     await expect(
-      insertConnection(firstOrganisationId, 'tenant-two')
+      insertConnection(firstOrganisationId, tenantTwo)
     ).rejects.toMatchObject({ code: '23505' });
     await expect(
-      insertConnection(secondOrganisationId, 'tenant-one')
+      insertConnection(secondOrganisationId, tenantOne)
     ).rejects.toMatchObject({ code: '23505' });
   });
 
@@ -1283,6 +1699,7 @@ JSON.stringify([{ connectionId: 'connection-one', tenantId: 'tenant-one', tenant
     const organisationId = randomUUID();
     const userId = randomUUID();
     const syncCompletedAt = new Date('2026-09-29T01:00:00.000Z');
+    const syncId = randomUUID();
     await database.db.insert(organisations).values({
       id: organisationId,
       name: 'Reconciliation uniqueness test',
@@ -1296,19 +1713,20 @@ JSON.stringify([{ connectionId: 'connection-one', tenantId: 'tenant-one', tenant
       email: `${userId}@example.invalid`,
       displayName: 'Reconciliation administrator'
     });
-    const insertReconciliation = () =>
+    const insertReconciliation = (evidenceId = syncId) =>
       database.pool.query(
         `insert into rollout_reconciliations
-          (id, organisation_id, sync_completed_at, active_contact_count,
+          (id, organisation_id, sync_completed_at, sync_id, active_contact_count,
            outstanding_invoice_count, outstanding_totals,
            generated_approval_count, enabled_sequence_count,
            all_enabled_sequences_review, acknowledged_by_user_id,
            acknowledged_at)
-         values ($1, $2, $3, 4, 5, $4, 6, 1, true, $5, $6)`,
+         values ($1, $2, $3, $4, 4, 5, $5, 6, 1, true, $6, $7)`,
         [
           randomUUID(),
           organisationId,
           syncCompletedAt,
+          evidenceId,
           { AUD: '1234.5000' },
           userId,
           new Date('2026-09-29T01:05:00.000Z')
@@ -1319,19 +1737,23 @@ JSON.stringify([{ connectionId: 'connection-one', tenantId: 'tenant-one', tenant
     await expect(insertReconciliation()).rejects.toMatchObject({
       code: '23505'
     });
+    await expect(insertReconciliation(randomUUID())).resolves.toMatchObject({
+      rowCount: 1
+    });
     await expect(
       database.pool.query(
         `insert into rollout_reconciliations
-          (id, organisation_id, sync_completed_at, active_contact_count,
+          (id, organisation_id, sync_completed_at, sync_id, active_contact_count,
            outstanding_invoice_count, outstanding_totals,
            generated_approval_count, enabled_sequence_count,
            all_enabled_sequences_review, acknowledged_by_user_id,
            acknowledged_at)
-         values ($1, $2, $3, 0, 0, '{}'::jsonb, 0, 0, true, $4, $5)`,
+         values ($1, $2, $3, $4, 0, 0, '{}'::jsonb, 0, 0, true, $5, $6)`,
         [
           randomUUID(),
           randomUUID(),
           syncCompletedAt,
+          randomUUID(),
           userId,
           new Date('2026-09-29T01:05:00.000Z')
         ]

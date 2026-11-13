@@ -20,9 +20,9 @@ export function MessagePreview({
     <details className="message-preview">
       <summary>Preview exact message</summary>
       <div className="message-preview__meta">
-        <span><small>Action</small><strong>{isXero ? 'Submit invoice email to Xero' : channel === 'SMS' ? 'Send SMS via Sinch' : 'Create escalation task'}</strong></span>
+        <span><small>Action</small><strong>{isXero ? 'Submit invoice email to Xero' : channel === 'SMS' ? 'Send AccountPulse SMS' : 'Create escalation task'}</strong></span>
         <span><small>Destination</small><strong>{isXero ? 'Xero-managed recipient set' : destination}</strong></span>
-        <span><small>Encoding</small><strong>{channel === 'SMS' ? `${encoding} · ${segmentCount} segment${segmentCount === 1 ? '' : 's'}` : 'Provider managed'}</strong></span>
+        <span><small>Encoding</small><strong>{channel === 'SMS' ? `${encoding} · ${segmentCount} segment${segmentCount === 1 ? '' : 's'}` : isXero ? 'Managed by Xero' : 'Not applicable'}</strong></span>
         <span><small>Source</small><strong>{invoiceNumber} · version {sourceVersion}</strong></span>
       </div>
       <div className="message-bubble">{content}</div>

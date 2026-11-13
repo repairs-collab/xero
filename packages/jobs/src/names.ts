@@ -11,12 +11,14 @@ export const jobNames = {
   operatorReplyExecute: 'operator-reply.execute',
   testSmsExecute: 'test-sms.execute',
   smsNumberProvision: 'sms-number.provision',
+  smsNumberProvisionReconcile: 'sms-number.provision-reconcile',
   voiceCallExecute: 'voice-call.execute',
   voiceCallReconcile: 'voice-call.reconcile',
   providerConnectionTest: 'provider.connection-test',
   webhookProcess: 'webhook.process',
   retentionApply: 'retention.apply',
   subscriptionLifecycle: 'subscription.lifecycle',
+  subscriptionLifecycleReconcile: 'subscription.lifecycle-reconcile',
   subscriptionTrialExpiry: 'subscription.trial-expiry'
 } as const;
 

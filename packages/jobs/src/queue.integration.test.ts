@@ -4,6 +4,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Client } from 'pg';
 import { type Db, PgBoss } from 'pg-boss';
 
+import { createDatabase } from '@bc5000/db';
+
 import { jobNames } from './names.js';
 import { DurableJobQueue } from './queue.js';
 import { ensureRecurringSchedules } from './schedules.js';
@@ -14,6 +16,7 @@ const databaseUrl =
 
 const queue = new DurableJobQueue({ databaseUrl });
 const queueController = new PgBoss(databaseUrl);
+const database = createDatabase(databaseUrl);
 
 beforeAll(async () => {
   await queue.start();
@@ -23,6 +26,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await queueController.stop({ graceful: false, timeout: 5_000 });
   await queue.stop();
+  await database.pool.end();
 });
 
 describe('durable job queue', () => {
@@ -46,6 +50,57 @@ describe('durable job queue', () => {
       id: firstId
     });
     expect(jobs).toHaveLength(1);
+  });
+
+  it('commits or rolls back a provisioning job with its business transaction', async () => {
+    const committedOrganisationId = randomUUID();
+    const committedKey = `paid-event:${randomUUID()}`;
+    const committedId = await database.db.transaction((transaction) =>
+      queue.enqueueUniqueInTransaction(
+        transaction,
+        jobNames.smsNumberProvision,
+        { organisationId: committedOrganisationId },
+        committedKey
+      )
+    );
+    const rolledBackOrganisationId = randomUUID();
+    const rolledBackKey = `paid-event:${randomUUID()}`;
+    let rolledBackId: string | undefined;
+
+    await expect(
+      database.db.transaction(async (transaction) => {
+        rolledBackId = await queue.enqueueUniqueInTransaction(
+          transaction,
+          jobNames.smsNumberProvision,
+          { organisationId: rolledBackOrganisationId },
+          rolledBackKey
+        );
+        throw new Error('ROLL_BACK_BUSINESS_EVENT');
+      })
+    ).rejects.toThrow('ROLL_BACK_BUSINESS_EVENT');
+
+    expect(
+      await queue.findJobs(jobNames.smsNumberProvision, { id: committedId })
+    ).toHaveLength(1);
+    const provisioningJobs = await queue.findJobs(jobNames.smsNumberProvision, {
+      key: committedKey
+    });
+    expect(provisioningJobs).toHaveLength(1);
+    expect(provisioningJobs[0]?.data).toEqual({
+      organisationId: committedOrganisationId
+    });
+    expect(rolledBackId).toBeDefined();
+    if (rolledBackId === undefined) throw new Error('Rollback job was not created');
+    expect(
+      await queue.findJobs(jobNames.smsNumberProvision, {
+        id: rolledBackId
+      })
+    ).toHaveLength(0);
+    expect(
+      await queue.findJobs(jobNames.smsNumberProvision, {
+        key: rolledBackKey
+      })
+    ).toHaveLength(0);
   });
 
   it('rejects malformed payloads before writing a job', async () => {
@@ -108,6 +163,46 @@ describe('durable job queue', () => {
     );
 
     expect(nextManualId).not.toBe(scheduledId);
+  });
+
+  it('replaces an exhausted failed provisioning job on the next startup publish', async () => {
+    const organisationId = randomUUID();
+    const singletonKey = `paid-backfill:${organisationId}`;
+    const testPriority = Date.now() % 2_000_000_000;
+    const failedId = await queueController.send(
+      jobNames.smsNumberProvision,
+      { organisationId },
+      { singletonKey, priority: testPriority, retryLimit: 0 }
+    );
+    expect(failedId).not.toBeNull();
+    if (failedId === null) throw new Error('Failed job was not created');
+    const [active] = await queueController.fetch(
+      jobNames.smsNumberProvision,
+      { minPriority: testPriority, maxPriority: testPriority }
+    );
+    expect(active?.id).toBe(failedId);
+    await queueController.fail(jobNames.smsNumberProvision, failedId, {
+      message: 'exhausted'
+    });
+    const [failed] = await queue.findJobs(jobNames.smsNumberProvision, {
+      id: failedId
+    });
+    expect(failed?.state).toBe('failed');
+
+    const replacementId = await queue.publish(
+      jobNames.smsNumberProvision,
+      { organisationId },
+      { singletonKey, deduplicateWhileActive: true }
+    );
+
+    expect(replacementId).not.toBe(failedId);
+    const jobs = await queue.findJobs(jobNames.smsNumberProvision, {
+      key: singletonKey
+    });
+    expect(jobs.filter((job) => job.state === 'failed')).toHaveLength(1);
+    expect(
+      jobs.filter((job) => ['created', 'retry', 'active'].includes(job.state))
+    ).toHaveLength(1);
   });
 
   it('settles overlapping scheduled and manual sync inserts to one in-flight job', async () => {
@@ -257,6 +352,17 @@ describe('durable job queue', () => {
     expect(
       schedules.filter(
         (schedule) => schedule.key === jobNames.xeroOAuthCleanup
+      )
+    ).toHaveLength(1);
+    expect(
+      schedules.filter(
+        (schedule) =>
+          schedule.key === jobNames.subscriptionLifecycleReconcile
+      )
+    ).toHaveLength(1);
+    expect(
+      schedules.filter(
+        (schedule) => schedule.key === 'sms-number.provision-reconcile'
       )
     ).toHaveLength(1);
   });

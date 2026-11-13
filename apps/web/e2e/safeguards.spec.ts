@@ -27,7 +27,7 @@ test('shows the final rollout safeguards without an in-app reset control', async
   await expect(page.getByText('Controlled live', { exact: true })).toBeVisible();
   await expect(page.getByText('Customer live', { exact: true })).toBeVisible();
   await expect(
-    page.getByText('Technical recipient allowlist', { exact: true })
+    page.getByRole('heading', { name: 'Controlled testing destinations' })
   ).toBeVisible();
   await expect(
     page.getByText('Fresh Xero sync required', { exact: true })
@@ -156,10 +156,10 @@ test('reconciles, activates customers, rolls back, and performs an emergency sto
   await expect(page).toHaveURL(/rollout=customer-enabled/);
 
   await page
-    .getByLabel('Reason for disabling all provider sending')
+    .getByLabel('Reason for disabling all sending')
     .fill('Emergency stop browser proof');
   await page
-    .getByRole('button', { name: 'Disable all provider sending' })
+    .getByRole('button', { name: 'Disable all sending' })
     .click();
   await expect(page).toHaveURL(/rollout=provider-sending-disabled/);
   await expect(page.getByRole('heading', { name: 'Dry run' })).toBeVisible();

@@ -165,6 +165,8 @@ type AutomaticScheduleStopReason =
   | 'OUTSIDE_SCHEDULE_WINDOW'
   | 'SOURCE_CHANGED';
 
+type AutomaticScheduleExecutor = Database | DbTransaction;
+
 const automaticScheduleStopReason = (
   row: AutomaticScheduleState,
   now: Date,
@@ -199,19 +201,12 @@ const automaticScheduleStopReason = (
   return null;
 };
 
-export async function revalidateAutomaticReminderSchedule(
-  dependencies: { transaction: DbTransaction; clock: { now(): Date } },
-  input: {
-    organisationId: string;
-    stageInstanceId: string;
-    expectedAutomatic: boolean;
-  }
-): Promise<
-  | { kind: 'eligible' }
-  | { kind: 'blocked'; reason: AutomaticScheduleStopReason }
-> {
-  if (!input.expectedAutomatic) return { kind: 'eligible' };
-  const [row] = await dependencies.transaction
+const loadAutomaticScheduleState = async (
+  executor: AutomaticScheduleExecutor,
+  input: { organisationId: string; stageInstanceId: string },
+  lock: boolean
+): Promise<AutomaticScheduleState | undefined> => {
+  const query = executor
     .select({
       organisation: { timeZone: organisations.timeZone },
       stage: {
@@ -257,11 +252,88 @@ export async function revalidateAutomaticReminderSchedule(
         eq(stageInstances.organisationId, input.organisationId),
         eq(stageInstances.id, input.stageInstanceId)
       )
-    )
-    .for('update')
-    .limit(1);
+    );
+  const rows = lock
+    ? await query.for('update').limit(1)
+    : await query.limit(1);
+  return rows[0];
+};
+
+export async function preflightAutomaticReminderSchedule(
+  dependencies: { database: Database; now: Date },
+  input: { organisationId: string; stageInstanceId: string }
+): Promise<
+  | {
+      kind: 'eligible';
+      automatic: boolean;
+      scheduledAt: Date;
+    }
+  | {
+      kind: 'blocked';
+      automatic: boolean;
+      reason: AutomaticScheduleStopReason;
+      scheduledAt: Date | null;
+    }
+> {
+  const row = await loadAutomaticScheduleState(
+    dependencies.database,
+    input,
+    false
+  );
   if (row === undefined) {
-    return { kind: 'blocked', reason: 'SOURCE_CHANGED' };
+    return {
+      kind: 'blocked',
+      automatic: false,
+      reason: 'SOURCE_CHANGED',
+      scheduledAt: null
+    };
+  }
+  const automatic =
+    row.sequence.mode === 'AUTOMATIC' && row.stage.origin === 'AUTOMATION';
+  const reason = automaticScheduleStopReason(
+    row,
+    dependencies.now,
+    automatic
+  );
+  return reason === null
+    ? { kind: 'eligible', automatic, scheduledAt: row.stage.scheduledAt }
+    : {
+        kind: 'blocked',
+        automatic,
+        reason,
+        scheduledAt: row.stage.scheduledAt
+      };
+}
+
+export async function revalidateAutomaticReminderSchedule(
+  dependencies: { transaction: DbTransaction; clock: { now(): Date } },
+  input: {
+    organisationId: string;
+    stageInstanceId: string;
+    expectedAutomatic: boolean;
+  }
+): Promise<
+  | { kind: 'eligible'; scheduledAt: Date }
+  | {
+      kind: 'blocked';
+      reason: AutomaticScheduleStopReason;
+      scheduledAt: Date | null;
+    }
+> {
+  const row = await loadAutomaticScheduleState(
+    dependencies.transaction,
+    input,
+    true
+  );
+  if (row === undefined) {
+    return {
+      kind: 'blocked',
+      reason: 'SOURCE_CHANGED',
+      scheduledAt: null
+    };
+  }
+  if (!input.expectedAutomatic) {
+    return { kind: 'eligible', scheduledAt: row.stage.scheduledAt };
   }
   const reason = automaticScheduleStopReason(
     row,
@@ -269,8 +341,8 @@ export async function revalidateAutomaticReminderSchedule(
     input.expectedAutomatic
   );
   return reason === null
-    ? { kind: 'eligible' }
-    : { kind: 'blocked', reason };
+    ? { kind: 'eligible', scheduledAt: row.stage.scheduledAt }
+    : { kind: 'blocked', reason, scheduledAt: row.stage.scheduledAt };
 }
 
 export async function revalidateReminder(

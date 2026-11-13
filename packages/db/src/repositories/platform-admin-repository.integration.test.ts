@@ -5,15 +5,18 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createDatabase, migrateDatabase } from '../client.js';
 import {
+  billingCases,
   invitations,
   memberships,
   organisations,
   platformAdminAuditEvents,
   providerConnections,
+  replyNumberProvisioningRequests,
   smsAllowanceSettings,
   smsNumberPool,
   smsUsageLedger,
   subscriptions,
+  transactionalEmailOutbox,
   users,
   xeroConnections
 } from '../schema/index.js';
@@ -210,6 +213,52 @@ afterAll(async () => {
 });
 
 describe('PostgresPlatformAdminRepository reads', () => {
+  it('lists and filters safe reply-number provisioning records with customer context', async () => {
+    const requestId = randomUUID();
+    await client.db.insert(replyNumberProvisioningRequests).values({
+      id: requestId,
+      organisationId: ids.beta,
+      provider: 'SINCH',
+      requestKey: `reply-number-platform-admin-${runId}`,
+      attempt: 1,
+      version: 2,
+      status: 'AWAITING_OWNER_APPROVAL',
+      quoteSetupFeeMinor: 1_135,
+      quoteMonthlyFeeMinor: 1_530,
+      quoteCurrency: 'aud',
+      quoteExpiresAt: new Date('2026-11-30T00:00:00.000Z'),
+      quotedAt: new Date('2026-11-11T00:00:00.000Z'),
+      documentationStatus: 'REQUIRED',
+      documentationEvidenceReference: 'case-safe-reference',
+      createdAt: new Date('2026-11-10T00:00:00.000Z'),
+      updatedAt: new Date('2026-11-11T00:00:00.000Z')
+    });
+
+    const page = await repository.listReplyNumberProvisioningRequests({
+      organisationId: ids.beta,
+      search: organisationNames.beta,
+      status: 'AWAITING_OWNER_APPROVAL',
+      documentationStatus: 'REQUIRED',
+      page: 1,
+      pageSize: 10
+    });
+
+    expect(page).toMatchObject({ total: 1, page: 1, pageSize: 10 });
+    expect(page.items[0]).toMatchObject({
+      id: requestId,
+      organisationId: ids.beta,
+      organisationName: organisationNames.beta,
+      status: 'AWAITING_OWNER_APPROVAL',
+      version: 2,
+      quoteSetupFeeMinor: 1_135,
+      quoteMonthlyFeeMinor: 1_530,
+      documentationStatus: 'REQUIRED',
+      documentationEvidenceReference: 'case-safe-reference'
+    });
+    expect(JSON.stringify(page.items[0])).not.toContain('approvedByUserId');
+    expect(JSON.stringify(page.items[0])).not.toContain('secretArn');
+  });
+
   it('paginates and sorts organisations deterministically', async () => {
     const first = await repository.listOrganisations({
       search: runId,
@@ -293,6 +342,148 @@ describe('PostgresPlatformAdminRepository reads', () => {
       organisationName: organisationNames.beta,
       reason: 'Owner review'
     });
+  });
+
+  it('lists billing cases and held notices with independent stable cursors and safe fields', async () => {
+    const created = [
+      new Date('2026-11-11T03:00:00.000Z'),
+      new Date('2026-11-11T02:00:00.000Z'),
+      new Date('2026-11-11T01:00:00.000Z')
+    ];
+    const caseRows = await client.db
+      .insert(billingCases)
+      .values([
+        {
+          organisationId: ids.alpha,
+          kind: 'DISPUTE',
+          status: 'OPEN',
+          providerObjectType: 'DISPUTE',
+          providerObjectId: `dp-new-${runId}`,
+          providerStatus: 'needs_response',
+          stripeSubscriptionId: `sub-billing-${runId}`,
+          subscriptionRelation: 'CURRENT',
+          amountMinor: 30_000,
+          currency: 'aud',
+          blocksSending: true,
+          latestProviderEventId: `evt-secret-new-${runId}`,
+          latestProviderEventCreatedAt: created[0]!,
+          openedAt: created[0]!,
+          createdAt: created[0]!,
+          updatedAt: created[0]!
+        },
+        {
+          organisationId: ids.alpha,
+          kind: 'REFUND',
+          status: 'REVIEW_REQUIRED',
+          providerObjectType: 'CHARGE',
+          providerObjectId: `ch-middle-${runId}`,
+          providerStatus: 'refunded',
+          stripeSubscriptionId: `sub-billing-${runId}`,
+          subscriptionRelation: 'RETIRED',
+          amountMinor: 20_000,
+          currency: 'aud',
+          blocksSending: false,
+          latestProviderEventId: `evt-secret-middle-${runId}`,
+          latestProviderEventCreatedAt: created[1]!,
+          openedAt: created[1]!,
+          createdAt: created[1]!,
+          updatedAt: created[1]!
+        },
+        {
+          organisationId: ids.alpha,
+          kind: 'PAYMENT_FAILURE',
+          status: 'OPEN',
+          providerObjectType: 'INVOICE',
+          providerObjectId: `in-old-${runId}`,
+          providerStatus: 'open',
+          stripeSubscriptionId: `sub-billing-${runId}`,
+          subscriptionRelation: 'CURRENT',
+          amountMinor: 10_000,
+          currency: 'aud',
+          blocksSending: true,
+          latestProviderEventId: `evt-secret-old-${runId}`,
+          latestProviderEventCreatedAt: created[2]!,
+          openedAt: created[2]!,
+          createdAt: created[2]!,
+          updatedAt: created[2]!
+        }
+      ])
+      .returning({ id: billingCases.id, createdAt: billingCases.createdAt });
+    const templates = [
+      'DISPUTE_OPENED',
+      'REFUND_RECORDED',
+      'PAYMENT_FAILED'
+    ] as const;
+    await client.db.insert(transactionalEmailOutbox).values(
+      caseRows.map((billingCase, index) => ({
+        organisationId: ids.alpha,
+        billingCaseId: billingCase.id,
+        recipient: `billing-${index}-${runId}@alpha.example`,
+        template: templates[index]!,
+        renderData: { privateDetail: `never-render-${index}-${runId}` },
+        idempotencyKey: `billing-queue-${index}-${runId}`,
+        status: 'HELD' as const,
+        createdAt: billingCase.createdAt,
+        updatedAt: billingCase.createdAt
+      }))
+    );
+
+    const first = await repository.listBillingOperations({
+      organisationId: ids.alpha,
+      limit: 2
+    });
+    const nextCases = await repository.listBillingOperations({
+      organisationId: ids.alpha,
+      limit: 2,
+      casesCursor: first.cases.nextCursor!
+    });
+    const nextHeldEmails = await repository.listBillingOperations({
+      organisationId: ids.alpha,
+      limit: 2,
+      heldEmailsCursor: first.heldEmails.nextCursor!
+    });
+    const filtered = await repository.listBillingOperations({
+      organisationId: ids.alpha,
+      caseKind: 'PAYMENT_FAILURE',
+      caseStatus: 'OPEN',
+      limit: 10
+    });
+
+    expect(first.cases.items.map((item) => item.providerReference)).toEqual([
+      `dp-new-${runId}`,
+      `ch-middle-${runId}`
+    ]);
+    expect(first.heldEmails.items).toHaveLength(2);
+    expect(first.cases.nextCursor).toEqual(expect.any(String));
+    expect(first.heldEmails.nextCursor).toEqual(expect.any(String));
+    expect(nextCases.cases.items.map((item) => item.providerReference)).toEqual([
+      `in-old-${runId}`
+    ]);
+    expect(nextCases.heldEmails.items.map((item) => item.id)).toEqual(
+      first.heldEmails.items.map((item) => item.id)
+    );
+    expect(nextHeldEmails.cases.items.map((item) => item.id)).toEqual(
+      first.cases.items.map((item) => item.id)
+    );
+    expect(nextHeldEmails.heldEmails.items).toHaveLength(1);
+    expect(filtered.cases.items).toHaveLength(1);
+    expect(filtered.cases.items[0]).toMatchObject({
+      organisationId: ids.alpha,
+      organisationName: organisationNames.alpha,
+      kind: 'PAYMENT_FAILURE',
+      status: 'OPEN',
+      amountMinor: 10_000,
+      currency: 'aud',
+      providerReference: `in-old-${runId}`,
+      subscriptionRelation: 'CURRENT',
+      blocksSending: true
+    });
+    const serialized = JSON.stringify({ first, nextCases, nextHeldEmails, filtered });
+    expect(serialized).not.toContain('renderData');
+    expect(serialized).not.toContain('idempotencyKey');
+    expect(serialized).not.toContain('latestProviderEventId');
+    expect(serialized).not.toContain('evt-secret');
+    expect(serialized).not.toContain('never-render');
   });
 });
 
@@ -466,6 +657,223 @@ describe('PostgresPlatformAdminRepository mutations', () => {
     expect(retried).toMatchObject({ ok: true, value: { platformStatusVersion: 1 } });
     expect(stale).toEqual({ ok: false, code: 'CONFLICT' });
     expect(reactivated).toMatchObject({ ok: true, value: { platformStatus: 'ACTIVE', platformStatusVersion: 2 } });
+  });
+
+  it('rejects reactivation while blocking financial cases remain without changing account state or owner audit', async () => {
+    const organisationId = randomUUID();
+    const suspendedAt = new Date('2026-11-11T00:10:00.000Z');
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: `platform-risk-hold-${organisationId}`,
+      name: 'Financial risk hold target',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await repository.suspendOrganisation({
+      actorUserId: ids.owner,
+      organisationId,
+      reason: 'Stripe payment failure',
+      expectedVersion: 0,
+      now: suspendedAt
+    });
+    await client.db.insert(billingCases).values({
+      organisationId,
+      kind: 'PAYMENT_FAILURE',
+      status: 'OPEN',
+      providerObjectType: 'INVOICE',
+      providerObjectId: `in_${randomUUID()}`,
+      providerStatus: 'payment_failed',
+      stripeSubscriptionId: `sub_${randomUUID()}`,
+      subscriptionRelation: 'CURRENT',
+      amountMinor: 12_345,
+      currency: 'aud',
+      blocksSending: true,
+      latestProviderEventId: `evt_${randomUUID()}`,
+      latestProviderEventCreatedAt: suspendedAt,
+      openedAt: suspendedAt
+    });
+
+    const stale = await repository.reactivateOrganisation({
+      actorUserId: ids.owner,
+      organisationId,
+      reason: 'Payment confirmed manually',
+      expectedVersion: 0,
+      now: new Date('2026-11-11T00:11:00.000Z')
+    });
+    const held = await repository.reactivateOrganisation({
+      actorUserId: ids.owner,
+      organisationId,
+      reason: 'Payment confirmed manually',
+      expectedVersion: 1,
+      now: new Date('2026-11-11T00:12:00.000Z')
+    });
+    const stored = await client.db.query.organisations.findFirst({
+      where: (table, { eq }) => eq(table.id, organisationId)
+    });
+    const audit = await repository.listAuditEvents({ organisationId });
+
+    expect(stale).toEqual({ ok: false, code: 'CONFLICT' });
+    expect(held).toEqual({ ok: false, code: 'BILLING_RISK_HOLD' });
+    expect(stored).toMatchObject({
+      platformStatus: 'SUSPENDED',
+      platformStatusVersion: 1,
+      suspendedAt,
+      suspensionReason: 'Stripe payment failure'
+    });
+    expect(audit.items.map((event) => event.eventType)).toEqual([
+      'ORGANISATION_SUSPENDED'
+    ]);
+  });
+
+  it('permits reactivation after every blocking financial case is resolved', async () => {
+    const organisationId = randomUUID();
+    const openedAt = new Date('2026-11-11T00:20:00.000Z');
+    const resolvedAt = new Date('2026-11-11T00:21:00.000Z');
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: `platform-resolved-risk-${organisationId}`,
+      name: 'Resolved financial risk target',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD',
+      platformStatus: 'SUSPENDED',
+      platformStatusVersion: 1,
+      suspendedAt: openedAt,
+      suspensionReason: 'Dispute opened'
+    });
+    const [billingCase] = await client.db
+      .insert(billingCases)
+      .values({
+        organisationId,
+        kind: 'DISPUTE',
+        status: 'OPEN',
+        providerObjectType: 'DISPUTE',
+        providerObjectId: `dp_${randomUUID()}`,
+        providerStatus: 'needs_response',
+        stripeSubscriptionId: `sub_${randomUUID()}`,
+        subscriptionRelation: 'CURRENT',
+        amountMinor: 23_456,
+        currency: 'aud',
+        blocksSending: true,
+        latestProviderEventId: `evt_${randomUUID()}`,
+        latestProviderEventCreatedAt: openedAt,
+        openedAt
+      })
+      .returning({ id: billingCases.id });
+    await client.db
+      .update(billingCases)
+      .set({
+        status: 'RESOLVED',
+        providerStatus: 'won',
+        resolvedAt,
+        updatedAt: resolvedAt
+      })
+      .where(eq(billingCases.id, billingCase!.id));
+
+    const reactivated = await repository.reactivateOrganisation({
+      actorUserId: ids.owner,
+      organisationId,
+      reason: 'Dispute resolved in our favour',
+      expectedVersion: 1,
+      now: new Date('2026-11-11T00:22:00.000Z')
+    });
+
+    expect(reactivated).toMatchObject({
+      ok: true,
+      value: { platformStatus: 'ACTIVE', platformStatusVersion: 2 }
+    });
+  });
+
+  it('rejects an active-status shortcut when a blocking review case remains unresolved', async () => {
+    const organisationId = randomUUID();
+    const openedAt = new Date('2026-11-11T00:25:00.000Z');
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: `platform-blocking-review-${organisationId}`,
+      name: 'Blocking review target',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await client.db.insert(billingCases).values({
+      organisationId,
+      kind: 'DISPUTE',
+      status: 'REVIEW_REQUIRED',
+      providerObjectType: 'DISPUTE',
+      providerObjectId: `dp_${randomUUID()}`,
+      providerStatus: 'lost',
+      stripeSubscriptionId: `sub_${randomUUID()}`,
+      subscriptionRelation: 'CURRENT',
+      amountMinor: 8_765,
+      currency: 'aud',
+      blocksSending: true,
+      latestProviderEventId: `evt_${randomUUID()}`,
+      latestProviderEventCreatedAt: openedAt,
+      openedAt
+    });
+
+    const held = await repository.reactivateOrganisation({
+      actorUserId: ids.owner,
+      organisationId,
+      reason: 'Attempted duplicate reactivation',
+      expectedVersion: 0,
+      now: new Date('2026-11-11T00:26:00.000Z')
+    });
+    const stored = await client.db.query.organisations.findFirst({
+      where: (table, { eq }) => eq(table.id, organisationId)
+    });
+    const audit = await repository.listAuditEvents({ organisationId });
+
+    expect(held).toEqual({ ok: false, code: 'BILLING_RISK_HOLD' });
+    expect(stored).toMatchObject({
+      platformStatus: 'ACTIVE',
+      platformStatusVersion: 0,
+      suspensionReason: null
+    });
+    expect(audit.items).toHaveLength(0);
+  });
+
+  it('permits reactivation when a financial review case does not block sending', async () => {
+    const organisationId = randomUUID();
+    const openedAt = new Date('2026-11-11T00:30:00.000Z');
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: `platform-refund-review-${organisationId}`,
+      name: 'Non-blocking refund review target',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD',
+      platformStatus: 'SUSPENDED',
+      platformStatusVersion: 1,
+      suspendedAt: openedAt,
+      suspensionReason: 'Manual review'
+    });
+    await client.db.insert(billingCases).values({
+      organisationId,
+      kind: 'REFUND',
+      status: 'REVIEW_REQUIRED',
+      providerObjectType: 'CHARGE',
+      providerObjectId: `ch_${randomUUID()}`,
+      providerStatus: 'refunded',
+      stripeSubscriptionId: `sub_${randomUUID()}`,
+      subscriptionRelation: 'CURRENT',
+      amountMinor: 3_456,
+      currency: 'aud',
+      blocksSending: false,
+      latestProviderEventId: `evt_${randomUUID()}`,
+      latestProviderEventCreatedAt: openedAt,
+      openedAt
+    });
+
+    const reactivated = await repository.reactivateOrganisation({
+      actorUserId: ids.owner,
+      organisationId,
+      reason: 'Refund review does not restrict service',
+      expectedVersion: 1,
+      now: new Date('2026-11-11T00:31:00.000Z')
+    });
+
+    expect(reactivated).toMatchObject({
+      ok: true,
+      value: { platformStatus: 'ACTIVE', platformStatusVersion: 2 }
+    });
   });
 
   it('registers only unique Australian Sinch numbers and provider identifiers', async () => {

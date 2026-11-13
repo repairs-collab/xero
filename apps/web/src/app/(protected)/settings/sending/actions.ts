@@ -167,6 +167,7 @@ export async function acknowledgeReconciliation(
       acknowledgement: text(formData, 'acknowledgement'),
       expectedVersion: nonnegativeInteger(formData, 'expectedVersion'),
       expected: {
+        syncId: text(formData, 'syncId'),
         syncCompletedAt: text(formData, 'syncCompletedAt'),
         metrics: reconciliationMetrics(formData)
       }

@@ -38,6 +38,7 @@ const unusedXero = {
   getOnlineInvoiceUrl: () =>
     Promise.reject(new Error('Online invoice URL was not expected'))
 };
+const noHolidays = { list: () => [] as string[] };
 
 beforeAll(async () => {
   await migrateDatabase(client.db);
@@ -450,6 +451,7 @@ describe('calculateReminderWork', () => {
         database: client.db,
         clock: { now: () => now },
         xero: unusedXero,
+        holidays: noHolidays,
         publisher: { publish }
       },
       seeded.organisationId
@@ -459,6 +461,7 @@ describe('calculateReminderWork', () => {
         database: client.db,
         clock: { now: () => now },
         xero: unusedXero,
+        holidays: noHolidays,
         publisher: { publish }
       },
       seeded.organisationId
@@ -480,7 +483,7 @@ describe('calculateReminderWork', () => {
       },
       {
         deduplicateWhileActive: true,
-        singletonKey: `automatic-reminder:${stages[0]?.id}:3`,
+        singletonKey: `automatic-reminder:${stages[0]?.id}:3:2026-09-18T01:00:00.000Z`,
         startAfter: new Date('2026-09-18T01:00:00.000Z')
       }
     );
@@ -513,6 +516,82 @@ describe('calculateReminderWork', () => {
     expect(chase?.sequenceId).toBe(seeded.sequenceId);
   });
 
+  it.each([
+    {
+      label: 'after the Sydney legal window',
+      executionTime: new Date('2026-09-18T07:30:00.000Z'),
+      sendTime: '18:00:00',
+      holidays: [] as string[]
+    },
+    {
+      label: 'on a configured Sydney public holiday',
+      executionTime: now,
+      sendTime: '11:00:00',
+      holidays: ['2026-09-18']
+    }
+  ])(
+    'reschedules an automatic SMS to the next eligible Sydney opening $label',
+    async ({ executionTime, sendTime, holidays }) => {
+      const seeded = await seedInvoiceAndSequence({
+        mode: 'AUTOMATIC',
+        dueDate: '2026-09-18',
+        offsetDays: 0,
+        channel: 'SMS',
+        sendTime,
+        socialWindowStart: '00:00:00',
+        socialWindowEnd: '23:59:59'
+      });
+      const publish = vi.fn<JobPublisher['publish']>(() =>
+        Promise.resolve('unexpected-job')
+      );
+
+      const summary = await runReminderCycle(
+        {
+          database: client.db,
+          clock: { now: () => executionTime },
+          xero: unusedXero,
+          holidays: { list: () => holidays },
+          publisher: { publish }
+        },
+        seeded.organisationId
+      );
+
+      expect(summary.dispatch).toMatchObject({
+        candidateCount: 0,
+        queuedCount: 0,
+        publishedCount: 0
+      });
+      expect(publish).not.toHaveBeenCalled();
+      const [stage] = await client.db
+        .select({
+          id: stageInstances.id,
+          status: stageInstances.status,
+          scheduledAt: stageInstances.scheduledAt
+        })
+        .from(stageInstances)
+        .where(eq(stageInstances.organisationId, seeded.organisationId));
+      expect(stage?.status).toBe('SCHEDULED');
+      const nextOpening = new Date('2026-09-20T22:30:00.000Z');
+      expect(stage?.scheduledAt).toEqual(nextOpening);
+
+      const next = await dispatchAutomaticReminderWork(
+        {
+          database: client.db,
+          clock: { now: () => nextOpening },
+          holidays: { list: () => holidays },
+          publisher: { publish }
+        },
+        seeded.organisationId
+      );
+      expect(next).toMatchObject({
+        candidateCount: 1,
+        queuedCount: 1,
+        publishedCount: 1
+      });
+      expect(publish).toHaveBeenCalledOnce();
+    }
+  );
+
   it('retries a current automatic reminder after an uncertain queue result', async () => {
     const seeded = await seedInvoiceAndSequence({
       mode: 'AUTOMATIC',
@@ -533,6 +612,7 @@ describe('calculateReminderWork', () => {
         {
           database: client.db,
           clock: { now: () => now },
+          holidays: noHolidays,
           publisher: { publish: failedPublish }
         },
         seeded.organisationId
@@ -549,6 +629,7 @@ describe('calculateReminderWork', () => {
       {
         database: client.db,
         clock: { now: () => now },
+        holidays: noHolidays,
         publisher: { publish: successfulPublish }
       },
       seeded.organisationId
@@ -568,12 +649,12 @@ describe('calculateReminderWork', () => {
       },
       expect.objectContaining({
         deduplicateWhileActive: true,
-        singletonKey: `automatic-reminder:${queuedStage?.id}:3`
+        singletonKey: `automatic-reminder:${queuedStage?.id}:3:2026-09-17T23:00:00.000Z`
       })
     );
   });
 
-  it('does not release an automatic reminder scheduled on a previous local day', async () => {
+  it('publishes an unsent Friday SMS after worker downtime through Monday opening', async () => {
     const seeded = await seedInvoiceAndSequence({
       mode: 'AUTOMATIC',
       dueDate: '2026-09-18',
@@ -592,7 +673,7 @@ describe('calculateReminderWork', () => {
       })
       .returning({ id: invoiceChases.id });
     if (chase === undefined) throw new Error('Expected an invoice chase');
-    const [historicalStage] = await client.db
+    const [overdueStage] = await client.db
       .insert(stageInstances)
       .values({
         organisationId: seeded.organisationId,
@@ -601,33 +682,66 @@ describe('calculateReminderWork', () => {
         stageKey: 'historical-due-date',
         channel: 'SMS',
         status: 'SCHEDULED',
-        scheduledAt: new Date('2026-09-16T23:00:00.000Z'),
+        scheduledAt: new Date('2026-09-18T01:00:00.000Z'),
         sourceVersion: 3
       })
       .returning({ id: stageInstances.id });
     const publish = vi.fn<JobPublisher['publish']>(() =>
-      Promise.resolve('unexpected-job')
+      Promise.resolve('overdue-job')
     );
+
+    const mondayOpening = new Date('2026-09-20T22:30:00.000Z');
 
     const result = await dispatchAutomaticReminderWork(
       {
         database: client.db,
-        clock: { now: () => now },
+        clock: { now: () => mondayOpening },
+        holidays: noHolidays,
+        publisher: { publish }
+      },
+      seeded.organisationId
+    );
+    const second = await dispatchAutomaticReminderWork(
+      {
+        database: client.db,
+        clock: { now: () => mondayOpening },
+        holidays: noHolidays,
         publisher: { publish }
       },
       seeded.organisationId
     );
 
-    expect(result).toMatchObject({ candidateCount: 0, publishedCount: 0 });
-    expect(publish).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      candidateCount: 1,
+      queuedCount: 1,
+      publishedCount: 1
+    });
+    expect(second).toMatchObject({ candidateCount: 0, publishedCount: 0 });
+    expect(publish).toHaveBeenCalledOnce();
+    expect(publish).toHaveBeenCalledWith(
+      jobNames.reminderExecute,
+      {
+        organisationId: seeded.organisationId,
+        stageInstanceId: overdueStage?.id
+      },
+      {
+        deduplicateWhileActive: true,
+        singletonKey: `automatic-reminder:${overdueStage?.id}:3:${mondayOpening.toISOString()}`,
+        startAfter: mondayOpening
+      }
+    );
     const [stored] = await client.db
-      .select({ status: stageInstances.status })
+      .select({
+        status: stageInstances.status,
+        scheduledAt: stageInstances.scheduledAt
+      })
       .from(stageInstances)
-      .where(eq(stageInstances.id, historicalStage?.id ?? randomUUID()));
-    expect(stored?.status).toBe('SCHEDULED');
+      .where(eq(stageInstances.id, overdueStage?.id ?? randomUUID()));
+    expect(stored?.status).toBe('QUEUED');
+    expect(stored?.scheduledAt).toEqual(mondayOpening);
   });
 
-  it('leaves a missed same-day reminder scheduled after its social window closes', async () => {
+  it('reschedules a missed same-day reminder to the next business opening', async () => {
     const seeded = await seedInvoiceAndSequence({
       mode: 'AUTOMATIC',
       dueDate: '2026-09-18',
@@ -647,6 +761,7 @@ describe('calculateReminderWork', () => {
       {
         database: client.db,
         clock: { now: () => afterWindow },
+        holidays: noHolidays,
         publisher: { publish }
       },
       seeded.organisationId
@@ -655,10 +770,16 @@ describe('calculateReminderWork', () => {
     expect(result).toMatchObject({ candidateCount: 0, publishedCount: 0 });
     expect(publish).not.toHaveBeenCalled();
     const [stage] = await client.db
-      .select({ status: stageInstances.status })
+      .select({
+        status: stageInstances.status,
+        scheduledAt: stageInstances.scheduledAt
+      })
       .from(stageInstances)
       .where(eq(stageInstances.organisationId, seeded.organisationId));
     expect(stage?.status).toBe('SCHEDULED');
+    expect(stage?.scheduledAt).toEqual(
+      new Date('2026-09-20T22:30:00.000Z')
+    );
   });
 
   it('keeps review-mode reminders awaiting approval and out of the automatic queue', async () => {
@@ -677,6 +798,7 @@ describe('calculateReminderWork', () => {
         database: client.db,
         clock: { now: () => now },
         xero: unusedXero,
+        holidays: noHolidays,
         publisher: { publish }
       },
       seeded.organisationId

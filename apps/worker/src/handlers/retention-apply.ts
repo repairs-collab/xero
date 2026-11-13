@@ -16,7 +16,9 @@ import {
   approvals,
   auditEvents,
   conversations,
+  dataRequestCases,
   type Database,
+  type DbTransaction,
   inboundMessages,
   invoiceChases,
   invoices,
@@ -27,19 +29,26 @@ import {
   stageInstances,
   webhookEvents
 } from '@bc5000/db';
+import { dataRequestReviewDecision } from '@bc5000/domain';
 import type { JobPayloads } from '@bc5000/jobs';
+
+import { lockRetentionOrganisation } from '../services/retention-legal-hold.js';
 
 const retained = '[RETAINED_METADATA_ONLY]';
 const retainedPayload = { retainedMetadataOnly: true } as const;
 
-export async function applyRetention(
+async function applyRetentionLocked(
   dependencies: {
-    database: Database;
+    database: DbTransaction;
     clock: { now(): Date };
     batchSize?: number;
   },
   payload: JobPayloads['retention.apply']
 ) {
+  await lockRetentionOrganisation(
+    dependencies.database,
+    payload.organisationId
+  );
   const now = dependencies.clock.now();
   const batchSize = dependencies.batchSize ?? 500;
   const contentCutoff = new Date(now);
@@ -79,6 +88,136 @@ export async function applyRetention(
       },
       occurredAt: now
     });
+  }
+
+  const dataRequestsReviewed = await (async () => {
+      const transaction = dependencies.database;
+      const [retentionCase] = await transaction
+        .select({
+          status: retentionCases.status,
+          closureEpisodeId: retentionCases.closureEpisodeId,
+          deletionEligibleAt: retentionCases.deletionEligibleAt,
+          backupExpiryVerifiedAt: retentionCases.backupExpiryVerifiedAt,
+          backupExpiryClosureEpisodeId:
+            retentionCases.backupExpiryClosureEpisodeId
+        })
+        .from(retentionCases)
+        .where(eq(retentionCases.organisationId, payload.organisationId))
+        .for('update')
+        .limit(1);
+      const requests = await transaction
+        .select({
+          id: dataRequestCases.id,
+          requestType: dataRequestCases.requestType,
+          status: dataRequestCases.status,
+          blockReason: dataRequestCases.blockReason,
+          retentionClosureEpisodeId:
+            dataRequestCases.retentionClosureEpisodeId,
+          version: dataRequestCases.version
+        })
+        .from(dataRequestCases)
+        .where(
+          and(
+            eq(dataRequestCases.organisationId, payload.organisationId),
+            eq(dataRequestCases.status, 'VERIFIED'),
+            lte(dataRequestCases.targetAt, now)
+          )
+        )
+        .orderBy(dataRequestCases.targetAt, dataRequestCases.id)
+        .limit(batchSize);
+
+      let changed = 0;
+      for (const request of requests) {
+        const decision = dataRequestReviewDecision({
+          requestType: request.requestType,
+          legalHold: retentionCase?.status === 'LEGAL_HOLD',
+          requestClosureEpisodeId: request.retentionClosureEpisodeId,
+          currentClosureEpisodeId:
+            retentionCase?.closureEpisodeId ?? null,
+          deletionEligibleAt: retentionCase?.deletionEligibleAt ?? null,
+          backupExpiryVerifiedAt:
+            retentionCase?.backupExpiryVerifiedAt ?? null,
+          backupExpiryClosureEpisodeId:
+            retentionCase?.backupExpiryClosureEpisodeId ?? null,
+          now
+        });
+        const { status, blockReason } = decision;
+        if (
+          request.status === status &&
+          request.blockReason === blockReason
+        ) {
+          continue;
+        }
+        const [updated] = await transaction
+          .update(dataRequestCases)
+          .set({
+            status,
+            blockReason,
+            version: request.version + 1,
+            lastReviewedAt: now,
+            updatedAt: now
+          })
+          .where(
+            and(
+              eq(dataRequestCases.organisationId, payload.organisationId),
+              eq(dataRequestCases.id, request.id),
+              eq(dataRequestCases.version, request.version)
+            )
+          )
+          .returning({ id: dataRequestCases.id });
+        if (updated === undefined) continue;
+        await transaction.insert(auditEvents).values({
+          organisationId: payload.organisationId,
+          eventType: 'DATA_REQUEST_REVIEW_STATE_CHANGED',
+          entityType: 'DATA_REQUEST',
+          entityId: request.id,
+          beforeValue: {
+            status: request.status,
+            blockReason: request.blockReason,
+            version: request.version
+          },
+          afterValue: {
+            status,
+            blockReason,
+            version: request.version + 1,
+            automaticDeletion: false
+          },
+          occurredAt: now
+        });
+        changed += 1;
+      }
+      return changed;
+    })();
+
+  const [retentionGuard] = await dependencies.database
+    .select({ status: retentionCases.status })
+    .from(retentionCases)
+    .where(eq(retentionCases.organisationId, payload.organisationId))
+    .limit(1);
+  const legalHoldActive = retentionGuard?.status === 'LEGAL_HOLD';
+  if (legalHoldActive) {
+    const result = {
+      accountReviewRequired,
+      dataRequestsReviewed,
+      legalHoldActive,
+      approvalsRedacted: 0,
+      outboundRedacted: 0,
+      attemptsRedacted: 0,
+      inboundRedacted: 0,
+      repliesRedacted: 0,
+      webhooksDeleted: 0,
+      contentCutoff: contentCutoff.toISOString(),
+      webhookCutoff: webhookCutoff.toISOString()
+    };
+    await dependencies.database.insert(auditEvents).values({
+      organisationId: payload.organisationId,
+      eventType: 'RETENTION_APPLIED',
+      entityType: 'ORGANISATION',
+      entityId: payload.organisationId,
+      afterValue: result,
+      occurredAt: now
+    });
+    return result;
   }
 
   const oldInvoices = await dependencies.database
@@ -336,6 +475,8 @@ export async function applyRetention(
 
   const result = {
     accountReviewRequired,
+    dataRequestsReviewed,
+    legalHoldActive,
     approvalsRedacted,
     outboundRedacted,
     attemptsRedacted,
@@ -354,4 +495,20 @@ export async function applyRetention(
     occurredAt: now
   });
   return result;
+}
+
+export async function applyRetention(
+  dependencies: {
+    database: Database;
+    clock: { now(): Date };
+    batchSize?: number;
+  },
+  payload: JobPayloads['retention.apply']
+) {
+  return dependencies.database.transaction((transaction) =>
+    applyRetentionLocked(
+      { ...dependencies, database: transaction },
+      payload
+    )
+  );
 }

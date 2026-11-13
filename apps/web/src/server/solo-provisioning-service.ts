@@ -13,13 +13,14 @@ import {
   xeroPendingAuthorisations
 } from '@bc5000/db/web';
 
+import { isAustralianTimeZone } from './australian-time-zones.js';
+
 export interface SoloProvisioningInput {
   userId: string;
   pendingAuthorisationId: string;
   connectionId: string;
   tenantId: string;
   now: Date;
-  trialEndsAt: Date;
 }
 
 export interface SoloProvisioningRepository {
@@ -44,18 +45,32 @@ const required = (value: string | undefined, code: string): string => {
 
 const validCurrency = (value: string): string => {
   const result = value.trim().toUpperCase();
-  if (!/^[A-Z]{3}$/.test(result)) {
+  if (result !== 'AUD') {
     throw new Error('XERO_ORGANISATION_CURRENCY_INVALID');
+  }
+  return result;
+};
+
+const validSoloTimeZone = (value: string): string => {
+  const result = value.trim();
+  if (!isAustralianTimeZone(result)) {
+    throw new Error('XERO_ORGANISATION_TIMEZONE_UNSUPPORTED');
   }
   return result;
 };
 
 const xeroTimeZones = new Map<string, string>([
   ['AUSEASTERNSTANDARDTIME', 'Australia/Sydney'],
-  ['AUSCENTRALSTANDARDTIME', 'Australia/Adelaide'],
+  ['AUSTRALIA/SYDNEY', 'Australia/Sydney'],
+  ['AUSTRALIA/MELBOURNE', 'Australia/Melbourne'],
+  ['AUSCENTRALSTANDARDTIME', 'Australia/Darwin'],
+  ['CENAUSTRALIASTANDARDTIME', 'Australia/Adelaide'],
+  ['EAUSTRALIASTANDARDTIME', 'Australia/Brisbane'],
+  ['EASTAUSTRALIASTANDARDTIME', 'Australia/Brisbane'],
   ['TASMANIASTANDARDTIME', 'Australia/Hobart'],
   ['WESTERNSTANDARDTIME', 'Australia/Perth'],
   ['WAUSTRALIASTANDARDTIME', 'Australia/Perth'],
+  ['LORDHOWESTANDARDTIME', 'Australia/Lord_Howe'],
   ['NEWZEALANDSTANDARDTIME', 'Pacific/Auckland']
 ]);
 
@@ -154,9 +169,11 @@ export const createPostgresSoloProvisioningRepository = (
           candidate.organisationName,
           'XERO_ORGANISATION_DETAILS_REQUIRED'
         );
-        const timeZone = required(
-          candidate.timeZone,
-          'XERO_ORGANISATION_TIMEZONE_REQUIRED'
+        const timeZone = validSoloTimeZone(
+          required(
+            candidate.timeZone,
+            'XERO_ORGANISATION_TIMEZONE_REQUIRED'
+          )
         );
         const baseCurrency = validCurrency(
           required(
@@ -203,8 +220,8 @@ export const createPostgresSoloProvisioningRepository = (
         await transaction.insert(subscriptions).values({
           organisationId: organisation.id,
           planCode: 'SOLO_AU_2000',
-          status: 'TRIALING',
-          trialEndsAt: input.trialEndsAt
+          status: 'INCOMPLETE',
+          trialEndsAt: null
         });
         await transaction.insert(organisationOnboarding).values({
           organisationId: organisation.id,
@@ -233,7 +250,8 @@ export const createPostgresSoloProvisioningRepository = (
             sendMode: 'dry-run',
             rolloutScope: 'CONTROLLED',
             operationalState: 'SYNC_REQUIRED',
-            trialEndsAt: input.trialEndsAt.toISOString()
+            subscriptionStatus: 'INCOMPLETE',
+            trialEndsAt: null
           },
           occurredAt: input.now
         });
@@ -276,8 +294,7 @@ export const createSoloProvisioningService = (dependencies: {
     const provisioned = await dependencies.repository.provision({
       userId: session.userId,
       ...input,
-      now,
-      trialEndsAt: new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000)
+      now
     });
     let initialSyncQueued = true;
     try {

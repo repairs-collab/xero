@@ -18,7 +18,6 @@ const input = {
   adminDisplayName: 'Alex Admin',
   timeZone: 'Australia/Sydney' as const,
   baseCurrency: 'AUD' as const,
-  trialDays: 14,
   includedSmsParts: 2_000,
   warningPercent: 80,
   reason: 'Approved beta customer'
@@ -51,7 +50,6 @@ describe('platform customer provisioning', () => {
       name: 'Acme Repairs',
       timeZone: 'Australia/Sydney',
       baseCurrency: 'AUD',
-      trialEndsAt: new Date('2026-11-25T00:00:00.000Z'),
       includedSmsParts: 2_000,
       warningPercent: 80,
       reason: 'Approved beta customer',
@@ -105,5 +103,65 @@ describe('platform customer provisioning', () => {
       service.createCustomer(session, { ...input, adminEmail: 'invalid' })
     ).rejects.toThrow('VALIDATION');
     expect(dependencies.repository.createWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('rejects New Zealand provisioning while the commercial release is Australia-only', async () => {
+    const dependencies = {
+      verifyOwner: vi.fn().mockResolvedValue(true),
+      repository: {
+        createWorkspace: vi.fn(),
+        removeFailedWorkspace: vi.fn()
+      },
+      inviteMember: vi.fn(),
+      clock: { now: () => new Date('2026-11-11T00:00:00.000Z') }
+    };
+    const service = createPlatformCustomerProvisioningService(dependencies);
+
+    await expect(
+      service.createCustomer(session, {
+        ...input,
+        timeZone: 'Pacific/Auckland' as never,
+        baseCurrency: 'NZD' as never
+      })
+    ).rejects.toThrow('VALIDATION');
+    expect(dependencies.repository.createWorkspace).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'Australia/Sydney',
+    'Australia/Melbourne',
+    'Australia/Hobart',
+    'Australia/Brisbane',
+    'Australia/Adelaide',
+    'Australia/Darwin',
+    'Australia/Perth',
+    'Australia/Lord_Howe',
+    'Australia/Broken_Hill',
+    'Australia/Lindeman',
+    'Australia/Eucla'
+  ])('accepts the Australian customer zone %s', async (timeZone) => {
+    const repository = {
+      createWorkspace: vi.fn().mockResolvedValue({ organisationId: 'org-1' }),
+      removeFailedWorkspace: vi.fn()
+    };
+    const service = createPlatformCustomerProvisioningService({
+      verifyOwner: vi.fn().mockResolvedValue(true),
+      repository,
+      inviteMember: vi.fn().mockResolvedValue({
+        invitationId: 'invite-1',
+        userId: 'user-1'
+      }),
+      clock: { now: () => new Date('2026-11-11T00:00:00.000Z') }
+    });
+
+    await expect(
+      service.createCustomer(session, {
+        ...input,
+        timeZone: timeZone as never
+      })
+    ).resolves.toMatchObject({ organisationId: 'org-1' });
+    expect(repository.createWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({ timeZone })
+    );
   });
 });

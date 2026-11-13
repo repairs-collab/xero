@@ -39,15 +39,21 @@ const readiness: CustomerRolloutReadiness = {
     },
     providersHealthy: {
       passed: false,
-      evidence: [
-        {
-          id: 'xero-connection-id',
-          provider: 'XERO',
-          authenticatedAt: now
-        }
-      ]
+      evidence: {
+        edition: 'INTERNAL_LEGACY',
+        authentications: [
+          {
+            id: 'xero-connection-id',
+            provider: 'XERO',
+            authenticatedAt: now
+          }
+        ]
+      }
     },
-    syncFresh: { passed: true, evidence: { timestamp: now } },
+    syncFresh: {
+      passed: true,
+      evidence: { timestamp: now, xeroConnectionId: null }
+    },
     importedDataPresent: {
       passed: true,
       evidence: { activeContactCount: 18, outstandingInvoiceCount: 23 }
@@ -69,6 +75,7 @@ const readiness: CustomerRolloutReadiness = {
       passed: true,
       evidence: {
         id: 'reconciliation-id',
+        syncId: '10000000-0000-4000-8000-000000000099',
         syncCompletedAt: now,
         acknowledgedAt: now
       }
@@ -90,8 +97,9 @@ describe('final rollout controls', () => {
     );
 
     expect(html).toContain('Controlled live is active');
-    expect(html).toContain('Xero and Sinch checks are current');
-    expect(html).toContain('Run both connection tests in Integrations');
+    expect(html).toContain('Xero and messaging checks are current');
+    expect(html).toContain('AccountPulse checks the messaging service automatically');
+    expect(html).not.toContain('Sinch');
     expect(html).toContain('Fresh Xero sync');
     expect(html).toContain('Imported receivables are present');
     expect(html).toContain('Controlled Test SMS');
@@ -103,6 +111,32 @@ describe('final rollout controls', () => {
     expect(html).not.toContain('+61400000001');
     expect(html).not.toContain('Private message content');
     expect(html).not.toMatch(/test xero email/i);
+  });
+
+  it('explains the dedicated reply-number requirements for Solo rollout', () => {
+    const html = renderToStaticMarkup(
+      createElement(RolloutGateList, {
+        readiness: {
+          ...readiness,
+          gates: {
+            ...readiness.gates,
+            providersHealthy: {
+              passed: false,
+              evidence: {
+                edition: 'SOLO',
+                xeroConnectionId: '10000000-0000-4000-8000-000000000098',
+                xeroConnectedAt: now,
+                replyNumberReadyAt: null
+              }
+            },
+            controlledSmsEvidence: { passed: false, evidence: null }
+          }
+        }
+      })
+    );
+    expect(html).toContain('Xero is connected and your reply number is ready');
+    expect(html).toContain('After completing onboarding, send a Test SMS from your dedicated reply number');
+    expect(html).not.toContain('Sinch');
   });
 
   it('renders reconciliation counts and currency totals without customer PII', () => {
@@ -199,7 +233,7 @@ describe('final rollout controls', () => {
     };
     expect(
       rolloutFeedback('provider-sending-disabled', dryRunState)?.title
-    ).toBe('All provider sending disabled');
+    ).toBe('All message sending disabled');
   });
 
   it('keeps reconciliation and final-customer acknowledgements distinct', () => {

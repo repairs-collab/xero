@@ -4,6 +4,7 @@ import {
   type Database,
   type DbTransaction,
   messageAttempts,
+  lockDebtContactProvider,
   organisations,
   outboundMessages,
   PostgresEntitlementRepository,
@@ -25,6 +26,7 @@ import {
 
 export interface ProviderSendDecisionInput {
   organisationId: string;
+  contactId?: string;
   source: ProviderSendSource;
   channel: ProviderSendChannel;
   destination: string;
@@ -63,7 +65,13 @@ export async function dispatchWithProviderSendLock<Value>(
     | { kind: 'provider-error'; error: unknown };
   const outcome: InternalDispatchResult = await database.transaction(
     async (transaction): Promise<InternalDispatchResult> => {
-    const [organisation] = await transaction
+      if (input.contactId !== undefined) {
+        await lockDebtContactProvider(transaction, {
+          organisationId: input.organisationId,
+          contactId: input.contactId
+        });
+      }
+      const [organisation] = await transaction
       .select()
       .from(organisations)
       .where(eq(organisations.id, input.organisationId))
@@ -245,6 +253,9 @@ export async function markProviderSendBlocked(
     reason:
       | Extract<ProviderSendPolicyDecision, { kind: 'blocked' }>['reason']
       | 'CHANNEL_SUPPRESSED'
+      | 'CONTACT_WINDOW_CLOSED'
+      | 'DAILY_CONTACT_LIMIT'
+      | 'DISPUTE_OPEN'
       | 'OUTSIDE_SCHEDULE_WINDOW'
       | 'SOURCE_CHANGED'
       | EntitlementSendBlocker

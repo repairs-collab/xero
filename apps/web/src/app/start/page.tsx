@@ -9,9 +9,9 @@ export default function StartPage() {
         <span className="eyebrow">AccountPulse Solo</span>
         <h1>Connect Xero and start chasing overdue accounts</h1>
         <p>
-          Accept your secure AccountPulse invitation, connect one Xero
-          organisation, and review your reminders during a 14-day free trial.
-          No card is required for the trial.
+          Invited beta customers can connect one Xero organisation in
+          controlled review mode. For paid commercial access, card payment is
+          due during signup and does not include a free trial.
         </p>
         <div className="button-row">
           <Link href="/auth/login?returnTo=%2Fonboarding" className="button button--primary">

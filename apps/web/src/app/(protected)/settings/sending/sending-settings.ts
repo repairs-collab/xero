@@ -3,11 +3,13 @@ import {
   count,
   desc,
   eq,
+  exists,
   gt,
   gte,
   inArray,
   lte,
-  sql
+  sql,
+  type SQL
 } from 'drizzle-orm';
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
 
@@ -20,13 +22,17 @@ import {
   type DbTransaction,
   invoices,
   operationalResetRuns,
+  organisationOnboarding,
   organisations,
   outboundMessages,
   PostgresEntitlementRepository,
   PostgresOrganisationSafetyRepository,
   providerConnections,
   reminderSequences,
-  rolloutReconciliations
+  rolloutReconciliations,
+  smsNumberPool,
+  smsUsageLedger,
+  xeroConnections
 } from '@bc5000/db/web';
 
 export const LIVE_ACKNOWLEDGEMENT =
@@ -58,6 +64,22 @@ interface ReadinessGate<T = undefined> {
   evidence: T;
 }
 
+type ProviderEvidence =
+  | {
+      edition: 'INTERNAL_LEGACY';
+      authentications: Array<{
+        id: string;
+        provider: 'XERO' | 'SINCH';
+        authenticatedAt: Date;
+      }>;
+    }
+  | {
+      edition: 'SOLO';
+      xeroConnectionId: string | null;
+      xeroConnectedAt: Date | null;
+      replyNumberReadyAt: Date | null;
+    };
+
 export interface CustomerRolloutReadiness {
   organisationId: string;
   operationalState: string;
@@ -68,14 +90,11 @@ export interface CustomerRolloutReadiness {
       sendMode: 'dry-run' | 'live';
       rolloutScope: 'CONTROLLED' | 'CUSTOMER';
     }>;
-    providersHealthy: ReadinessGate<
-      Array<{
-        id: string;
-        provider: 'XERO' | 'SINCH';
-        authenticatedAt: Date;
-      }>
-    >;
-    syncFresh: ReadinessGate<{ timestamp: Date | null }>;
+    providersHealthy: ReadinessGate<ProviderEvidence>;
+    syncFresh: ReadinessGate<{
+      timestamp: Date | null;
+      xeroConnectionId: string | null;
+    }>;
     importedDataPresent: ReadinessGate<{
       activeContactCount: number;
       outstandingInvoiceCount: number;
@@ -91,6 +110,7 @@ export interface CustomerRolloutReadiness {
     }>;
     reconciliationCurrent: ReadinessGate<{
       id: string;
+      syncId: string;
       syncCompletedAt: Date;
       acknowledgedAt: Date;
     } | null>;
@@ -99,12 +119,25 @@ export interface CustomerRolloutReadiness {
 }
 
 type Executor = Database | DbTransaction;
+type Organisation = typeof organisations.$inferSelect;
+
+const syncFreshnessMs = 15 * 60_000;
+const providerAuthenticationFreshnessMs = 24 * 60 * 60_000;
+const controlledSmsFreshnessMs = 7 * 24 * 60 * 60_000;
+const legacyProviders = ['XERO', 'SINCH'] as const;
+
+const isRecent = (timestamp: Date | null, now: Date, maxAge: number): boolean => {
+  if (timestamp === null) return false;
+  const age = now.getTime() - timestamp.getTime();
+  return age >= 0 && age <= maxAge;
+};
 
 const activationErrors = new Set([
   'ACKNOWLEDGEMENT_MISMATCH',
   'PROVIDERS_UNHEALTHY',
   'XERO_SYNC_STALE',
   'ALLOWLIST_REQUIRED',
+  'OPERATIONAL_STATE_CONFLICT',
   'FORBIDDEN'
 ]);
 
@@ -141,9 +174,9 @@ export const liveActivationFeedback = (
     case 'PROVIDERS_UNHEALTHY':
       return {
         tone: 'error',
-        title: 'Provider checks are out of date',
+        title: 'Connection checks are out of date',
         detail:
-          'Run successful Xero and Sinch connection tests, then try again within 24 hours.'
+          'Reconnect Xero if needed. AccountPulse checks the messaging service automatically; contact support if this remains blocked.'
       };
     case 'XERO_SYNC_STALE':
       return {
@@ -280,15 +313,54 @@ async function getReconciliationMetrics(
   };
 }
 
-async function lockCustomerRolloutEvidence(
+async function lockSoloXeroConnection(
+  transaction: DbTransaction,
+  organisationId: string
+): Promise<void> {
+  // Another session may already be refreshing or replacing this connection.
+  // Never wait for it while holding the organisation lock.
+  try {
+    await transaction
+      .select({ id: xeroConnections.id })
+      .from(xeroConnections)
+      .where(eq(xeroConnections.organisationId, organisationId))
+      .for('share', { noWait: true });
+  } catch (error) {
+    const cause: unknown = error instanceof Error ? error.cause : error;
+    if (cause && typeof cause === 'object' && 'code' in cause && cause.code === '55P03') {
+      throw new Error('OPERATIONAL_STATE_CONFLICT');
+    }
+    throw error;
+  }
+}
+
+async function lockSoloReplyNumber(
   transaction: DbTransaction,
   organisationId: string
 ): Promise<void> {
   await transaction
-    .select({ id: providerConnections.id })
-    .from(providerConnections)
-    .where(eq(providerConnections.organisationId, organisationId))
+    .select({ id: smsNumberPool.id })
+    .from(smsNumberPool)
+    .where(eq(smsNumberPool.organisationId, organisationId))
     .for('update');
+}
+
+async function lockCustomerRolloutEvidence(
+  transaction: DbTransaction,
+  organisation: Organisation
+): Promise<void> {
+  const organisationId = organisation.id;
+  // The caller holds the organisation lock. Number operations use that same
+  // lock before locking the assigned number and writing onboarding evidence.
+  if (organisation.edition === 'SOLO') {
+    await lockSoloReplyNumber(transaction, organisationId);
+  } else {
+    await transaction
+      .select({ id: providerConnections.id })
+      .from(providerConnections)
+      .where(eq(providerConnections.organisationId, organisationId))
+      .for('update');
+  }
   await transaction
     .select({ id: contacts.id })
     .from(contacts)
@@ -331,46 +403,193 @@ async function lockCustomerRolloutEvidence(
     .for('update');
 }
 
+async function getProviderEvidence(
+  database: Executor,
+  organisation: Organisation,
+  now: Date
+): Promise<ProviderEvidence> {
+  if (organisation.edition === 'SOLO') {
+    const [connection] = await database
+      .select({
+        id: xeroConnections.id,
+        connectedAt: xeroConnections.connectedAt
+      })
+      .from(xeroConnections)
+      .where(and(
+        eq(xeroConnections.organisationId, organisation.id),
+        eq(xeroConnections.status, 'CONNECTED')
+      ))
+      .limit(1);
+    const [number] = await database
+      .select({
+        provider: smsNumberPool.provider,
+        providerNumberId: smsNumberPool.providerNumberId,
+        providerVerifiedAt: smsNumberPool.providerVerifiedAt,
+        readyAt: smsNumberPool.readyAt
+      })
+      .from(smsNumberPool)
+      .where(and(
+        eq(smsNumberPool.organisationId, organisation.id),
+        eq(smsNumberPool.status, 'READY')
+      ))
+      .limit(1);
+    const numberVerified = number !== undefined &&
+      number.provider.trim() !== '' &&
+      Boolean(number.providerNumberId?.trim()) &&
+      number.providerVerifiedAt !== null &&
+      number.providerVerifiedAt.getTime() <= now.getTime() &&
+      number.readyAt !== null &&
+      number.readyAt.getTime() <= now.getTime();
+    return {
+      edition: 'SOLO',
+      xeroConnectionId: connection?.id ?? null,
+      xeroConnectedAt: connection?.connectedAt ?? null,
+      replyNumberReadyAt: numberVerified ? number.readyAt : null
+    };
+  }
+
+  const healthySince = new Date(now.getTime() - providerAuthenticationFreshnessMs);
+  const providers = await database
+    .select({
+      id: providerConnections.id,
+      provider: providerConnections.provider,
+      connectedAt: providerConnections.connectedAt,
+      authenticatedAt: providerConnections.lastSuccessfulAuthenticationAt
+    })
+    .from(providerConnections)
+    .where(and(
+      eq(providerConnections.organisationId, organisation.id),
+      eq(providerConnections.enabled, true),
+      gte(providerConnections.lastSuccessfulAuthenticationAt, healthySince),
+      lte(providerConnections.lastSuccessfulAuthenticationAt, now)
+    ));
+  return {
+    edition: 'INTERNAL_LEGACY',
+    authentications: providers.flatMap(({ id, provider, connectedAt, authenticatedAt }) =>
+      connectedAt === null || authenticatedAt === null
+        ? []
+        : [{ id, provider, authenticatedAt }]
+    )
+  };
+}
+
+const hasHealthyProviders = (evidence: ProviderEvidence, now: Date): boolean =>
+  evidence.edition === 'SOLO'
+    ? evidence.xeroConnectionId !== null &&
+      evidence.xeroConnectedAt !== null &&
+      evidence.replyNumberReadyAt !== null
+    : legacyProviders.every((provider) =>
+        evidence.authentications.some((authentication) =>
+          authentication.provider === provider &&
+          isRecent(authentication.authenticatedAt, now, providerAuthenticationFreshnessMs)
+        )
+      );
+
+const hasFreshSync = (
+  timestamp: Date | null,
+  successfulXeroConnectionId: string | null,
+  evidence: ProviderEvidence,
+  now: Date
+): boolean =>
+  timestamp !== null &&
+  isRecent(timestamp, now, syncFreshnessMs) &&
+  (evidence.edition === 'INTERNAL_LEGACY' ||
+    (successfulXeroConnectionId !== null &&
+      successfulXeroConnectionId === evidence.xeroConnectionId));
+
+async function getControlledSmsEvidence(
+  database: Executor,
+  organisation: Organisation,
+  providerEvidence: ProviderEvidence,
+  now: Date
+): Promise<CustomerRolloutReadiness['gates']['controlledSmsEvidence']['evidence']> {
+  const recentSmsSince = new Date(now.getTime() - controlledSmsFreshnessMs);
+  let dedicatedSmsCondition: SQL | undefined;
+  if (providerEvidence.edition === 'SOLO') {
+    const { replyNumberReadyAt } = providerEvidence;
+    if (replyNumberReadyAt === null) return null;
+    const [onboarding] = await database
+      .select({ completedAt: organisationOnboarding.completedAt })
+      .from(organisationOnboarding)
+      .where(and(
+        eq(organisationOnboarding.organisationId, organisation.id),
+        eq(organisationOnboarding.completedVersion, organisationOnboarding.version)
+      ))
+      .limit(1);
+    if (!onboarding?.completedAt) return null;
+    const earliestDedicatedSend = new Date(Math.max(
+      onboarding.completedAt.getTime(),
+      replyNumberReadyAt.getTime()
+    ));
+
+    // The worker commits usage for dedicated-number sends. Shared-sender
+    // verification and verified-admin tests do not reserve or commit usage.
+    dedicatedSmsCondition = exists(
+      database.select({ id: smsUsageLedger.id }).from(smsUsageLedger).where(and(
+        eq(smsUsageLedger.organisationId, outboundMessages.organisationId),
+        eq(smsUsageLedger.outboundMessageId, outboundMessages.id),
+        eq(smsUsageLedger.source, 'TEST_SMS'),
+        eq(smsUsageLedger.entryType, 'COMMIT'),
+        gte(smsUsageLedger.occurredAt, earliestDedicatedSend),
+        lte(smsUsageLedger.occurredAt, now)
+      ))
+    );
+  }
+
+  const recentTestMessages = await database
+    .select({
+      id: outboundMessages.id,
+      status: outboundMessages.status,
+      recipientKey: outboundMessages.recipientKey,
+      createdAt: outboundMessages.createdAt,
+      completedAt: outboundMessages.completedAt
+    })
+    .from(outboundMessages)
+    .where(and(
+      eq(outboundMessages.organisationId, organisation.id),
+      eq(outboundMessages.channel, 'SMS'),
+      eq(outboundMessages.source, 'TEST_SMS'),
+      inArray(outboundMessages.status, ['ACCEPTED', 'DELIVERED']),
+      gte(outboundMessages.createdAt, recentSmsSince),
+      lte(outboundMessages.createdAt, now),
+      dedicatedSmsCondition
+    ))
+    .orderBy(desc(outboundMessages.completedAt), desc(outboundMessages.createdAt));
+  const message = recentTestMessages.find((message) =>
+    organisation.recipientAllowlist.includes(message.recipientKey) &&
+    isRecent(message.completedAt ?? message.createdAt, now, controlledSmsFreshnessMs)
+  );
+  return message
+    ? {
+        id: message.id,
+        status: message.status as 'ACCEPTED' | 'DELIVERED',
+        timestamp: message.completedAt ?? message.createdAt
+      }
+    : null;
+}
+
 const failedReadinessGatesAt = (
   readiness: CustomerRolloutReadiness,
   now: Date
 ): string[] => {
-  const failed = Object.entries(readiness.gates)
+  const { gates } = readiness;
+  const providerEvidence = gates.providersHealthy.evidence;
+  const failed = new Set(Object.entries(gates)
     .filter(([, gate]) => !gate.passed)
-    .map(([key]) => key);
-  const providerEvidence = readiness.gates.providersHealthy.evidence;
-  const providersCurrent = (['XERO', 'SINCH'] as const).every((provider) =>
-    providerEvidence.some((evidence) => {
-      const age = now.getTime() - evidence.authenticatedAt.getTime();
-      return provider === evidence.provider && age >= 0 && age <= 24 * 60 * 60_000;
-    })
-  );
-  const syncTimestamp = readiness.gates.syncFresh.evidence.timestamp;
-  const syncAge =
-    syncTimestamp === null
-      ? Number.POSITIVE_INFINITY
-      : now.getTime() - syncTimestamp.getTime();
-  const smsTimestamp = readiness.gates.controlledSmsEvidence.evidence?.timestamp;
-  const smsAge =
-    smsTimestamp === undefined
-      ? Number.POSITIVE_INFINITY
-      : now.getTime() - smsTimestamp.getTime();
-  if (!providersCurrent && !failed.includes('providersHealthy')) {
-    failed.push('providersHealthy');
+    .map(([key]) => key));
+  if (!hasHealthyProviders(providerEvidence, now)) failed.add('providersHealthy');
+  if (!hasFreshSync(
+    gates.syncFresh.evidence.timestamp,
+    gates.syncFresh.evidence.xeroConnectionId,
+    providerEvidence,
+    now
+  )) {
+    failed.add('syncFresh');
   }
-  if (
-    (syncAge < 0 || syncAge > 15 * 60_000) &&
-    !failed.includes('syncFresh')
-  ) {
-    failed.push('syncFresh');
+  if (!isRecent(gates.controlledSmsEvidence.evidence?.timestamp ?? null, now, controlledSmsFreshnessMs)) {
+    failed.add('controlledSmsEvidence');
   }
-  if (
-    (smsAge < 0 || smsAge > 7 * 24 * 60 * 60_000) &&
-    !failed.includes('controlledSmsEvidence')
-  ) {
-    failed.push('controlledSmsEvidence');
-  }
-  return failed;
+  return [...failed];
 };
 
 async function calculateCustomerRolloutReadiness(
@@ -384,54 +603,11 @@ async function calculateCustomerRolloutReadiness(
     .limit(1);
   if (!organisation) throw new Error('ORGANISATION_NOT_FOUND');
 
-  const healthySince = new Date(input.now.getTime() - 24 * 60 * 60_000);
-  const recentSmsSince = new Date(input.now.getTime() - 7 * 24 * 60 * 60_000);
-  // This helper also runs on a single transaction connection during final
-  // activation, so keep its reads sequential rather than multiplexing a pg
-  // client that only supports one active query.
-  const metrics = await getReconciliationMetrics(
-    database,
-    input.organisationId
+  const metrics = await getReconciliationMetrics(database, input.organisationId);
+  const providerEvidence = await getProviderEvidence(database, organisation, input.now);
+  const controlledSmsEvidence = await getControlledSmsEvidence(
+    database, organisation, providerEvidence, input.now
   );
-  const providers = await database
-    .select({
-      id: providerConnections.id,
-      provider: providerConnections.provider,
-      connectedAt: providerConnections.connectedAt,
-      authenticatedAt: providerConnections.lastSuccessfulAuthenticationAt
-    })
-    .from(providerConnections)
-    .where(
-      and(
-        eq(providerConnections.organisationId, input.organisationId),
-        eq(providerConnections.enabled, true),
-        gte(providerConnections.lastSuccessfulAuthenticationAt, healthySince),
-        lte(providerConnections.lastSuccessfulAuthenticationAt, input.now)
-      )
-    );
-  const recentTestMessages = await database
-    .select({
-      id: outboundMessages.id,
-      status: outboundMessages.status,
-      recipientKey: outboundMessages.recipientKey,
-      createdAt: outboundMessages.createdAt,
-      completedAt: outboundMessages.completedAt
-    })
-    .from(outboundMessages)
-    .where(
-      and(
-        eq(outboundMessages.organisationId, input.organisationId),
-        eq(outboundMessages.channel, 'SMS'),
-        eq(outboundMessages.source, 'TEST_SMS'),
-        inArray(outboundMessages.status, ['ACCEPTED', 'DELIVERED']),
-        gte(outboundMessages.createdAt, recentSmsSince),
-        lte(outboundMessages.createdAt, input.now)
-      )
-    )
-    .orderBy(
-      desc(outboundMessages.completedAt),
-      desc(outboundMessages.createdAt)
-    );
   const activeResets = await database
     .select({ id: operationalResetRuns.id })
     .from(operationalResetRuns)
@@ -443,44 +619,14 @@ async function calculateCustomerRolloutReadiness(
     )
     .limit(1);
 
-  const providerEvidence = providers
-    .filter(
-      (
-        provider
-      ): provider is typeof provider & {
-        connectedAt: Date;
-        authenticatedAt: Date;
-      } => provider.connectedAt !== null && provider.authenticatedAt !== null
-    )
-    .map((provider) => ({
-      id: provider.id,
-      provider: provider.provider,
-      authenticatedAt: provider.authenticatedAt
-    }));
-  const providersHealthy = (['XERO', 'SINCH'] as const).every((provider) =>
-    providerEvidence.some((evidence) => evidence.provider === provider)
-  );
-  const controlledMessage = recentTestMessages.find((message) => {
-    const timestamp = message.completedAt ?? message.createdAt;
-    return (
-      organisation.recipientAllowlist.includes(message.recipientKey) &&
-      timestamp.getTime() >= recentSmsSince.getTime() &&
-      timestamp.getTime() <= input.now.getTime()
-    );
-  });
-  const controlledSmsEvidence = controlledMessage
-    ? {
-        id: controlledMessage.id,
-        status: controlledMessage.status as 'ACCEPTED' | 'DELIVERED',
-        timestamp: controlledMessage.completedAt ?? controlledMessage.createdAt
-      }
-    : null;
   const [reconciliation] =
-    organisation.lastSuccessfulSyncAt === null
+    organisation.lastSuccessfulSyncAt === null ||
+    organisation.lastSuccessfulSyncId === null
       ? []
       : await database
           .select({
             id: rolloutReconciliations.id,
+            syncId: rolloutReconciliations.syncId,
             syncCompletedAt: rolloutReconciliations.syncCompletedAt,
             acknowledgedAt: rolloutReconciliations.acknowledgedAt,
             activeContactCount: rolloutReconciliations.activeContactCount,
@@ -500,17 +646,10 @@ async function calculateCustomerRolloutReadiness(
                 rolloutReconciliations.organisationId,
                 input.organisationId
               ),
-              eq(
-                rolloutReconciliations.syncCompletedAt,
-                organisation.lastSuccessfulSyncAt
-              )
+              eq(rolloutReconciliations.syncId, organisation.lastSuccessfulSyncId)
             )
           )
           .limit(1);
-  const syncAge =
-    organisation.lastSuccessfulSyncAt === null
-      ? Number.POSITIVE_INFINITY
-      : input.now.getTime() - organisation.lastSuccessfulSyncAt.getTime();
   const reconciliationMetricsCurrent =
     reconciliation !== undefined &&
     canonicalMetrics(metrics) ===
@@ -546,12 +685,20 @@ async function calculateCustomerRolloutReadiness(
       }
     },
     providersHealthy: {
-      passed: providersHealthy,
+      passed: hasHealthyProviders(providerEvidence, input.now),
       evidence: providerEvidence
     },
     syncFresh: {
-      passed: syncAge >= 0 && syncAge <= 15 * 60_000,
-      evidence: { timestamp: organisation.lastSuccessfulSyncAt }
+      passed: hasFreshSync(
+        organisation.lastSuccessfulSyncAt,
+        organisation.lastSuccessfulXeroConnectionId,
+        providerEvidence,
+        input.now
+      ),
+      evidence: {
+        timestamp: organisation.lastSuccessfulSyncAt,
+        xeroConnectionId: organisation.lastSuccessfulXeroConnectionId
+      }
     },
     importedDataPresent: {
       passed:
@@ -581,6 +728,7 @@ async function calculateCustomerRolloutReadiness(
           ? null
           : {
               id: reconciliation.id,
+              syncId: reconciliation.syncId,
               syncCompletedAt: reconciliation.syncCompletedAt,
               acknowledgedAt: reconciliation.acknowledgedAt
             }
@@ -678,37 +826,21 @@ export function createSendingSettings(dependencies: {
       ) {
         throw new Error('OPERATIONAL_STATE_CONFLICT');
       }
+      if (organisation.edition === 'SOLO') {
+        await lockSoloReplyNumber(transaction, organisation.id);
+        await lockSoloXeroConnection(transaction, organisation.id);
+      }
       const now = dependencies.clock.now();
-      const healthySince = new Date(now.getTime() - 24 * 60 * 60_000);
-      const providers = await transaction
-        .select()
-        .from(providerConnections)
-        .where(
-          and(
-            eq(providerConnections.organisationId, input.organisationId),
-            eq(providerConnections.enabled, true),
-            gte(
-              providerConnections.lastSuccessfulAuthenticationAt,
-              healthySince
-            ),
-            lte(providerConnections.lastSuccessfulAuthenticationAt, now)
-          )
-        );
-      if (
-        !(['XERO', 'SINCH'] as const).every((provider) =>
-          providers.some(
-            (connection) =>
-              connection.provider === provider && connection.connectedAt !== null
-          )
-        )
-      ) {
+      const providerEvidence = await getProviderEvidence(transaction, organisation, now);
+      if (!hasHealthyProviders(providerEvidence, now)) {
         throw new Error('PROVIDERS_UNHEALTHY');
       }
-      if (
-        organisation.lastSuccessfulSyncAt === null ||
-        now.getTime() - organisation.lastSuccessfulSyncAt.getTime() < 0 ||
-        now.getTime() - organisation.lastSuccessfulSyncAt.getTime() > 15 * 60_000
-      ) {
+      if (!hasFreshSync(
+        organisation.lastSuccessfulSyncAt,
+        organisation.lastSuccessfulXeroConnectionId,
+        providerEvidence,
+        now
+      )) {
         throw new Error('XERO_SYNC_STALE');
       }
       if (organisation.recipientAllowlist.length === 0) {
@@ -747,6 +879,7 @@ export function createSendingSettings(dependencies: {
       acknowledgement: string;
       expectedVersion: number;
       expected: {
+        syncId: string;
         syncCompletedAt: string;
         metrics: ReconciliationMetrics;
       };
@@ -769,6 +902,7 @@ export function createSendingSettings(dependencies: {
         throw new Error('OPERATIONAL_STATE_CONFLICT');
       }
       if (
+        organisation.lastSuccessfulSyncId !== input.expected.syncId ||
         !sameTimestamp(
           organisation.lastSuccessfulSyncAt,
           input.expected.syncCompletedAt
@@ -783,7 +917,10 @@ export function createSendingSettings(dependencies: {
       if (canonicalMetrics(metrics) !== canonicalMetrics(input.expected.metrics)) {
         throw new Error('RECONCILIATION_METRICS_CHANGED');
       }
-      if (organisation.lastSuccessfulSyncAt === null) {
+      if (
+        organisation.lastSuccessfulSyncAt === null ||
+        organisation.lastSuccessfulSyncId === null
+      ) {
         throw new Error('SYNC_REQUIRED');
       }
       const [reconciliation] = await transaction
@@ -791,6 +928,7 @@ export function createSendingSettings(dependencies: {
         .values({
           organisationId: input.organisationId,
           syncCompletedAt: organisation.lastSuccessfulSyncAt,
+          syncId: organisation.lastSuccessfulSyncId,
           ...metrics,
           acknowledgedByUserId: session.userId,
           acknowledgedAt: now
@@ -815,6 +953,7 @@ export function createSendingSettings(dependencies: {
         entityType: 'ROLLOUT_RECONCILIATION',
         entityId: reconciliation.id,
         afterValue: {
+          syncId: organisation.lastSuccessfulSyncId,
           syncCompletedAt: organisation.lastSuccessfulSyncAt.toISOString(),
           ...metrics
         },
@@ -837,9 +976,12 @@ export function createSendingSettings(dependencies: {
       throw new Error('CUSTOMER_ROLLOUT_ACKNOWLEDGEMENT_MISMATCH');
     }
     return dependencies.database.transaction(async (transaction) => {
+      // Updating the organisation's non-key fields must not block the FK
+      // check in an SMS worker that already holds an outbound message lock.
       const organisation = await safety.assertOperationalMutationAllowed(
         transaction,
-        input.organisationId
+        input.organisationId,
+        'no key update'
       );
       if (
         organisation.operationalState !== 'RECONCILED' ||
@@ -847,19 +989,36 @@ export function createSendingSettings(dependencies: {
       ) {
         throw new Error('OPERATIONAL_STATE_CONFLICT');
       }
-      const entitlements = await new PostgresEntitlementRepository(
+      const entitlementRepository = new PostgresEntitlementRepository(
         dependencies.database
-      ).decide(input.organisationId, dependencies.clock.now(), transaction);
+      );
+      const entitlements = await entitlementRepository.decide(
+        input.organisationId, () => dependencies.clock.now(), transaction
+      );
       if (!entitlements.canCustomerSend) {
         throw new Error(entitlements.blocker ?? 'SUBSCRIPTION_REQUIRED');
       }
-      await lockCustomerRolloutEvidence(transaction, input.organisationId);
+      await lockCustomerRolloutEvidence(transaction, organisation);
+      if (organisation.edition === 'SOLO') {
+        await lockSoloXeroConnection(transaction, organisation.id);
+      }
       const readinessTime = dependencies.clock.now();
       const readiness = await calculateCustomerRolloutReadiness(transaction, {
         organisationId: input.organisationId,
         now: readinessTime
       });
-      const now = dependencies.clock.now();
+      let now = readinessTime;
+      const finalEntitlements = await entitlementRepository.decide(
+        input.organisationId,
+        () => {
+          now = dependencies.clock.now();
+          return now;
+        },
+        transaction
+      );
+      if (!finalEntitlements.canCustomerSend) {
+        throw new Error(finalEntitlements.blocker ?? 'SUBSCRIPTION_REQUIRED');
+      }
       const failed = failedReadinessGatesAt(readiness, now);
       if (failed.length > 0) {
         throw new Error(`CUSTOMER_ROLLOUT_NOT_READY:${failed.join(',')}`);
@@ -915,7 +1074,8 @@ export function createSendingSettings(dependencies: {
     return dependencies.database.transaction(async (transaction) => {
       const organisation = await safety.assertOperationalMutationAllowed(
         transaction,
-        input.organisationId
+        input.organisationId,
+        'no key update'
       );
       if (organisation.operationalStateVersion !== input.expectedVersion) {
         throw new Error('OPERATIONAL_STATE_CONFLICT');
@@ -926,7 +1086,7 @@ export function createSendingSettings(dependencies: {
       if (organisation.rolloutScope === 'CUSTOMER') {
         throw new Error('ROLLOUT_STATE_CONFLICT');
       }
-      await lockCustomerRolloutEvidence(transaction, input.organisationId);
+      await lockCustomerRolloutEvidence(transaction, organisation);
       const now = dependencies.clock.now();
       const readiness = await calculateCustomerRolloutReadiness(transaction, {
         organisationId: input.organisationId,

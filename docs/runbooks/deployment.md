@@ -89,11 +89,50 @@ cd /the/protected/OVH_DEPLOY_PATH
 
 The rollback script accepts only a manifest previously recorded for that exact immutable SHA. It takes the same exclusive lock, stops web and worker, and transactionally changes scheduled cancellations to incomplete and pauses the affected organisations before starting the selected images. Automatic rollback uses the same safeguard. If stopping services or reconciliation fails, older images must remain stopped until the failure is resolved. PostgreSQL and its records are preserved; no database restore occurs. The script checks `/health/ready`. Review forward database migrations for compatibility before rolling application code back.
 
+Before a paid beta release or rollback involving the direct-debit migrations,
+complete the fail-closed preflight in
+[`paid-beta-direct-debit.md`](paid-beta-direct-debit.md). Never assume a
+card-only Billing Portal configuration proves the effective Stripe collection
+path is card-only.
+
 If a database restore is genuinely required, stop and use the separate restore procedure with a new database target. Never overwrite the current database or replay customer communications as part of a normal rollback.
 
 ## Backup and release evidence
 
 Pre-release backups are stored in `${OVH_DEPLOY_PATH}/backups` and named with the candidate SHA and UTC timestamp. Release and rollback metadata live under `${OVH_DEPLOY_PATH}/releases/FULL_SHA`. Apply the organisation's retention and encrypted off-host backup policy to both directories.
+
+## Owner-only server health snapshot
+
+The AccountPulse Owner console reads a sanitized host snapshot from a read-only
+mount. It never receives the Docker socket, a shell, host credentials or a host
+filesystem path. The snapshot contains uptime, CPU load, memory and root disk
+capacity, the live capacity and ID of OVH disk 698708443 (nominal 200 GB), a UTC
+check time, and the health of the fixed `web`, `worker`, `postgres` and `caddy`
+containers. The HUD shows Unavailable until it receives a current snapshot with
+valid metrics for both disks.
+
+After the reviewed monitor files have been transferred to the OVH deploy path,
+install the collector through a separately approved host change:
+
+```bash
+cd /the/protected/OVH_DEPLOY_PATH
+sudo ./install-server-health-monitor.sh
+```
+
+The installer runs one collection, then enables a five-minute systemd timer.
+Verify it without changing application state:
+
+```bash
+systemctl status accountpulse-server-health.timer --no-pager
+systemctl status accountpulse-server-health.service --no-pager
+test -r /var/lib/accountpulse/server-health/server-health.json
+```
+
+Do not add the Docker socket to the web container. Do not extend the snapshot
+with hostnames, IP addresses, environment values, credentials, process command
+lines, customer data or provider secrets. If the collector is absent, fails, or
+has not refreshed for more than 15 minutes, the Owner console must show
+**Unavailable** rather than reusing old values.
 
 ## Secret rotation
 

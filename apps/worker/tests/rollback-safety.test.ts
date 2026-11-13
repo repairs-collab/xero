@@ -22,4 +22,18 @@ describe('rollback safety guard', () => {
     expect(result.stdout).toContain(stopFail === '1' || sqlFail === '1' ? 'RESULT:1' : 'RESULT:0');
     if (expectsSql) expect(result.stdout).toContain("status = 'INCOMPLETE'");
   });
+
+  it('blocks older images when forward-migrated direct-debit history is unresolved', () => {
+    const script = `${helper}\nfake_compose() {\n  if [ "$1" = stop ]; then echo STOP; return 0; fi\n  legacy=0\n  reconciliation=0\n  while IFS= read -r line; do\n    printf '%s\\n' "$line"\n    case "$line" in *"status = 'LEGACY_UNBOUND'"*) legacy=1 ;; esac\n    case "$line" in *provider_reconciled_at*) reconciliation=1 ;; esac\n  done\n  if [ "$legacy" = 1 ] && [ "$reconciliation" = 1 ]; then return 1; fi\n  return 0\n}\nrollback_safeguard fake_compose\nprintf 'RESULT:%s\\n' "$?"\n`;
+    const result = spawnSync(shell, ['-s'], {
+      input: script,
+      encoding: 'utf8',
+      env: process.env
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('STOP');
+    expect(result.stdout).toContain("status = 'LEGACY_UNBOUND'");
+    expect(result.stdout).toContain('provider_reconciled_at');
+    expect(result.stdout).toContain('RESULT:1');
+  });
 });

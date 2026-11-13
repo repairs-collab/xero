@@ -10,6 +10,7 @@ import {
   type ScheduleOptions
 } from 'pg-boss';
 import { Client } from 'pg';
+import { sql, type SQL } from 'drizzle-orm';
 
 import type { DbTransaction } from '@bc5000/db';
 
@@ -70,6 +71,35 @@ const stableJobId = (name: JobName, singletonKey: string): string => {
   return `${hex.slice(0, 8).join('')}-${hex.slice(8, 12).join('')}-${hex.slice(12, 16).join('')}-${hex.slice(16, 20).join('')}-${hex.slice(20).join('')}`;
 };
 
+export const createTransactionalPgBossDatabase = (
+  transaction: DbTransaction
+): Db => ({
+  executeSql: async (text, values = []) => {
+    const placeholders = [...text.matchAll(/\$(\d+)/g)];
+    const supportedInsertShape =
+      values.length === 1 &&
+      placeholders.length === 1 &&
+      placeholders[0]?.[0] === '$1' &&
+      /\bfrom\s+json_to_recordset\(\$1::text::json\)\s+as\s+x\s*\(/i.test(
+        text
+      );
+    if (!supportedInsertShape) {
+      throw new Error('PG_BOSS_TRANSACTION_SQL_UNSUPPORTED');
+    }
+    const placeholderIndex = placeholders[0]?.index;
+    if (placeholderIndex === undefined) {
+      throw new Error('PG_BOSS_TRANSACTION_SQL_UNSUPPORTED');
+    }
+    const chunks: SQL[] = [
+      sql.raw(text.slice(0, placeholderIndex)),
+      sql`${values[0]}`,
+      sql.raw(text.slice(placeholderIndex + 2))
+    ];
+    const result = await transaction.execute(sql.join(chunks));
+    return { rows: result.rows };
+  }
+});
+
 export interface DurableJobQueueOptions {
   databaseUrl: string;
   logger?: JobQueueLogger;
@@ -89,6 +119,7 @@ export class DurableJobQueue implements JobPublisher {
   readonly #databaseUrl: string;
   readonly #logger: JobQueueLogger;
   readonly #workers = new Map<JobName, string>();
+  #bossRunning = false;
   #started = false;
 
   constructor(options: DurableJobQueueOptions) {
@@ -108,20 +139,38 @@ export class DurableJobQueue implements JobPublisher {
 
   async start(): Promise<void> {
     if (this.#started) return;
-    await this.#boss.start();
-    for (const name of allJobNames) {
-      await this.#boss.createQueue(name, {
-        policy: 'stately',
-        ...optionsFor(name)
-      });
+    this.#bossRunning = true;
+    try {
+      await this.#boss.start();
+      for (const name of allJobNames) {
+        await this.#boss.createQueue(name, {
+          policy: 'stately',
+          ...optionsFor(name)
+        });
+      }
+      this.#started = true;
+    } catch (error) {
+      let cleanupSucceeded = false;
+      try {
+        await this.#boss.stop({ graceful: false, timeout: 5_000 });
+        cleanupSucceeded = true;
+      } catch (stopError) {
+        this.#logger.error(
+          'pg-boss cleanup failed after queue startup failure',
+          stopError
+        );
+      }
+      this.#bossRunning = !cleanupSucceeded;
+      this.#started = false;
+      throw error;
     }
-    this.#started = true;
   }
 
   async stop(): Promise<void> {
-    if (!this.#started) return;
+    if (!this.#started && !this.#bossRunning) return;
     await this.#boss.stop({ graceful: false, timeout: 5_000 });
     this.#started = false;
+    this.#bossRunning = false;
   }
 
   async stopClaiming(): Promise<void> {
@@ -156,6 +205,29 @@ export class DurableJobQueue implements JobPublisher {
       ...startOptions,
       id,
       singletonKey
+    });
+    return inserted ?? id;
+  }
+
+  async enqueueUniqueInTransaction<Name extends JobName>(
+    transaction: DbTransaction,
+    name: Name,
+    payload: JobPayloads[Name],
+    singletonKey: string,
+    startAfter?: Date
+  ): Promise<string> {
+    if (singletonKey.trim().length === 0) {
+      throw new Error('singletonKey must not be empty');
+    }
+    const data = parseJobPayload(name, payload);
+    const id = stableJobId(name, singletonKey);
+    const startOptions = startAfter === undefined ? {} : { startAfter };
+    const inserted = await this.#boss.send(name, data, {
+      ...optionsFor(name),
+      ...startOptions,
+      id,
+      singletonKey,
+      db: createTransactionalPgBossDatabase(transaction)
     });
     return inserted ?? id;
   }

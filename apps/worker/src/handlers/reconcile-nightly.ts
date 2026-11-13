@@ -1,10 +1,10 @@
 import { and, eq, gt } from 'drizzle-orm';
 
-import { auditEvents, invoices } from '@bc5000/db';
+import { invoices } from '@bc5000/db';
 import type { XeroInvoice } from '@bc5000/integrations/xero';
 import type { JobPayloads } from '@bc5000/jobs';
 
-import { recordSuccessfulSync, synchroniseInvoiceCollection, type XeroSyncDependencies } from './xero-invoice-refresh.js';
+import { commitXeroSync, startXeroSync, type XeroSyncJobDependencies } from './xero-invoice-refresh.js';
 
 async function mapWithConcurrency<T>(items: T[], concurrency: number, action: (item: T) => Promise<void>): Promise<void> {
   let index = 0;
@@ -16,24 +16,31 @@ async function mapWithConcurrency<T>(items: T[], concurrency: number, action: (i
 
 const terminal = (invoice: XeroInvoice) => invoice.status === 'PAID' || invoice.status === 'VOIDED' || invoice.status === 'DELETED' || Number(invoice.amountDue) <= 0;
 
-export async function reconcileNightly(dependencies: XeroSyncDependencies, payload: JobPayloads['xero.nightly-reconcile']) {
-  const listed = await dependencies.xero.listOutstandingInvoices();
+export async function reconcileNightly(dependencies: XeroSyncJobDependencies, payload: JobPayloads['xero.nightly-reconcile']) {
+  const { sync, connection } = await startXeroSync(dependencies, payload.organisationId);
+  const listed = await sync.xero.listOutstandingInvoices();
   const remoteIds = new Set(listed.data.map((invoice) => invoice.id));
   const localEligible = await dependencies.database.select({ xeroInvoiceId: invoices.xeroInvoiceId }).from(invoices).where(and(eq(invoices.organisationId, payload.organisationId), eq(invoices.type, 'ACCREC'), eq(invoices.status, 'AUTHORISED'), gt(invoices.amountDue, '0')));
   const missing = localEligible.filter((invoice) => !remoteIds.has(invoice.xeroInvoiceId));
-  let upserted = 0;
-  await synchroniseInvoiceCollection(dependencies, payload.organisationId, listed.data);
-  upserted += listed.data.length;
   const confirmedInvoices: XeroInvoice[] = [];
   await mapWithConcurrency(missing, 4, async (local) => {
-    const confirmed = await dependencies.xero.getInvoice(local.xeroInvoiceId);
+    const confirmed = await sync.xero.getInvoice(local.xeroInvoiceId);
     confirmedInvoices.push(confirmed.data);
   });
-  await synchroniseInvoiceCollection(dependencies, payload.organisationId, confirmedInvoices);
-  upserted += confirmedInvoices.length;
+  const upserted = listed.data.length + confirmedInvoices.length;
   const confirmedTerminal = confirmedInvoices.filter(terminal).length;
-  await recordSuccessfulSync(dependencies, payload.organisationId);
   const summary = { remoteEligible: listed.data.length, localEligible: localEligible.length, missingLocally: listed.data.filter((invoice) => !localEligible.some((local) => local.xeroInvoiceId === invoice.id)).length, targetedConfirmations: missing.length, confirmedTerminal, upserted, apiHeadroom: listed.rateLimit.remaining };
-  await dependencies.database.insert(auditEvents).values({ organisationId: payload.organisationId, eventType: 'XERO_RECONCILIATION_COMPLETED', entityType: 'ORGANISATION', entityId: payload.organisationId, afterValue: summary, occurredAt: dependencies.clock.now() });
+  await commitXeroSync(
+    sync,
+    payload.organisationId,
+    connection,
+    [...listed.data, ...confirmedInvoices],
+    {
+      completionAudit: {
+        eventType: 'XERO_RECONCILIATION_COMPLETED',
+        afterValue: summary
+      }
+    }
+  );
   return summary;
 }

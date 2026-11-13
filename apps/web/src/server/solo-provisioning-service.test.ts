@@ -29,10 +29,20 @@ class FakeRepository implements SoloProvisioningRepository {
 }
 
 describe('SoloProvisioningService', () => {
-  it('maps supported Australian and New Zealand Xero time zones explicitly', () => {
-    expect(accountPulseTimeZoneForXero('AUSEASTERNSTANDARDTIME')).toBe(
-      'Australia/Sydney'
-    );
+  it.each([
+    ['AUSEASTERNSTANDARDTIME', 'Australia/Sydney'],
+    ['AUSTRALIA/MELBOURNE', 'Australia/Melbourne'],
+    ['TASMANIASTANDARDTIME', 'Australia/Hobart'],
+    ['EAUSTRALIASTANDARDTIME', 'Australia/Brisbane'],
+    ['AUSCENTRALSTANDARDTIME', 'Australia/Darwin'],
+    ['CENAUSTRALIASTANDARDTIME', 'Australia/Adelaide'],
+    ['WAUSTRALIASTANDARDTIME', 'Australia/Perth'],
+    ['LORDHOWESTANDARDTIME', 'Australia/Lord_Howe']
+  ])('maps the Australian Xero zone %s to %s', (source, expected) => {
+    expect(accountPulseTimeZoneForXero(source)).toBe(expected);
+  });
+
+  it('keeps non-Australian Xero zones distinguishable for AU-only validation', () => {
     expect(accountPulseTimeZoneForXero('NEWZEALANDSTANDARDTIME')).toBe(
       'Pacific/Auckland'
     );
@@ -78,8 +88,7 @@ describe('SoloProvisioningService', () => {
         pendingAuthorisationId: 'pending_solo',
         connectionId: 'connection_solo',
         tenantId: 'tenant_solo',
-        now: new Date('2026-11-09T12:00:00.000Z'),
-        trialEndsAt: new Date('2026-11-23T12:00:00.000Z')
+        now: new Date('2026-11-09T12:00:00.000Z')
       }
     ]);
     expect(published).toEqual([

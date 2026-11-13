@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   accountRetentionTransition,
-  accountPulseRetentionMatrix
+  accountPulseRetentionMatrix,
+  dataRequestReviewDecision
 } from './retention-policy.js';
 
 describe('AccountPulse retention policy', () => {
@@ -41,7 +42,7 @@ describe('AccountPulse retention policy', () => {
     ).toBe('LEGAL_HOLD');
   });
 
-  it('makes every public record category explicit without inventing legal periods', () => {
+  it('applies five years only to approved account records and keeps the direct-debit exception narrow', () => {
     expect(accountPulseRetentionMatrix.map((row) => row.category)).toEqual([
       'XERO_REFRESH_TOKEN',
       'OAUTH_TRANSIENT_TOKEN',
@@ -49,15 +50,37 @@ describe('AccountPulse retention policy', () => {
       'OUTBOUND_MESSAGE_CONTENT',
       'INBOUND_MESSAGE_CONTENT',
       'PROCESSED_WEBHOOK_PAYLOAD',
+      'CUSTOMER_RECORD',
+      'INVOICE_RECORD',
+      'MESSAGE_METADATA',
+      'CALL_METADATA',
       'AUDIT_METADATA',
       'BILLING_RECORD',
+      'DIRECT_DEBIT_MANDATE_EVIDENCE',
       'DATABASE_BACKUP'
     ]);
+    const fiveYearCategories = [
+      'CUSTOMER_RECORD',
+      'INVOICE_RECORD',
+      'MESSAGE_METADATA',
+      'CALL_METADATA',
+      'AUDIT_METADATA'
+    ];
     expect(
-      accountPulseRetentionMatrix.find(
-        (row) => row.category === 'AUDIT_METADATA'
-      )?.duration
-    ).toBeNull();
+      accountPulseRetentionMatrix
+        .filter((row) => fiveYearCategories.includes(row.category))
+        .map((row) => ({
+          category: row.category,
+          duration: row.duration,
+          implementation: row.implementation
+        }))
+    ).toEqual(
+      fiveYearCategories.map((category) => ({
+        category,
+        duration: '5 years after account cancellation',
+        implementation: 'ENFORCED'
+      }))
+    );
     expect(
       accountPulseRetentionMatrix.find(
         (row) => row.category === 'BILLING_RECORD'
@@ -65,8 +88,65 @@ describe('AccountPulse retention policy', () => {
     ).toBeNull();
     expect(
       accountPulseRetentionMatrix.find(
+        (row) => row.category === 'DIRECT_DEBIT_MANDATE_EVIDENCE'
+      )?.duration
+    ).toBe('Up to 7 years where BECS or Stripe rules require it');
+    expect(
+      accountPulseRetentionMatrix.find(
         (row) => row.category === 'DATABASE_BACKUP'
       )?.duration
     ).toBeNull();
+  });
+
+  it('keeps the shorter raw-content and processed-webhook minimisation periods', () => {
+    expect(
+      accountPulseRetentionMatrix.find(
+        (row) => row.category === 'OUTBOUND_MESSAGE_CONTENT'
+      )?.duration
+    ).toBe('24 months');
+    expect(
+      accountPulseRetentionMatrix.find(
+        (row) => row.category === 'PROCESSED_WEBHOOK_PAYLOAD'
+      )?.duration
+    ).toBe('90 days');
+  });
+
+  it('requires backup evidence from the current closure episode at or after eligibility', () => {
+    const base = {
+      requestType: 'DELETION' as const,
+      legalHold: false,
+      requestClosureEpisodeId: 'request-episode',
+      currentClosureEpisodeId: 'current-episode',
+      deletionEligibleAt: new Date('2026-08-01T00:00:00.000Z'),
+      backupExpiryClosureEpisodeId: 'current-episode',
+      now: new Date('2026-09-18T00:00:00.000Z')
+    };
+
+    expect(
+      dataRequestReviewDecision({
+        ...base,
+        backupExpiryVerifiedAt: new Date('2026-08-15T00:00:00.000Z')
+      })
+    ).toEqual({
+      status: 'BLOCKED',
+      blockReason: 'RETENTION_PERIOD_ACTIVE'
+    });
+    expect(
+      dataRequestReviewDecision({
+        ...base,
+        requestClosureEpisodeId: 'current-episode',
+        backupExpiryVerifiedAt: new Date('2026-07-31T23:59:59.999Z')
+      })
+    ).toEqual({
+      status: 'BLOCKED',
+      blockReason: 'BACKUP_AGEING_UNVERIFIED'
+    });
+    expect(
+      dataRequestReviewDecision({
+        ...base,
+        requestClosureEpisodeId: 'current-episode',
+        backupExpiryVerifiedAt: new Date('2026-08-01T00:00:00.000Z')
+      })
+    ).toEqual({ status: 'MANUAL_REVIEW_REQUIRED', blockReason: null });
   });
 });

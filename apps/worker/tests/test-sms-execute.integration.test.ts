@@ -10,6 +10,8 @@ import {
   organisationOnboarding,
   organisations,
   outboundMessages,
+  smsNumberPool,
+  smsUsageLedger,
   subscriptions,
   suppressions
 } from '@bc5000/db';
@@ -17,6 +19,8 @@ import {
   SinchPermanentSubmissionFailure,
   SinchUnknownSubmissionOutcome
 } from '@bc5000/integrations/sinch';
+
+import type { SmsProvider } from '@bc5000/integrations/sms';
 
 import { executeTestSms } from '../src/handlers/test-sms-execute.js';
 import { processOptOut } from '../src/services/inbound-reply-service.js';
@@ -162,6 +166,79 @@ describe('test SMS execution', () => {
       reason: 'VERIFIED_ADMIN_MOBILE_REQUIRED'
     });
     expect(sendCustomer).not.toHaveBeenCalled();
+  });
+
+  it('records committed usage for a dedicated-number test but not a shared-sender test', async () => {
+    const seeded = await seedTestSms();
+    const sourceNumber = '+614' + String(parseInt(randomUUID().slice(0, 8), 16))
+      .slice(-8).padStart(8, '0');
+    await client.db.update(organisations).set({ edition: 'SOLO' })
+      .where(eq(organisations.id, seeded.organisationId));
+    await client.db.insert(subscriptions).values({
+      organisationId: seeded.organisationId,
+      planCode: 'SOLO_AU_2000',
+      status: 'ACTIVE',
+      stripeProviderStatus: 'active',
+      trustedStripeProviderStatus: 'active',
+      currentPeriodStart: new Date('2026-09-01T00:00:00Z'),
+      currentPeriodEnd: new Date('2026-10-01T00:00:00Z')
+    });
+    await client.db.insert(organisationOnboarding).values({
+      organisationId: seeded.organisationId,
+      adminMobile: number,
+      adminMobileVerifiedAt: now,
+      replyNumberReadyAt: now
+    });
+    await client.db.insert(smsNumberPool).values({
+      organisationId: seeded.organisationId,
+      e164Number: sourceNumber,
+      status: 'READY',
+      provider: 'SINCH',
+      providerNumberId: randomUUID(),
+      providerVerifiedAt: now,
+      readyAt: now
+    });
+    const sendSms = vi.fn<SmsProvider['sendSms']>(() =>
+      Promise.resolve({
+        kind: 'accepted' as const,
+        messageId: randomUUID(),
+        status: 'ACCEPTED'
+      })
+    );
+
+    await expect(executeTestSms(dependencies(sendSms), seeded))
+      .resolves.toMatchObject({ kind: 'sent' });
+    expect(sendSms.mock.calls[0]?.[0]).not.toHaveProperty('sourceNumber');
+    await expect(client.db.select().from(smsUsageLedger)
+      .where(eq(smsUsageLedger.organisationId, seeded.organisationId))).resolves.toEqual([]);
+
+    await client.db.update(organisationOnboarding)
+      .set({ completedVersion: 1, completedAt: now })
+      .where(eq(organisationOnboarding.organisationId, seeded.organisationId));
+    const dedicated = await client.db.insert(outboundMessages).values({
+      organisationId: seeded.organisationId,
+      channel: 'SMS',
+      source: 'TEST_SMS',
+      recipientKey: number,
+      content: seeded.content,
+      status: 'QUEUED',
+      idempotencyKey: randomUUID()
+    }).returning({ outboundMessageId: outboundMessages.id });
+    if (!dedicated[0]) throw new Error('TEST_SMS_NOT_CREATED');
+
+    await expect(executeTestSms(dependencies(sendSms), {
+      organisationId: seeded.organisationId,
+      outboundMessageId: dedicated[0].outboundMessageId
+    })).resolves.toMatchObject({ kind: 'sent' });
+    expect(sendSms).toHaveBeenLastCalledWith(expect.objectContaining({ sourceNumber }));
+    await expect(client.db.select().from(smsUsageLedger)
+      .where(eq(smsUsageLedger.organisationId, seeded.organisationId))).resolves.toEqual(
+        expect.arrayContaining([expect.objectContaining({
+          outboundMessageId: dedicated[0].outboundMessageId,
+          source: 'TEST_SMS',
+          entryType: 'COMMIT'
+        })])
+      );
   });
 
   it('records a dry run when the destination is outside the technical allowlist', async () => {

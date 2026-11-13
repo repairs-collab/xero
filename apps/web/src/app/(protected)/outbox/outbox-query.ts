@@ -13,7 +13,6 @@ import {
   contacts,
   type Database,
   invoices,
-  messageAttempts,
   outboundMessages,
   type OutboundSource,
   type OutboundStatus,
@@ -47,9 +46,6 @@ export interface OutboxRow {
   content: string | null;
   status: OutboundStatus;
   failureReason: string | null;
-  provider: 'XERO' | 'SINCH' | null;
-  providerMessageId: string | null;
-  providerStatus: string | null;
   createdAt: Date;
   completedAt: Date | null;
 }
@@ -148,9 +144,6 @@ export async function queryOutbox(
       content: outboundMessages.content,
       status: outboundMessages.status,
       failureReason: outboundMessages.failureReason,
-      provider: messageAttempts.provider,
-      providerMessageId: messageAttempts.providerMessageId,
-      providerStatus: messageAttempts.status,
       createdAt: outboundMessages.createdAt,
       completedAt: outboundMessages.completedAt
     })
@@ -170,14 +163,6 @@ export async function queryOutbox(
       )
     )
     .leftJoin(users, eq(users.id, outboundMessages.actorUserId))
-    .leftJoin(
-      messageAttempts,
-      and(
-        eq(messageAttempts.organisationId, input.organisationId),
-        eq(messageAttempts.outboundMessageId, outboundMessages.id),
-        eq(messageAttempts.attemptNumber, 1)
-      )
-    )
     .where(and(...conditions))
     .orderBy(desc(outboundMessages.createdAt), desc(outboundMessages.id))
     .limit(limit + 1);

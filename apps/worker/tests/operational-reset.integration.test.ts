@@ -88,6 +88,7 @@ const seedGraph = async (
   const conversationId = randomUUID();
   const replyOutboundMessageId = randomUUID();
   const testOutboundMessageId = randomUUID();
+  const syncId = randomUUID();
   const syncedAt = new Date(now.getTime() - 60_000);
 
   await database.db.insert(organisations).values({
@@ -102,6 +103,7 @@ const seedGraph = async (
     recipientAllowlist: ['+61400000001'],
     xeroSyncCursor: 'cursor-before-reset',
     lastSuccessfulSyncAt: syncedAt,
+    lastSuccessfulSyncId: syncId,
     latestReconciledSyncAt: syncedAt
   });
   await database.db.insert(users).values({
@@ -359,6 +361,7 @@ const seedGraph = async (
   await database.db.insert(rolloutReconciliations).values({
     organisationId,
     syncCompletedAt: syncedAt,
+    syncId,
     activeContactCount: 1,
     outstandingInvoiceCount: 1,
     outstandingTotals: { AUD: '100.0000' },
@@ -599,6 +602,8 @@ describe('operational reset', { timeout: 15_000 }, () => {
       operationalState: 'SYNC_REQUIRED',
       xeroSyncCursor: null,
       lastSuccessfulSyncAt: null,
+      lastSuccessfulSyncId: null,
+      lastSuccessfulXeroConnectionId: null,
       latestReconciledSyncAt: null
     });
     expect(

@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createDatabase, migrateDatabase } from '../client.js';
-import { organisations, users } from '../schema/index.js';
+import { organisations, users, xeroConnections } from '../schema/index.js';
 import {
   PostgresXeroConnectionRepository,
   type XeroConnectionRecord
@@ -24,6 +24,12 @@ const envelope = (ciphertext: string) => ({
   ciphertext: Buffer.from(ciphertext).toString('base64'),
   tag: Buffer.alloc(16, 2).toString('base64')
 });
+
+const deferred = () => {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+};
 
 const seedUser = async (label: string): Promise<string> => {
   const id = randomUUID();
@@ -134,12 +140,13 @@ describe('PostgresXeroConnectionRepository', () => {
     const firstOrganisationId = await seedOrganisation('First pending organisation');
     const secondOrganisationId = await seedOrganisation('Second pending organisation');
     const now = new Date('2026-11-09T02:00:00.000Z');
+    const xeroOrganisationId = randomUUID();
     const candidate = {
       connectionId: randomUUID(),
       tenantId: randomUUID(),
       tenantName: 'Example Pty Ltd',
       tenantType: 'ORGANISATION',
-      xeroOrganisationId: 'xero-example-organisation',
+      xeroOrganisationId,
       organisationName: 'Example Pty Ltd',
       baseCurrency: 'AUD',
       timeZone: 'Australia/Sydney'
@@ -171,7 +178,7 @@ describe('PostgresXeroConnectionRepository', () => {
       .from(organisations)
       .where(eq(organisations.id, firstOrganisationId));
     expect(updatedOrganisation).toMatchObject({
-      xeroOrganisationId: 'xero-example-organisation',
+      xeroOrganisationId,
       name: 'Example Pty Ltd',
       baseCurrency: 'AUD',
       timeZone: 'Australia/Sydney'
@@ -206,6 +213,184 @@ describe('PostgresXeroConnectionRepository', () => {
         now
       })
     ).rejects.toThrow('XERO_TENANT_ALREADY_CONNECTED');
+  });
+
+  it('waits for the organisation before locking a connection held by an email worker', async () => {
+    const userId = await seedUser('Reconnect owner');
+    const organisationId = await seedOrganisation('Worker-held organisation');
+    const now = new Date('2026-11-09T02:00:00.000Z');
+    const candidate = {
+      connectionId: randomUUID(),
+      tenantId: randomUUID(),
+      tenantName: 'Example Pty Ltd',
+      tenantType: 'ORGANISATION',
+      xeroOrganisationId: randomUUID(),
+      organisationName: 'Example Pty Ltd',
+      baseCurrency: 'AUD',
+      timeZone: 'Australia/Sydney'
+    };
+    await firstRepository.upsertConnection({
+      ...candidate,
+      organisationId,
+      encryptedRefreshToken: envelope('old-token'),
+      grantedScopes: ['offline_access'],
+      now
+    });
+    const pendingAuthorisationId = await firstRepository.createPendingAuthorisation({
+      userId,
+      existingOrganisationId: organisationId,
+      flowPurpose: 'CONNECT_EXISTING',
+      encryptedRefreshToken: envelope('new-token'),
+      candidateTenants: [candidate],
+      grantedScopes: ['offline_access'],
+      expiresAt: new Date(now.getTime() + 300_000)
+    });
+    const locked = deferred();
+    const refresh = deferred();
+    const emailWorker = firstClient.db.transaction(async (transaction) => {
+      await transaction.select().from(organisations)
+        .where(eq(organisations.id, organisationId)).for('update');
+      locked.resolve();
+      await refresh.promise;
+      await secondClient.db.transaction(async (lease) => {
+        await lease.execute(sql`set local lock_timeout = '500ms'`);
+        await lease.update(xeroConnections).set({ lastRefreshedAt: now })
+          .where(eq(xeroConnections.organisationId, organisationId));
+      });
+    }).then(() => null, (error: unknown) => error);
+    await locked.promise;
+    const reconnect = firstRepository.finalisePendingAuthorisation({
+      ...candidate,
+      pendingAuthorisationId,
+      userId,
+      existingOrganisationId: organisationId,
+      organisationId,
+      now
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    refresh.resolve();
+    expect(await emailWorker).toBeNull();
+    await expect(reconnect).resolves.toMatchObject({ status: 'CONNECTED' });
+  });
+
+  it.each(['SOLO', 'INTERNAL_LEGACY'] as const)(
+    'invalidates prior %s OAuth sync evidence on finalising a reconnect at the same timestamp',
+    async (edition) => {
+    const userId = await seedUser('Reconnect owner');
+    const organisationId = await seedOrganisation(`Reconnect ${edition} workspace`);
+    const startedAt = new Date('2026-11-09T02:00:00.000Z');
+    const syncAt = new Date(startedAt.getTime() + 5000);
+    await firstClient.db.update(organisations).set({
+      edition
+    }).where(eq(organisations.id, organisationId));
+    const candidate = {
+      connectionId: randomUUID(),
+      tenantId: randomUUID(),
+      tenantName: 'Reconnect Solo workspace',
+      tenantType: 'ORGANISATION',
+      xeroOrganisationId: randomUUID(),
+      organisationName: 'Reconnect Solo workspace',
+      baseCurrency: 'AUD',
+      timeZone: 'Australia/Sydney'
+    };
+    const first = await firstRepository.upsertConnection({
+      ...candidate,
+      organisationId,
+      encryptedRefreshToken: envelope('first-refresh-token'),
+      grantedScopes: ['offline_access'],
+      now: startedAt
+    });
+    await firstClient.db.update(organisations).set({
+      xeroSyncCursor: syncAt.toISOString(),
+      lastSuccessfulSyncAt: syncAt,
+      lastSuccessfulSyncId: randomUUID(),
+      lastSuccessfulXeroConnectionId: first.id,
+      latestReconciledSyncAt: syncAt,
+      operationalState: 'RECONCILED',
+      operationalStateVersion: 7,
+      sendMode: 'live',
+      rolloutScope: 'CUSTOMER',
+      liveSendAcknowledged: true
+    }).where(eq(organisations.id, organisationId));
+    const pendingAuthorisationId = await firstRepository.createPendingAuthorisation({
+      userId,
+      existingOrganisationId: organisationId,
+      flowPurpose: 'CONNECT_EXISTING',
+      encryptedRefreshToken: envelope('new-refresh-token'),
+      candidateTenants: [candidate],
+      grantedScopes: ['offline_access'],
+      expiresAt: new Date(startedAt.getTime() + 300_000)
+    });
+    const reconnected = await firstRepository.finalisePendingAuthorisation({
+      ...candidate,
+      pendingAuthorisationId,
+      userId,
+      existingOrganisationId: organisationId,
+      organisationId,
+      now: startedAt
+    });
+    expect(reconnected.id).not.toBe(first.id);
+    expect(reconnected.connectedAt).toEqual(first.connectedAt);
+    const [organisation] = await firstClient.db.select().from(organisations)
+      .where(eq(organisations.id, organisationId));
+    expect(organisation).toMatchObject({
+      xeroSyncCursor: null,
+      lastSuccessfulSyncAt: null,
+      lastSuccessfulSyncId: null,
+      lastSuccessfulXeroConnectionId: null,
+      latestReconciledSyncAt: null,
+      operationalState: 'SYNC_REQUIRED',
+      operationalStateVersion: 8,
+      sendMode: 'live',
+      rolloutScope: 'CONTROLLED',
+      liveSendAcknowledged: false
+    });
+    }
+  );
+
+  it('preserves an active operational reset while invalidating reconnect readiness', async () => {
+    const organisationId = await seedOrganisation('Reconnect during reset');
+    const connection = {
+      organisationId,
+      connectionId: randomUUID(),
+      tenantId: randomUUID(),
+      encryptedRefreshToken: envelope('reset-first-token'),
+      grantedScopes: ['offline_access']
+    };
+    const startedAt = new Date('2026-11-09T02:30:00.000Z');
+    await firstRepository.upsertConnection({ ...connection, now: startedAt });
+    await firstClient.db
+      .update(organisations)
+      .set({
+        operationalState: 'RESET_IN_PROGRESS',
+        operationalStateVersion: 10,
+        sendMode: 'live',
+        rolloutScope: 'CUSTOMER',
+        liveSendAcknowledged: true,
+        lastSuccessfulSyncAt: startedAt,
+        latestReconciledSyncAt: startedAt
+      })
+      .where(eq(organisations.id, organisationId));
+
+    await firstRepository.upsertConnection({
+      ...connection,
+      encryptedRefreshToken: envelope('reset-reconnect-token'),
+      now: new Date(startedAt.getTime() + 1000)
+    });
+
+    const [organisation] = await firstClient.db
+      .select()
+      .from(organisations)
+      .where(eq(organisations.id, organisationId));
+    expect(organisation).toMatchObject({
+      operationalState: 'RESET_IN_PROGRESS',
+      operationalStateVersion: 11,
+      sendMode: 'live',
+      rolloutScope: 'CONTROLLED',
+      liveSendAcknowledged: false,
+      lastSuccessfulSyncAt: null,
+      latestReconciledSyncAt: null
+    });
   });
 
   it('finds, marks, disconnects and reconnects without decrypting token material', async () => {

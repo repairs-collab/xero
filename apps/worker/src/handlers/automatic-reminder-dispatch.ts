@@ -1,4 +1,4 @@
-import { and, asc, eq, gte, inArray, lt } from 'drizzle-orm';
+import { and, asc, eq, gte, inArray, lt, or } from 'drizzle-orm';
 
 import {
   auditEvents,
@@ -11,7 +11,11 @@ import {
   reminderSequenceVersions,
   stageInstances
 } from '@bc5000/db';
-import { localDateInterval } from '@bc5000/domain';
+import {
+  decideDebtContactWindow,
+  localDateInterval,
+  nextDebtContactOpening
+} from '@bc5000/domain';
 import { jobNames, type JobPublisher } from '@bc5000/jobs';
 
 import {
@@ -23,6 +27,7 @@ import {
 export interface AutomaticReminderDispatchDependencies {
   database: Database;
   clock: { now(): Date };
+  holidays: { list(organisationId: string): readonly string[] };
   publisher: JobPublisher;
 }
 
@@ -34,6 +39,7 @@ export interface AutomaticReminderDispatchSummary {
 
 export interface ReminderCycleDependencies
   extends ReminderCalculationDependencies {
+  holidays: { list(organisationId: string): readonly string[] };
   publisher: JobPublisher;
 }
 
@@ -67,6 +73,11 @@ const localTime = (instant: Date, timeZone: string): string => {
   return `${part('hour')}:${part('minute')}:${part('second')}`;
 };
 
+const publishedOccurrenceKey = (
+  stageInstanceId: string,
+  scheduledAt: Date
+): string => `${stageInstanceId}:${scheduledAt.toISOString()}`;
+
 export async function dispatchAutomaticReminderWork(
   dependencies: AutomaticReminderDispatchDependencies,
   organisationId: string
@@ -93,6 +104,7 @@ export async function dispatchAutomaticReminderWork(
   const rows = await dependencies.database
     .select({
       id: stageInstances.id,
+      channel: stageInstances.channel,
       scheduledAt: stageInstances.scheduledAt,
       sourceVersion: stageInstances.sourceVersion,
       socialWindowStart: reminderSequenceVersions.socialWindowStart,
@@ -129,8 +141,17 @@ export async function dispatchAutomaticReminderWork(
         eq(stageInstances.organisationId, organisationId),
         inArray(stageInstances.status, ['SCHEDULED', 'QUEUED']),
         inArray(stageInstances.channel, ['SMS', 'XERO_EMAIL']),
-        gte(stageInstances.scheduledAt, interval.from),
-        lt(stageInstances.scheduledAt, interval.before)
+        or(
+          and(
+            eq(stageInstances.channel, 'SMS'),
+            lt(stageInstances.scheduledAt, interval.before)
+          ),
+          and(
+            eq(stageInstances.channel, 'XERO_EMAIL'),
+            gte(stageInstances.scheduledAt, interval.from),
+            lt(stageInstances.scheduledAt, interval.before)
+          )
+        )
       )
     )
     .orderBy(asc(stageInstances.scheduledAt), asc(stageInstances.id));
@@ -139,7 +160,10 @@ export async function dispatchAutomaticReminderWork(
     rows.length === 0
       ? []
       : await dependencies.database
-          .select({ stageInstanceId: auditEvents.entityId })
+          .select({
+            stageInstanceId: auditEvents.entityId,
+            afterValue: auditEvents.afterValue
+          })
           .from(auditEvents)
           .where(
             and(
@@ -155,12 +179,93 @@ export async function dispatchAutomaticReminderWork(
               )
             )
           );
-  const publishedStageIds = new Set(
-    publishedRows.map((row) => row.stageInstanceId)
+  const publishedOccurrenceKeys = new Set(
+    publishedRows.flatMap((row) => {
+      const scheduledAt = row.afterValue?.scheduledAt;
+      return typeof scheduledAt === 'string'
+        ? [`${row.stageInstanceId}:${scheduledAt}`]
+        : [];
+    })
   );
-  const candidates = rows.filter((row) => {
-    if (publishedStageIds.has(row.id)) return false;
+  const closedSmsRows = rows.filter((row) => {
+    if (
+      publishedOccurrenceKeys.has(
+        publishedOccurrenceKey(row.id, row.scheduledAt)
+      ) ||
+      row.channel !== 'SMS'
+    ) {
+      return false;
+    }
     const dispatchAt = row.scheduledAt > now ? row.scheduledAt : now;
+    return !decideDebtContactWindow(
+      dispatchAt,
+      dependencies.holidays.list(organisationId)
+    ).allowed;
+  });
+  for (const row of closedSmsRows) {
+    const dispatchAt = row.scheduledAt > now ? row.scheduledAt : now;
+    const nextOpening = nextDebtContactOpening(
+      dispatchAt,
+      dependencies.holidays.list(organisationId)
+    );
+    await dependencies.database.transaction(async (transaction) => {
+      const [current] = await transaction
+        .select({ status: stageInstances.status })
+        .from(stageInstances)
+        .where(
+          and(
+            eq(stageInstances.organisationId, organisationId),
+            eq(stageInstances.id, row.id),
+            inArray(stageInstances.status, ['SCHEDULED', 'QUEUED'])
+          )
+        )
+        .for('update')
+        .limit(1);
+      if (current === undefined) return;
+      await transaction
+        .update(stageInstances)
+        .set({
+          status: 'SCHEDULED',
+          scheduledAt: nextOpening,
+          updatedAt: now
+        })
+        .where(
+          and(
+            eq(stageInstances.organisationId, organisationId),
+            eq(stageInstances.id, row.id),
+            inArray(stageInstances.status, ['SCHEDULED', 'QUEUED'])
+          )
+        );
+      await transaction.insert(auditEvents).values({
+        organisationId,
+        eventType: 'AUTOMATIC_REMINDER_CONTACT_WINDOW_RESCHEDULED',
+        entityType: 'STAGE_INSTANCE',
+        entityId: row.id,
+        beforeValue: { scheduledAt: row.scheduledAt.toISOString() },
+        afterValue: { scheduledAt: nextOpening.toISOString() },
+        occurredAt: now
+      });
+    });
+  }
+  const candidates = rows.filter((row) => {
+    if (
+      publishedOccurrenceKeys.has(
+        publishedOccurrenceKey(row.id, row.scheduledAt)
+      )
+    ) {
+      return false;
+    }
+    if (closedSmsRows.some((closed) => closed.id === row.id)) return false;
+    const dispatchAt = row.scheduledAt > now ? row.scheduledAt : now;
+    if (
+      row.channel === 'SMS' &&
+      !decideDebtContactWindow(
+        dispatchAt,
+        dependencies.holidays.list(organisationId)
+      ).allowed
+    ) {
+      return false;
+    }
     const time = localTime(dispatchAt, organisation.timeZone);
     return time >= row.socialWindowStart && time < row.socialWindowEnd;
   });
@@ -195,25 +300,51 @@ export async function dispatchAutomaticReminderWork(
           .for('update')
           .limit(1);
         if (stage === undefined) return null;
-        if (stage.status === 'SCHEDULED') {
+        const recoveringOverdueSms =
+          candidate.channel === 'SMS' && stage.scheduledAt < interval.from;
+        const recoveredScheduledAt =
+          recoveringOverdueSms ? now : stage.scheduledAt;
+        if (stage.status === 'SCHEDULED' || recoveringOverdueSms) {
           await transaction
             .update(stageInstances)
-            .set({ status: 'QUEUED', updatedAt: now })
+            .set({
+              status: 'QUEUED',
+              scheduledAt: recoveredScheduledAt,
+              updatedAt: now
+            })
             .where(
               and(
                 eq(stageInstances.organisationId, organisationId),
                 eq(stageInstances.id, stage.id),
-                eq(stageInstances.status, 'SCHEDULED')
+                inArray(stageInstances.status, ['SCHEDULED', 'QUEUED'])
               )
             );
         }
-        return { ...stage, newlyQueued: stage.status === 'SCHEDULED' };
+        if (recoveringOverdueSms) {
+          await transaction.insert(auditEvents).values({
+            organisationId,
+            eventType: 'AUTOMATIC_REMINDER_CONTACT_WINDOW_RESCHEDULED',
+            entityType: 'STAGE_INSTANCE',
+            entityId: stage.id,
+            beforeValue: { scheduledAt: stage.scheduledAt.toISOString() },
+            afterValue: {
+              scheduledAt: recoveredScheduledAt.toISOString(),
+              reason: 'OVERDUE_UNSENT'
+            },
+            occurredAt: now
+          });
+        }
+        return {
+          ...stage,
+          scheduledAt: recoveredScheduledAt,
+          newlyQueued: stage.status === 'SCHEDULED'
+        };
       }
     );
     if (prepared === null) continue;
     if (prepared.newlyQueued) queuedCount += 1;
 
-    const singletonKey = `automatic-reminder:${prepared.id}:${prepared.sourceVersion.toString()}`;
+    const singletonKey = `automatic-reminder:${prepared.id}:${prepared.sourceVersion.toString()}:${prepared.scheduledAt.toISOString()}`;
     const jobId = await dependencies.publisher.publish(
       jobNames.reminderExecute,
       { organisationId, stageInstanceId: prepared.id },
@@ -262,6 +393,7 @@ export async function runReminderCycle(
     {
       database: dependencies.database,
       clock: dependencies.clock,
+      holidays: dependencies.holidays,
       publisher: dependencies.publisher
     },
     organisationId

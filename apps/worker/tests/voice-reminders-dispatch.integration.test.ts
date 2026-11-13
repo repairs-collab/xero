@@ -490,7 +490,7 @@ describe('dispatchDueVoiceReminders', () => {
 
     expect(summary).toMatchObject({
       status: 'DEFERRED',
-      nextDispatchAt: new Date('2026-10-11T22:00:00.000Z')
+      nextDispatchAt: new Date('2026-10-11T21:30:00.000Z')
     });
     expect(jobs.publish).not.toHaveBeenCalled();
   });

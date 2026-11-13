@@ -5,11 +5,18 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createDatabase, migrateDatabase } from '../client.js';
 import {
+  auditEvents,
   contacts,
+  conversations,
+  inboundMessages,
   invoices,
+  invoiceChases,
+  operatorReplies,
   organisations,
+  outboundMessages,
   reminderSequences,
   reminderSequenceVersions,
+  stageInstances,
   suppressions,
   tasks,
   users,
@@ -415,5 +422,196 @@ describe('PostgresActivityRepository voice timeline', () => {
     expect(reviewEvent).toMatchObject({
       source: 'AccountPulse Voice - Sequence review'
     });
+  });
+});
+
+describe('PostgresActivityRepository customer-safe activity', () => {
+  it('keeps messaging sources provider-neutral in the customer timeline', async () => {
+    const organisationId = randomUUID();
+    const contactId = randomUUID();
+    const invoiceId = randomUUID();
+    const actorUserId = randomUUID();
+    const sequenceId = randomUUID();
+    const sequenceVersionId = randomUUID();
+    const chaseId = randomUUID();
+    const stageInstanceId = randomUUID();
+    const conversationId = randomUUID();
+    const now = new Date('2026-11-12T00:00:00.000Z');
+
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: randomUUID(),
+      name: 'Provider-neutral timeline test',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await client.db.insert(users).values({
+      id: actorUserId,
+      cognitoSubject: randomUUID(),
+      email: `${actorUserId}@example.invalid`,
+      displayName: 'Timeline operator'
+    });
+    await client.db.insert(contacts).values({
+      id: contactId,
+      organisationId,
+      xeroContactId: randomUUID(),
+      name: 'Messaging Customer',
+      active: true,
+      sourceVersion: 1
+    });
+    await client.db.insert(invoices).values({
+      id: invoiceId,
+      organisationId,
+      xeroInvoiceId: randomUUID(),
+      contactId,
+      invoiceNumber: 'INV-MESSAGE-100',
+      type: 'ACCREC',
+      status: 'AUTHORISED',
+      issueDate: '2026-10-01',
+      dueDate: '2026-10-31',
+      amountDue: '100.0000',
+      total: '100.0000',
+      currency: 'AUD',
+      syncVersion: 1,
+      xeroUpdatedAt: now
+    });
+    await client.db.insert(reminderSequences).values({
+      id: sequenceId,
+      organisationId,
+      name: 'Messaging timeline sequence',
+      kind: 'MESSAGING'
+    });
+    await client.db.insert(reminderSequenceVersions).values({
+      id: sequenceVersionId,
+      organisationId,
+      sequenceId,
+      versionNumber: 1,
+      status: 'ACTIVE'
+    });
+    await client.db.insert(invoiceChases).values({
+      id: chaseId,
+      organisationId,
+      invoiceId,
+      sequenceId,
+      customerId: contactId,
+      status: 'ACTIVE'
+    });
+    await client.db.insert(stageInstances).values({
+      id: stageInstanceId,
+      organisationId,
+      invoiceChaseId: chaseId,
+      sequenceVersionId,
+      stageKey: 'due-date',
+      channel: 'SMS',
+      status: 'DELIVERED',
+      scheduledAt: now,
+      sourceVersion: 1
+    });
+    await client.db.insert(outboundMessages).values({
+      organisationId,
+      stageInstanceId,
+      contactId,
+      invoiceId,
+      actorUserId,
+      channel: 'SMS',
+      source: 'MANUAL_REMINDER',
+      recipientKey: 'redacted-recipient',
+      status: 'DELIVERED',
+      idempotencyKey: randomUUID(),
+      completedAt: now
+    });
+    await client.db.insert(conversations).values({
+      id: conversationId,
+      organisationId,
+      contactId,
+      normalisedNumber: '+61400000000',
+      lastMessageAt: now
+    });
+    await client.db.insert(inboundMessages).values({
+      organisationId,
+      conversationId,
+      provider: 'SINCH',
+      providerMessageId: randomUUID(),
+      body: 'Can we pay Friday?',
+      bodyHash: 'sha256:inbound',
+      providerPayload: { provider: 'private' },
+      receivedAt: now
+    });
+    await client.db.insert(operatorReplies).values({
+      organisationId,
+      conversationId,
+      actorUserId,
+      content: 'Yes, Friday is fine.',
+      contentHash: 'sha256:reply',
+      status: 'DELIVERED',
+      idempotencyKey: randomUUID(),
+      sentAt: now
+    });
+
+    const timeline = await new PostgresActivityRepository(client.db)
+      .customerTimeline(organisationId, contactId);
+    const messagingEvents = timeline.filter((event) =>
+      ['SMS delivered', 'Customer replied', 'Operator replied'].includes(event.label)
+    );
+
+    expect(messagingEvents).toHaveLength(3);
+    expect(messagingEvents.every((event) => event.source === 'AccountPulse messaging'))
+      .toBe(true);
+    expect(JSON.stringify(messagingEvents)).not.toContain('Sinch');
+  });
+
+  it('projects an allowlisted customer audit while excluding provider internals', async () => {
+    const organisationId = randomUUID();
+    const providerConnectionId = randomUUID();
+
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: randomUUID(),
+      name: 'Safe activity projection test',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await client.db.insert(auditEvents).values([
+      {
+        organisationId,
+        eventType: 'REMINDER_APPROVED',
+        entityType: 'APPROVAL',
+        entityId: randomUUID(),
+        correlationId: 'customer-safe-correlation',
+        occurredAt: new Date('2026-11-12T01:00:00.000Z')
+      },
+      {
+        organisationId,
+        eventType: 'SINCH_CALLBACK_KEY_ROTATED',
+        entityType: 'PROVIDER_CONNECTION',
+        entityId: providerConnectionId,
+        correlationId: 'sinch-private-correlation',
+        occurredAt: new Date('2026-11-12T02:00:00.000Z')
+      }
+    ]);
+
+    const repository = new PostgresActivityRepository(client.db);
+    const customerRows = await repository.searchCustomerActivity(organisationId);
+    const craftedFilterRows = await repository.searchCustomerActivity(
+      organisationId,
+      { activityType: 'SINCH_CALLBACK_KEY_ROTATED' as never }
+    );
+    const rawRows = await repository.search(organisationId, {
+      eventType: 'SINCH_CALLBACK_KEY_ROTATED'
+    });
+
+    expect(customerRows).toEqual([
+      expect.objectContaining({
+        label: 'Reminder approved',
+        subject: 'Reminder'
+      })
+    ]);
+    const serialised = JSON.stringify([...customerRows, ...craftedFilterRows]);
+    expect(serialised).not.toContain('SINCH_CALLBACK_KEY_ROTATED');
+    expect(serialised).not.toContain('PROVIDER_CONNECTION');
+    expect(serialised).not.toContain(providerConnectionId);
+    expect(serialised).not.toContain('sinch-private-correlation');
+    expect(rawRows).toHaveLength(1);
+    expect(rawRows[0]?.entityId).toBe(providerConnectionId);
   });
 });

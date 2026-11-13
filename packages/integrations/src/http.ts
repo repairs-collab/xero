@@ -3,6 +3,7 @@ export interface HttpRequest {
   url: string;
   headers: Record<string, string>;
   body?: string;
+  signal?: AbortSignal;
 }
 
 export interface HttpResponse {
@@ -19,7 +20,8 @@ export class FetchHttpClient implements HttpClient {
   async request(request: HttpRequest): Promise<HttpResponse> {
     const requestInit: RequestInit = {
       method: request.method,
-      headers: request.headers
+      headers: request.headers,
+      ...(request.signal === undefined ? {} : { signal: request.signal })
     };
     if (request.body !== undefined) requestInit.body = request.body;
 

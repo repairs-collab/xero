@@ -12,6 +12,7 @@ import {
   auditEvents,
   organisationOnboarding,
   organisations,
+  replyNumberProvisioningRequests,
   smsAllowanceSettings,
   smsNumberPool,
   smsUsageLedger,
@@ -53,6 +54,65 @@ const commitKey = (outboundMessageId: string): string =>
   `${outboundMessageId}:commit`;
 const releaseKey = (outboundMessageId: string): string =>
   `${outboundMessageId}:release`;
+
+const addUtcMonthsClamped = (anchor: Date, months: number): Date => {
+  const targetMonth = anchor.getUTCMonth() + months;
+  const targetYear = anchor.getUTCFullYear() + Math.floor(targetMonth / 12);
+  const normalizedMonth = ((targetMonth % 12) + 12) % 12;
+  const lastDay = new Date(
+    Date.UTC(targetYear, normalizedMonth + 1, 0)
+  ).getUTCDate();
+  return new Date(
+    Date.UTC(
+      targetYear,
+      normalizedMonth,
+      Math.min(anchor.getUTCDate(), lastDay),
+      anchor.getUTCHours(),
+      anchor.getUTCMinutes(),
+      anchor.getUTCSeconds(),
+      anchor.getUTCMilliseconds()
+    )
+  );
+};
+
+const monthlyAllowancePeriod = (input: {
+  subscriptionPeriodStart: Date;
+  subscriptionPeriodEnd: Date;
+  at: Date;
+}): { start: Date; end: Date } => {
+  const { subscriptionPeriodStart, subscriptionPeriodEnd, at } = input;
+  if (
+    subscriptionPeriodEnd.getTime() <= subscriptionPeriodStart.getTime() ||
+    at.getTime() < subscriptionPeriodStart.getTime() ||
+    at.getTime() >= subscriptionPeriodEnd.getTime()
+  ) {
+    throw new Error('SMS_ALLOWANCE_PERIOD_INACTIVE');
+  }
+  let monthOffset = Math.max(
+    0,
+    (at.getUTCFullYear() - subscriptionPeriodStart.getUTCFullYear()) * 12 +
+      at.getUTCMonth() -
+      subscriptionPeriodStart.getUTCMonth()
+  );
+  let start = addUtcMonthsClamped(subscriptionPeriodStart, monthOffset);
+  if (start.getTime() > at.getTime()) {
+    monthOffset -= 1;
+    start = addUtcMonthsClamped(subscriptionPeriodStart, monthOffset);
+  }
+  let end = addUtcMonthsClamped(subscriptionPeriodStart, monthOffset + 1);
+  while (
+    at.getTime() >= end.getTime() &&
+    end.getTime() < subscriptionPeriodEnd.getTime()
+  ) {
+    monthOffset += 1;
+    start = end;
+    end = addUtcMonthsClamped(subscriptionPeriodStart, monthOffset + 1);
+  }
+  if (end.getTime() > subscriptionPeriodEnd.getTime()) {
+    end = subscriptionPeriodEnd;
+  }
+  return { start, end };
+};
 
 export class PostgresSmsCommerceRepository {
   constructor(
@@ -104,6 +164,11 @@ export class PostgresSmsCommerceRepository {
     ) {
       throw new Error('SMS_BILLING_PERIOD_MISSING');
     }
+    const allowancePeriod = monthlyAllowancePeriod({
+      subscriptionPeriodStart: subscription.currentPeriodStart,
+      subscriptionPeriodEnd: subscription.currentPeriodEnd,
+      at: input.now
+    });
 
     const [number] = await executor
       .select({ e164Number: smsNumberPool.e164Number })
@@ -160,7 +225,7 @@ export class PostgresSmsCommerceRepository {
           eq(smsUsageLedger.organisationId, input.organisationId),
           eq(
             smsUsageLedger.billingPeriodStart,
-            subscription.currentPeriodStart
+            allowancePeriod.start
           )
         )
       );
@@ -169,9 +234,8 @@ export class PostgresSmsCommerceRepository {
       existing !== undefined &&
       existing.partDelta === input.partCount &&
       existing.billingPeriodStart.getTime() ===
-        subscription.currentPeriodStart.getTime() &&
-      existing.billingPeriodEnd.getTime() ===
-        subscription.currentPeriodEnd.getTime();
+        allowancePeriod.start.getTime() &&
+      existing.billingPeriodEnd.getTime() === allowancePeriod.end.getTime();
     const decision = decideSmsAllowance({
       ...usage,
       requestedParts: input.partCount,
@@ -198,8 +262,8 @@ export class PostgresSmsCommerceRepository {
 
     await executor.insert(smsUsageLedger).values({
       organisationId: input.organisationId,
-      billingPeriodStart: subscription.currentPeriodStart,
-      billingPeriodEnd: subscription.currentPeriodEnd,
+      billingPeriodStart: allowancePeriod.start,
+      billingPeriodEnd: allowancePeriod.end,
       outboundMessageId: input.outboundMessageId,
       source: input.source,
       entryType: 'RESERVE',
@@ -349,6 +413,22 @@ export class PostgresSmsCommerceRepository {
     ) {
       return null;
     }
+    let allowancePeriod: { start: Date; end: Date };
+    try {
+      allowancePeriod = monthlyAllowancePeriod({
+        subscriptionPeriodStart: subscription.currentPeriodStart,
+        subscriptionPeriodEnd: subscription.currentPeriodEnd,
+        at: this.clock.now()
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === 'SMS_ALLOWANCE_PERIOD_INACTIVE'
+      ) {
+        return null;
+      }
+      throw error;
+    }
     const effective = await this.loadAllowance(organisationId, executor);
     const entries = await executor
       .select({
@@ -361,14 +441,14 @@ export class PostgresSmsCommerceRepository {
           eq(smsUsageLedger.organisationId, organisationId),
           eq(
             smsUsageLedger.billingPeriodStart,
-            subscription.currentPeriodStart
+            allowancePeriod.start
           )
         )
       );
     const usage = summariseSmsUsage(entries);
     return {
-      billingPeriodStart: subscription.currentPeriodStart,
-      billingPeriodEnd: subscription.currentPeriodEnd,
+      billingPeriodStart: allowancePeriod.start,
+      billingPeriodEnd: allowancePeriod.end,
       includedParts: effective.includedParts,
       warningPercent: effective.warningPercent,
       committedParts: usage.committedParts,
@@ -417,6 +497,27 @@ export class PostgresSmsCommerceRepository {
         !hasPaidSubscriptionAccess({ subscriptionStatus: subscription.status, stripeProviderStatus: subscription.stripeProviderStatus, currentPeriodEnd: subscription.currentPeriodEnd, cancelAt: subscription.cancelAt, now: new Date(Math.max(now.getTime(), this.clock.now().getTime())) })
       ) {
         throw new Error('PAID_SUBSCRIPTION_REQUIRED');
+      }
+      const [activeProvisioningRequest] = await transaction
+        .select({ id: replyNumberProvisioningRequests.id })
+        .from(replyNumberProvisioningRequests)
+        .where(
+          and(
+            eq(
+              replyNumberProvisioningRequests.organisationId,
+              organisationId
+            ),
+            inArray(replyNumberProvisioningRequests.status, [
+              'AWAITING_QUOTE',
+              'AWAITING_OWNER_APPROVAL',
+              'APPROVED_FOR_MANUAL_ORDER',
+              'MANUAL_ORDER_RECORDED'
+            ])
+          )
+        )
+        .limit(1);
+      if (activeProvisioningRequest) {
+        throw new Error('SMS_NUMBER_PROVISIONING_REQUEST_ACTIVE');
       }
       const [existing] = await transaction
         .select({

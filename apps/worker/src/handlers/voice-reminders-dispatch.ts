@@ -22,7 +22,12 @@ import {
   reminderSequenceVersions,
   voiceCallRequests
 } from '@bc5000/db';
-import { nextVoiceDispatchAt } from '@bc5000/domain';
+import {
+  debtContactTimeZone,
+  debtContactWindowEndLocal,
+  debtContactWindowStartLocal,
+  nextVoiceDispatchAt
+} from '@bc5000/domain';
 import { jobNames, type JobPublisher } from '@bc5000/jobs';
 
 export type VoiceDispatchSummary =
@@ -296,10 +301,10 @@ export async function dispatchDueVoiceReminders(
           requestedAt: now,
           lastCompletedAt: lastTerminal?.completedAt ?? null,
           cooldownSeconds,
-          timezone: settings.timezone,
+          timezone: debtContactTimeZone,
           holidays: [...dependencies.holidays.list(organisationId)],
-          weekdayStartLocal: settings.weekdayStartLocal.slice(0, 5),
-          weekdayEndLocal: settings.weekdayEndLocal.slice(0, 5)
+          weekdayStartLocal: debtContactWindowStartLocal,
+          weekdayEndLocal: debtContactWindowEndLocal
         });
         if (nextDispatchAt.getTime() > now.getTime()) {
           return {

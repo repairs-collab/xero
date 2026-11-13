@@ -1,22 +1,29 @@
-import { and, asc, eq, inArray, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, lt, or, sql, type SQL } from 'drizzle-orm';
 
 import { summariseSmsUsage } from '@bc5000/domain';
 
 import type { Database, DbTransaction } from '../connection.js';
 import {
+  billingCases,
   invitations,
   memberships,
   organisationOnboarding,
   organisations,
   platformAdminAuditEvents,
+  replyNumberProvisioningRequests,
   smsAllowanceSettings,
   smsNumberPool,
   smsUsageLedger,
   subscriptions,
+  transactionalEmailOutbox,
   users,
   xeroConnections,
   type OrganisationEdition,
+  type BillingCaseKind,
+  type BillingCaseStatus,
   type PlatformAccountStatus,
+  type ReplyNumberDocumentationStatus,
+  type ReplyNumberProvisioningStatus,
   type SmsNumberStatus,
   type SubscriptionStatus,
   type XeroConnectionStatus
@@ -47,6 +54,15 @@ export interface PlatformNumberListInput {
   pageSize?: number;
 }
 
+export interface PlatformReplyNumberProvisioningListInput {
+  search?: string;
+  organisationId?: string;
+  status?: ReplyNumberProvisioningStatus;
+  documentationStatus?: ReplyNumberDocumentationStatus;
+  page?: number;
+  pageSize?: number;
+}
+
 export interface PlatformAuditListInput {
   organisationId?: string;
   actorUserId?: string;
@@ -55,6 +71,54 @@ export interface PlatformAuditListInput {
   to?: Date;
   page?: number;
   pageSize?: number;
+}
+
+export interface PlatformBillingOperationsListInput {
+  organisationId?: string;
+  caseKind?: BillingCaseKind;
+  caseStatus?: BillingCaseStatus;
+  casesCursor?: string;
+  heldEmailsCursor?: string;
+  limit?: number;
+}
+
+export interface PlatformBillingCaseView {
+  id: string;
+  organisationId: string;
+  organisationName: string;
+  kind: BillingCaseKind;
+  status: BillingCaseStatus;
+  providerObjectType: 'INVOICE' | 'CHARGE' | 'DISPUTE';
+  providerReference: string;
+  providerStatus: string;
+  subscriptionRelation: 'CURRENT' | 'RETIRED';
+  amountMinor: number;
+  currency: string;
+  blocksSending: boolean;
+  openedAt: Date;
+  resolvedAt: Date | null;
+  createdAt: Date;
+}
+
+export interface PlatformHeldEmailView {
+  id: string;
+  organisationId: string;
+  organisationName: string;
+  billingCaseId: string;
+  recipient: string;
+  template:
+    | 'PAYMENT_FAILED'
+    | 'PAYMENT_RECOVERED'
+    | 'REFUND_RECORDED'
+    | 'DISPUTE_OPENED'
+    | 'DISPUTE_CLOSED';
+  status: 'HELD';
+  createdAt: Date;
+}
+
+export interface PlatformBillingOperationsPage {
+  cases: { items: PlatformBillingCaseView[]; nextCursor: string | null };
+  heldEmails: { items: PlatformHeldEmailView[]; nextCursor: string | null };
 }
 
 export interface PlatformSmsUsageSummary {
@@ -149,6 +213,35 @@ export interface PlatformNumberSummary {
   updatedAt: Date;
 }
 
+export interface PlatformReplyNumberProvisioningView {
+  id: string;
+  organisationId: string;
+  organisationName: string;
+  xeroOrganisationId: string;
+  organisationPlatformStatus: PlatformAccountStatus;
+  provider: string;
+  attempt: number;
+  version: number;
+  status: ReplyNumberProvisioningStatus;
+  quoteSetupFeeMinor: number | null;
+  quoteMonthlyFeeMinor: number | null;
+  quoteCurrency: string | null;
+  quoteExpiresAt: Date | null;
+  quotedAt: Date | null;
+  documentationStatus: ReplyNumberDocumentationStatus;
+  documentationEvidenceReference: string | null;
+  approvedAt: Date | null;
+  externalOrderReference: string | null;
+  manualOrderRecordedAt: Date | null;
+  fulfilledNumberId: string | null;
+  fulfilledE164Number: string | null;
+  failureCode: string | null;
+  failedAt: Date | null;
+  expiredAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 export interface PlatformAuditView {
   id: string;
   actorUserId: string;
@@ -181,13 +274,21 @@ export type PlatformOrganisationPage = PlatformPage<PlatformOrganisationSummary>
   };
 };
 export type PlatformNumberPage = PlatformPage<PlatformNumberSummary>;
+export type PlatformReplyNumberProvisioningPage =
+  PlatformPage<PlatformReplyNumberProvisioningView>;
 export type PlatformAuditPage = PlatformPage<PlatformAuditView>;
 
 export interface PlatformAdminReadRepository {
   listOrganisations(input?: PlatformOrganisationListInput): Promise<PlatformOrganisationPage>;
   getOrganisationDetail(organisationId: string): Promise<PlatformOrganisationDetail | null>;
   listSmsNumbers(input?: PlatformNumberListInput): Promise<PlatformNumberPage>;
+  listReplyNumberProvisioningRequests(
+    input?: PlatformReplyNumberProvisioningListInput
+  ): Promise<PlatformReplyNumberProvisioningPage>;
   listAuditEvents(input?: PlatformAuditListInput): Promise<PlatformAuditPage>;
+  listBillingOperations(
+    input?: PlatformBillingOperationsListInput
+  ): Promise<PlatformBillingOperationsPage>;
 }
 
 export type PlatformMutationFailureCode =
@@ -198,6 +299,14 @@ export type PlatformMutationFailureCode =
 export type PlatformMutationResult<T> =
   | { ok: true; value: T }
   | { ok: false; code: PlatformMutationFailureCode };
+
+export type PlatformStatusMutationFailureCode =
+  | PlatformMutationFailureCode
+  | 'BILLING_RISK_HOLD';
+
+export type PlatformStatusMutationResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; code: PlatformStatusMutationFailureCode };
 
 export interface PlatformTrialMutationInput {
   actorUserId: string;
@@ -236,10 +345,10 @@ export interface PlatformAdminRepository extends PlatformAdminReadRepository {
   ): Promise<PlatformMutationResult<PlatformOrganisationDetail>>;
   suspendOrganisation(
     input: PlatformStatusMutationInput
-  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>>;
+  ): Promise<PlatformStatusMutationResult<PlatformOrganisationDetail>>;
   reactivateOrganisation(
     input: PlatformStatusMutationInput
-  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>>;
+  ): Promise<PlatformStatusMutationResult<PlatformOrganisationDetail>>;
   registerSmsNumber(input: {
     actorUserId: string;
     e164Number: string;
@@ -303,6 +412,43 @@ const compareNullableDates = (left: Date | null, right: Date | null): number => 
   if (right === null) return -1;
   return left.getTime() - right.getTime();
 };
+
+const uuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const encodeBillingCursor = (createdAt: Date, id: string): string =>
+  Buffer.from(
+    JSON.stringify({ createdAt: createdAt.toISOString(), id }),
+    'utf8'
+  ).toString('base64url');
+
+const decodeBillingCursor = (
+  value: string
+): { createdAt: Date; id: string } | null => {
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(value, 'base64url').toString('utf8')
+    ) as { createdAt?: unknown; id?: unknown };
+    if (
+      typeof parsed.createdAt !== 'string' ||
+      typeof parsed.id !== 'string' ||
+      !uuidPattern.test(parsed.id)
+    ) {
+      return null;
+    }
+    const createdAt = new Date(parsed.createdAt);
+    return Number.isFinite(createdAt.getTime())
+      ? { createdAt, id: parsed.id }
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+const emptyBillingOperationsPage = (): PlatformBillingOperationsPage => ({
+  cases: { items: [], nextCursor: null },
+  heldEmails: { items: [], nextCursor: null }
+});
 
 export class PostgresPlatformAdminRepository implements PlatformAdminRepository {
   constructor(private readonly database: Database) {}
@@ -571,6 +717,104 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
     return { items: rows.slice(offset, offset + pageSize), total, page, pageSize };
   }
 
+  async listReplyNumberProvisioningRequests(
+    input: PlatformReplyNumberProvisioningListInput = {}
+  ): Promise<PlatformReplyNumberProvisioningPage> {
+    const { page, pageSize } = pageValues(input.page, input.pageSize);
+    const [requestRows, organisationRows, numberRows] = await Promise.all([
+      this.database.select().from(replyNumberProvisioningRequests),
+      this.database
+        .select({
+          id: organisations.id,
+          name: organisations.name,
+          xeroOrganisationId: organisations.xeroOrganisationId,
+          platformStatus: organisations.platformStatus
+        })
+        .from(organisations),
+      this.database
+        .select({ id: smsNumberPool.id, e164Number: smsNumberPool.e164Number })
+        .from(smsNumberPool)
+    ]);
+    const organisationById = new Map(
+      organisationRows.map((row) => [row.id, row])
+    );
+    const numberById = new Map(numberRows.map((row) => [row.id, row]));
+    const query = input.search?.trim().toLocaleLowerCase() ?? '';
+    let rows: PlatformReplyNumberProvisioningView[] = requestRows.flatMap(
+      (request) => {
+        const organisation = organisationById.get(request.organisationId);
+        if (!organisation) return [];
+        const fulfilledNumber = request.fulfilledNumberId
+          ? numberById.get(request.fulfilledNumberId)
+          : undefined;
+        return [{
+          id: request.id,
+          organisationId: request.organisationId,
+          organisationName: organisation.name,
+          xeroOrganisationId: organisation.xeroOrganisationId,
+          organisationPlatformStatus: organisation.platformStatus,
+          provider: request.provider,
+          attempt: request.attempt,
+          version: request.version,
+          status: request.status,
+          quoteSetupFeeMinor: request.quoteSetupFeeMinor,
+          quoteMonthlyFeeMinor: request.quoteMonthlyFeeMinor,
+          quoteCurrency: request.quoteCurrency,
+          quoteExpiresAt: request.quoteExpiresAt,
+          quotedAt: request.quotedAt,
+          documentationStatus: request.documentationStatus,
+          documentationEvidenceReference:
+            request.documentationEvidenceReference,
+          approvedAt: request.approvedAt,
+          externalOrderReference: request.externalOrderReference,
+          manualOrderRecordedAt: request.manualOrderRecordedAt,
+          fulfilledNumberId: request.fulfilledNumberId,
+          fulfilledE164Number: fulfilledNumber?.e164Number ?? null,
+          failureCode: request.failureCode,
+          failedAt: request.failedAt,
+          expiredAt: request.expiredAt,
+          createdAt: request.createdAt,
+          updatedAt: request.updatedAt
+        }];
+      }
+    );
+    if (input.organisationId) {
+      rows = rows.filter((row) => row.organisationId === input.organisationId);
+    }
+    if (input.status) {
+      rows = rows.filter((row) => row.status === input.status);
+    }
+    if (input.documentationStatus) {
+      rows = rows.filter(
+        (row) => row.documentationStatus === input.documentationStatus
+      );
+    }
+    if (query) {
+      rows = rows.filter((row) =>
+        [
+          row.id,
+          row.organisationName,
+          row.xeroOrganisationId,
+          row.externalOrderReference ?? '',
+          row.fulfilledE164Number ?? ''
+        ].some((value) => value.toLocaleLowerCase().includes(query))
+      );
+    }
+    rows.sort(
+      (left, right) =>
+        right.updatedAt.getTime() - left.updatedAt.getTime() ||
+        right.id.localeCompare(left.id)
+    );
+    const total = rows.length;
+    const offset = (page - 1) * pageSize;
+    return {
+      items: rows.slice(offset, offset + pageSize),
+      total,
+      page,
+      pageSize
+    };
+  }
+
   async listAuditEvents(
     input: PlatformAuditListInput = {}
   ): Promise<PlatformAuditPage> {
@@ -608,6 +852,143 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
       total,
       page,
       pageSize
+    };
+  }
+
+  async listBillingOperations(
+    input: PlatformBillingOperationsListInput = {}
+  ): Promise<PlatformBillingOperationsPage> {
+    const organisationId = input.organisationId?.trim();
+    if (organisationId && !uuidPattern.test(organisationId)) {
+      return emptyBillingOperationsPage();
+    }
+    const limit =
+      Number.isSafeInteger(input.limit) && (input.limit ?? 0) > 0
+        ? Math.min(input.limit!, 100)
+        : 25;
+    const casesCursor = input.casesCursor
+      ? decodeBillingCursor(input.casesCursor)
+      : null;
+    const heldEmailsCursor = input.heldEmailsCursor
+      ? decodeBillingCursor(input.heldEmailsCursor)
+      : null;
+
+    const caseConditions: SQL[] = [];
+    if (organisationId) {
+      caseConditions.push(eq(billingCases.organisationId, organisationId));
+    }
+    if (input.caseKind) {
+      caseConditions.push(eq(billingCases.kind, input.caseKind));
+    }
+    if (input.caseStatus) {
+      caseConditions.push(eq(billingCases.status, input.caseStatus));
+    }
+    if (casesCursor) {
+      caseConditions.push(
+        or(
+          lt(billingCases.createdAt, casesCursor.createdAt),
+          and(
+            eq(billingCases.createdAt, casesCursor.createdAt),
+            lt(billingCases.id, casesCursor.id)
+          )
+        )!
+      );
+    }
+
+    const emailConditions: SQL[] = [
+      eq(transactionalEmailOutbox.status, 'HELD')
+    ];
+    if (organisationId) {
+      emailConditions.push(
+        eq(transactionalEmailOutbox.organisationId, organisationId)
+      );
+    }
+    if (heldEmailsCursor) {
+      emailConditions.push(
+        or(
+          lt(transactionalEmailOutbox.createdAt, heldEmailsCursor.createdAt),
+          and(
+            eq(transactionalEmailOutbox.createdAt, heldEmailsCursor.createdAt),
+            lt(transactionalEmailOutbox.id, heldEmailsCursor.id)
+          )
+        )!
+      );
+    }
+
+    const [caseRows, emailRows] = await Promise.all([
+      input.casesCursor && !casesCursor
+        ? Promise.resolve([])
+        : this.database
+            .select({
+              id: billingCases.id,
+              organisationId: billingCases.organisationId,
+              organisationName: organisations.name,
+              kind: billingCases.kind,
+              status: billingCases.status,
+              providerObjectType: billingCases.providerObjectType,
+              providerReference: billingCases.providerObjectId,
+              providerStatus: billingCases.providerStatus,
+              subscriptionRelation: billingCases.subscriptionRelation,
+              amountMinor: billingCases.amountMinor,
+              currency: billingCases.currency,
+              blocksSending: billingCases.blocksSending,
+              openedAt: billingCases.openedAt,
+              resolvedAt: billingCases.resolvedAt,
+              createdAt: billingCases.createdAt
+            })
+            .from(billingCases)
+            .innerJoin(
+              organisations,
+              eq(organisations.id, billingCases.organisationId)
+            )
+            .where(caseConditions.length > 0 ? and(...caseConditions) : undefined)
+            .orderBy(desc(billingCases.createdAt), desc(billingCases.id))
+            .limit(limit + 1),
+      input.heldEmailsCursor && !heldEmailsCursor
+        ? Promise.resolve([])
+        : this.database
+            .select({
+              id: transactionalEmailOutbox.id,
+              organisationId: transactionalEmailOutbox.organisationId,
+              organisationName: organisations.name,
+              billingCaseId: transactionalEmailOutbox.billingCaseId,
+              recipient: transactionalEmailOutbox.recipient,
+              template: transactionalEmailOutbox.template,
+              status: transactionalEmailOutbox.status,
+              createdAt: transactionalEmailOutbox.createdAt
+            })
+            .from(transactionalEmailOutbox)
+            .innerJoin(
+              organisations,
+              eq(organisations.id, transactionalEmailOutbox.organisationId)
+            )
+            .where(and(...emailConditions))
+            .orderBy(
+              desc(transactionalEmailOutbox.createdAt),
+              desc(transactionalEmailOutbox.id)
+            )
+            .limit(limit + 1)
+    ]);
+
+    const caseItems = caseRows.slice(0, limit);
+    const emailItems = emailRows.slice(0, limit);
+    const lastCase = caseItems.at(-1);
+    const lastEmail = emailItems.at(-1);
+    return {
+      cases: {
+        items: caseItems,
+        nextCursor:
+          caseRows.length > limit && lastCase
+            ? encodeBillingCursor(lastCase.createdAt, lastCase.id)
+            : null
+      },
+      heldEmails: {
+        items: emailItems as PlatformHeldEmailView[],
+        nextCursor:
+          emailRows.length > limit && lastEmail
+            ? encodeBillingCursor(lastEmail.createdAt, lastEmail.id)
+            : null
+      }
     };
   }
 
@@ -725,7 +1106,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
       targetStatus: PlatformAccountStatus;
       eventType: 'ORGANISATION_SUSPENDED' | 'ORGANISATION_REACTIVATED';
     }
-  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>> {
+  ): Promise<PlatformStatusMutationResult<PlatformOrganisationDetail>> {
     const result = await this.database.transaction(async (transaction) => {
       const [organisation] = await transaction
         .select()
@@ -740,6 +1121,22 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
       const reason = input.reason.trim();
       if (reason.length === 0 || reason.length > 500) {
         return { ok: false, code: 'VALIDATION' } as const;
+      }
+      if (input.targetStatus === 'ACTIVE') {
+        const [blockingCase] = await transaction
+          .select({ id: billingCases.id })
+          .from(billingCases)
+          .where(
+            and(
+              eq(billingCases.organisationId, input.organisationId),
+              eq(billingCases.blocksSending, true),
+              inArray(billingCases.status, ['OPEN', 'REVIEW_REQUIRED'])
+            )
+          )
+          .limit(1);
+        if (blockingCase) {
+          return { ok: false, code: 'BILLING_RISK_HOLD' } as const;
+        }
       }
       if (organisation.platformStatus === input.targetStatus) {
         if (
@@ -795,7 +1192,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
 
   suspendOrganisation(
     input: PlatformStatusMutationInput
-  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>> {
+  ): Promise<PlatformStatusMutationResult<PlatformOrganisationDetail>> {
     return this.updatePlatformStatus({
       ...input,
       targetStatus: 'SUSPENDED',
@@ -805,7 +1202,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
 
   reactivateOrganisation(
     input: PlatformStatusMutationInput
-  ): Promise<PlatformMutationResult<PlatformOrganisationDetail>> {
+  ): Promise<PlatformStatusMutationResult<PlatformOrganisationDetail>> {
     return this.updatePlatformStatus({
       ...input,
       targetStatus: 'ACTIVE',
@@ -1046,6 +1443,27 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
         )
         .limit(1);
       if (active) return { ok: false, code: 'INVALID_STATE' } as const;
+      const [activeProvisioningRequest] = await transaction
+        .select({ id: replyNumberProvisioningRequests.id })
+        .from(replyNumberProvisioningRequests)
+        .where(
+          and(
+            eq(
+              replyNumberProvisioningRequests.organisationId,
+              input.organisationId
+            ),
+            inArray(replyNumberProvisioningRequests.status, [
+              'AWAITING_QUOTE',
+              'AWAITING_OWNER_APPROVAL',
+              'APPROVED_FOR_MANUAL_ORDER',
+              'MANUAL_ORDER_RECORDED'
+            ])
+          )
+        )
+        .limit(1);
+      if (activeProvisioningRequest) {
+        return { ok: false, code: 'INVALID_STATE' } as const;
+      }
       await transaction
         .update(smsNumberPool)
         .set({

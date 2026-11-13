@@ -11,6 +11,8 @@ const tenantTables = [
   'subscriptions',
   'subscription_events',
   'retention_cases',
+  'data_request_cases',
+  'retention_operation_receipts',
   'sms_number_pool',
   'sms_allowance_settings',
   'sms_usage_ledger',
@@ -82,7 +84,11 @@ export const createPlatformCustomerBackupService = (dependencies: {
   database: Database;
   clock: { now(): Date };
 }) => ({
-  async createBackup(actorUserId: string, organisationId: string) {
+  async createBackup(
+    actorUserId: string,
+    organisationId: string,
+    context: { requestId?: string } = {}
+  ) {
     if (!(await dependencies.verifyOwner(actorUserId))) {
       throw new AuthorizationFailure();
     }
@@ -92,6 +98,20 @@ export const createPlatformCustomerBackupService = (dependencies: {
       )
     )[0];
     if (organisation === undefined) throw new Error('ORGANISATION_NOT_FOUND');
+    const requestId = context.requestId;
+    if (requestId !== undefined) {
+      const request = rows(
+        await dependencies.database.execute(sql`
+          select id, request_type
+            from data_request_cases
+           where organisation_id = ${organisationId}
+             and id = ${requestId}
+             and request_type = 'EXPORT'
+           limit 1
+        `)
+      )[0];
+      if (request === undefined) throw new Error('DATA_REQUEST_NOT_FOUND');
+    }
 
     const members = rows(
       await dependencies.database.execute(sql`
@@ -127,11 +147,18 @@ export const createPlatformCustomerBackupService = (dependencies: {
       actorUserId,
       targetOrganisationId: organisationId,
       eventType: 'PLATFORM_CUSTOMER_BACKUP_DOWNLOADED',
-      entityType: 'ORGANISATION',
-      entityId: organisationId,
-      reason: 'Owner requested customer backup export',
+      entityType: requestId === undefined ? 'ORGANISATION' : 'DATA_REQUEST',
+      entityId: requestId ?? organisationId,
+      reason:
+        requestId === undefined
+          ? 'Owner requested customer backup export'
+          : 'Owner delivered verified customer export',
       beforeValue: null,
-      afterValue: { format: 'ACCOUNT_PULSE_JSON_V1', generatedAt: generatedAt.toISOString() },
+      afterValue: {
+        format: 'ACCOUNT_PULSE_JSON_V1',
+        generatedAt: generatedAt.toISOString(),
+        ...(requestId === undefined ? {} : { requestId })
+      },
       occurredAt: generatedAt
     });
     return redactCustomerBackup({

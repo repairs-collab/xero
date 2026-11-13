@@ -103,6 +103,31 @@ describe('AccountPulse account entitlements', () => {
     }))).toMatchObject({ canCustomerSend: allowed, canAutomaticDispatch: allowed });
   });
 
+  it.each([
+    ['missing signed provider state', null, '2026-11-11T00:00:00.000Z'],
+    ['a failed provider state', 'past_due', '2026-11-11T00:00:00.000Z'],
+    ['a missing paid period', 'active', null],
+    ['an expired paid period', 'active', '2026-11-10T00:00:00.000Z']
+  ])(
+    'fails closed at the final entitlement check for ACTIVE with %s',
+    (_label, providerStatus, periodEnd) => {
+      expect(
+        decideAccountEntitlements(
+          solo({
+            subscriptionStatus: 'ACTIVE',
+            stripeProviderStatus: providerStatus,
+            currentPeriodEnd:
+              periodEnd === null ? null : new Date(periodEnd)
+          })
+        )
+      ).toMatchObject({
+        canCustomerSend: false,
+        canAutomaticDispatch: false,
+        blocker: 'SUBSCRIPTION_REQUIRED'
+      });
+    }
+  );
+
   it('allows only verified-admin tests during a current trial', () => {
     expect(
       decideAccountEntitlements(

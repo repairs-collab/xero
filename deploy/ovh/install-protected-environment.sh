@@ -12,7 +12,7 @@ if [[ "$COMMERCIAL_ENV" != "$EXPECTED_COMMERCIAL_ENV" ]]; then
   exit 64
 fi
 
-for command in docker grep install mktemp openssl sort tr; do
+for command in date docker grep install jq mktemp openssl sort tr; do
   command -v "$command" >/dev/null || {
     echo "Required command is unavailable: $command" >&2
     exit 69
@@ -54,6 +54,9 @@ for name in \
   DATABASE_PORT \
   DATABASE_URL \
   DATABASE_USER \
+  DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION \
+  DEBT_CONTACT_HOLIDAY_COVERAGE_END \
+  DEBT_CONTACT_HOLIDAY_DATES_JSON \
   LIVE_SEND_ACK \
   NODE_ENV \
   PUBLIC_BASE_URL \
@@ -89,7 +92,8 @@ for name in \
   XERO_WEBHOOK_KEY \
   STRIPE_PORTAL_CONFIGURATION_ID \
   STRIPE_SECRET_KEY \
-  STRIPE_SOLO_PRICE_ID \
+  STRIPE_SOLO_MONTHLY_PRICE_ID \
+  STRIPE_SOLO_ANNUAL_PRICE_ID \
   STRIPE_WEBHOOK_SECRET; do
   wanted["$name"]=true
 done
@@ -181,12 +185,16 @@ fi
 declare -A commercial_names=(
   [ACCOUNT_PULSE_LEGAL_ENTITY]=true
   [ACCOUNT_PULSE_SUPPORT_EMAIL]=true
+  [DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION]=true
+  [DEBT_CONTACT_HOLIDAY_COVERAGE_END]=true
+  [DEBT_CONTACT_HOLIDAY_DATES_JSON]=true
   [SMS_NUMBER_QUARANTINE_DAYS]=true
   [XERO_OAUTH_CLIENT_ID]=true
   [XERO_OAUTH_CLIENT_SECRET]=true
   [STRIPE_SECRET_KEY]=true
   [STRIPE_WEBHOOK_SECRET]=true
-  [STRIPE_SOLO_PRICE_ID]=true
+  [STRIPE_SOLO_MONTHLY_PRICE_ID]=true
+  [STRIPE_SOLO_ANNUAL_PRICE_ID]=true
   [STRIPE_PORTAL_CONFIGURATION_ID]=true
 )
 declare -A commercial_seen=()
@@ -235,11 +243,14 @@ required=(
   COGNITO_CLIENT_ID COGNITO_DOMAIN COGNITO_ISSUER COGNITO_REDIRECT_URI
   COGNITO_USER_POOL_ID DATABASE_NAME DATABASE_PASSWORD DATABASE_URL
   DATABASE_USER NODE_ENV PUBLIC_BASE_URL SEND_MODE SESSION_SECRET_BASE64
+  DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION DEBT_CONTACT_HOLIDAY_COVERAGE_END
+  DEBT_CONTACT_HOLIDAY_DATES_JSON
   SINCH_API_CREDENTIALS SINCH_CALLBACK_PUBLIC_KEYS_JSON SINCH_WEBHOOK_TOKEN
   SMS_NUMBER_QUARANTINE_DAYS VOICE_GATEWAY_SIGNING_SECRET
   XERO_OAUTH_CLIENT_ID XERO_OAUTH_CLIENT_SECRET XERO_OAUTH_REDIRECT_URI
   XERO_TOKEN_ACTIVE_KEY_ID XERO_TOKEN_ENCRYPTION_KEYS_JSON XERO_WEBHOOK_KEY
-  STRIPE_PORTAL_CONFIGURATION_ID STRIPE_SECRET_KEY STRIPE_SOLO_PRICE_ID
+  STRIPE_PORTAL_CONFIGURATION_ID STRIPE_SECRET_KEY
+  STRIPE_SOLO_MONTHLY_PRICE_ID STRIPE_SOLO_ANNUAL_PRICE_ID
   STRIPE_WEBHOOK_SECRET
 )
 for name in "${required[@]}"; do
@@ -247,6 +258,43 @@ for name in "${required[@]}"; do
     echo "The live environment is missing required setting $name; refusing to alter production." >&2
     exit 65
   }
+done
+
+holiday_calendar_version=${configuration[DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION]}
+[[ "$holiday_calendar_version" != 'replace-me' && "$holiday_calendar_version" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || {
+  echo 'DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION is invalid.' >&2
+  exit 65
+}
+
+holiday_coverage_end=${configuration[DEBT_CONTACT_HOLIDAY_COVERAGE_END]}
+canonical_holiday_coverage_end=$(date -u --date="${holiday_coverage_end}T00:00:00Z" '+%F' 2>/dev/null || true)
+[[ "$canonical_holiday_coverage_end" == "$holiday_coverage_end" ]] || {
+  echo 'DEBT_CONTACT_HOLIDAY_COVERAGE_END must be a YYYY-MM-DD date.' >&2
+  exit 65
+}
+minimum_holiday_coverage_end=$(TZ=Australia/Sydney date --date='+366 days' '+%F')
+if [[ "$holiday_coverage_end" < "$minimum_holiday_coverage_end" ]]; then
+  echo 'DEBT_CONTACT_HOLIDAY_COVERAGE_END must cover at least 366 days from the current Australia/Sydney date.' >&2
+  exit 65
+fi
+
+holiday_dates_json=${configuration[DEBT_CONTACT_HOLIDAY_DATES_JSON]}
+jq -e '
+  type == "array" and
+  length > 0 and
+  all(.[]; type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) and
+  length == (unique | length)
+' <<< "$holiday_dates_json" >/dev/null || {
+  echo 'DEBT_CONTACT_HOLIDAY_DATES_JSON must be a non-empty JSON array of unique YYYY-MM-DD dates.' >&2
+  exit 65
+}
+mapfile -t holiday_dates < <(jq -r '.[]' <<< "$holiday_dates_json")
+for holiday_date in "${holiday_dates[@]}"; do
+  canonical_holiday_date=$(date -u --date="${holiday_date}T00:00:00Z" '+%F' 2>/dev/null || true)
+  if [[ "$canonical_holiday_date" != "$holiday_date" || "$holiday_date" > "$holiday_coverage_end" ]]; then
+    echo 'DEBT_CONTACT_HOLIDAY_DATES_JSON contains an invalid or out-of-coverage date.' >&2
+    exit 65
+  fi
 done
 
 write_environment_entry() {

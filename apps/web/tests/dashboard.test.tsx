@@ -17,8 +17,8 @@ describe('DashboardView', () => {
           paidAfterReminders: '$12,400',
           lastXeroSync: '18 Sep 2026, 10:05 am',
           xeroHealthy: true,
-          sinchHealthy: true,
-          supportEmail: 'AP@motts.com.au',
+          messagingHealthy: true,
+          supportEmail: 'ap@motts.com.au',
           supportChatUrl: null
         }
       })
@@ -31,6 +31,7 @@ describe('DashboardView', () => {
     expect(html).toContain('Paid after reminders');
     expect(html).not.toContain('Recovered because of reminders');
     expect(html).toContain('Xero connected');
-    expect(html).toContain('Sinch connected');
+    expect(html).toContain('AccountPulse messaging ready');
+    expect(html).not.toContain('Sinch');
   });
 });

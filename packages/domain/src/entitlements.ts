@@ -66,8 +66,14 @@ export const hasPaidSubscriptionAccess = (input: {
   cancelAt?: Date | null;
   now: Date;
 }): boolean => {
-  if (input.subscriptionStatus === 'ACTIVE') return true;
-  if (input.subscriptionStatus !== 'CANCEL_AT_PERIOD_END' || input.stripeProviderStatus !== 'active' || input.currentPeriodEnd == null) return false;
+  if (
+    (input.subscriptionStatus !== 'ACTIVE' &&
+      input.subscriptionStatus !== 'CANCEL_AT_PERIOD_END') ||
+    input.stripeProviderStatus !== 'active' ||
+    input.currentPeriodEnd == null
+  ) {
+    return false;
+  }
   const now = input.now.getTime();
   return input.currentPeriodEnd.getTime() > now && (input.cancelAt == null || input.cancelAt.getTime() > now);
 };

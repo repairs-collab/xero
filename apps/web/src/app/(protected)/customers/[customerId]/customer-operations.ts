@@ -4,7 +4,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
 
 import { authorise, type AppSession } from '@bc5000/auth';
-import { approvals, auditEvents, contactChannels, type Database, disputes, invoiceChases, invoices, pauses, paymentPromises, stageInstances, tasks } from '@bc5000/db/web';
+import { approvals, auditEvents, contactChannels, type Database, disputes, invoiceChases, invoices, lockDebtContactProvider, pauses, paymentPromises, stageInstances, tasks } from '@bc5000/db/web';
 import type { PauseKind } from '@bc5000/domain';
 import { jobNames, type JobPublisher } from '@bc5000/jobs';
 
@@ -65,6 +65,10 @@ export function createCustomerOperations(dependencies: { database: Database; pub
     authorise(session, 'chase.operate', input.organisationId);
     const now = dependencies.clock.now();
     await dependencies.database.transaction(async (transaction) => {
+      await lockDebtContactProvider(transaction, {
+        organisationId: input.organisationId,
+        contactId: input.customerId
+      });
       await transaction.insert(disputes).values({ organisationId: input.organisationId, contactId: input.customerId, ...(input.invoiceId === undefined ? {} : { invoiceId: input.invoiceId }), status: 'OPEN', reason, recordedByUserId: session.userId, recordedAt: now });
       await transaction.insert(pauses).values({ organisationId: input.organisationId, kind: 'DISPUTE', scope: 'customer', contactId: input.customerId, active: true, reason, actorUserId: session.userId, startedAt: now });
       await transaction.update(invoiceChases).set({ status: 'PAUSED', updatedAt: now }).where(and(eq(invoiceChases.organisationId, input.organisationId), eq(invoiceChases.customerId, input.customerId), eq(invoiceChases.status, 'ACTIVE')));
@@ -92,6 +96,10 @@ export function createCustomerOperations(dependencies: { database: Database; pub
     const reason = input.reason.trim(); if (reason === '') throw new Error('RESUME_REASON_REQUIRED');
     const now = dependencies.clock.now();
     await dependencies.database.transaction(async (transaction) => {
+      await lockDebtContactProvider(transaction, {
+        organisationId: input.organisationId,
+        contactId: input.customerId
+      });
       await transaction.update(pauses).set({ active: false, endedAt: now }).where(and(eq(pauses.organisationId, input.organisationId), eq(pauses.contactId, input.customerId), eq(pauses.active, true)));
       await transaction.update(disputes).set({ status: 'RESOLVED', resolvedAt: now }).where(and(eq(disputes.organisationId, input.organisationId), eq(disputes.contactId, input.customerId), eq(disputes.status, 'OPEN')));
       await transaction.update(paymentPromises).set({ status: 'CANCELLED', endedAt: now }).where(and(eq(paymentPromises.organisationId, input.organisationId), eq(paymentPromises.contactId, input.customerId), eq(paymentPromises.status, 'ACTIVE')));

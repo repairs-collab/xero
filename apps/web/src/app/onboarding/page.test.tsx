@@ -138,4 +138,39 @@ describe('self-service onboarding entry', () => {
     expect(markup).toContain('organisationId=org_invited');
     expect(markup).not.toContain('Your Xero organisation is connected');
   });
+
+  it('asks an unpaid customer to activate without promising a trial', async () => {
+    requireWebAcceptedIdentitySession.mockResolvedValueOnce({
+      userId: 'user_unpaid',
+      cognitoSubject: 'subject_unpaid',
+      displayName: 'Unpaid Administrator',
+      expiresAt: '2026-11-11T00:00:00.000Z',
+      memberships: [
+        { organisationId: 'org_unpaid', role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }
+      ]
+    });
+    getStatus.mockResolvedValueOnce({
+      completedCount: 1,
+      complete: false,
+      steps: [],
+      trial: {
+        readOnly: true,
+        canSync: false,
+        canPreview: false,
+        testSmsPartLimit: 0,
+        testSmsDestination: null,
+        canSendCustomers: false,
+        canEnableAutomatic: false,
+        canAssignPermanentNumber: false,
+        actions: ['SUBSCRIBE', 'EXPORT', 'DISCONNECT']
+      }
+    });
+
+    const markup = renderToStaticMarkup(
+      await SelfServiceOnboardingPage({ searchParams: Promise.resolve({}) })
+    );
+
+    expect(markup).toContain('Payment is required to activate AccountPulse');
+    expect(markup).not.toContain('Your trial is read-only');
+  });
 });

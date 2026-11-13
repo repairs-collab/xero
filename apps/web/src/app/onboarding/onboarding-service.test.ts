@@ -25,6 +25,9 @@ const evidence = (
   allSequencesInReview: true,
   sequenceReviewedAt: now,
   subscriptionStatus: 'ACTIVE',
+  stripeProviderStatus: 'active',
+  currentPeriodEnd: new Date('2026-12-10T00:00:00.000Z'),
+  cancelAt: null,
   trialEndsAt: null,
   replyNumberStatus: 'READY',
   ...overrides
@@ -44,6 +47,14 @@ describe('AccountPulse Solo onboarding evidence', () => {
       'REPLY_NUMBER_READY'
     ]);
     expect(status.steps.every((step) => step.complete)).toBe(true);
+    expect(
+      status.steps.find((step) => step.key === 'ADMIN_MOBILE_VERIFIED')
+        ?.description
+    ).toBe('Verify an Australian mobile for test messages.');
+    expect(
+      status.steps.find((step) => step.key === 'SUBSCRIPTION_ACTIVE')
+        ?.description
+    ).toBe('Pay securely through Stripe to activate AccountPulse.');
     expect(status).toMatchObject({ completedCount: 8, complete: true });
   });
 

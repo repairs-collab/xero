@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
-import type { Database } from '@bc5000/db';
+import type { Database, DbTransaction } from '@bc5000/db';
 import {
   approvals,
+  auditEvents,
   contactChannels,
   contacts,
   invoiceChases,
@@ -10,7 +11,8 @@ import {
   organisations,
   PostgresOrganisationSafetyRepository,
   stageInstances,
-  tasks
+  tasks,
+  xeroConnections
 } from '@bc5000/db';
 import type {
   ListOutstandingInvoicesOptions,
@@ -45,14 +47,47 @@ export interface XeroSyncDependencies {
   clock: SyncClock;
 }
 
-export const assertXeroSyncAllowed = async (
-  dependencies: XeroSyncDependencies,
+const assertXeroSyncAllowed = async (
+  dependencies: Pick<XeroSyncDependencies, 'database'>,
   organisationId: string
-): Promise<void> => {
-  await new PostgresOrganisationSafetyRepository(
+): Promise<typeof organisations.$inferSelect> => {
+  return new PostgresOrganisationSafetyRepository(
     dependencies.database
   ).assertOperationalMutationAllowed(dependencies.database, organisationId);
 };
+
+export type XeroSyncJobDependencies = Pick<XeroSyncDependencies, 'database' | 'clock'> &
+  ({ xero: XeroSyncClient } | { loadXero(): Promise<XeroSyncClient> });
+
+type XeroSyncConnection = Pick<
+  typeof xeroConnections.$inferSelect,
+  'id' | 'status'
+>;
+
+export async function startXeroSync(
+  dependencies: XeroSyncJobDependencies,
+  organisationId: string
+): Promise<{ sync: XeroSyncDependencies; connection: XeroSyncConnection | null }> {
+  const organisation = await assertXeroSyncAllowed(dependencies, organisationId);
+  const [connection] = await dependencies.database
+    .select({ id: xeroConnections.id, status: xeroConnections.status })
+    .from(xeroConnections)
+    .where(eq(xeroConnections.organisationId, organisationId))
+    .limit(1);
+  if (
+    (connection !== undefined && connection.status !== 'CONNECTED') ||
+    (organisation.edition === 'SOLO' && connection === undefined)
+  ) {
+    throw new Error('XERO_CONNECTION_REQUIRED');
+  }
+  // Resolve the client after capturing the generation, including the choice of
+  // OAuth or legacy credentials. A reconnect from this point invalidates the job.
+  const xero = 'xero' in dependencies ? dependencies.xero : await dependencies.loadXero();
+  return {
+    sync: { database: dependencies.database, clock: dependencies.clock, xero },
+    connection: connection ?? null
+  };
+}
 
 const money = (value: string): string => new Decimal(value).toFixed(4);
 
@@ -103,21 +138,14 @@ const terminalReason = (
   return null;
 };
 
-export async function synchroniseInvoiceSnapshot(
+const applyInvoiceSnapshot = async (
+  transaction: DbTransaction,
   dependencies: XeroSyncDependencies,
   organisationId: string,
   invoice: XeroInvoice,
-  preloadedContact?: XeroContact
-): Promise<void> {
-  const contact =
-    preloadedContact ??
-    (await dependencies.xero.getContact(invoice.contactId)).data;
-  const now = dependencies.clock.now();
-
-  await dependencies.database.transaction(async (transaction) => {
-    await new PostgresOrganisationSafetyRepository(
-      dependencies.database
-    ).assertOperationalMutationAllowed(transaction, organisationId);
+  contact: XeroContact,
+  now: Date
+): Promise<void> => {
     const existingContacts = await transaction
       .select()
       .from(contacts)
@@ -348,62 +376,136 @@ export async function synchroniseInvoiceSnapshot(
           )
         );
     }
+};
+
+export async function synchroniseInvoiceSnapshot(
+  dependencies: XeroSyncDependencies,
+  organisationId: string,
+  connection: XeroSyncConnection | null,
+  invoice: XeroInvoice,
+  preloadedContact?: XeroContact
+): Promise<void> {
+  const contact =
+    preloadedContact ??
+    (await dependencies.xero.getContact(invoice.contactId)).data;
+  const now = dependencies.clock.now();
+
+  await dependencies.database.transaction(async (transaction) => {
+    const organisation = await new PostgresOrganisationSafetyRepository(
+      dependencies.database
+    ).assertOperationalMutationAllowed(
+      transaction,
+      organisationId,
+      'no key update'
+    );
+    await assertCurrentXeroGeneration(
+      transaction,
+      organisation,
+      organisationId,
+      connection
+    );
+    await applyInvoiceSnapshot(
+      transaction,
+      dependencies,
+      organisationId,
+      invoice,
+      contact,
+      now
+    );
   });
 }
 
-export async function synchroniseInvoiceCollection(
+const loadContactsForInvoices = async (
   dependencies: XeroSyncDependencies,
-  organisationId: string,
   invoiceSnapshots: XeroInvoice[]
-): Promise<void> {
+): Promise<Map<string, XeroContact>> => {
   const contactIds = [
     ...new Set(invoiceSnapshots.map((invoice) => invoice.contactId))
   ];
   const contactResult = await dependencies.xero.listContacts(contactIds);
-  const contactsById = new Map(
+  return new Map(
     contactResult.data.map((contact) => [contact.id, contact])
   );
+};
 
-  for (const invoice of invoiceSnapshots) {
-    const contact = contactsById.get(invoice.contactId);
-    if (contact === undefined) {
-      throw new Error(`Xero contact was not returned for invoice ${invoice.id}`);
-    }
-    await synchroniseInvoiceSnapshot(
-      dependencies,
-      organisationId,
-      invoice,
-      contact
-    );
-  }
-}
-
-export async function runInvoiceRefresh(
-  dependencies: XeroSyncDependencies,
-  payload: XeroInvoiceRefreshJob
-): Promise<void> {
-  await assertXeroSyncAllowed(dependencies, payload.organisationId);
-  const invoice = await dependencies.xero.getInvoice(payload.invoiceId);
-  await synchroniseInvoiceSnapshot(
-    dependencies,
-    payload.organisationId,
-    invoice.data
-  );
-}
-
-export const recordSuccessfulSync = async (
-  dependencies: XeroSyncDependencies,
-  organisationId: string
+const assertCurrentXeroGeneration = async (
+  transaction: DbTransaction,
+  organisation: typeof organisations.$inferSelect,
+  organisationId: string,
+  connection: XeroSyncConnection | null
 ): Promise<void> => {
+  const [current] = await transaction
+    .select({ id: xeroConnections.id, status: xeroConnections.status })
+    .from(xeroConnections)
+    .where(eq(xeroConnections.organisationId, organisationId))
+    .for('share', { noWait: true })
+    .limit(1);
+
+  if (connection === null) {
+    if (organisation.edition === 'SOLO' || current !== undefined) {
+      throw new Error('XERO_SYNC_CONNECTION_CHANGED');
+    }
+    return;
+  }
+  if (
+    current?.id !== connection.id ||
+    current.status !== connection.status ||
+    current.status !== 'CONNECTED'
+  ) {
+    throw new Error('XERO_SYNC_CONNECTION_CHANGED');
+  }
+};
+
+export async function commitXeroSync(
+  dependencies: XeroSyncDependencies,
+  organisationId: string,
+  connection: XeroSyncConnection | null,
+  invoiceSnapshots: XeroInvoice[],
+  options: {
+    completionAudit?: {
+      eventType: string;
+      afterValue: Record<string, unknown>;
+    };
+  } = {}
+): Promise<void> {
+  const contactsById = await loadContactsForInvoices(
+    dependencies,
+    invoiceSnapshots
+  );
   const now = dependencies.clock.now();
+  const syncId = randomUUID();
   const safety = new PostgresOrganisationSafetyRepository(
     dependencies.database
   );
+
   await dependencies.database.transaction(async (transaction) => {
     const organisation = await safety.assertOperationalMutationAllowed(
       transaction,
-      organisationId
+      organisationId,
+      'no key update'
     );
+    await assertCurrentXeroGeneration(
+      transaction,
+      organisation,
+      organisationId,
+      connection
+    );
+
+    for (const invoice of invoiceSnapshots) {
+      const contact = contactsById.get(invoice.contactId);
+      if (contact === undefined) {
+        throw new Error(`Xero contact was not returned for invoice ${invoice.id}`);
+      }
+      await applyInvoiceSnapshot(
+        transaction,
+        dependencies,
+        organisationId,
+        invoice,
+        contact,
+        now
+      );
+    }
+
     const invalidatesReconciliation = [
       'SYNC_REQUIRED',
       'RECONCILIATION_REQUIRED',
@@ -414,6 +516,8 @@ export const recordSuccessfulSync = async (
       .set({
         xeroSyncCursor: now.toISOString(),
         lastSuccessfulSyncAt: now,
+        lastSuccessfulSyncId: syncId,
+        lastSuccessfulXeroConnectionId: connection?.id ?? null,
         latestReconciledSyncAt: null,
         ...(invalidatesReconciliation
           ? {
@@ -424,5 +528,36 @@ export const recordSuccessfulSync = async (
         updatedAt: now
       })
       .where(eq(organisations.id, organisationId));
+    if (options.completionAudit !== undefined) {
+      await transaction.insert(auditEvents).values({
+        organisationId,
+        eventType: options.completionAudit.eventType,
+        entityType: 'ORGANISATION',
+        entityId: organisationId,
+        afterValue: {
+          ...options.completionAudit.afterValue,
+          syncId,
+          xeroConnectionId: connection?.id ?? null
+        },
+        occurredAt: now
+      });
+    }
   });
-};
+}
+
+export async function runInvoiceRefresh(
+  dependencies: XeroSyncJobDependencies,
+  payload: XeroInvoiceRefreshJob
+): Promise<void> {
+  const { sync, connection } = await startXeroSync(
+    dependencies,
+    payload.organisationId
+  );
+  const invoice = await sync.xero.getInvoice(payload.invoiceId);
+  await synchroniseInvoiceSnapshot(
+    sync,
+    payload.organisationId,
+    connection,
+    invoice.data
+  );
+}

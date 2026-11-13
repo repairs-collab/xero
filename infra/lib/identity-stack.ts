@@ -44,13 +44,13 @@ export class IdentityStack extends Stack {
       userVerification: {
         emailSubject: 'Verify your AccountPulse account',
         emailBody:
-          'Welcome to AccountPulse. Your verification code is {####}. If you did not request this account, contact AP@motts.com.au.',
+          'Welcome to AccountPulse. Your verification code is {####}. If you did not request this account, contact ap@motts.com.au.',
         emailStyle: VerificationEmailStyle.CODE
       },
       userInvitation: {
         emailSubject: 'Welcome to AccountPulse — your account is ready',
         emailBody:
-          `Welcome to AccountPulse. Your secure customer account has been created.\n\nUsername: {username}\nTemporary password: {####}\n\nSign in at https://${props.hostname}/auth/login?returnTo=%2Fonboarding\n\nOn first sign-in you will set a new password and MFA, accept the AccountPulse Terms and Privacy Policy, connect Xero, and complete guided setup.\n\nThis invitation expires in 3 days. If you were not expecting it, contact AP@motts.com.au.`
+          `Welcome to AccountPulse. Your secure customer account has been created.\n\nUsername: {username}\nTemporary password: {####}\n\nSign in at https://${props.hostname}/auth/login?returnTo=%2Fonboarding\n\nOn first sign-in you will set a new password and MFA, accept the AccountPulse Terms and Privacy Policy, connect Xero, and complete guided setup.\n\nThis invitation expires in 3 days. If you were not expecting it, contact ap@motts.com.au.`
       },
       removalPolicy: RemovalPolicy.RETAIN
     });

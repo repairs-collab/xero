@@ -65,6 +65,8 @@ const seedReadySolo = async (): Promise<{
     organisationId,
     planCode: 'SOLO_AU_2000',
     status: 'ACTIVE',
+    stripeProviderStatus: 'active',
+    trustedStripeProviderStatus: 'active',
     currentPeriodStart: now,
     currentPeriodEnd: new Date('2026-12-10T00:00:00.000Z')
   });

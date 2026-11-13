@@ -15,23 +15,32 @@ import {
   contacts,
   disputes,
   type Database,
+  type DbTransaction,
   invoiceChases,
   invoices,
+  lockDebtContactProvider,
   memberships,
   organisations,
   organisationVoiceSettings,
   pauses,
   paymentPromises,
+  PostgresDebtContactRepository,
+  PostgresEntitlementRepository,
   type PostgresVoiceCallRepository,
   reminderSequences,
   reminderSequenceVersions,
   reminderWhitelistEntries,
   sequenceStages,
+  subscriptions,
   suppressions,
   users,
   voiceCallRequests
 } from '@bc5000/db';
 import {
+  debtContactTimeZone,
+  debtContactWindowEndLocal,
+  debtContactWindowStartLocal,
+  decideDebtContactWindow,
   evaluateVoiceContactPolicy,
   fixedVoiceCallCopy,
   normaliseVoiceAmount,
@@ -78,6 +87,8 @@ export type VoiceCallCancellationCode =
   | 'VOICE_CALL_NOT_FOUND'
   | 'DEPLOYMENT_DISABLED'
   | 'INITIATING_USER_DISABLED'
+  | 'SUBSCRIPTION_REQUIRED'
+  | 'DAILY_CONTACT_LIMIT'
   | 'UNKNOWN_OUTCOME'
   | 'STALE_ACCOUNT_DATA';
 
@@ -206,11 +217,31 @@ interface RevalidatedCall {
   settings: typeof organisationVoiceSettings.$inferSelect;
 }
 
+const lockCustomerProviderBoundary = async (
+  transaction: DbTransaction,
+  input: { organisationId: string; contactId: string }
+): Promise<void> => {
+  await lockDebtContactProvider(transaction, input);
+  await transaction
+    .select({ id: organisations.id })
+    .from(organisations)
+    .where(eq(organisations.id, input.organisationId))
+    .for('no key update')
+    .limit(1);
+  await transaction
+    .select({ organisationId: subscriptions.organisationId })
+    .from(subscriptions)
+    .where(eq(subscriptions.organisationId, input.organisationId))
+    .for('update')
+    .limit(1);
+};
+
 const revalidate = async (
   dependencies: VoiceCallExecutionDependencies,
   payload: VoiceCallExecutePayload,
   now: Date,
-  expectedState: 'QUEUED' | 'SUBMITTING' = 'QUEUED'
+  expectedState: 'QUEUED' | 'SUBMITTING' = 'QUEUED',
+  executor: Database | DbTransaction = dependencies.database
 ): Promise<
   | { kind: 'eligible'; value: RevalidatedCall }
   | {
@@ -222,7 +253,8 @@ const revalidate = async (
 > => {
   const call = await dependencies.repository.loadForExecution(
     payload.organisationId,
-    payload.voiceCallId
+    payload.voiceCallId,
+    executor
   );
   if (call === null) {
     return {
@@ -235,47 +267,45 @@ const revalidate = async (
     return { kind: 'existing', state: call.state };
   }
 
-  const [organisationRows, settingsRows, contactRows, actorRows] =
-    await Promise.all([
-      dependencies.database
-        .select()
-        .from(organisations)
-        .where(eq(organisations.id, payload.organisationId))
-        .limit(1),
-      dependencies.database
-        .select()
-        .from(organisationVoiceSettings)
-        .where(
-          eq(organisationVoiceSettings.organisationId, payload.organisationId)
-        )
-        .limit(1),
-      dependencies.database
-        .select()
-        .from(contacts)
-        .where(
-          and(
-            eq(contacts.organisationId, payload.organisationId),
-            eq(contacts.id, call.contactId)
-          )
-        )
-        .limit(1),
-      call.actorUserId === null
-        ? Promise.resolve([])
-        : dependencies.database
-            .select({
-              membershipDisabledAt: memberships.disabledAt,
-              userDisabledAt: users.disabledAt
-            })
-            .from(memberships)
-            .innerJoin(users, eq(users.id, memberships.userId))
-            .where(
-              and(
-                eq(memberships.organisationId, payload.organisationId),
-                eq(memberships.userId, call.actorUserId)
-              )
+  const organisationRows = await executor
+    .select()
+    .from(organisations)
+    .where(eq(organisations.id, payload.organisationId))
+    .limit(1);
+  const settingsRows = await executor
+    .select()
+    .from(organisationVoiceSettings)
+    .where(
+      eq(organisationVoiceSettings.organisationId, payload.organisationId)
+    )
+    .limit(1);
+  const contactRows = await executor
+    .select()
+    .from(contacts)
+    .where(
+      and(
+        eq(contacts.organisationId, payload.organisationId),
+        eq(contacts.id, call.contactId)
+      )
+    )
+    .limit(1);
+  const actorRows =
+    call.actorUserId === null
+      ? []
+      : await executor
+          .select({
+            membershipDisabledAt: memberships.disabledAt,
+            userDisabledAt: users.disabledAt
+          })
+          .from(memberships)
+          .innerJoin(users, eq(users.id, memberships.userId))
+          .where(
+            and(
+              eq(memberships.organisationId, payload.organisationId),
+              eq(memberships.userId, call.actorUserId)
             )
-            .limit(1)
-    ]);
+          )
+          .limit(1);
   const organisation = organisationRows[0];
   const settings = settingsRows[0];
   const contact = contactRows[0];
@@ -319,6 +349,18 @@ const revalidate = async (
       reason: 'DEPLOYMENT_DISABLED'
     };
   }
+  if (
+    call.purpose === 'CUSTOMER' &&
+    !(await new PostgresEntitlementRepository(
+      dependencies.database
+    ).hasPaidCustomerAccess(payload.organisationId, now, executor))
+  ) {
+    return {
+      kind: 'blocked',
+      actorUserId: call.actorUserId,
+      reason: 'SUBSCRIPTION_REQUIRED'
+    };
+  }
 
   if (call.source !== 'MANUAL') {
     if (
@@ -334,7 +376,7 @@ const revalidate = async (
       };
     }
 
-    const [source] = await dependencies.database
+    const [source] = await executor
       .select({ id: sequenceStages.id })
       .from(reminderSequences)
       .innerJoin(
@@ -381,7 +423,7 @@ const revalidate = async (
   const currentInvoices =
     call.invoices.length === 0
       ? []
-      : await dependencies.database
+      : await executor
           .select()
           .from(invoices)
           .where(
@@ -476,7 +518,7 @@ const revalidate = async (
   }
 
   const invoiceIds = call.invoices.map((invoice) => invoice.invoiceId);
-  const chaseRows = await dependencies.database
+  const chaseRows = await executor
     .select({
       invoiceId: invoiceChases.invoiceId,
       sequenceId: invoiceChases.sequenceId,
@@ -514,94 +556,81 @@ const revalidate = async (
     ...new Set(chaseRows.map((row) => row.invoiceId))
   ];
   const sequenceIds = [...new Set(chaseRows.map((row) => row.sequenceId))];
-  const [
-    channels,
-    suppressionsRows,
-    disputesRows,
-    promisesRows,
-    pausesRows,
-    whitelistRows
-  ] =
-    await Promise.all([
-      dependencies.database
-        .select()
-        .from(contactChannels)
-        .where(
-          and(
-            eq(contactChannels.organisationId, payload.organisationId),
-            eq(contactChannels.contactId, call.contactId),
-            eq(contactChannels.kind, 'VOICE'),
-            eq(contactChannels.usable, true)
-          )
-        ),
-      dependencies.database
-        .select()
-        .from(suppressions)
-        .where(
-          and(
-            eq(suppressions.organisationId, payload.organisationId),
-            eq(suppressions.channel, 'VOICE'),
-            eq(suppressions.normalisedDestination, call.destinationNumber),
-            eq(suppressions.consentState, 'SUPPRESSED')
-          )
-        ),
-      dependencies.database
-        .select()
-        .from(disputes)
-        .where(
-          and(
-            eq(disputes.organisationId, payload.organisationId),
-            eq(disputes.contactId, call.contactId),
-            eq(disputes.status, 'OPEN'),
-            or(
-              isNull(disputes.invoiceId),
-              inArray(disputes.invoiceId, candidateInvoiceIds)
-            )
-          )
-        ),
-      dependencies.database
-        .select()
-        .from(paymentPromises)
-        .where(
-          and(
-            eq(paymentPromises.organisationId, payload.organisationId),
-            eq(paymentPromises.contactId, call.contactId),
-            eq(paymentPromises.status, 'ACTIVE')
-          )
-        ),
-      dependencies.database
-        .select()
-        .from(pauses)
-        .where(
-          and(
-            eq(pauses.organisationId, payload.organisationId),
-            eq(pauses.active, true),
-            or(isNull(pauses.expiresAt), gt(pauses.expiresAt, now)),
-            or(
-              eq(pauses.contactId, call.contactId),
-              inArray(pauses.invoiceId, candidateInvoiceIds),
-              inArray(pauses.sequenceId, sequenceIds)
-            )
-          )
-        ),
-      dependencies.database
-        .select()
-        .from(reminderWhitelistEntries)
-        .where(
-          and(
-            eq(reminderWhitelistEntries.organisationId, payload.organisationId),
-            eq(reminderWhitelistEntries.contactId, call.contactId),
-            isNull(reminderWhitelistEntries.removedAt),
-            or(
-              eq(reminderWhitelistEntries.scope, 'CLIENT'),
-              inArray(
-                reminderWhitelistEntries.invoiceId,
-                candidateInvoiceIds
-              )
-            )
-          )
-        ),
-    ]);
+  const channels = await executor
+    .select()
+    .from(contactChannels)
+    .where(
+      and(
+        eq(contactChannels.organisationId, payload.organisationId),
+        eq(contactChannels.contactId, call.contactId),
+        eq(contactChannels.kind, 'VOICE'),
+        eq(contactChannels.usable, true)
+      )
+    );
+  const suppressionsRows = await executor
+    .select()
+    .from(suppressions)
+    .where(
+      and(
+        eq(suppressions.organisationId, payload.organisationId),
+        eq(suppressions.channel, 'VOICE'),
+        eq(suppressions.normalisedDestination, call.destinationNumber),
+        eq(suppressions.consentState, 'SUPPRESSED')
+      )
+    );
+  const disputesRows = await executor
+    .select()
+    .from(disputes)
+    .where(
+      and(
+        eq(disputes.organisationId, payload.organisationId),
+        eq(disputes.contactId, call.contactId),
+        eq(disputes.status, 'OPEN'),
+        or(
+          isNull(disputes.invoiceId),
+          inArray(disputes.invoiceId, candidateInvoiceIds)
+        )
+      )
+    );
+  const promisesRows = await executor
+    .select()
+    .from(paymentPromises)
+    .where(
+      and(
+        eq(paymentPromises.organisationId, payload.organisationId),
+        eq(paymentPromises.contactId, call.contactId),
+        eq(paymentPromises.status, 'ACTIVE')
+      )
+    );
+  const pausesRows = await executor
+    .select()
+    .from(pauses)
+    .where(
+      and(
+        eq(pauses.organisationId, payload.organisationId),
+        eq(pauses.active, true),
+        or(isNull(pauses.expiresAt), gt(pauses.expiresAt, now)),
+        or(
+          eq(pauses.contactId, call.contactId),
+          inArray(pauses.invoiceId, candidateInvoiceIds),
+          inArray(pauses.sequenceId, sequenceIds)
+        )
+      )
+    );
+  const whitelistRows = await executor
+    .select()
+    .from(reminderWhitelistEntries)
+    .where(
+      and(
+        eq(reminderWhitelistEntries.organisationId, payload.organisationId),
+        eq(reminderWhitelistEntries.contactId, call.contactId),
+        isNull(reminderWhitelistEntries.removedAt),
+        or(
+          eq(reminderWhitelistEntries.scope, 'CLIENT'),
+          inArray(reminderWhitelistEntries.invoiceId, candidateInvoiceIds)
+        )
+      )
+    );
   const today = localDate(now, settings.timezone);
   const approvedInvoiceIds = new Set(invoiceIds);
   const disputedInvoiceIds = new Set(
@@ -682,18 +711,21 @@ const revalidate = async (
     };
   }
 
-  const attempts = await dependencies.repository.recentProviderAcceptedAttempts({
-    organisationId: payload.organisationId,
-    contactId: call.contactId,
-    from: new Date(now.getTime() - 40 * 24 * 60 * 60 * 1000),
-    before: now
-  });
+  const attempts = await dependencies.repository.recentProviderAcceptedAttempts(
+    {
+      organisationId: payload.organisationId,
+      contactId: call.contactId,
+      from: new Date(now.getTime() - 40 * 24 * 60 * 60 * 1000),
+      before: now
+    },
+    executor
+  );
   const policy = evaluateVoiceContactPolicy({
     now,
-    timezone: settings.timezone,
+    timezone: debtContactTimeZone,
     holidays: [...dependencies.holidays.list(payload.organisationId)],
-    weekdayStartLocal: settings.weekdayStartLocal.slice(0, 5),
-    weekdayEndLocal: settings.weekdayEndLocal.slice(0, 5),
+    weekdayStartLocal: debtContactWindowStartLocal,
+    weekdayEndLocal: debtContactWindowEndLocal,
     featureEnabled: settings.enabled,
     permissionAllowed: true,
     destinationValid: destinationIsCurrent,
@@ -816,71 +848,131 @@ export async function executeVoiceCall(
   }
 
   const submissionNow = dependencies.clock.now();
-  const finalValidation = await revalidate(
-    dependencies,
-    payload,
-    submissionNow,
-    'SUBMITTING'
-  );
-  if (finalValidation.kind === 'existing') {
-    return { kind: 'existing', state: finalValidation.state };
-  }
-  if (finalValidation.kind === 'blocked') {
-    return cancel(
-      dependencies,
-      payload,
-      finalValidation.actorUserId,
-      finalValidation.reason,
-      submissionNow,
-      'SUBMITTING'
-    );
-  }
-  ({ call, settings } = finalValidation.value);
-  if (
-    call.accountName === null ||
-    call.voipcloudUserNumber === null ||
-    call.ttsVoiceId === null ||
-    call.gatewayFlowVersion === null
-  ) {
-    throw new Error('VOICE_SETTINGS_NOT_CONFIGURED');
-  }
   try {
-    const result = await dependencies.gateway.createCall({
-      version: 1,
-      purpose: call.purpose,
-      gatewayCallId: call.id,
-      organisationId: payload.organisationId,
-      voiceCallId: call.id,
-      idempotencyKey: call.idempotencyKey,
-      provider: 'VOIPCLOUD',
-      providerUserNumber: call.voipcloudUserNumber,
-      destinationNumber: call.destinationNumber,
-      callerId: call.outboundNumber,
-      flowVersion: call.gatewayFlowVersion,
-      ttsVoiceId: call.ttsVoiceId,
-      callbackUrl: dependencies.gatewayCallbackUrl,
-      transfer: {
-        ...(settings.transferSipUri === null
-          ? {}
-          : { sipUri: settings.transferSipUri }),
-        fallbackNumber: settings.fallbackOfficeNumber,
-        label: call.transferTargetLabel
-      },
-      approvedFacts: {
-        accountName: call.accountName,
-        combinedAmount: normaliseVoiceAmount(call.combinedAmount),
-        currency: call.currency,
-        invoices: call.invoices.map((invoice) => ({
-          invoiceNumber: invoice.invoiceNumber,
-          amountDue: normaliseVoiceAmount(invoice.amountDue),
-          dueDate: invoice.dueDate
-        }))
+    const boundary = await dependencies.database.transaction(
+      async (transaction) => {
+        if (call.purpose === 'CUSTOMER') {
+          await lockCustomerProviderBoundary(transaction, {
+            organisationId: payload.organisationId,
+            contactId: call.contactId
+          });
+        }
+        const boundaryNow = dependencies.clock.now();
+        const finalValidation = await revalidate(
+          dependencies,
+          payload,
+          boundaryNow,
+          'SUBMITTING',
+          transaction
+        );
+        if (finalValidation.kind === 'existing') {
+          return { kind: 'existing' as const, state: finalValidation.state };
+        }
+        if (finalValidation.kind === 'blocked') {
+          return {
+            kind: 'blocked' as const,
+            actorUserId: finalValidation.actorUserId,
+            reason: finalValidation.reason,
+            at: boundaryNow
+          };
+        }
+        ({ call, settings } = finalValidation.value);
+        if (
+          call.accountName === null ||
+          call.voipcloudUserNumber === null ||
+          call.ttsVoiceId === null ||
+          call.gatewayFlowVersion === null
+        ) {
+          throw new Error('VOICE_SETTINGS_NOT_CONFIGURED');
+        }
+        if (call.purpose === 'CUSTOMER') {
+          const contactAt = dependencies.clock.now();
+          const contactWindow = decideDebtContactWindow(
+            contactAt,
+            dependencies.holidays.list(payload.organisationId)
+          );
+          if (!contactWindow.allowed) {
+            return {
+              kind: 'blocked' as const,
+              actorUserId: call.actorUserId,
+              reason: 'CALLING_WINDOW_CLOSED' as const,
+              at: contactAt
+            };
+          }
+          const debtContactClaim = await new PostgresDebtContactRepository(
+            dependencies.database
+          ).claimDebtContact({
+            organisationId: payload.organisationId,
+            contactId: call.contactId,
+            localDate: contactWindow.localDate,
+            channel: 'VOICE',
+            sourceId: call.id,
+            claimedAt: contactAt
+          });
+          if (debtContactClaim.kind === 'already-claimed') {
+            return {
+              kind: 'blocked' as const,
+              actorUserId: call.actorUserId,
+              reason: 'DAILY_CONTACT_LIMIT' as const,
+              at: contactAt
+            };
+          }
+        }
+        const result = await dependencies.gateway.createCall({
+          version: 1,
+          purpose: call.purpose,
+          gatewayCallId: call.id,
+          organisationId: payload.organisationId,
+          voiceCallId: call.id,
+          idempotencyKey: call.idempotencyKey,
+          provider: 'VOIPCLOUD',
+          providerUserNumber: call.voipcloudUserNumber,
+          destinationNumber: call.destinationNumber,
+          callerId: call.outboundNumber,
+          flowVersion: call.gatewayFlowVersion,
+          ttsVoiceId: call.ttsVoiceId,
+          callbackUrl: dependencies.gatewayCallbackUrl,
+          transfer: {
+            ...(settings.transferSipUri === null
+              ? {}
+              : { sipUri: settings.transferSipUri }),
+            fallbackNumber: settings.fallbackOfficeNumber,
+            label: call.transferTargetLabel
+          },
+          approvedFacts: {
+            accountName: call.accountName,
+            combinedAmount: normaliseVoiceAmount(call.combinedAmount),
+            currency: call.currency,
+            invoices: call.invoices.map((invoice) => ({
+              invoiceNumber: invoice.invoiceNumber,
+              amountDue: normaliseVoiceAmount(invoice.amountDue),
+              dueDate: invoice.dueDate
+            }))
+          }
+        });
+        return {
+          kind: 'provider-accepted' as const,
+          providerCallId: result.gatewayCallId
+        };
       }
-    });
+    );
+    if (boundary.kind === 'existing') {
+      return { kind: 'existing', state: boundary.state };
+    }
+    if (boundary.kind === 'blocked') {
+      return cancel(
+        dependencies,
+        payload,
+        boundary.actorUserId,
+        boundary.reason,
+        boundary.at,
+        'SUBMITTING'
+      );
+    }
     await dependencies.repository.recordProviderAccepted({
       organisationId: payload.organisationId,
       voiceCallId: call.id,
-      providerCallId: result.gatewayCallId,
+      providerCallId: boundary.providerCallId,
       now: submissionNow
     });
     await audit(dependencies.database, {
@@ -894,7 +986,7 @@ export async function executeVoiceCall(
       state: 'ACCEPTED',
       occurredAt: submissionNow
     });
-    return { kind: 'accepted', providerCallId: result.gatewayCallId };
+    return { kind: 'accepted', providerCallId: boundary.providerCallId };
   } catch (error) {
     if (error instanceof VoiceGatewayUnknownDispatchError) {
       await dependencies.database

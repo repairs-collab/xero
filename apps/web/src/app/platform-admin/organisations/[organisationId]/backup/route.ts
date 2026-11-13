@@ -25,10 +25,13 @@ export async function GET(
       database: getDatabaseClient().db,
       clock: { now: () => new Date() }
     });
-    const backup = (await service.createBackup(
-      session.userId,
-      organisationId
-    )) as { organisation?: { name?: unknown }; generatedAt?: unknown };
+    const requestId = request.nextUrl.searchParams.get('requestId')?.trim();
+    const backup = (await (requestId
+      ? service.createBackup(session.userId, organisationId, { requestId })
+      : service.createBackup(session.userId, organisationId))) as {
+      organisation?: { name?: unknown };
+      generatedAt?: unknown;
+    };
     const name =
       typeof backup.organisation?.name === 'string'
         ? backup.organisation.name
@@ -47,7 +50,10 @@ export async function GET(
     if (
       error instanceof AuthenticationFailure ||
       error instanceof AuthorizationFailure ||
-      (error instanceof Error && error.message === 'ORGANISATION_NOT_FOUND')
+      (error instanceof Error &&
+        ['ORGANISATION_NOT_FOUND', 'DATA_REQUEST_NOT_FOUND'].includes(
+          error.message
+        ))
     ) {
       return new NextResponse('Not found', {
         status: 404,

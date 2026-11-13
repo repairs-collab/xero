@@ -44,11 +44,19 @@ const seedOrganisation = async (input: {
       input.platformStatus === 'SUSPENDED' ? 'Owner review' : null
   });
   if (input.edition === 'SOLO') {
+    const subscriptionStatus = input.subscriptionStatus ?? 'TRIALING';
     await client.db.insert(subscriptions).values({
       organisationId,
       planCode: 'SOLO_AU_2000',
-      status: input.subscriptionStatus ?? 'TRIALING',
-      trialEndsAt: input.trialEndsAt ?? new Date('2026-11-24T00:00:00.000Z')
+      status: subscriptionStatus,
+      trialEndsAt: input.trialEndsAt ?? new Date('2026-11-24T00:00:00.000Z'),
+      ...(subscriptionStatus === 'ACTIVE'
+        ? {
+            trustedStripeProviderStatus: 'active',
+            currentPeriodStart: new Date('2026-11-09T00:00:00.000Z'),
+            currentPeriodEnd: new Date('2026-12-09T00:00:00.000Z')
+          }
+        : {})
     });
     await client.db.insert(organisationOnboarding).values({
       organisationId,
@@ -69,7 +77,7 @@ describe('PostgresEntitlementRepository', () => {
     await client.db.update(subscriptions).set({ status: 'CANCEL_AT_PERIOD_END', stripeProviderStatus: 'active', currentPeriodStart: new Date(now.getTime() - 1000), currentPeriodEnd: now }).where(eq(subscriptions.organisationId, organisationId));
     await expect(repository.decide(organisationId, new Date(now.getTime() - 1))).resolves.toMatchObject({ canCustomerSend: true });
     await expect(repository.decide(organisationId, now)).resolves.toMatchObject({ canCustomerSend: false });
-    await client.db.update(subscriptions).set({ status: 'CANCEL_AT_PERIOD_END', currentPeriodEnd: new Date(now.getTime() + 1000) }).where(eq(subscriptions.organisationId, organisationId));
+    await client.db.update(subscriptions).set({ status: 'CANCEL_AT_PERIOD_END', trustedStripeProviderStatus: null, currentPeriodEnd: new Date(now.getTime() + 1000) }).where(eq(subscriptions.organisationId, organisationId));
     await expect(repository.decide(organisationId, now)).resolves.toMatchObject({ canCustomerSend: false });
   });
 

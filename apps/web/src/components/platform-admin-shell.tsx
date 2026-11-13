@@ -2,10 +2,13 @@
 
 import {
   ArrowRightStartOnRectangleIcon,
+  ArchiveBoxIcon,
+  BanknotesIcon,
   BuildingOffice2Icon,
   ChatBubbleLeftRightIcon,
   ClipboardDocumentListIcon,
   HomeIcon,
+  ServerStackIcon,
   ShieldCheckIcon
 } from '@heroicons/react/24/outline';
 import Link from 'next/link';
@@ -15,7 +18,10 @@ import type { ReactNode } from 'react';
 const navigation = [
   ['Overview', '/platform-admin', HomeIcon],
   ['Customers', '/platform-admin#customers', BuildingOffice2Icon],
+  ['Billing operations', '/platform-admin/billing', BanknotesIcon],
+  ['Retention & privacy', '/platform-admin/retention', ArchiveBoxIcon],
   ['Sinch & SMS', '/platform-admin/sms', ChatBubbleLeftRightIcon],
+  ['Server health', '/platform-admin/system', ServerStackIcon],
   ['Audit', '/platform-admin/audit', ClipboardDocumentListIcon]
 ] as const;
 

@@ -78,13 +78,15 @@ describe('OVH release pipeline', () => {
     const installer = repositoryFile(
       'deploy/ovh/install-protected-environment.sh'
     );
+    const environmentExample = repositoryFile('deploy/ovh/env.example');
 
     for (const name of [
       'XERO_OAUTH_CLIENT_ID',
       'XERO_OAUTH_CLIENT_SECRET',
       'STRIPE_SECRET_KEY',
       'STRIPE_WEBHOOK_SECRET',
-      'STRIPE_SOLO_PRICE_ID',
+      'STRIPE_SOLO_MONTHLY_PRICE_ID',
+      'STRIPE_SOLO_ANNUAL_PRICE_ID',
       'STRIPE_PORTAL_CONFIGURATION_ID'
     ]) {
       expect(workflow).toContain(`secrets.${name}`);
@@ -93,6 +95,9 @@ describe('OVH release pipeline', () => {
     for (const name of [
       'ACCOUNT_PULSE_LEGAL_ENTITY',
       'ACCOUNT_PULSE_SUPPORT_EMAIL',
+      'DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION',
+      'DEBT_CONTACT_HOLIDAY_COVERAGE_END',
+      'DEBT_CONTACT_HOLIDAY_DATES_JSON',
       'SMS_NUMBER_QUARANTINE_DAYS'
     ]) {
       expect(workflow).toContain(`vars.${name}`);
@@ -124,6 +129,18 @@ describe('OVH release pipeline', () => {
     );
     expect(installer).toContain('XERO_TOKEN_ENCRYPTION_KEYS_JSON');
     expect(installer).not.toContain('set -x');
+    expect(environmentExample).toContain(
+      'DEBT_CONTACT_HOLIDAY_DATES_JSON=['
+    );
+    expect(environmentExample).toContain(
+      'DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION='
+    );
+    expect(environmentExample).toContain(
+      'DEBT_CONTACT_HOLIDAY_COVERAGE_END='
+    );
+    expect(installer).toContain('minimum_holiday_coverage_end');
+    expect(installer).toContain('jq -e');
+    expect(environmentExample).toContain('Australia/Sydney');
   });
 
   it('locks, backs up, migrates, checks health and restores images on failure', () => {

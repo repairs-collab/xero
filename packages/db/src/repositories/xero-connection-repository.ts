@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import {
   and,
   eq,
@@ -112,6 +114,48 @@ const postgresErrorCode = (error: unknown): string | null => {
   return postgresErrorCode(value.cause);
 };
 
+async function lockOrganisationForConnectionChange(
+  transaction: DbTransaction,
+  organisationId: string
+): Promise<void> {
+  // Xero email dispatch holds the organisation while refreshing in another
+  // session. Acquire the organisation before any connection row locks.
+  await transaction
+    .select({ id: organisations.id })
+    .from(organisations)
+    .where(eq(organisations.id, organisationId))
+    .for('no key update');
+}
+
+async function clearOAuthSyncEvidence(
+  transaction: DbTransaction,
+  organisationId: string,
+  now: Date
+): Promise<void> {
+  await transaction
+    .update(organisations)
+    .set({
+      xeroSyncCursor: null,
+      lastSuccessfulSyncAt: null,
+      lastSuccessfulSyncId: null,
+      lastSuccessfulXeroConnectionId: null,
+      latestReconciledSyncAt: null,
+      operationalState: sql`case
+        when ${organisations.operationalState} in (
+          'RESET_PREPARING',
+          'RESET_IN_PROGRESS',
+          'RESET_FAILED'
+        ) then ${organisations.operationalState}
+        else 'SYNC_REQUIRED'
+      end`,
+      operationalStateVersion: sql`${organisations.operationalStateVersion} + 1`,
+      rolloutScope: 'CONTROLLED',
+      liveSendAcknowledged: false,
+      updatedAt: now
+    })
+    .where(eq(organisations.id, organisationId));
+}
+
 export class PostgresXeroConnectionRepository {
   constructor(private readonly database: Database) {}
 
@@ -176,6 +220,7 @@ export class PostgresXeroConnectionRepository {
   ): Promise<XeroConnectionRecord> {
     try {
       return await this.database.transaction(async (transaction) => {
+      await lockOrganisationForConnectionChange(transaction, input.organisationId);
       const [existingForOrganisation] = await transaction
         .select()
         .from(xeroConnections)
@@ -271,6 +316,7 @@ export class PostgresXeroConnectionRepository {
         const [updated] = await transaction
           .update(xeroConnections)
           .set({
+            id: randomUUID(),
             status: 'CONNECTED',
             encryptedRefreshToken: pending.encryptedRefreshToken,
             grantedScopes: pending.grantedScopes,
@@ -287,6 +333,11 @@ export class PostgresXeroConnectionRepository {
         connection = updated;
       }
 
+      await clearOAuthSyncEvidence(
+        transaction,
+        input.organisationId,
+        input.now
+      );
       await transaction
         .delete(xeroPendingAuthorisations)
         .where(eq(xeroPendingAuthorisations.id, pending.id));
@@ -305,6 +356,7 @@ export class PostgresXeroConnectionRepository {
   ): Promise<XeroConnectionRecord> {
     try {
       return await this.database.transaction(async (transaction) => {
+      await lockOrganisationForConnectionChange(transaction, input.organisationId);
       const [ownedElsewhere] = await transaction
         .select({ organisationId: xeroConnections.organisationId })
         .from(xeroConnections)
@@ -344,6 +396,11 @@ export class PostgresXeroConnectionRepository {
           })
           .returning();
         if (inserted === undefined) throw new Error('XERO_CONNECTION_CREATE_FAILED');
+        await clearOAuthSyncEvidence(
+          transaction,
+          input.organisationId,
+          input.now
+        );
         return inserted;
       }
       if (
@@ -356,6 +413,7 @@ export class PostgresXeroConnectionRepository {
       const [updated] = await transaction
         .update(xeroConnections)
         .set({
+          id: randomUUID(),
           status: 'CONNECTED',
           encryptedRefreshToken: input.encryptedRefreshToken,
           grantedScopes: input.grantedScopes,
@@ -369,6 +427,11 @@ export class PostgresXeroConnectionRepository {
         .where(eq(xeroConnections.id, existing.id))
         .returning();
       if (updated === undefined) throw new Error('XERO_CONNECTION_UPDATE_FAILED');
+        await clearOAuthSyncEvidence(
+          transaction,
+          input.organisationId,
+          input.now
+        );
         return updated;
       });
     } catch (error) {

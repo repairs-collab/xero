@@ -176,6 +176,139 @@
       "when": 1794460000001,
       "tag": "0024_lyrical_may_parker",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1794460000002,
+      "tag": "0025_orange_rattler",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1794460000003,
+      "tag": "0026_messy_big_bertha",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1794460000004,
+      "tag": "0027_transactional_email_evidence_immutability",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1794460000005,
+      "tag": "0028_transactional_email_evidence_identity_hardening",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1794460000006,
+      "tag": "0029_productive_rocket_racer",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1794460000007,
+      "tag": "0030_long_kylun",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1794460000008,
+      "tag": "0031_shallow_caretaker",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1794460000009,
+      "tag": "0032_past_nicolaos",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1794460000010,
+      "tag": "0033_fat_sharon_ventura",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1794460000011,
+      "tag": "0034_polite_guardian",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1794460000012,
+      "tag": "0035_same_azazel",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1794460000013,
+      "tag": "0036_simple_xorn",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1794460000014,
+      "tag": "0037_watery_tombstone",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1794535474311,
+      "tag": "0038_flawless_talon",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1794536744180,
+      "tag": "0039_amused_stranger",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1794537428843,
+      "tag": "0040_orange_namor",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1794538082752,
+      "tag": "0041_careless_nemesis",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1794538718408,
+      "tag": "0042_first-card-episode-evidence",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1794539953154,
+      "tag": "0043_direct_debit_evidence_repair",
+      "breakpoints": true
     }
   ]
 }

@@ -8,6 +8,7 @@ import {
   organisationOnboarding,
   organisations,
   outboundMessages,
+  replyNumberProvisioningRequests,
   smsAllowanceSettings,
   smsNumberPool,
   smsUsageLedger,
@@ -28,7 +29,10 @@ const now = new Date('2026-11-10T00:00:00.000Z');
 beforeAll(() => migrateDatabase(client.db));
 afterAll(() => client.pool.end());
 
-const seedPaidOrganisation = async () => {
+const seedPaidOrganisation = async (options: {
+  currentPeriodStart?: Date;
+  currentPeriodEnd?: Date;
+} = {}) => {
   const organisationId = randomUUID();
   await client.db.insert(organisations).values({
     id: organisationId,
@@ -42,8 +46,10 @@ const seedPaidOrganisation = async () => {
     organisationId,
     planCode: 'SOLO_AU_2000',
     status: 'ACTIVE',
-    currentPeriodStart: periodStart,
-    currentPeriodEnd: periodEnd
+    stripeProviderStatus: 'active',
+    trustedStripeProviderStatus: 'active',
+    currentPeriodStart: options.currentPeriodStart ?? periodStart,
+    currentPeriodEnd: options.currentPeriodEnd ?? periodEnd
   });
   await client.db.insert(organisationOnboarding).values({ organisationId });
   return organisationId;
@@ -156,6 +162,29 @@ describe('PostgresSmsCommerceRepository', () => {
     ).resolves.toMatchObject({ id: poolNumber.id, status: 'READY' });
   });
 
+  it('does not claim a pool number while manual provisioning is active', async () => {
+    const organisationId = await seedPaidOrganisation();
+    const poolNumber = await seedPoolNumber({ verified: true });
+    await client.db.insert(replyNumberProvisioningRequests).values({
+      organisationId,
+      provider: 'SINCH',
+      requestKey: `reply-number:${organisationId}:1`,
+      attempt: 1,
+      status: 'AWAITING_QUOTE',
+      createdAt: now,
+      updatedAt: now
+    });
+
+    await expect(
+      repository.reserveAvailableNumber(organisationId, now)
+    ).rejects.toThrow('SMS_NUMBER_PROVISIONING_REQUEST_ACTIVE');
+    await expect(
+      client.db.query.smsNumberPool.findFirst({
+        where: (table, { eq }) => eq(table.id, poolNumber.id)
+      })
+    ).resolves.toMatchObject({ status: 'AVAILABLE', organisationId: null });
+  });
+
   it('reserves and commits final rendered parts idempotently per tenant', async () => {
     const organisationId = await seedPaidOrganisation();
     await seedPoolNumber({ verified: true, createdAt: new Date(-Date.now()) });
@@ -194,6 +223,66 @@ describe('PostgresSmsCommerceRepository', () => {
       reason: 'SMS_ALLOWANCE_EXHAUSTED',
       projectedParts: 2_001
     });
+  });
+
+  it('resets an annual subscription allowance on clamped monthly boundaries and retries idempotently', async () => {
+    const annualStart = new Date('2027-01-31T00:00:00.000Z');
+    const annualEnd = new Date('2028-01-31T00:00:00.000Z');
+    const secondCycleStart = new Date('2027-02-28T00:00:00.000Z');
+    const secondCycleEnd = new Date('2027-03-31T00:00:00.000Z');
+    const organisationId = await seedPaidOrganisation({
+      currentPeriodStart: annualStart,
+      currentPeriodEnd: annualEnd
+    });
+    await client.db.insert(smsAllowanceSettings).values({
+      organisationId,
+      includedParts: 2,
+      warningPercent: 80
+    });
+    await seedPoolNumber({
+      verified: true,
+      createdAt: new Date(-Date.now())
+    });
+    const number = await repository.reserveAvailableNumber(
+      organisationId,
+      annualStart
+    );
+    await repository.markNumberReady(organisationId, number.id, annualStart);
+
+    const firstCycleOutbound = await seedOutbound(organisationId);
+    await expect(
+      repository.reserveUsage({
+        organisationId,
+        outboundMessageId: firstCycleOutbound,
+        source: 'MANUAL_REMINDER',
+        partCount: 2,
+        now: new Date('2027-02-27T23:59:59.999Z')
+      })
+    ).resolves.toMatchObject({ kind: 'reserved', alreadyReserved: false });
+
+    const secondCycleOutbound = await seedOutbound(organisationId);
+    const secondCycleReservation = {
+      organisationId,
+      outboundMessageId: secondCycleOutbound,
+      source: 'MANUAL_REMINDER' as const,
+      partCount: 2,
+      now: secondCycleStart
+    };
+    await expect(
+      repository.reserveUsage(secondCycleReservation)
+    ).resolves.toMatchObject({ kind: 'reserved', alreadyReserved: false });
+    await expect(
+      repository.reserveUsage(secondCycleReservation)
+    ).resolves.toMatchObject({ kind: 'reserved', alreadyReserved: true });
+
+    clockTime = secondCycleStart;
+    await expect(repository.loadUsage(organisationId)).resolves.toMatchObject({
+      billingPeriodStart: secondCycleStart,
+      billingPeriodEnd: secondCycleEnd,
+      reservedParts: 2,
+      remainingParts: 0
+    });
+    clockTime = now;
   });
 
   it('hard-caps persisted legacy overage settings at the exact multipart boundary', async () => {

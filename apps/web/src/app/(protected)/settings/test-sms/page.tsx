@@ -55,7 +55,7 @@ export default async function TestSmsPage({
       </Link>
       <header className="page-heading">
         <span className="eyebrow">Administrator tool</span>
-        <h1>Test SMS</h1>
+        <h1>Test sending</h1>
         <p>
           Check a number and message through the same safe delivery controls as
           AccountPulse reminders.
@@ -69,7 +69,7 @@ export default async function TestSmsPage({
             The trial includes up to {onboarding.trial.testSmsPartLimit} SMS
             parts sent only to the verified Administrator mobile.
             {onboarding.trial.testSmsDestination === null
-              ? ' Mobile verification is required before a provider test can be sent.'
+              ? ' Mobile verification is required before a live test message can be sent.'
               : ` Verified destination: ${onboarding.trial.testSmsDestination}.`}
           </p>
         </section>
@@ -81,8 +81,8 @@ export default async function TestSmsPage({
           <div>
             <strong>Test SMS queued</strong>
             <p>
-              Open Outbox to see whether it was a dry run, accepted by Sinch, or
-              delivered.
+              Open Outbox to see whether it was a dry run, accepted for
+              delivery, or delivered.
             </p>
           </div>
           <Link className="button button--primary" href="/outbox?source=TEST_SMS">

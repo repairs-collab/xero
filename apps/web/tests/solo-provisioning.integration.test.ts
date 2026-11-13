@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import type { AppSession } from '@bc5000/auth';
+import { decideAccountEntitlements } from '@bc5000/domain';
 import {
   auditEvents,
   createDatabase,
@@ -42,7 +43,9 @@ const tokenEnvelope = {
   tag: Buffer.alloc(16).toString('base64')
 };
 
-const seedProvisionalIdentity = async (): Promise<{
+const seedProvisionalIdentity = async (
+  candidate: { baseCurrency?: string; timeZone?: string } = {}
+): Promise<{
   session: AppSession;
   pendingAuthorisationId: string;
   connectionId: string;
@@ -73,8 +76,8 @@ const seedProvisionalIdentity = async (): Promise<{
         tenantType: 'ORGANISATION',
         xeroOrganisationId: randomUUID(),
         organisationName: 'Solo Repairs Pty Ltd',
-        baseCurrency: 'AUD',
-        timeZone: 'Australia/Sydney'
+        baseCurrency: candidate.baseCurrency ?? 'AUD',
+        timeZone: candidate.timeZone ?? 'Australia/Sydney'
       }
     ],
     grantedScopes: ['offline_access', 'accounting.invoices'],
@@ -95,7 +98,62 @@ const seedProvisionalIdentity = async (): Promise<{
 };
 
 describe('AccountPulse Solo provisioning', () => {
-  it('atomically creates one safe trial workspace and remains idempotent on retry', async () => {
+  it.each([
+    {
+      name: 'a non-AUD organisation',
+      candidate: { baseCurrency: 'NZD', timeZone: 'Australia/Sydney' },
+      error: 'XERO_ORGANISATION_CURRENCY_INVALID'
+    },
+    {
+      name: 'a New Zealand organisation',
+      candidate: { baseCurrency: 'AUD', timeZone: 'Pacific/Auckland' },
+      error: 'XERO_ORGANISATION_TIMEZONE_UNSUPPORTED'
+    }
+  ])('rejects $name before persisting a Solo workspace', async ({ candidate, error }) => {
+    const seeded = await seedProvisionalIdentity(candidate);
+    const repository = createPostgresSoloProvisioningRepository(client.db);
+
+    await expect(
+      repository.provision({
+        userId: seeded.session.userId,
+        pendingAuthorisationId: seeded.pendingAuthorisationId,
+        connectionId: seeded.connectionId,
+        tenantId: seeded.tenantId,
+        now
+      })
+    ).rejects.toThrow(error);
+
+    await expect(
+      client.db
+        .select()
+        .from(memberships)
+        .where(eq(memberships.userId, seeded.session.userId))
+    ).resolves.toEqual([]);
+  });
+
+  it('persists an allowlisted Australian zone beyond Sydney and Melbourne', async () => {
+    const seeded = await seedProvisionalIdentity({
+      baseCurrency: 'AUD',
+      timeZone: 'Australia/Hobart'
+    });
+    const repository = createPostgresSoloProvisioningRepository(client.db);
+
+    const provisioned = await repository.provision({
+      userId: seeded.session.userId,
+      pendingAuthorisationId: seeded.pendingAuthorisationId,
+      connectionId: seeded.connectionId,
+      tenantId: seeded.tenantId,
+      now
+    });
+    const [organisation] = await client.db
+      .select({ timeZone: organisations.timeZone })
+      .from(organisations)
+      .where(eq(organisations.id, provisioned.organisationId));
+
+    expect(organisation?.timeZone).toBe('Australia/Hobart');
+  });
+
+  it('atomically creates one unpaid workspace and remains idempotent on retry', async () => {
     const seeded = await seedProvisionalIdentity();
     const published = new Set<string>();
     const service = createSoloProvisioningService({
@@ -159,8 +217,26 @@ describe('AccountPulse Solo provisioning', () => {
     expect(storedSubscriptions).toHaveLength(1);
     expect(storedSubscriptions[0]).toMatchObject({
       planCode: 'SOLO_AU_2000',
-      status: 'TRIALING',
-      trialEndsAt: new Date('2026-11-24T00:00:00.000Z')
+      status: 'INCOMPLETE',
+      trialEndsAt: null
+    });
+    expect(
+      decideAccountEntitlements({
+        edition: 'SOLO',
+        platformStatus: 'ACTIVE',
+        subscriptionStatus: storedSubscriptions[0]!.status,
+        trialEndsAt: storedSubscriptions[0]!.trialEndsAt,
+        onboardingCompletedVersion: 1,
+        requiredOnboardingVersion: 1,
+        replyNumberReady: true,
+        verifiedAdminMobile: '+61412345678',
+        acceptedTrialTestSmsParts: 0,
+        now
+      })
+    ).toMatchObject({
+      canCustomerSend: false,
+      canAutomaticDispatch: false,
+      blocker: 'SUBSCRIPTION_REQUIRED'
     });
 
     const storedOnboarding = await client.db
@@ -218,8 +294,7 @@ describe('AccountPulse Solo provisioning', () => {
       pendingAuthorisationId: first.pendingAuthorisationId,
       connectionId: first.connectionId,
       tenantId: first.tenantId,
-      now,
-      trialEndsAt: new Date('2026-11-24T00:00:00.000Z')
+      now
     });
     const second = await seedProvisionalIdentity();
     await client.db
@@ -247,8 +322,7 @@ describe('AccountPulse Solo provisioning', () => {
         pendingAuthorisationId: second.pendingAuthorisationId,
         connectionId: first.connectionId,
         tenantId: first.tenantId,
-        now,
-        trialEndsAt: new Date('2026-11-24T00:00:00.000Z')
+        now
       });
     } catch (error) {
       message = error instanceof Error ? error.message : String(error);

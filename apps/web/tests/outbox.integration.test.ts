@@ -293,7 +293,7 @@ describe('Outbox query and presentation', () => {
     ]);
   });
 
-  it('shows safe content fallbacks, provider results, and organisation-safe links', async () => {
+  it('shows customer-safe results without provider identifiers and organisation-safe links', async () => {
     const seeded = await seedOutbox();
     const result = await queryOutbox(client.db, {
       organisationId: seeded.organisationId,
@@ -304,7 +304,11 @@ describe('Outbox query and presentation', () => {
     expect(html).toContain('Content was not retained for this historical message');
     expect(html).toContain('Xero controls the rendered email body');
     expect(html).toContain('Xero invoice email requested for INV-100');
-    expect(html).toContain('sinch-outbox-1');
+    expect(html).not.toContain('sinch-outbox-1');
+    expect(html).not.toContain('Sinch');
+    expect(html).not.toContain('PROVIDER_REJECTED');
+    expect(html).toContain('Delivery was not completed');
+    expect(result.rows.every((row) => !('providerMessageId' in row))).toBe(true);
     expect(html).toContain(`/customers/${seeded.contactId}`);
     expect(html).toContain(`/invoices/${seeded.invoiceId}`);
     expect(html).not.toContain(seeded.foreignOrganisationId);

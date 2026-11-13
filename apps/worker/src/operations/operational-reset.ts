@@ -996,6 +996,8 @@ export function createOperationalResetService(
             operationalStateVersion: sql`${organisations.operationalStateVersion} + 1`,
             xeroSyncCursor: null,
             lastSuccessfulSyncAt: null,
+            lastSuccessfulSyncId: null,
+            lastSuccessfulXeroConnectionId: null,
             latestReconciledSyncAt: null,
             updatedAt: completedAt
           })

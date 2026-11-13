@@ -31,6 +31,13 @@ const formatDate = (value: Date): string =>
     timeZone: 'Australia/Sydney'
   }).format(value);
 
+const resultDetail = (row: OutboxRow): string => {
+  if (row.failureReason === null) return 'Recorded';
+  if (row.failureReason.startsWith('SUPPRESSED')) return 'Recipient has opted out';
+  if (row.status === 'CANCELLED') return 'Delivery was cancelled';
+  return 'Delivery was not completed';
+};
+
 const contentFor = (row: OutboxRow) => {
   if (row.source === 'VERIFICATION_OTP') {
     return (
@@ -109,8 +116,7 @@ export function OutboxTable({ rows }: { rows: OutboxRow[] }) {
             <span className={`status-chip status-chip--${row.status.toLowerCase()}`}>
               {statusLabels[row.status]}
             </span>
-            <small>{row.failureReason ?? row.providerStatus ?? 'Recorded'}</small>
-            {row.providerMessageId !== null && <code>{row.providerMessageId}</code>}
+            <small>{resultDetail(row)}</small>
           </div>
           <div className="outbox-time" role="cell">
             <time dateTime={row.createdAt.toISOString()}>{formatDate(row.createdAt)}</time>

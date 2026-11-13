@@ -63,7 +63,7 @@ export const rolloutFeedback = (
         tone: 'success',
         title: 'Controlled live is active',
         detail:
-          'Only destinations on the technical recipient allowlist can reach providers.'
+          'Only destinations on the technical recipient allowlist can receive messages.'
       };
     case 'reconciled':
       return {
@@ -91,12 +91,12 @@ export const rolloutFeedback = (
         tone: 'success',
         title: 'Returned to controlled live',
         detail:
-          'Provider calls remain live, but only technical allowlist destinations can be reached.'
+          'Message delivery remains live, but only technical allowlist destinations can be reached.'
       };
     case 'provider-sending-disabled':
       return {
         tone: 'success',
-        title: 'All provider sending disabled',
+        title: 'All message sending disabled',
         detail:
           'AccountPulse is in Dry run and customer rollout will require the full approval flow again.'
       };
@@ -182,8 +182,9 @@ const gateCopy = {
       'Enable controlled live only after the technical recipient allowlist is ready.'
   },
   providersHealthy: {
-    title: 'Xero and Sinch checks are current',
-    correction: 'Run both connection tests in Integrations within 24 hours.'
+    title: 'Xero and messaging checks are current',
+    correction:
+      'Reconnect Xero if needed. AccountPulse checks the messaging service automatically; contact support if this remains blocked.'
   },
   syncFresh: {
     title: 'Fresh Xero sync',
@@ -215,6 +216,24 @@ const gateCopy = {
   }
 } as const;
 
+const soloGateCopy: Partial<Record<keyof typeof gateCopy, {
+  title: string;
+  correction: string;
+}>> = {
+  providersHealthy: {
+    title: 'Xero is connected and your reply number is ready',
+    correction: 'Check your Xero connection and contact support if your dedicated reply number is still pending.'
+  },
+  syncFresh: {
+    title: 'Fresh Xero sync',
+    correction: 'Run a sync after connecting Xero and return within 15 minutes.'
+  },
+  controlledSmsEvidence: {
+    title: 'Controlled Test SMS',
+    correction: 'After completing onboarding, send a Test SMS from your dedicated reply number to an allowlisted mobile. It must be accepted or delivered within the last seven days.'
+  }
+};
+
 const formatEvidenceTime = (value: Date): string =>
   new Intl.DateTimeFormat('en-AU', {
     dateStyle: 'medium',
@@ -230,6 +249,7 @@ export function RolloutGateList({
   const entries = Object.entries(gateCopy) as Array<
     [keyof typeof gateCopy, (typeof gateCopy)[keyof typeof gateCopy]]
   >;
+  const isSolo = readiness.gates.providersHealthy.evidence.edition === 'SOLO';
   const smsEvidence = readiness.gates.controlledSmsEvidence.evidence;
 
   return (
@@ -248,7 +268,8 @@ export function RolloutGateList({
         </span>
       </div>
       <ol className="rollout-gate-list">
-        {entries.map(([key, copy]) => {
+        {entries.map(([key, defaultCopy]) => {
+          const copy = (isSolo && soloGateCopy[key]) || defaultCopy;
           const gate = readiness.gates[key];
           return (
             <li

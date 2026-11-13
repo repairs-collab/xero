@@ -12,7 +12,9 @@ const scheduleDefinitions = [
 ] as const;
 
 const globalScheduleDefinitions = [
-  { name: jobNames.xeroOAuthCleanup, cron: '*/15 * * * *' }
+  { name: jobNames.xeroOAuthCleanup, cron: '*/15 * * * *' },
+  { name: jobNames.smsNumberProvisionReconcile, cron: '20 * * * *' },
+  { name: jobNames.subscriptionLifecycleReconcile, cron: '10 * * * *' }
 ] as const;
 
 export async function ensureRecurringSchedules(

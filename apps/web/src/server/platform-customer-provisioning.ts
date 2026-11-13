@@ -16,22 +16,24 @@ import {
 import { getDatabaseClient } from './runtime.js';
 import { isPlatformOwner } from './platform-authorization.js';
 import { getPlatformUserAdministration } from './platform-user-administration.js';
+import {
+  type AustralianTimeZone,
+  isAustralianTimeZone
+} from './australian-time-zones.js';
 
 export interface CreatePlatformCustomerInput {
   name: string;
   adminEmail: string;
   adminDisplayName: string;
-  timeZone: 'Australia/Sydney' | 'Australia/Adelaide' | 'Australia/Perth' | 'Pacific/Auckland';
-  baseCurrency: 'AUD' | 'NZD';
-  trialDays: number;
+  timeZone: AustralianTimeZone;
+  baseCurrency: 'AUD';
   includedSmsParts: number;
   warningPercent: number;
   reason: string;
 }
 
-interface WorkspaceInput extends Omit<CreatePlatformCustomerInput, 'adminEmail' | 'adminDisplayName' | 'trialDays'> {
+interface WorkspaceInput extends Omit<CreatePlatformCustomerInput, 'adminEmail' | 'adminDisplayName'> {
   actorUserId: string;
-  trialEndsAt: Date;
   now: Date;
 }
 
@@ -63,8 +65,8 @@ export const createPostgresPlatformCustomerProvisioningRepository = (
       await transaction.insert(subscriptions).values({
         organisationId: organisation.id,
         planCode: 'SOLO_AU_2000',
-        status: 'TRIALING',
-        trialEndsAt: input.trialEndsAt
+        status: 'INCOMPLETE',
+        trialEndsAt: null
       });
       await transaction.insert(organisationOnboarding).values({
         organisationId: organisation.id,
@@ -82,7 +84,8 @@ export const createPostgresPlatformCustomerProvisioningRepository = (
         sendMode: 'dry-run',
         rolloutScope: 'CONTROLLED',
         operationalState: 'SYNC_REQUIRED',
-        trialEndsAt: input.trialEndsAt.toISOString(),
+        subscriptionStatus: 'INCOMPLETE',
+        trialEndsAt: null,
         includedSmsParts: input.includedSmsParts
       };
       await transaction.insert(auditEvents).values({
@@ -120,13 +123,6 @@ export const createPostgresPlatformCustomerProvisioningRepository = (
 });
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const allowedTimeZones = new Set<CreatePlatformCustomerInput['timeZone']>([
-  'Australia/Sydney',
-  'Australia/Adelaide',
-  'Australia/Perth',
-  'Pacific/Auckland'
-]);
-
 export const createPlatformCustomerProvisioningService = (dependencies: {
   verifyOwner(userId: string): Promise<boolean>;
   repository: PlatformCustomerProvisioningRepository;
@@ -150,11 +146,8 @@ export const createPlatformCustomerProvisioningService = (dependencies: {
       !emailPattern.test(input.adminEmail) ||
       input.adminDisplayName.length < 2 ||
       input.adminDisplayName.length > 160 ||
-      !allowedTimeZones.has(input.timeZone) ||
-      !['AUD', 'NZD'].includes(input.baseCurrency) ||
-      !Number.isSafeInteger(input.trialDays) ||
-      input.trialDays < 1 ||
-      input.trialDays > 90 ||
+      !isAustralianTimeZone(input.timeZone) ||
+      input.baseCurrency !== 'AUD' ||
       !Number.isSafeInteger(input.includedSmsParts) ||
       input.includedSmsParts < 1 ||
       input.includedSmsParts > 1_000_000 ||
@@ -172,9 +165,6 @@ export const createPlatformCustomerProvisioningService = (dependencies: {
       name: input.name,
       timeZone: input.timeZone,
       baseCurrency: input.baseCurrency,
-      trialEndsAt: new Date(
-        now.getTime() + input.trialDays * 24 * 60 * 60 * 1000
-      ),
       includedSmsParts: input.includedSmsParts,
       warningPercent: input.warningPercent,
       reason: input.reason,

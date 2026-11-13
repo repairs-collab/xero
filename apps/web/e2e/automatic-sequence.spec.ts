@@ -43,7 +43,7 @@ test('an administrator switches one sequence to automatic with the 7-day email a
 
   await expect(page.getByRole('heading', { name: 'Automatic' })).toBeVisible();
   await page.goto('/activity?eventType=SEQUENCE_MODE_CHANGED');
-  await expect(page.getByText('SEQUENCE_MODE_CHANGED')).toBeVisible();
+  await expect(page.getByText('Sequence mode changed')).toBeVisible();
 });
 
 test('dry-run and controlled-launch gates are visible before live testing', async ({ page }) => {
@@ -52,7 +52,7 @@ test('dry-run and controlled-launch gates are visible before live testing', asyn
   await expect(page.getByLabel('Mobile numbers or email addresses')).toHaveValue('+61400000001');
   await expect(page.getByRole('heading', { name: 'Final sending readiness' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Enable Controlled live' })).toBeVisible();
-  await expect(page.getByText(/Provider calls are disabled/)).toBeVisible();
+  await expect(page.getByText(/Message delivery is disabled/)).toBeVisible();
 });
 
 test('customer rollout keeps the first reminder cohort in Review mode', async ({

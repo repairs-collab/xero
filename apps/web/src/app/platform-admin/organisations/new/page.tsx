@@ -1,7 +1,22 @@
 import Link from 'next/link';
 
+import { australianTimeZones } from '../../../../server/australian-time-zones.js';
 import { requirePlatformOwnerPage } from '../../../../server/platform-page-authorization.js';
 import { createCustomerAction } from './actions.js';
+
+const timeZoneLabels = {
+  'Australia/Sydney': 'Sydney (NSW and ACT)',
+  'Australia/Melbourne': 'Melbourne (Victoria)',
+  'Australia/Hobart': 'Hobart (Tasmania)',
+  'Australia/Brisbane': 'Brisbane (Queensland)',
+  'Australia/Adelaide': 'Adelaide (South Australia)',
+  'Australia/Darwin': 'Darwin (Northern Territory)',
+  'Australia/Perth': 'Perth (Western Australia)',
+  'Australia/Lord_Howe': 'Lord Howe Island',
+  'Australia/Broken_Hill': 'Broken Hill (New South Wales)',
+  'Australia/Lindeman': 'Lindeman Island (Queensland)',
+  'Australia/Eucla': 'Eucla (Western Australia)'
+} as const;
 
 export default async function NewPlatformCustomerPage({
   searchParams
@@ -17,8 +32,9 @@ export default async function NewPlatformCustomerPage({
           <span className="eyebrow">Customer onboarding</span>
           <h1>Create a new AccountPulse customer</h1>
           <p>
-            Creates a safe Solo trial, emails the first Administrator and sends
-            them through legal acceptance, Xero connection and guided setup.
+            Creates a controlled Solo beta workspace, emails the first
+            Administrator and sends them through legal acceptance, Xero
+            connection and guided setup.
           </p>
         </div>
         <Link className="button button--quiet" href="/platform-admin">
@@ -48,17 +64,17 @@ export default async function NewPlatformCustomerPage({
             <label>
               Region and time zone
               <select name="timeZone" defaultValue="Australia/Sydney">
-                <option value="Australia/Sydney">Australia — Eastern</option>
-                <option value="Australia/Adelaide">Australia — Central</option>
-                <option value="Australia/Perth">Australia — Western</option>
-                <option value="Pacific/Auckland">New Zealand</option>
+                {australianTimeZones.map((timeZone) => (
+                  <option key={timeZone} value={timeZone}>
+                    {timeZoneLabels[timeZone]}
+                  </option>
+                ))}
               </select>
             </label>
             <label>
               Base currency
               <select name="baseCurrency" defaultValue="AUD">
                 <option value="AUD">AUD</option>
-                <option value="NZD">NZD</option>
               </select>
             </label>
           </div>
@@ -85,13 +101,9 @@ export default async function NewPlatformCustomerPage({
         </section>
 
         <section>
-          <span className="eyebrow">Trial and usage</span>
+          <span className="eyebrow">Activation and usage</span>
           <h2>Commercial settings</h2>
           <div className="form-grid">
-            <label>
-              Trial length (days)
-              <input name="trialDays" type="number" min={1} max={90} defaultValue={14} required />
-            </label>
             <label>
               Included SMS parts
               <input name="includedSmsParts" type="number" min={1} max={1_000_000} defaultValue={2_000} required />
@@ -123,8 +135,8 @@ export default async function NewPlatformCustomerPage({
           <strong>Safe defaults</strong>
           <p>
             The workspace begins in dry-run review mode with customer sending
-            disabled until Xero is connected, data is reconciled and setup is
-            completed.
+            disabled until Xero is connected, data is reconciled, setup is
+            completed and a paid subscription is activated.
           </p>
         </div>
         <button className="button button--primary" type="submit">

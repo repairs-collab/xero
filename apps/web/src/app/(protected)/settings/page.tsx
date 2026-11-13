@@ -17,7 +17,7 @@ export default async function SettingsPage() {
       <header className="page-heading">
         <span className="eyebrow">Administration</span>
         <h1>Admin Settings</h1>
-        <p>Manage users, providers, and the safeguards around live sending.</p>
+        <p>Manage users, Xero, and the safeguards around live sending.</p>
       </header>
       <div className="settings-home">
         {settingsCardsForRole(role).map((card) => (

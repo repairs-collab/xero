@@ -20,6 +20,7 @@ import {
   organisations,
   PostgresSmsCommerceRepository,
   PostgresXeroConnectionRepository,
+  users,
   type DatabaseClient
 } from '@bc5000/db/web';
 import { FetchHttpClient } from '@bc5000/integrations/http';
@@ -35,7 +36,11 @@ import {
   XeroOAuthSessionProvider,
   type TokenCipher
 } from '@bc5000/integrations/xero';
-import { ensureRecurringSchedules, jobNames } from '@bc5000/jobs';
+import {
+  ensureRecurringSchedules,
+  jobNames,
+  subscriptionLifecycleSingletonKey
+} from '@bc5000/jobs';
 
 import {
   createOnboardingService,
@@ -272,18 +277,24 @@ export const getXeroTokenCipher = (): TokenCipher => {
 export const getStripeConfiguration = (): StripeRuntimeConfiguration => {
   const secretKey = process.env.STRIPE_SECRET_KEY?.trim();
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET?.trim();
-  const soloPriceId = process.env.STRIPE_SOLO_PRICE_ID?.trim();
+  const soloMonthlyPriceId =
+    process.env.STRIPE_SOLO_MONTHLY_PRICE_ID?.trim();
+  const soloAnnualPriceId = process.env.STRIPE_SOLO_ANNUAL_PRICE_ID?.trim();
   const portalConfigurationId =
     process.env.STRIPE_PORTAL_CONFIGURATION_ID?.trim();
   const publicBaseUrl = process.env.PUBLIC_BASE_URL?.trim();
   if (
     !secretKey ||
     !webhookSecret ||
-    !soloPriceId ||
+    !soloMonthlyPriceId ||
+    !soloAnnualPriceId ||
     !portalConfigurationId ||
     !publicBaseUrl
   ) {
     throw new Error('Stripe billing configuration is incomplete');
+  }
+  if (soloMonthlyPriceId === soloAnnualPriceId) {
+    throw new Error('Stripe monthly and annual Price IDs must be distinct');
   }
   let publicUrl: URL;
   try {
@@ -304,7 +315,8 @@ export const getStripeConfiguration = (): StripeRuntimeConfiguration => {
   return {
     secretKey,
     webhookSecret,
-    soloPriceId,
+    soloMonthlyPriceId,
+    soloAnnualPriceId,
     portalConfigurationId,
     publicBaseUrl: publicUrl.origin,
     priceCurrency: 'aud',
@@ -317,31 +329,55 @@ export const getSubscriptionService = () => {
   if (subscriptionServicePromise === undefined) {
     const configuration = getStripeConfiguration();
     const clock = { now: () => new Date() };
-    subscriptionServicePromise = Promise.resolve(
-      createSubscriptionService({
+    const starting = (async () => {
+      const queue = await getJobQueue();
+      return createSubscriptionService({
         stripe: createStripeBillingClient(configuration),
         repository: createPostgresSubscriptionRepository(
           getDatabaseClient().db,
           clock
         ),
-        soloPriceId: configuration.soloPriceId,
-        clock,
-        publishLifecycle: async (input) => {
-          const queue = await getJobQueue();
-          await queue.publish(jobNames.subscriptionLifecycle, input, {
-            singletonKey: `${jobNames.subscriptionLifecycle}:${input.organisationId}:${input.status}`,
-            deduplicateWhileActive: true
-          });
+        soloMonthlyPriceId: configuration.soloMonthlyPriceId,
+        soloAnnualPriceId: configuration.soloAnnualPriceId ?? null,
+        verifyPlatformOwner: async (userId) => {
+          const [user] = await getDatabaseClient()
+            .db.select({ platformRole: users.platformRole })
+            .from(users)
+            .where(and(eq(users.id, userId), isNull(users.disabledAt)))
+            .limit(1);
+          return user?.platformRole === 'OWNER';
         },
-        publishNumberProvision: async (input) => {
-          const queue = await getJobQueue();
-          await queue.publish(jobNames.smsNumberProvision, input, {
-            singletonKey: `${jobNames.smsNumberProvision}:${input.organisationId}`,
-            deduplicateWhileActive: true
-          });
+        clock,
+        enqueueLifecycle: async (transaction, input) => {
+          await queue.enqueueUniqueInTransaction(
+            transaction,
+            jobNames.subscriptionLifecycle,
+            {
+              organisationId: input.organisationId,
+              status: input.status,
+              stripeSubscriptionId: input.stripeSubscriptionId,
+              cancelledAt: input.cancelledAt
+            },
+            subscriptionLifecycleSingletonKey(input)
+          );
+        },
+        enqueueNumberProvision: async (transaction, input) => {
+          await queue.enqueueUniqueInTransaction(
+            transaction,
+            jobNames.smsNumberProvision,
+            { organisationId: input.organisationId },
+            `${jobNames.smsNumberProvision}:${input.organisationId}:${input.eventId}`
+          );
         }
-      })
-    );
+      });
+    })();
+    const cached = starting.catch((error: unknown) => {
+      if (subscriptionServicePromise === cached) {
+        subscriptionServicePromise = undefined;
+      }
+      throw error;
+    });
+    subscriptionServicePromise = cached;
   }
   return subscriptionServicePromise;
 };

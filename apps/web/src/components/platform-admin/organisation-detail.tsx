@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import type { ReactNode } from 'react';
 
 import type { PlatformOrganisationDetail } from '@bc5000/db/web';
 
@@ -40,6 +41,8 @@ const feedback = (code: string | undefined) => {
       return { kind: 'success', title: 'Change saved', copy: 'The customer account is up to date.' };
     case 'CONFLICT':
       return { kind: 'warning', title: 'The record changed', copy: 'Refresh this page and review the latest values before trying again.' };
+    case 'BILLING_RISK_HOLD':
+      return { kind: 'warning', title: 'Financial review required', copy: 'resolve the open payment or dispute case before reactivating this account.' };
     case 'LAST_ADMIN_REQUIRED':
       return { kind: 'warning', title: 'Administrator required', copy: 'At least one active customer administrator must remain.' };
     case 'INVALID_STATE':
@@ -56,11 +59,13 @@ const feedback = (code: string | undefined) => {
 export function PlatformOrganisationDetailView({
   detail,
   actions,
-  feedbackCode
+  feedbackCode,
+  directDebitOperations
 }: {
   detail: PlatformOrganisationDetail;
   actions: PlatformOrganisationActions;
   feedbackCode?: string;
+  directDebitOperations?: ReactNode;
 }) {
   const smsUsed = detail.smsUsage.committedParts + detail.smsUsage.reservedParts;
   const expectedUpdatedAt = detail.subscription?.updatedAt.toISOString() ?? '';
@@ -104,6 +109,7 @@ export function PlatformOrganisationDetailView({
       </section>
 
       <section className="platform-admin-grid">
+        {directDebitOperations}
         <article className="panel platform-control-card">
           <h2>Trial and account status</h2>
           {detail.subscription?.status === 'TRIALING' ? (

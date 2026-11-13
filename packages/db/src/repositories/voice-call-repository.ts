@@ -566,9 +566,10 @@ export class PostgresVoiceCallRepository {
 
   loadForExecution(
     organisationId: string,
-    voiceCallId: string
+    voiceCallId: string,
+    executor: VoiceExecutor = this.database
   ): Promise<VoiceCallExecutionAggregate | null> {
-    return loadAggregate(this.database, organisationId, voiceCallId);
+    return loadAggregate(executor, organisationId, voiceCallId);
   }
 
   async queueApprovedScheduledCall(
@@ -743,9 +744,10 @@ export class PostgresVoiceCallRepository {
   }
 
   async recentProviderAcceptedAttempts(
-    input: RecentVoiceAttemptsInput
+    input: RecentVoiceAttemptsInput,
+    executor: VoiceExecutor = this.database
   ): Promise<ReadonlyArray<VoiceAttempt>> {
-    const rows = await this.database
+    const rows = await executor
       .select({
         voiceCallId: voiceCallRequests.id,
         providerAcceptedAt: voiceCallRequests.providerAcceptedAt,
