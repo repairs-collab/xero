@@ -138,6 +138,48 @@ const recordExternalOrder = async (organisationId: string) => {
 };
 
 describe('PostgresReplyNumberProvisioningRepository', () => {
+  it('finds only paid Solo organisations that still need provisioning work', async () => {
+    const eligibleOrganisationId = await seedOrganisation();
+    const requestedOrganisationId = await seedOrganisation();
+    const numberedOrganisationId = await seedOrganisation();
+    const unpaidOrganisationId = await seedOrganisation({
+      status: 'PAST_DUE',
+      trustedStatus: 'past_due'
+    });
+    const requested = await repository.ensureRequestForPaidOrganisation({
+      organisationId: requestedOrganisationId,
+      provider: 'SINCH',
+      now
+    });
+    if (!requested.ok) throw new Error(`ensure failed: ${requested.code}`);
+    await client.db.insert(smsNumberPool).values({
+      e164Number: `+614${randomInt(10_000_000, 99_999_999)}`,
+      provider: 'SINCH',
+      providerNumberId: `sinch-${randomUUID()}`,
+      providerVerifiedAt: now,
+      status: 'READY',
+      organisationId: numberedOrganisationId,
+      reservedAt: now,
+      readyAt: now
+    });
+
+    const candidates = await repository.listPaidOrganisationsNeedingProvisioning(
+      now
+    );
+    const candidateIds = new Set(candidates.map((value) => value.organisationId));
+
+    expect(candidateIds.has(eligibleOrganisationId)).toBe(true);
+    expect(candidateIds.has(requestedOrganisationId)).toBe(false);
+    expect(candidateIds.has(numberedOrganisationId)).toBe(false);
+    expect(candidateIds.has(unpaidOrganisationId)).toBe(false);
+    expect(
+      candidates.find((value) => value.organisationId === eligibleOrganisationId)
+    ).toMatchObject({
+      currentPeriodStart: new Date('2026-11-01T00:00:00.000Z'),
+      currentPeriodEnd: periodEnd
+    });
+  });
+
   it('distinguishes no request from an existing active manual request', async () => {
     const organisationId = await seedOrganisation();
 

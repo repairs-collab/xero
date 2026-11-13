@@ -56,6 +56,7 @@ import {
   createInboundReplyRecoveryService
 } from './operations/inbound-reply-recovery.js';
 import { createOperationalResetService } from './operations/operational-reset.js';
+import { backfillPaidSmsNumberProvisioning } from './operations/sms-number-provisioning-backfill.js';
 import { evaluateVoiceMonitor } from './operations/voice-monitor.js';
 import {
   createDatabaseXeroOAuthReadinessLoader,
@@ -414,6 +415,16 @@ async function main() {
             .select({ id: organisations.id })
             .from(organisations);
     }
+  });
+
+  await queue.start();
+  const provisioningBackfillCount = await backfillPaidSmsNumberProvisioning({
+    repository: replyNumberProvisioningRepository,
+    publisher: queue,
+    clock
+  });
+  console.info('Paid SMS number provisioning backfill completed', {
+    queued: provisioningBackfillCount
   });
 
   await startWorker({

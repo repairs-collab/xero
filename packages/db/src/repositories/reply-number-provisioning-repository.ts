@@ -63,6 +63,12 @@ export type ReplyNumberProvisioningResult =
   | { ok: true; value: ReplyNumberProvisioningRequest }
   | { ok: false; code: ReplyNumberProvisioningFailureCode };
 
+export interface PaidOrganisationProvisioningCandidate {
+  organisationId: string;
+  currentPeriodStart: Date;
+  currentPeriodEnd: Date;
+}
+
 export interface EnsureReplyNumberRequestInput {
   organisationId: string;
   provider: string;
@@ -250,6 +256,65 @@ const isUniqueViolation = (error: unknown): boolean =>
 
 export class PostgresReplyNumberProvisioningRepository {
   constructor(private readonly database: Database) {}
+
+  async listPaidOrganisationsNeedingProvisioning(
+    now: Date
+  ): Promise<PaidOrganisationProvisioningCandidate[]> {
+    if (!validDate(now)) throw new Error('INVALID_PROVISIONING_TIME');
+    const candidates = await this.database
+      .select({
+        organisationId: organisations.id,
+        subscriptionStatus: subscriptions.status,
+        stripeProviderStatus: subscriptions.trustedStripeProviderStatus,
+        currentPeriodStart: subscriptions.currentPeriodStart,
+        currentPeriodEnd: subscriptions.currentPeriodEnd,
+        cancelAt: subscriptions.cancelAt
+      })
+      .from(organisations)
+      .innerJoin(
+        subscriptions,
+        eq(subscriptions.organisationId, organisations.id)
+      )
+      .where(
+        and(
+          eq(organisations.edition, 'SOLO'),
+          eq(organisations.platformStatus, 'ACTIVE')
+        )
+      );
+
+    const result: PaidOrganisationProvisioningCandidate[] = [];
+    for (const candidate of candidates) {
+      if (
+        candidate.stripeProviderStatus !== 'active' ||
+        candidate.currentPeriodStart === null ||
+        candidate.currentPeriodEnd === null ||
+        candidate.currentPeriodStart.getTime() > now.getTime() ||
+        candidate.currentPeriodEnd.getTime() <= now.getTime() ||
+        !hasPaidSubscriptionAccess({
+          subscriptionStatus: candidate.subscriptionStatus,
+          stripeProviderStatus: candidate.stripeProviderStatus,
+          currentPeriodEnd: candidate.currentPeriodEnd,
+          cancelAt: candidate.cancelAt,
+          now
+        })
+      ) {
+        continue;
+      }
+      if (
+        (await this.loadOrganisationProvisioningState(
+          candidate.organisationId
+        )).kind !== 'NONE'
+      ) {
+        continue;
+      }
+      result.push({
+        organisationId: candidate.organisationId,
+        currentPeriodStart: candidate.currentPeriodStart,
+        currentPeriodEnd: candidate.currentPeriodEnd
+      });
+    }
+    return result;
+  }
 
   async loadOrganisationProvisioningState(
     organisationId: string
