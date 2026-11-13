@@ -8,12 +8,14 @@ vi.mock('next/navigation', () => ({
 import { PlatformAdminShell } from './platform-admin-shell.js';
 
 describe('platform owner navigation', () => {
-  it('links to the retention and privacy operations queue', () => {
+  it('links to retention operations and the owner-only server health HUD', () => {
     const html = renderToStaticMarkup(
       <PlatformAdminShell displayName="Owner">Content</PlatformAdminShell>
     );
 
     expect(html).toContain('href="/platform-admin/retention"');
     expect(html).toContain('Retention &amp; privacy');
+    expect(html).toContain('href="/platform-admin/system"');
+    expect(html).toContain('Server health');
   });
 });

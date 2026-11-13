@@ -8,6 +8,7 @@ import {
   ChatBubbleLeftRightIcon,
   ClipboardDocumentListIcon,
   HomeIcon,
+  ServerStackIcon,
   ShieldCheckIcon
 } from '@heroicons/react/24/outline';
 import Link from 'next/link';
@@ -20,6 +21,7 @@ const navigation = [
   ['Billing operations', '/platform-admin/billing', BanknotesIcon],
   ['Retention & privacy', '/platform-admin/retention', ArchiveBoxIcon],
   ['Sinch & SMS', '/platform-admin/sms', ChatBubbleLeftRightIcon],
+  ['Server health', '/platform-admin/system', ServerStackIcon],
   ['Audit', '/platform-admin/audit', ClipboardDocumentListIcon]
 ] as const;
 
