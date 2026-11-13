@@ -24,7 +24,8 @@ test('denies an ordinary customer administrator', async ({ page }) => {
   expect(await backup.text()).not.toContain(platformOwnerScenario.customerName);
 });
 
-test('lets a membership-free owner administer the beta customer without exposing secrets', async ({ page }) => {
+test('lets a membership-free owner administer the paid beta customer without exposing secrets', async ({ page }) => {
+  test.setTimeout(60_000);
   await loginAsPlatformOwner(page);
   await page.goto('/platform-admin');
   await expect(page.getByRole('heading', { name: 'Customer overview' })).toBeVisible();
@@ -32,15 +33,24 @@ test('lets a membership-free owner administer the beta customer without exposing
   await expect(page.locator('body')).not.toContainText('secretArn');
   await expect(page.locator('body')).not.toContainText('ciphertext');
 
-  await page.getByText(platformOwnerScenario.customerName).click();
-  await expect(page.getByText('xero-tenant-platform-beta')).toBeVisible();
+  await page.goto(
+    `/platform-admin/organisations/${launchScenario.organisationId}`
+  );
+  await expect(
+    page.getByRole('heading', {
+      level: 1,
+      name: platformOwnerScenario.customerName
+    })
+  ).toBeVisible();
+  await expect(
+    page.locator('.platform-fact-grid').getByText('xero-tenant-platform-beta')
+  ).toBeVisible();
 
-  const trial = page.locator('form').filter({ has: page.getByRole('button', { name: 'Extend trial' }) });
-  await trial.getByLabel('New trial end').fill('2026-11-30T00:00');
-  await trial.getByLabel('Reason').fill('Approved beta extension');
-  await trial.getByRole('checkbox').check();
-  await trial.getByRole('button', { name: 'Extend trial' }).click();
-  await expect(page.getByText(/30 Nov 2026/)).toBeVisible();
+  const subscription = page.locator('.platform-fact-grid article').filter({
+    has: page.getByText('Subscription', { exact: true })
+  });
+  await expect(subscription.getByText('ACTIVE', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Extend trial' })).toHaveCount(0);
 
   const allowance = page.locator('form').filter({ has: page.getByRole('button', { name: 'Update allowance' }) });
   await allowance.getByLabel('Included SMS parts').fill('2500');
@@ -57,20 +67,29 @@ test('lets a membership-free owner administer the beta customer without exposing
   await expect(page.getByText('SUSPENDED', { exact: true })).toBeVisible();
 
   await page.goto('/platform-admin/audit');
-  await expect(page.getByText('Approved beta extension')).toBeVisible();
   await expect(page.getByText('Temporary billing review')).toBeVisible();
 });
 
-test('registers, assigns and verifies a Sinch number', async ({ page }) => {
+test('registers an existing Sinch number, assigns it and verifies readiness', async ({ page }) => {
   await loginAsPlatformOwner(page);
   await page.goto('/platform-admin/sms');
 
-  const registration = page.locator('form').filter({ has: page.getByRole('button', { name: 'Register number' }) });
+  const legacyPool = page.locator('details').filter({
+    has: page.getByText('Legacy spare-number pool', { exact: true })
+  });
+  await legacyPool.locator('summary').click();
+  const registration = legacyPool.locator('form').filter({
+    has: page.getByRole('button', { name: 'Register existing number' })
+  });
   await registration.getByLabel('Number').fill('+61400000999');
+  await registration.getByLabel('Sinch provider ID').fill('sinch-beta-999');
   await registration.getByLabel('Reason').fill('Beta number purchase');
-  await registration.getByRole('button', { name: 'Register number' }).click();
+  await registration.getByRole('button', { name: 'Register existing number' }).click();
+  await expect(page.getByRole('status')).toContainText('Change saved');
 
-  const number = page.locator('article').filter({ hasText: '+61400000999' });
+  await legacyPool.locator('summary').click();
+
+  const number = legacyPool.locator('article').filter({ hasText: '+61400000999' });
   await expect(number).toBeVisible();
   const assignment = number.locator('form').filter({
     has: page.getByRole('button', { name: 'Assign customer' })

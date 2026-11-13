@@ -18,5 +18,5 @@ test('reviews and approves the due-date SMS with an audit trail', async ({ page 
 
   await expect(page.getByRole('heading', { name: "You're all caught up" })).toBeVisible();
   await page.goto('/activity?eventType=REMINDER_APPROVED');
-  await expect(page.getByText('REMINDER_APPROVED')).toBeVisible();
+  await expect(page.getByText('Reminder approved')).toBeVisible();
 });

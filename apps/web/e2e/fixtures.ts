@@ -413,10 +413,17 @@ export async function seedPlatformAdminScenario(): Promise<void> {
     await client.db.insert(subscriptions).values({
       organisationId: launchScenario.organisationId,
       planCode: 'SOLO_AU_2000',
-      status: 'TRIALING',
+      billingCadence: 'MONTHLY',
+      status: 'ACTIVE',
+      stripeProviderStatus: 'active',
+      trustedStripeProviderStatus: 'active',
+      stripeCustomerId: 'cus_e2e_platform_beta',
+      stripeSubscriptionId: 'sub_e2e_platform_beta',
       currentPeriodStart: new Date('2026-11-01T00:00:00.000Z'),
-      currentPeriodEnd: new Date('2026-11-20T00:00:00.000Z'),
-      trialEndsAt: new Date('2026-11-20T00:00:00.000Z'),
+      currentPeriodEnd: new Date('2026-12-01T00:00:00.000Z'),
+      initialCardStripeSubscriptionId: 'sub_e2e_platform_beta',
+      initialCardInvoiceId: 'in_e2e_platform_beta_initial',
+      initialCardPaymentSucceededAt: new Date('2026-11-01T00:00:00.000Z'),
       lastStripeEventCreatedAt: now,
       updatedAt: now
     });
