@@ -1415,7 +1415,9 @@ export const createSubscriptionService = (dependencies: {
       }
       throw error;
     }
-    const enqueueCancellation = input.status === 'CANCELLED';
+    const enqueueCancellation =
+      input.status === 'CANCELLED' &&
+      input.stripeProviderStatus === 'canceled';
     const enqueueProvisioning = hasPaidSubscriptionAccess({
       subscriptionStatus: input.status,
       stripeProviderStatus: input.stripeProviderStatus,
