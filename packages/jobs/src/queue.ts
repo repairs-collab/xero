@@ -10,6 +10,7 @@ import {
   type ScheduleOptions
 } from 'pg-boss';
 import { Client } from 'pg';
+import { sql, type SQL } from 'drizzle-orm';
 
 import type { DbTransaction } from '@bc5000/db';
 
@@ -69,6 +70,31 @@ const stableJobId = (name: JobName, singletonKey: string): string => {
   );
   return `${hex.slice(0, 8).join('')}-${hex.slice(8, 12).join('')}-${hex.slice(12, 16).join('')}-${hex.slice(16, 20).join('')}-${hex.slice(20).join('')}`;
 };
+
+const fromDrizzleTransaction = (transaction: DbTransaction): Db => ({
+  executeSql: async (text, values = []) => {
+    const chunks: SQL[] = [];
+    const referenced = new Set<number>();
+    const placeholder = /\$(\d+)/g;
+    let cursor = 0;
+    for (const match of text.matchAll(placeholder)) {
+      const index = Number.parseInt(match[1] ?? '', 10) - 1;
+      if (!Number.isSafeInteger(index) || index < 0 || index >= values.length) {
+        throw new Error('PG_BOSS_TRANSACTION_PARAMETER_INVALID');
+      }
+      chunks.push(sql.raw(text.slice(cursor, match.index)));
+      chunks.push(sql`${values[index]}`);
+      referenced.add(index);
+      cursor = (match.index ?? 0) + match[0].length;
+    }
+    chunks.push(sql.raw(text.slice(cursor)));
+    if (referenced.size !== values.length) {
+      throw new Error('PG_BOSS_TRANSACTION_PARAMETER_UNUSED');
+    }
+    const result = await transaction.execute(sql.join(chunks));
+    return { rows: result.rows };
+  }
+});
 
 export interface DurableJobQueueOptions {
   databaseUrl: string;
@@ -156,6 +182,29 @@ export class DurableJobQueue implements JobPublisher {
       ...startOptions,
       id,
       singletonKey
+    });
+    return inserted ?? id;
+  }
+
+  async enqueueUniqueInTransaction<Name extends JobName>(
+    transaction: DbTransaction,
+    name: Name,
+    payload: JobPayloads[Name],
+    singletonKey: string,
+    startAfter?: Date
+  ): Promise<string> {
+    if (singletonKey.trim().length === 0) {
+      throw new Error('singletonKey must not be empty');
+    }
+    const data = parseJobPayload(name, payload);
+    const id = stableJobId(name, singletonKey);
+    const startOptions = startAfter === undefined ? {} : { startAfter };
+    const inserted = await this.#boss.send(name, data, {
+      ...optionsFor(name),
+      ...startOptions,
+      id,
+      singletonKey,
+      db: fromDrizzleTransaction(transaction)
     });
     return inserted ?? id;
   }
