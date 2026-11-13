@@ -47,6 +47,17 @@ const formatAge = (seconds: number): string => {
   return `Checked ${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ago`;
 };
 
+const formatCheckedAt = (value: string): string =>
+  new Intl.DateTimeFormat('en-AU', {
+    timeZone: 'Australia/Sydney',
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short'
+  }).format(new Date(value));
+
 const CapacityCard = ({
   label,
   usedPercent,
@@ -98,9 +109,16 @@ export function ServerHealthHud({ health }: { health: ServerHealthView }) {
           <h2 id="server-health-status">{health.message}</h2>
         </div>
         <small>
-          {health.ageSeconds === null
-            ? 'No current host metrics can be shown.'
-            : formatAge(health.ageSeconds)}
+          {health.ageSeconds === null || health.checkedAt === null ? (
+            'No current host metrics can be shown.'
+          ) : (
+            <>
+              <span>{formatAge(health.ageSeconds)}</span>
+              <time dateTime={health.checkedAt}>
+                Last checked {formatCheckedAt(health.checkedAt)}
+              </time>
+            </>
+          )}
         </small>
       </section>
 

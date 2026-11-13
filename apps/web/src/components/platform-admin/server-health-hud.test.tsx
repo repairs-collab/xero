@@ -44,6 +44,8 @@ describe('owner server health HUD', () => {
     expect(html).toContain('Server health');
     expect(html).toContain('Healthy');
     expect(html).toContain('Checked 5 minutes ago');
+    expect(html).toContain('Last checked');
+    expect(html).toContain('dateTime="2026-11-13T01:00:00.000Z"');
     expect(html).toContain('10 days');
     expect(html).toContain('5-minute load 1.20 across 4 cores');
     expect(html).toContain('50% used');
