@@ -9,6 +9,7 @@ export interface StripeApi {
         parameters: Record<string, unknown>,
         options: { idempotencyKey: string }
       ): Promise<unknown>;
+      retrieve(sessionId: string): Promise<unknown>;
     };
   };
   readonly billingPortal: {
@@ -61,13 +62,35 @@ export interface StripeRuntimeConfiguration extends StripeBillingConfiguration {
   readonly secretKey: string;
 }
 
-export interface SoloCheckoutRequest {
+export type SoloBillingCadence = 'MONTHLY' | 'ANNUAL';
+
+export interface SoloCheckoutConfiguration {
+  readonly priceId: string;
+  readonly automaticTaxEnabled: boolean;
+  readonly publicOrigin: string;
+}
+
+export interface SoloCheckoutRequest extends SoloCheckoutConfiguration {
   readonly organisationId: string;
   readonly userId: string;
-  readonly customerEmail: string;
+  readonly customerEmail: string | null;
   readonly stripeCustomerId?: string;
-  readonly billingCadence: 'MONTHLY' | 'ANNUAL';
+  readonly billingCadence: SoloBillingCadence;
+  readonly attemptId: string;
+  readonly expiresAt: Date;
   readonly idempotencyKey: string;
+}
+
+export interface StripeCheckoutSession {
+  id: string;
+  organisationId: string;
+  attemptId: string;
+  billingCadence: SoloBillingCadence;
+  expiresAt: Date;
+  status: 'open' | 'complete' | 'expired';
+  stripeCustomerId: string | null;
+  stripeSubscriptionId: string | null;
+  url: string | null;
 }
 
 export interface DirectDebitSetupRequest {
@@ -236,6 +259,61 @@ const requireProviderId = (value: unknown): string => {
   return value;
 };
 
+const record = (value: unknown): Record<string, unknown> => {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new StripeProviderFailure();
+  }
+  return value as Record<string, unknown>;
+};
+
+export const isStripeCheckoutAttemptId = (value: unknown): value is string =>
+  typeof value === 'string' &&
+  /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value);
+
+export const parseStripeCheckoutSession = (value: unknown): StripeCheckoutSession => {
+  const session = record(value);
+  const metadata = record(session.metadata);
+  const organisationId = requireProviderId(metadata.organisation_id);
+  const attemptId = metadata.checkout_attempt_id;
+  const billingCadence = metadata.billing_cadence;
+  const { status } = session;
+  const expiresAt = new Date(Number(session.expires_at) * 1000);
+  if (
+    session.object !== 'checkout.session' ||
+    session.mode !== 'subscription' ||
+    session.client_reference_id !== organisationId ||
+    metadata.plan_code !== accountPulseSoloPlanCode ||
+    !isStripeCheckoutAttemptId(attemptId) ||
+    (billingCadence !== 'MONTHLY' && billingCadence !== 'ANNUAL') ||
+    (status !== 'open' && status !== 'complete' && status !== 'expired') ||
+    !Number.isSafeInteger(session.expires_at) ||
+    !Number.isFinite(expiresAt.getTime()) ||
+    expiresAt.getTime() <= 0
+  ) {
+    throw new StripeProviderFailure();
+  }
+  const stripeCustomerId = session.customer === null ? null : requireProviderId(session.customer);
+  const stripeSubscriptionId = session.subscription === null ? null : requireProviderId(session.subscription);
+  if (
+    (status === 'complete' && (stripeCustomerId === null || stripeSubscriptionId === null)) ||
+    (stripeSubscriptionId !== null && stripeCustomerId === null)
+  ) {
+    throw new StripeProviderFailure();
+  }
+
+  return {
+    id: requireProviderId(session.id),
+    organisationId,
+    attemptId,
+    billingCadence,
+    expiresAt,
+    status,
+    stripeCustomerId,
+    stripeSubscriptionId,
+    url: session.url == null ? null : requireProviderId(session.url)
+  };
+};
+
 const requireChargePaymentIdentity = (
   value: unknown,
   expectedChargeId: string
@@ -372,55 +450,80 @@ export class StripeBillingClient {
     }
   }
 
-  async createSoloCheckout(
-    request: SoloCheckoutRequest
-  ): Promise<StripeHostedSession> {
+  checkoutConfiguration(billingCadence: SoloBillingCadence): SoloCheckoutConfiguration {
+    const priceId = billingCadence === 'MONTHLY'
+      ? this.#soloMonthlyPriceId
+      : this.#soloAnnualPriceId;
+    if (priceId === null) throw new StripeConfigurationFailure();
+    return {
+      priceId,
+      automaticTaxEnabled: this.#automaticTaxEnabled,
+      publicOrigin: this.#publicOrigin
+    };
+  }
+
+  async createSoloCheckout(request: SoloCheckoutRequest): Promise<StripeCheckoutSession> {
     const organisationId = requireNonEmpty(request.organisationId);
     const userId = requireNonEmpty(request.userId);
-    const idempotencyKey = requireNonEmpty(request.idempotencyKey);
-    const priceId =
-      request.billingCadence === 'MONTHLY'
-        ? this.#soloMonthlyPriceId
-        : request.billingCadence === 'ANNUAL'
-          ? this.#soloAnnualPriceId
-          : null;
-    if (priceId === null) throw new StripeConfigurationFailure();
+    const priceId = requireNonEmpty(request.priceId);
+    const publicOrigin = parsePublicOrigin(request.publicOrigin);
+    const expiresAt = request.expiresAt.getTime() / 1000;
+    if (
+      !isStripeCheckoutAttemptId(request.attemptId) ||
+      request.idempotencyKey !== `solo-checkout:${request.attemptId}` ||
+      !Number.isSafeInteger(expiresAt) ||
+      expiresAt <= 0 ||
+      (request.billingCadence !== 'MONTHLY' && request.billingCadence !== 'ANNUAL')
+    ) {
+      throw new StripeConfigurationFailure();
+    }
+
     const metadata = {
       organisation_id: organisationId,
       initiating_user_id: userId,
-      plan_code: accountPulseSoloPlanCode
+      plan_code: accountPulseSoloPlanCode,
+      checkout_attempt_id: request.attemptId,
+      billing_cadence: request.billingCadence
     };
     const customer = request.stripeCustomerId?.trim();
     const customerParameters = customer
       ? { customer }
-      : { customer_email: requireNonEmpty(request.customerEmail) };
+      : { customer_email: requireNonEmpty(request.customerEmail ?? '') };
 
-    let session: unknown;
     try {
-      session = await this.#api.checkout.sessions.create(
+      const session = await this.#api.checkout.sessions.create(
         {
           mode: 'subscription',
           line_items: [{ price: priceId, quantity: 1 }],
           payment_method_types: ['card'],
-          automatic_tax: { enabled: this.#automaticTaxEnabled },
+          automatic_tax: { enabled: request.automaticTaxEnabled },
           billing_address_collection: 'required',
           tax_id_collection: { enabled: true },
           client_reference_id: organisationId,
+          expires_at: expiresAt,
           ...customerParameters,
           metadata,
-          subscription_data: {
-            metadata
-          },
-          success_url: `${this.#publicOrigin}/settings/billing?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
-          cancel_url: `${this.#publicOrigin}/settings/billing?checkout=cancelled`
+          subscription_data: { metadata },
+          success_url: `${publicOrigin}/settings/billing?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${publicOrigin}/settings/billing?checkout=cancelled`
         },
-        { idempotencyKey }
+        { idempotencyKey: request.idempotencyKey }
       );
+      return parseStripeCheckoutSession(session);
     } catch {
       throw new StripeProviderFailure();
     }
+  }
 
-    return requireHostedSession(session);
+  async retrieveSoloCheckout(sessionId: string): Promise<StripeCheckoutSession> {
+    const id = requireNonEmpty(sessionId);
+    try {
+      const session = parseStripeCheckoutSession(await this.#api.checkout.sessions.retrieve(id));
+      if (session.id !== id) throw new StripeProviderFailure();
+      return session;
+    } catch {
+      throw new StripeProviderFailure();
+    }
   }
 
   async createBillingPortal(

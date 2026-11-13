@@ -5,6 +5,7 @@ import { decideAccountEntitlements } from '@bc5000/domain';
 import type {
   SoloCheckoutRequest,
   StripeChargeOwnership,
+  StripeCheckoutSession,
   StripeHostedSession,
   StripeHostedSetupSession,
   StripeWebhookEvent
@@ -75,10 +76,30 @@ class FakeStripe implements StripeBillingGateway {
   chargeOwnership = new Map<string, StripeChargeOwnership>();
   event: StripeWebhookEvent | undefined;
 
-  createSoloCheckout(request: SoloCheckoutRequest): Promise<StripeHostedSession> {
+  checkoutConfiguration(billingCadence: SoloCheckoutRequest['billingCadence']) {
+    return {
+      priceId: billingCadence === 'MONTHLY' ? 'price_solo_au_2000' : 'price_solo_annual',
+      publicOrigin: 'https://example.com',
+      automaticTaxEnabled: true
+    };
+  }
+
+  createSoloCheckout(request: SoloCheckoutRequest): Promise<StripeCheckoutSession> {
     this.checkoutRequests.push(request);
+    return this.retrieveSoloCheckout('cs_solo');
+  }
+
+  retrieveSoloCheckout(id: string): Promise<StripeCheckoutSession> {
+    const request = this.checkoutRequests[0]!;
     return Promise.resolve({
-      id: 'cs_solo',
+      id,
+      organisationId: request.organisationId,
+      attemptId: request.attemptId,
+      billingCadence: request.billingCadence,
+      expiresAt: request.expiresAt,
+      status: 'open',
+      stripeCustomerId: request.stripeCustomerId ?? null,
+      stripeSubscriptionId: null,
       url: 'https://checkout.stripe.com/c/pay/cs_solo'
     });
   }
@@ -168,6 +189,39 @@ class FakeRepository implements SubscriptionRepository {
         ? this.currentAccount
         : null
     );
+  }
+
+  checkoutAttempt: Awaited<ReturnType<SubscriptionRepository['reserveCheckout']>> | null = null;
+
+  reserveCheckout(input: Parameters<SubscriptionRepository['reserveCheckout']>[0]) {
+    const account = this.currentAccount;
+    if (account === null) return Promise.reject(new SubscriptionFailure('SUBSCRIPTION_NOT_FOUND'));
+    if (account.edition !== 'SOLO') return Promise.reject(new SubscriptionFailure('BILLING_NOT_APPLICABLE'));
+    if (account.stripeSubscriptionId !== null) return Promise.reject(new SubscriptionFailure('CHECKOUT_NOT_AVAILABLE'));
+    const attemptId = '4b2d7cdd-536b-41d2-8555-18e902183bc0';
+    this.checkoutAttempt ??= {
+      request: {
+        ...input.configuration,
+        organisationId: input.organisationId,
+        userId: input.userId,
+        customerEmail: account.billingEmail,
+        billingCadence: input.billingCadence,
+        attemptId,
+        expiresAt: new Date('2026-11-09T13:00:00.000Z'),
+        idempotencyKey: 'solo-checkout:' + attemptId
+      },
+      stripeSessionId: null
+    };
+    return Promise.resolve(this.checkoutAttempt);
+  }
+
+  recordCheckoutSession(input: Parameters<SubscriptionRepository['recordCheckoutSession']>[0]) {
+    if (this.checkoutAttempt !== null) this.checkoutAttempt.stripeSessionId = input.id;
+    return Promise.resolve('OPEN' as const);
+  }
+
+  applyCheckoutExpired() {
+    return Promise.resolve(this.applyOutcome);
   }
 
   applyLifecycleEvent(
@@ -515,16 +569,13 @@ describe('subscription checkout and portal', () => {
 
     expect(first.url).toContain('checkout.stripe.com');
     expect(second).toEqual(first);
-    expect(stripe.checkoutRequests).toHaveLength(2);
+    expect(stripe.checkoutRequests).toHaveLength(1);
     expect(stripe.checkoutRequests[0]).toMatchObject({
       organisationId: 'org_solo',
       userId: 'user_admin',
       billingCadence: 'MONTHLY',
-      idempotencyKey: stripe.checkoutRequests[1]?.idempotencyKey
+      idempotencyKey: 'solo-checkout:' + stripe.checkoutRequests[0]?.attemptId
     });
-    expect(stripe.checkoutRequests[0]?.idempotencyKey).toContain(
-      '2026-11-09T00:00:00.000Z'
-    );
     expect(repository.currentAccount?.status).toBe('TRIALING');
     expect(repository.auditInputs[0]?.detail).toEqual({
       action: 'CHECKOUT_CREATED',
@@ -540,8 +591,8 @@ describe('subscription checkout and portal', () => {
     expect(annual.stripe.checkoutRequests[0]).toMatchObject({
       billingCadence: 'ANNUAL'
     });
-    expect(annual.stripe.checkoutRequests[0]?.idempotencyKey).toContain(
-      ':ANNUAL:'
+    expect(annual.stripe.checkoutRequests[0]?.idempotencyKey).toBe(
+      'solo-checkout:' + annual.stripe.checkoutRequests[0]?.attemptId
     );
 
     const forged = createService();
@@ -1495,12 +1546,15 @@ describe('one-time trial and event safety', () => {
     await service.createCheckout(adminSession, 'org_solo');
     expect(stripe.checkoutRequests[0]).not.toHaveProperty('trialEnd');
     repository.currentAccount = account({ trialEndsAt: new Date('2026-11-09T12:30:00Z') });
+    repository.checkoutAttempt = null;
     await service.createCheckout(adminSession, 'org_solo');
     expect(stripe.checkoutRequests[1]).not.toHaveProperty('trialEnd');
     repository.currentAccount = account({trialEndsAt: null});
+    repository.checkoutAttempt = null;
     await service.createCheckout(adminSession, 'org_solo');
     expect(stripe.checkoutRequests[2]).not.toHaveProperty('trialEnd');
     repository.currentAccount = account({trialEndsAt: new Date('2026-11-11T12:05:00Z')});
+    repository.checkoutAttempt = null;
     await service.createCheckout(adminSession, 'org_solo');
     expect(stripe.checkoutRequests[3]).not.toHaveProperty('trialEnd');
   });

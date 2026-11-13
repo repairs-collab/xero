@@ -8,6 +8,8 @@ import {
   requireWebAcceptedSession
 } from '../../../../server/runtime.js';
 
+import { SubscriptionFailure } from '../../../../server/subscription-service.js';
+
 const organisationIdFrom = (formData: FormData): string => {
   const value = formData.get('organisationId');
   if (typeof value !== 'string' || value.trim() === '') {
@@ -39,7 +41,12 @@ export async function startSoloCheckout(formData: FormData): Promise<void> {
     session,
     organisationIdFrom(formData),
     billingCadenceFrom(formData)
-  );
+  ).catch((error: unknown) => {
+    if (error instanceof SubscriptionFailure && error.code === 'CHECKOUT_ATTEMPT_CONFLICT') {
+      redirect('/settings/billing?checkout=attempt-conflict');
+    }
+    throw error;
+  });
   redirect(hosted.url);
 }
 

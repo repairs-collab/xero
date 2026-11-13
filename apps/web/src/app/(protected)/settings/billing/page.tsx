@@ -1,6 +1,7 @@
 import { headers } from 'next/headers';
 import Link from 'next/link';
 import { billingStatus } from './billing-status.js';
+import { isTerminalStripeSubscription } from '../../../../server/subscription-service.js';
 
 import {
   getBillingAccountSnapshot,
@@ -44,7 +45,12 @@ const date = (value: Date | null): string =>
         timeZone: 'Australia/Sydney'
       }).format(value);
 
-export default async function BillingSettingsPage() {
+export default async function BillingSettingsPage({
+  searchParams
+}: {
+  searchParams?: Promise<{ checkout?: string | string[] }>;
+}) {
+  const checkoutConflict = (await searchParams)?.checkout === 'attempt-conflict';
   const session = await requireWebSession(
     new Request('http://localhost/', { headers: await headers() })
   );
@@ -84,6 +90,13 @@ export default async function BillingSettingsPage() {
           stores your card number.
         </p>
       </header>
+
+      {checkoutConflict && admin && !legacySmsExempt ? (
+        <div className="callout callout--warning" role="status">
+          <strong>A Stripe checkout is already in progress</strong>
+          <p>Choose the same billing option to reopen it if it is still available. You can change billing options after Stripe confirms the earlier checkout has expired or ended.</p>
+        </div>
+      ) : null}
 
       <section className="panel">
         <div className="panel__header">
@@ -151,7 +164,8 @@ export default async function BillingSettingsPage() {
                 stripeConfigured &&
                 admin &&
                 (account.stripeSubscriptionId === null ||
-                  account.status === 'CANCELLED');
+                  (account.status === 'CANCELLED' &&
+                    isTerminalStripeSubscription(account.stripeProviderStatus)));
               return (
                 <article key={plan.cadence}>
                   <h3>{plan.title}</h3>

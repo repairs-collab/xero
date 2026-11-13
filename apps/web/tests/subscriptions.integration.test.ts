@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { eq } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { AppSession } from '@bc5000/auth';
 import {
@@ -14,7 +14,7 @@ import {
   subscriptions,
   users
 } from '@bc5000/db';
-import type { StripeWebhookEvent } from '@bc5000/integrations/stripe';
+import type { SoloCheckoutRequest, StripeCheckoutSession, StripeWebhookEvent } from '@bc5000/integrations/stripe';
 
 import { createPostgresSubscriptionRepository } from '../src/server/subscription-repository.js';
 import {
@@ -34,8 +34,46 @@ afterAll(async () => client.pool.end());
 class FakeStripe implements StripeBillingGateway {
   event: StripeWebhookEvent | undefined;
 
-  createSoloCheckout() {
-    return Promise.resolve({ id: 'cs_test', url: 'https://checkout.stripe.test' });
+  checkoutRequests: SoloCheckoutRequest[] = [];
+  checkoutSessions = new Map<string, StripeCheckoutSession>();
+  loseResponse = false;
+
+  checkoutConfiguration(cadence: 'MONTHLY' | 'ANNUAL') {
+    return {
+      priceId: cadence === 'MONTHLY' ? 'price_solo_au_2000' : 'price_solo_annual',
+      automaticTaxEnabled: true,
+      publicOrigin: 'https://ap.test'
+    };
+  }
+
+  createSoloCheckout(request: SoloCheckoutRequest) {
+    this.checkoutRequests.push(request);
+    let session = this.checkoutSessions.get(request.idempotencyKey);
+    if (session === undefined) {
+      session = {
+        id: 'cs_' + randomUUID(),
+        url: 'https://checkout.stripe.test/' + randomUUID(),
+        organisationId: request.organisationId,
+        attemptId: request.attemptId,
+        billingCadence: request.billingCadence,
+        expiresAt: request.expiresAt,
+        status: 'open',
+        stripeCustomerId: request.stripeCustomerId ?? null,
+        stripeSubscriptionId: null
+      };
+      this.checkoutSessions.set(request.idempotencyKey, session);
+    }
+    if (this.loseResponse) {
+      this.loseResponse = false;
+      return Promise.reject(new Error('lost response'));
+    }
+    return Promise.resolve({ ...session });
+  }
+
+  retrieveSoloCheckout(id: string) {
+    const session = [...this.checkoutSessions.values()].find((row) => row.id === id);
+    if (session === undefined) return Promise.reject(new Error('missing Session'));
+    return Promise.resolve({ ...session });
   }
 
   createBillingPortal() {
@@ -79,6 +117,7 @@ const stripeEvent = (input: {
     created: input.created,
     data: {
       object: {
+        object: 'subscription',
         id: 'sub_' + currentOrganisationId,
         customer: 'cus_' + currentOrganisationId,
         status: input.status,
@@ -513,3 +552,264 @@ describe('competing checkout replacement order', () => {
     expect(await repository.applyLifecycleEvent({...lifecycle, eventId:'evt_selected_lifecycle_' + organisationId, eventCreatedAt:selectedTime, stripeSubscriptionId:selectedId})).toBe('APPLIED');
   });
 });
+
+describe('single paid Checkout across cadences', () => {
+  const checkoutFixture = async () => {
+    const seeded = await seed();
+    const stripe = new FakeStripe();
+    let currentTime = now;
+    const clock = { now: () => currentTime };
+    const repository = createPostgresSubscriptionRepository(client.db, clock);
+    const services = [repository, createPostgresSubscriptionRepository(client.db, clock)].map(
+      (repo) => createSubscriptionService({
+        stripe,
+        repository: repo,
+        soloMonthlyPriceId: 'price_solo_au_2000',
+        soloAnnualPriceId: 'price_solo_annual',
+        verifyPlatformOwner: () => Promise.resolve(false),
+        clock,
+        publishLifecycle: () => Promise.resolve(),
+        publishNumberProvision: () => Promise.resolve()
+      })
+    );
+    return {
+      ...seeded,
+      stripe,
+      repository,
+      checkout: (cadence: 'MONTHLY' | 'ANNUAL' = 'MONTHLY', instance = 0) =>
+        services[instance]!.createCheckout(seeded.session, seeded.organisationId, cadence),
+      webhook: (event: StripeWebhookEvent) => {
+        stripe.event = event;
+        return services[1]!.handleWebhook(JSON.stringify(event), 'signed');
+      },
+      advance: (seconds: number) => { currentTime = new Date(currentTime.getTime() + seconds * 1000); }
+    };
+  };
+
+  it('allows only one payable Session in a monthly versus annual race', async () => {
+    const { checkout, stripe } = await checkoutFixture();
+    const outcomes = await Promise.allSettled([checkout(), checkout('ANNUAL', 1)]);
+    expect(outcomes.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    const rejected = outcomes.find((result) => result.status === 'rejected');
+    expect(rejected?.reason).toMatchObject({ code: 'CHECKOUT_ATTEMPT_CONFLICT' });
+    expect(stripe.checkoutSessions.size).toBe(1);
+  });
+
+  it('converges simultaneous same-cadence calls on one provider Session', async () => {
+    const { checkout, stripe } = await checkoutFixture();
+    const hosted = await Promise.all([checkout(), checkout('MONTHLY', 1)]);
+    expect(hosted[1]).toEqual(hosted[0]);
+    expect(stripe.checkoutSessions.size).toBe(1);
+    expect(stripe.checkoutRequests[0]?.attemptId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('reuses the frozen attempt after a lost provider response', async () => {
+    const { checkout, stripe, organisationId, session } = await checkoutFixture();
+    stripe.loseResponse = true;
+    await expect(checkout()).rejects.toThrow('lost response');
+    await client.db.update(users).set({ email: `new-${organisationId}@example.invalid` }).where(eq(users.id, session.userId));
+    await expect(checkout('ANNUAL', 1)).rejects.toMatchObject({ code: 'CHECKOUT_ATTEMPT_CONFLICT' });
+    await expect(checkout('MONTHLY', 1)).resolves.toMatchObject({ id: stripe.checkoutSessions.values().next().value?.id });
+    expect(stripe.checkoutRequests[1]).toEqual(stripe.checkoutRequests[0]);
+    expect(stripe.checkoutRequests[0]?.organisationId).toBe(organisationId);
+    expect(stripe.checkoutSessions.size).toBe(1);
+  });
+
+  it('reuses the provider Session after the first local bind fails', async () => {
+    const { checkout, stripe, repository } = await checkoutFixture();
+    const bind = vi.spyOn(repository, 'recordCheckoutSession').mockRejectedValueOnce(new Error('bind failed'));
+    await expect(checkout()).rejects.toThrow('bind failed');
+    bind.mockRestore();
+    await expect(checkout('ANNUAL', 1)).rejects.toMatchObject({ code: 'CHECKOUT_ATTEMPT_CONFLICT' });
+    await expect(checkout()).resolves.toMatchObject({ id: stripe.checkoutSessions.values().next().value?.id });
+    expect(stripe.checkoutSessions.size).toBe(1);
+  });
+
+  it('holds an elapsed attempt until read-only Stripe evidence confirms expiry', async () => {
+    const { checkout, stripe, advance } = await checkoutFixture();
+    const monthly = await checkout();
+    advance(86_400);
+    await expect(checkout('ANNUAL', 1)).rejects.toMatchObject({ code: 'CHECKOUT_ATTEMPT_CONFLICT' });
+    const session = stripe.checkoutSessions.values().next().value!;
+    session.status = 'expired';
+    session.url = null;
+    const annual = await checkout('ANNUAL', 1);
+    expect(annual.id).not.toBe(monthly.id);
+    expect(stripe.checkoutSessions.size).toBe(2);
+  });
+
+  it('releases an unknown Session only after its signed expiry arrives', async () => {
+    const { checkout, stripe, advance, webhook } = await checkoutFixture();
+    stripe.loseResponse = true;
+    await expect(checkout()).rejects.toThrow('lost response');
+    const request = stripe.checkoutRequests[0]!;
+    advance(86_400);
+    await expect(checkout()).rejects.toMatchObject({ code: 'CHECKOUT_ATTEMPT_CONFLICT' });
+    const event = attemptCheckoutEvent(request, stripe.checkoutSessions.values().next().value!.id, 'expired');
+    await expect(webhook(event)).resolves.toBe('APPLIED');
+    await expect(webhook(event)).resolves.toBe('DUPLICATE');
+    await expect(checkout('ANNUAL')).resolves.toBeDefined();
+    expect(stripe.checkoutSessions.size).toBe(2);
+  });
+
+  it.each(['checkout-first', 'lifecycle-first'])('binds an episode in %s order and requires both terminal signals', async (order) => {
+    const { checkout, stripe, organisationId, webhook } = await checkoutFixture();
+    const hosted = await checkout();
+    const request = stripe.checkoutRequests[0]!;
+    const complete = attemptCheckoutEvent(request, hosted.id, 'complete');
+    const active = attemptLifecycleEvent(request, 'active');
+    const canceled = attemptLifecycleEvent(request, 'canceled');
+    const session = stripe.checkoutSessions.values().next().value!;
+    if (order === 'checkout-first') {
+      await expect(webhook(complete)).resolves.toBe('APPLIED');
+      await expect(webhook(active)).resolves.toBe('APPLIED');
+      await expect(checkout('ANNUAL')).rejects.toMatchObject({ code: 'CHECKOUT_ATTEMPT_CONFLICT' });
+      await expect(webhook(canceled)).resolves.toBe('APPLIED');
+    } else {
+      await expect(webhook(active)).resolves.toBe('APPLIED');
+      await expect(webhook(canceled)).resolves.toBe('APPLIED');
+      await expect(checkout('ANNUAL')).rejects.toMatchObject({ code: 'CHECKOUT_ATTEMPT_CONFLICT' });
+      await expect(webhook(complete)).resolves.toBe('APPLIED');
+    }
+    session.status = 'complete';
+    session.url = null;
+    await expect(webhook(complete)).resolves.toBe('DUPLICATE');
+    const next = await checkout('ANNUAL', 1);
+    expect(next.id).not.toBe(hosted.id);
+    expect(stripe.checkoutRequests.at(-1)?.stripeCustomerId).toBe('cus_' + organisationId);
+    await expect(webhook(attemptCheckoutEvent(request, hosted.id, 'expired'))).resolves.toBe('REJECTED');
+    const [row] = await client.db.select().from(subscriptions).where(eq(subscriptions.organisationId, organisationId));
+    expect(row).toMatchObject({
+      stripeSubscriptionId: 'sub_' + organisationId,
+      trustedStripeProviderStatus: 'canceled',
+      initialCardInvoiceId: 'in_' + organisationId
+    });
+  });
+
+  it('keeps a lifecycle-bound subscription fenced through a delayed Session expiry', async () => {
+    const { checkout, stripe, webhook } = await checkoutFixture();
+    const hosted = await checkout();
+    const request = stripe.checkoutRequests[0]!;
+    const paused = attemptLifecycleEvent(request, 'paused');
+    const canceled = attemptLifecycleEvent(request, 'canceled');
+    await expect(webhook(paused)).resolves.toBe('APPLIED');
+    const expired = attemptCheckoutEvent(request, hosted.id, 'expired');
+    await expect(webhook(expired)).resolves.toBe('APPLIED');
+    await expect(checkout('ANNUAL')).rejects.toMatchObject({ code: 'CHECKOUT_ATTEMPT_CONFLICT' });
+    // Stripe may emit two distinct lifecycle events in the same second.
+    await expect(webhook({ ...canceled, created: paused.created })).resolves.toBe('APPLIED');
+    await expect(checkout('ANNUAL')).resolves.toBeDefined();
+  });
+
+  it('rejects evidence with mismatched organisation, attempt, Session, customer or cadence', async () => {
+    const { checkout, stripe, organisationId, webhook } = await checkoutFixture();
+    const other = await checkoutFixture();
+    const expectedCustomer = 'cus_' + organisationId;
+    await client.db.update(subscriptions).set({ stripeCustomerId: expectedCustomer }).where(eq(subscriptions.organisationId, organisationId));
+    const hosted = await checkout();
+    const request = stripe.checkoutRequests[0]!;
+    const checkoutEvent = attemptCheckoutEvent(request, hosted.id, 'complete');
+    const checkoutObject = checkoutEvent.data.object as Record<string, unknown>;
+    const metadata = checkoutObject.metadata as Record<string, unknown>;
+    const changes = [
+      { client_reference_id: other.organisationId, metadata: { ...metadata, organisation_id: other.organisationId } },
+      { metadata: { organisation_id: request.organisationId, plan_code: 'SOLO_AU_2000' } },
+      { metadata: { ...metadata, checkout_attempt_id: randomUUID() } },
+      { id: 'cs_wrong' },
+      { customer: 'cus_wrong' },
+      { metadata: { ...metadata, billing_cadence: 'ANNUAL' } }
+    ];
+    for (const change of changes) {
+      await expect(webhook({ ...checkoutEvent, id: 'evt_' + randomUUID(), data: { object: { ...checkoutObject, ...change } } })).resolves.toBe('REJECTED');
+    }
+    const lifecycle = attemptLifecycleEvent({ ...request, billingCadence: 'ANNUAL', priceId: 'price_solo_annual' }, 'active');
+    await expect(webhook(lifecycle)).resolves.toBe('REJECTED');
+    await expect(checkout('ANNUAL')).rejects.toMatchObject({ code: 'CHECKOUT_ATTEMPT_CONFLICT' });
+    const [row] = await client.db.select().from(subscriptions).where(eq(subscriptions.organisationId, organisationId));
+    expect(row?.stripeSubscriptionId).toBeNull();
+    await expect(webhook(checkoutEvent)).resolves.toBe('APPLIED');
+  });
+
+  it('does not let another tenant claim a customer already observed on a different attempt', async () => {
+    const first = await checkoutFixture();
+    const second = await checkoutFixture();
+    await first.checkout();
+    const providerSession = first.stripe.checkoutSessions.values().next().value!;
+    providerSession.status = 'complete';
+    providerSession.url = null;
+    providerSession.stripeCustomerId = 'cus_' + first.organisationId;
+    providerSession.stripeSubscriptionId = 'sub_' + first.organisationId;
+    await expect(first.checkout()).rejects.toMatchObject({ code: 'CHECKOUT_ATTEMPT_CONFLICT' });
+
+    const hosted = await second.checkout();
+    const request = second.stripe.checkoutRequests[0]!;
+    const event = attemptCheckoutEvent(request, hosted.id, 'complete');
+    const object = event.data.object as Record<string, unknown>;
+    await expect(second.webhook({ ...event, data: { object: {
+      ...object,
+      customer: providerSession.stripeCustomerId
+    } } })).resolves.toBe('REJECTED');
+  });
+
+  it('keeps a paused or unverified cancelled predecessor fenced', async () => {
+    const { checkout, stripe, organisationId } = await checkoutFixture();
+    await client.db.update(subscriptions).set({
+      status: 'CANCELLED',
+      stripeProviderStatus: 'paused',
+      stripeCustomerId: 'cus_' + organisationId,
+      stripeSubscriptionId: 'sub_' + organisationId
+    }).where(eq(subscriptions.organisationId, organisationId));
+    await expect(checkout()).rejects.toMatchObject({ code: 'CHECKOUT_NOT_AVAILABLE' });
+    await client.db.update(subscriptions).set({ status: 'CANCELLED' }).where(eq(subscriptions.organisationId, organisationId));
+    await expect(checkout()).rejects.toMatchObject({ code: 'CHECKOUT_NOT_AVAILABLE' });
+    expect(stripe.checkoutSessions.size).toBe(0);
+  });
+});
+
+const attemptCheckoutEvent = (
+  request: SoloCheckoutRequest,
+  stripeSessionId: string,
+  status: 'complete' | 'expired'
+): StripeWebhookEvent => ({
+  id: 'evt_' + randomUUID(),
+  type: status === 'complete' ? 'checkout.session.completed' : 'checkout.session.expired',
+  created: Math.floor(now.getTime() / 1000) + 30,
+  data: {
+    object: {
+      object: 'checkout.session',
+      id: stripeSessionId,
+      mode: 'subscription',
+      status,
+      expires_at: request.expiresAt.getTime() / 1000,
+      payment_status: status === 'complete' ? 'paid' : 'unpaid',
+      currency: 'aud',
+      amount_total: status === 'complete' ? 32890 : null,
+      payment_method_types: ['card'],
+      client_reference_id: request.organisationId,
+      metadata: {
+        organisation_id: request.organisationId,
+        plan_code: 'SOLO_AU_2000',
+        checkout_attempt_id: request.attemptId,
+        billing_cadence: request.billingCadence
+      },
+      customer: status === 'complete' ? 'cus_' + request.organisationId : request.stripeCustomerId ?? null,
+      subscription: status === 'complete' ? 'sub_' + request.organisationId : null,
+      invoice: status === 'complete' ? 'in_' + request.organisationId : null
+    }
+  }
+});
+
+const attemptLifecycleEvent = (request: SoloCheckoutRequest, status: 'active' | 'canceled' | 'paused'): StripeWebhookEvent => {
+  currentOrganisationId = request.organisationId;
+  const event = stripeEvent({
+    id: 'evt_' + randomUUID(),
+    created: Math.floor(now.getTime() / 1000) + (status === 'canceled' ? 60 : 15),
+    status,
+    priceId: request.priceId
+  });
+  const object = event.data.object as { metadata: Record<string, unknown>; items: { data: [{ price: { recurring: { interval: string } } }] } };
+  object.metadata.checkout_attempt_id = request.attemptId;
+  object.metadata.billing_cadence = request.billingCadence;
+  object.items.data[0].price.recurring.interval = request.billingCadence === 'ANNUAL' ? 'year' : 'month';
+  return event;
+};

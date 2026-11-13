@@ -274,6 +274,13 @@
       "when": 1794535474311,
       "tag": "0038_flawless_talon",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1794536744180,
+      "tag": "0039_amused_stranger",
+      "breakpoints": true
     }
   ]
 }

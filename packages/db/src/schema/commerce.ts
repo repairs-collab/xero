@@ -121,6 +121,61 @@ export const subscriptions = pgTable(
   ]
 );
 
+export const soloCheckoutAttempts = pgTable(
+  'solo_checkout_attempts',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    organisationId: uuid('organisation_id')
+      .notNull()
+      .references(() => subscriptions.organisationId, { onDelete: 'cascade' }),
+    predecessorStripeSubscriptionId: varchar('predecessor_stripe_subscription_id', { length: 128 }),
+    requestedStripeCustomerId: varchar('requested_stripe_customer_id', { length: 128 }),
+    billingCadence: varchar('billing_cadence', { length: 16 })
+      .$type<SubscriptionBillingCadence>()
+      .notNull(),
+    initiatingUserId: uuid('initiating_user_id').notNull(),
+    customerEmail: text('customer_email'),
+    priceId: varchar('price_id', { length: 128 }).notNull(),
+    automaticTaxEnabled: boolean('automatic_tax_enabled').notNull(),
+    publicOrigin: text('public_origin').notNull(),
+    requestFingerprint: char('request_fingerprint', { length: 64 }).notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    stripeSessionId: varchar('stripe_session_id', { length: 128 }),
+    stripeSessionStatus: varchar('stripe_session_status', { length: 16 })
+      .$type<'open' | 'complete' | 'expired'>(),
+    stripeCustomerId: varchar('stripe_customer_id', { length: 128 }),
+    stripeSubscriptionId: varchar('stripe_subscription_id', { length: 128 }),
+    terminalLifecycleAt: timestamp('terminal_lifecycle_at', { withTimezone: true }),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull()
+  },
+  (table) => [
+    uniqueIndex('solo_checkout_attempts_unresolved_org_uq')
+      .on(table.organisationId)
+      .where(sql`${table.resolvedAt} is null`),
+    uniqueIndex('solo_checkout_attempts_session_uq').on(table.stripeSessionId),
+    uniqueIndex('solo_checkout_attempts_subscription_uq').on(table.stripeSubscriptionId),
+    check('solo_checkout_attempts_cadence_ck', sql`${table.billingCadence} in ('MONTHLY', 'ANNUAL')`),
+    check('solo_checkout_attempts_request_customer_ck', sql`(${table.requestedStripeCustomerId} is null) <> (${table.customerEmail} is null)`),
+    check('solo_checkout_attempts_session_ck', sql`
+      (${table.stripeSessionId} is null) = (${table.stripeSessionStatus} is null)
+      and (${table.stripeSessionStatus} is null or ${table.stripeSessionStatus} in ('open', 'complete', 'expired'))
+    `),
+    check('solo_checkout_attempts_subscription_ck', sql`
+      (${table.stripeSubscriptionId} is null or ${table.stripeCustomerId} is not null)
+      and (${table.stripeSessionStatus} is distinct from 'complete' or ${table.stripeSubscriptionId} is not null)
+      and (${table.terminalLifecycleAt} is null or ${table.stripeSubscriptionId} is not null)
+    `),
+    check('solo_checkout_attempts_resolved_ck', sql`
+      ${table.resolvedAt} is null or (
+        ${table.stripeSessionStatus} is not null and ${table.stripeSessionStatus} in ('complete', 'expired')
+        and (${table.stripeSubscriptionId} is null or ${table.terminalLifecycleAt} is not null)
+      )
+    `)
+  ]
+);
+
 export type DirectDebitRequestStatus =
   | 'REQUESTED'
   | 'SETUP_PENDING'

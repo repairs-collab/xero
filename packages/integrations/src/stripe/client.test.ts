@@ -65,6 +65,10 @@ class FakeStripeApi implements StripeApi {
     url: '/v1/invoice_payments'
   };
 
+  checkoutResponse: unknown;
+  checkoutRetrieveResponse: unknown;
+  checkoutRetrieveCalls: string[] = [];
+
   checkout = {
     sessions: {
       create: (
@@ -72,11 +76,22 @@ class FakeStripeApi implements StripeApi {
         options: { idempotencyKey: string }
       ) => {
         this.checkoutCalls.push({ parameters, options });
-        return Promise.resolve({
+        return Promise.resolve(this.checkoutResponse ?? {
           id: 'cs_solo_checkout',
+          object: 'checkout.session',
+          mode: parameters.mode,
+          status: 'open',
+          metadata: parameters.metadata,
+          client_reference_id: parameters.client_reference_id,
+          customer: parameters.customer ?? null,
+          subscription: null,
           url: 'https://checkout.stripe.com/c/pay/cs_solo_checkout',
-          expires_at: 1_794_312_000
+          expires_at: parameters.expires_at ?? 1_794_312_000
         });
+      },
+      retrieve: (id: string) => {
+        this.checkoutRetrieveCalls.push(id);
+        return Promise.resolve(this.checkoutRetrieveResponse);
       }
     }
   };
@@ -157,20 +172,26 @@ const createClient = (api: StripeApi): StripeBillingClient =>
     webhookToleranceSeconds: 300
   });
 
+const checkoutAttemptId = 'a05f69ec-0fbb-4bc1-8e1f-ae42f09f117e';
+const checkoutRequest = (client: StripeBillingClient, billingCadence: 'MONTHLY' | 'ANNUAL' = 'MONTHLY') => ({
+  ...client.checkoutConfiguration(billingCadence),
+  organisationId: 'org_solo',
+  userId: 'user_owner',
+  customerEmail: 'owner@example.com',
+  billingCadence,
+  attemptId: checkoutAttemptId,
+  expiresAt: new Date(1_794_312_000 * 1000),
+  idempotencyKey: 'solo-checkout:' + checkoutAttemptId
+});
+
 describe('StripeBillingClient checkout', () => {
   it('creates exactly one recurring Solo price with tax, ownership metadata and idempotency', async () => {
     const api = new FakeStripeApi();
     const client = createClient(api);
 
     await expect(
-      client.createSoloCheckout({
-        organisationId: 'org_solo',
-        userId: 'user_owner',
-        customerEmail: 'owner@example.com',
-        billingCadence: 'MONTHLY',
-        idempotencyKey: 'solo-checkout:org_solo:attempt_1'
-      })
-    ).resolves.toEqual({
+      client.createSoloCheckout(checkoutRequest(client))
+    ).resolves.toMatchObject({
       id: 'cs_solo_checkout',
       url: 'https://checkout.stripe.com/c/pay/cs_solo_checkout'
     });
@@ -185,17 +206,22 @@ describe('StripeBillingClient checkout', () => {
           billing_address_collection: 'required',
           tax_id_collection: { enabled: true },
           client_reference_id: 'org_solo',
+          expires_at: 1_794_312_000,
           customer_email: 'owner@example.com',
           metadata: {
             organisation_id: 'org_solo',
             initiating_user_id: 'user_owner',
-            plan_code: 'SOLO_AU_2000'
+            plan_code: 'SOLO_AU_2000',
+            checkout_attempt_id: checkoutAttemptId,
+            billing_cadence: 'MONTHLY'
           },
           subscription_data: {
             metadata: {
               organisation_id: 'org_solo',
               initiating_user_id: 'user_owner',
-              plan_code: 'SOLO_AU_2000'
+              plan_code: 'SOLO_AU_2000',
+              checkout_attempt_id: checkoutAttemptId,
+              billing_cadence: 'MONTHLY'
             }
           },
           success_url:
@@ -203,23 +229,20 @@ describe('StripeBillingClient checkout', () => {
           cancel_url:
             'https://ap.motts.com.au/settings/billing?checkout=cancelled'
         },
-        options: { idempotencyKey: 'solo-checkout:org_solo:attempt_1' }
+        options: { idempotencyKey: 'solo-checkout:' + checkoutAttemptId }
       }
     ]);
   });
 
   it('never forwards a legacy trial deadline into paid Checkout', async () => {
     const api = new FakeStripeApi();
+    const client = createClient(api);
     const legacyRequest = {
-      organisationId: 'org_solo',
-      userId: 'user_owner',
-      customerEmail: 'owner@example.com',
-      billingCadence: 'MONTHLY' as const,
-      idempotencyKey: 'paid-checkout',
+      ...checkoutRequest(client),
       trialEnd: 1_795_392_000
     };
 
-    await createClient(api).createSoloCheckout(legacyRequest);
+    await client.createSoloCheckout(legacyRequest);
 
     expect(api.checkoutCalls[0]?.parameters.subscription_data).not.toHaveProperty(
       'trial_end'
@@ -231,12 +254,9 @@ describe('StripeBillingClient checkout', () => {
     const client = createClient(api);
 
     await client.createSoloCheckout({
-      organisationId: 'org_solo',
-      userId: 'user_owner',
+      ...checkoutRequest(client),
       stripeCustomerId: 'cus_existing',
-      customerEmail: 'ignored@example.com',
-      billingCadence: 'MONTHLY',
-      idempotencyKey: 'solo-checkout:org_solo:attempt_2'
+      customerEmail: 'ignored@example.com'
     });
 
     expect(api.checkoutCalls[0]?.parameters).toMatchObject({
@@ -247,13 +267,8 @@ describe('StripeBillingClient checkout', () => {
 
   it('uses only the configured annual Price and fails closed when it is unavailable', async () => {
     const api = new FakeStripeApi();
-    await createClient(api).createSoloCheckout({
-      organisationId: 'org_solo',
-      userId: 'user_owner',
-      customerEmail: 'owner@example.com',
-      billingCadence: 'ANNUAL',
-      idempotencyKey: 'solo-checkout:org_solo:annual'
-    });
+    const client = createClient(api);
+    await client.createSoloCheckout(checkoutRequest(client, 'ANNUAL'));
     expect(api.checkoutCalls[0]?.parameters).toMatchObject({
       line_items: [{ price: 'price_solo_annual', quantity: 1 }],
       payment_method_types: ['card']
@@ -268,15 +283,7 @@ describe('StripeBillingClient checkout', () => {
       publicBaseUrl: 'https://ap.motts.com.au',
       webhookSecret: 'whsec_test_only'
     });
-    await expect(
-      unavailable.createSoloCheckout({
-        organisationId: 'org_solo',
-        userId: 'user_owner',
-        customerEmail: 'owner@example.com',
-        billingCadence: 'ANNUAL',
-        idempotencyKey: 'solo-checkout:org_solo:annual-unavailable'
-      })
-    ).rejects.toBeInstanceOf(StripeConfigurationFailure);
+    expect(() => unavailable.checkoutConfiguration('ANNUAL')).toThrow(StripeConfigurationFailure);
     expect(unavailableApi.checkoutCalls).toEqual([]);
   });
 
@@ -693,5 +700,100 @@ describe('StripeBillingClient webhook verification', () => {
 
     expect(failure).toBeInstanceOf(StripeWebhookSignatureFailure);
     expect((failure as Error).message).not.toContain('provider details');
+  });
+});
+
+describe('paid Checkout attempts', () => {
+  const attemptId = 'ee53e493-2de8-4bb2-bce6-8b0024c853a0';
+  const metadata = {
+    organisation_id: 'org_solo',
+    initiating_user_id: 'user_owner',
+    plan_code: 'SOLO_AU_2000',
+    checkout_attempt_id: attemptId,
+    billing_cadence: 'MONTHLY'
+  };
+  const request = {
+    organisationId: 'org_solo',
+    userId: 'user_owner',
+    customerEmail: 'owner@example.com',
+    billingCadence: 'MONTHLY' as const,
+    attemptId,
+    expiresAt: new Date(1_794_312_000 * 1000),
+    priceId: 'price_solo_monthly',
+    automaticTaxEnabled: true,
+    publicOrigin: 'https://ap.motts.com.au',
+    idempotencyKey: 'solo-checkout:' + attemptId
+  };
+  const sessionObject = {
+    id: 'cs_solo_checkout',
+    object: 'checkout.session',
+    mode: 'subscription',
+    status: 'open',
+    metadata,
+    client_reference_id: 'org_solo',
+    customer: null,
+    subscription: null,
+    expires_at: 1_794_312_000,
+    url: 'https://checkout.stripe.com/c/pay/cs_solo_checkout'
+  };
+
+  it('replays identical parameters, expiry and attempt metadata across configuration changes', async () => {
+    const api = new FakeStripeApi();
+    api.checkoutResponse = sessionObject;
+    const changedConfiguration = new StripeBillingClient(api, {
+      soloMonthlyPriceId: 'price_changed',
+      priceCurrency: 'aud',
+      automaticTaxEnabled: false,
+      portalConfigurationId: 'bpc_solo',
+      publicBaseUrl: 'https://new.example.com',
+      webhookSecret: 'whsec_test_only'
+    });
+    await createClient(api).createSoloCheckout(request);
+    await changedConfiguration.createSoloCheckout(request);
+    expect(api.checkoutCalls[1]).toEqual(api.checkoutCalls[0]);
+    expect(api.checkoutCalls[0]).toMatchObject({
+      options: { idempotencyKey: 'solo-checkout:' + attemptId },
+      parameters: {
+        expires_at: 1_794_312_000,
+        line_items: [{ price: 'price_solo_monthly', quantity: 1 }],
+        automatic_tax: { enabled: true },
+        metadata,
+        subscription_data: { metadata }
+      }
+    });
+  });
+
+  it.each(['open', 'expired', 'complete'] as const)('retrieves and parses %s status without a provider mutation', async (status) => {
+    const api = new FakeStripeApi();
+    api.checkoutRetrieveResponse = {
+      ...sessionObject,
+      status,
+      url: status === 'open' ? sessionObject.url : null,
+      customer: status === 'complete' ? 'cus_solo' : null,
+      subscription: status === 'complete' ? 'sub_solo' : null
+    };
+    await expect(createClient(api).retrieveSoloCheckout('cs_solo_checkout')).resolves.toMatchObject({
+      status,
+      attemptId,
+      organisationId: 'org_solo',
+      billingCadence: 'MONTHLY',
+      expiresAt: new Date(1_794_312_000 * 1000),
+      stripeCustomerId: status === 'complete' ? 'cus_solo' : null,
+      stripeSubscriptionId: status === 'complete' ? 'sub_solo' : null
+    });
+    expect(api.checkoutRetrieveCalls).toEqual(['cs_solo_checkout']);
+    expect(api.checkoutCalls).toEqual([]);
+  });
+
+  it.each([
+    { id: 'cs_unexpected' },
+    { status: 'unknown' },
+    { metadata: { ...metadata, checkout_attempt_id: 'invalid' } },
+    { client_reference_id: 'org_other' },
+    { expires_at: null }
+  ])('fails closed when provider Session identity or status is invalid', async (changes) => {
+    const api = new FakeStripeApi();
+    api.checkoutRetrieveResponse = { ...sessionObject, ...changes };
+    await expect(createClient(api).retrieveSoloCheckout('cs_solo_checkout')).rejects.toBeInstanceOf(StripeProviderFailure);
   });
 });

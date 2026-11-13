@@ -32,6 +32,30 @@ subscription or organisation rows directly in the database.
 - Never copy card data, Stripe secrets, webhook signatures or raw webhook
   payloads into AccountPulse, tickets, chat or email.
 
+## Paid Checkout cutover
+
+1. Pause new paid Checkout starts on the old release before the cutover.
+2. Inventory old open and recent Solo subscription Checkout Sessions in Stripe
+   Dashboard or through read-only Stripe access. Include Sessions with no
+   Stripe customer yet. Use the organisation in Checkout metadata and the
+   client reference to match those Sessions, and record their Stripe Session IDs.
+3. Hold affected organisations from starting paid Checkout until Stripe confirms
+   each earlier Session expired or completed. For completed Sessions, verify
+   subscription ownership, signed lifecycle reconciliation, and whether multiple
+   subscriptions were created. Escalate ambiguous or duplicate ownership and
+   keep the affected organisations on hold.
+4. Enable the new checkout path only after draining or isolating these holds.
+   Keep checkout disabled if the affected organisations cannot be isolated.
+   A local expiry timestamp cannot clear a hold. Use read-only reconciliation
+   and the existing finance escalation process. This cutover runs without
+   automatic Stripe expiry, cancellation or refunds.
+
+If a new Checkout attempt has no Session ID after a lost provider response, a
+same-option retry during the original attempt window can recover the Session.
+After that window, use Stripe's Session history and signed event delivery to
+match the organisation and attempt UUID. Keep the hold until Stripe evidence
+resolves it. Do not reset or delete an attempt to reopen checkout.
+
 ## Daily review
 
 1. Sign in to the private owner console with the owner account and MFA.

@@ -76,7 +76,7 @@ describe('billing SMS hard-cap copy', () => {
   });
 
   it('renders configured included, used and remaining parts with an explicit blocked limit', async () => {
-    const markup = renderToStaticMarkup(await BillingSettingsPage());
+    const markup = renderToStaticMarkup(await BillingSettingsPage({}));
 
     expect(markup).toContain('2,500 SMS parts per monthly allowance period');
     expect(markup).toContain('1,240 of 2,500 parts used');
@@ -90,6 +90,15 @@ describe('billing SMS hard-cap copy', () => {
     expect(markup).not.toMatch(/overage/i);
   });
 
+  it('shows a recoverable conflict when another Checkout is still being resolved', async () => {
+    const markup = renderToStaticMarkup(await BillingSettingsPage({
+      searchParams: Promise.resolve({ checkout: 'attempt-conflict' })
+    }));
+
+    expect(markup).toContain('A Stripe checkout is already in progress');
+    expect(markup).toContain('Choose the same billing option to reopen it');
+  });
+
   it('renders exact monthly and derived annual AUD pricing before paid signup', async () => {
     getBillingAccountSnapshot.mockResolvedValue({
       ...(await getBillingAccountSnapshot()),
@@ -100,7 +109,7 @@ describe('billing SMS hard-cap copy', () => {
       currentPeriodEnd: null
     });
 
-    const markup = renderToStaticMarkup(await BillingSettingsPage());
+    const markup = renderToStaticMarkup(await BillingSettingsPage({}));
 
     expect(markup).toContain('$299.00 AUD excluding GST');
     expect(markup).toContain('GST $29.90');
@@ -124,7 +133,7 @@ describe('billing SMS hard-cap copy', () => {
       directDebitStatus: null
     });
 
-    const markup = renderToStaticMarkup(await BillingSettingsPage());
+    const markup = renderToStaticMarkup(await BillingSettingsPage({}));
 
     expect(markup).toContain('Request direct debit');
     expect(markup).toContain('reviewed manually');
@@ -141,7 +150,7 @@ describe('billing SMS hard-cap copy', () => {
       directDebitStatus: 'RECONCILIATION_REQUIRED'
     });
 
-    const markup = renderToStaticMarkup(await BillingSettingsPage());
+    const markup = renderToStaticMarkup(await BillingSettingsPage({}));
 
     expect(markup).toContain('Reconciliation required');
     expect(markup).toContain(
@@ -179,7 +188,7 @@ describe('billing SMS hard-cap copy', () => {
       warningPercent: 80
     });
 
-    const markup = renderToStaticMarkup(await BillingSettingsPage());
+    const markup = renderToStaticMarkup(await BillingSettingsPage({}));
 
     expect(markup).toContain('2,500 SMS parts per monthly allowance period');
     expect(markup).toContain('0 of 2,500 parts used');
@@ -210,7 +219,7 @@ describe('billing SMS hard-cap copy', () => {
       createdAt: new Date('2026-10-01T00:00:00.000Z')
     });
 
-    const markup = renderToStaticMarkup(await BillingSettingsPage());
+    const markup = renderToStaticMarkup(await BillingSettingsPage({}));
 
     expect(markup).toContain('Internal legacy account');
     expect(markup).toContain('Allowance exempt');

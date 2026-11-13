@@ -11,6 +11,7 @@ import {
   memberships,
   organisations,
   retiredStripeSubscriptions,
+  soloCheckoutAttempts,
   subscriptionEvents,
   subscriptions,
   transactionalEmailOutbox,
@@ -19,10 +20,15 @@ import {
 
 import {
   decideStripeEventApplication,
+  isTerminalStripeSubscription,
   retainedTrialEnd,
+  SubscriptionFailure,
   shouldRetireIgnoredReplacementCandidate,
   type BillingAccount,
+  type CheckoutSessionDisposition,
+  type CheckoutSessionEvidence,
   type DirectDebitRequestRecord,
+  type SoloCheckoutAttempt,
   type LegacyDirectDebitReconciliation,
   type StripeCheckoutCompletedInput,
   type StripeEventApplicationOutcome,
@@ -215,6 +221,220 @@ const toLegacyDirectDebitReconciliation = (
   };
 };
 
+type SubscriptionRow = typeof subscriptions.$inferSelect;
+type CheckoutAttemptRow = typeof soloCheckoutAttempts.$inferSelect;
+
+const lockBillingRows = async (transaction: DbTransaction, organisationId: string) => {
+  const [organisation] = await transaction
+    .select({ edition: organisations.edition })
+    .from(organisations)
+    .where(eq(organisations.id, organisationId))
+    .for('update')
+    .limit(1);
+  const [subscription] = await transaction
+    .select()
+    .from(subscriptions)
+    .where(eq(subscriptions.organisationId, organisationId))
+    .for('update')
+    .limit(1);
+  return { organisation, subscription };
+};
+
+const canReplaceSubscription = (subscription: SubscriptionRow): boolean =>
+  subscription.stripeSubscriptionId === null ||
+  (subscription.status === 'CANCELLED' &&
+    subscription.stripeCustomerId !== null &&
+    isTerminalStripeSubscription(subscription.trustedStripeProviderStatus));
+
+const attemptRequest = (row: CheckoutAttemptRow): SoloCheckoutAttempt => ({
+  stripeSessionId: row.stripeSessionId,
+  request: {
+    organisationId: row.organisationId,
+    userId: row.initiatingUserId,
+    billingCadence: row.billingCadence,
+    customerEmail: row.customerEmail,
+    ...(row.requestedStripeCustomerId === null ? {} : { stripeCustomerId: row.requestedStripeCustomerId }),
+    priceId: row.priceId,
+    automaticTaxEnabled: row.automaticTaxEnabled,
+    publicOrigin: row.publicOrigin,
+    attemptId: row.id,
+    expiresAt: row.expiresAt,
+    idempotencyKey: `solo-checkout:${row.id}`
+  }
+});
+
+const lockCheckoutAttempt = async (
+  transaction: DbTransaction,
+  organisationId: string,
+  attemptId: string
+): Promise<CheckoutAttemptRow | undefined> => {
+  const [attempt] = await transaction.select().from(soloCheckoutAttempts)
+    .where(and(eq(soloCheckoutAttempts.organisationId, organisationId), eq(soloCheckoutAttempts.id, attemptId)))
+    .for('update')
+    .limit(1);
+  return attempt;
+};
+
+const attemptMatchesEpisode = (
+  attempt: CheckoutAttemptRow,
+  subscription: SubscriptionRow,
+  customerId: string | null,
+  subscriptionId: string | null,
+  allowResolved = false
+): boolean => {
+  const knownCustomerId = attempt.stripeCustomerId ?? attempt.requestedStripeCustomerId;
+  const currentIsPredecessor = subscription.stripeSubscriptionId === attempt.predecessorStripeSubscriptionId;
+  return (
+    (attempt.resolvedAt === null || (allowResolved && !currentIsPredecessor)) &&
+    (currentIsPredecessor ? canReplaceSubscription(subscription) : subscription.stripeSubscriptionId === attempt.stripeSubscriptionId) &&
+    (knownCustomerId === null || knownCustomerId === customerId) &&
+    (subscription.stripeCustomerId === null || subscription.stripeCustomerId === customerId) &&
+    (subscriptionId === null || (
+      subscriptionId !== attempt.predecessorStripeSubscriptionId &&
+      (attempt.stripeSubscriptionId === null || attempt.stripeSubscriptionId === subscriptionId)
+    ))
+  );
+};
+
+const sessionMatchesAttempt = (
+  attempt: CheckoutAttemptRow,
+  subscription: SubscriptionRow,
+  evidence: CheckoutSessionEvidence,
+  allowResolved = false
+): boolean =>
+  attemptMatchesEpisode(
+    attempt,
+    subscription,
+    evidence.stripeCustomerId ?? (
+      attempt.requestedStripeCustomerId === null && evidence.status === 'expired'
+        ? attempt.stripeCustomerId
+        : null
+    ),
+    evidence.stripeSubscriptionId,
+    allowResolved
+  ) &&
+  evidence.billingCadence === attempt.billingCadence &&
+  evidence.expiresAt.getTime() === attempt.expiresAt.getTime() &&
+  (attempt.stripeSessionId === null || attempt.stripeSessionId === evidence.id) &&
+  (attempt.stripeSessionStatus === null ||
+    attempt.stripeSessionStatus === 'open' ||
+    attempt.stripeSessionStatus === evidence.status);
+
+const conflictsWithCheckoutHistory = async (
+  transaction: DbTransaction,
+  subscription: SubscriptionRow,
+  incomingSubscriptionId: string
+): Promise<boolean> => {
+  const [attempt] = await transaction
+    .select({ id: soloCheckoutAttempts.id })
+    .from(soloCheckoutAttempts)
+    .where(and(
+      eq(soloCheckoutAttempts.organisationId, subscription.organisationId),
+      subscription.stripeSubscriptionId === incomingSubscriptionId
+        ? eq(soloCheckoutAttempts.stripeSubscriptionId, incomingSubscriptionId)
+        : undefined
+    ))
+    .limit(1);
+  return attempt !== undefined;
+};
+
+const checkoutAttemptIdentityConflict = async (
+  transaction: DbTransaction,
+  organisationId: string,
+  attemptId: string | undefined,
+  customerId: string | null,
+  subscriptionId: string | null,
+  sessionId?: string
+): Promise<boolean> => {
+  const identity = or(
+    sessionId === undefined ? undefined : eq(soloCheckoutAttempts.stripeSessionId, sessionId),
+    subscriptionId === null ? undefined : eq(soloCheckoutAttempts.stripeSubscriptionId, subscriptionId),
+    customerId === null ? undefined : and(
+      sql`${soloCheckoutAttempts.organisationId} <> ${organisationId}`,
+      eq(soloCheckoutAttempts.stripeCustomerId, customerId)
+    )
+  );
+  if (identity === undefined) return false;
+  const [conflict] = await transaction.select({ id: soloCheckoutAttempts.id })
+    .from(soloCheckoutAttempts)
+    .where(and(
+      attemptId === undefined ? undefined : sql`${soloCheckoutAttempts.id} <> ${attemptId}`,
+      identity
+    ))
+    .limit(1);
+  return conflict !== undefined;
+};
+
+const checkoutIdentityOwnedElsewhere = async (
+  transaction: DbTransaction,
+  evidence: CheckoutSessionEvidence
+): Promise<boolean> => {
+  if (await checkoutAttemptIdentityConflict(
+    transaction,
+    evidence.organisationId,
+    evidence.attemptId,
+    evidence.stripeCustomerId,
+    evidence.stripeSubscriptionId,
+    evidence.id
+  )) return true;
+  if (evidence.stripeCustomerId === null && evidence.stripeSubscriptionId === null) return false;
+  const [otherSubscription] = await transaction.select({ organisationId: subscriptions.organisationId })
+    .from(subscriptions)
+    .where(and(
+      sql`${subscriptions.organisationId} <> ${evidence.organisationId}`,
+      or(
+        evidence.stripeCustomerId === null ? undefined : eq(subscriptions.stripeCustomerId, evidence.stripeCustomerId),
+        evidence.stripeSubscriptionId === null ? undefined : eq(subscriptions.stripeSubscriptionId, evidence.stripeSubscriptionId)
+      )
+    ))
+    .limit(1);
+  return otherSubscription !== undefined;
+};
+
+const persistAttemptSession = async (
+  transaction: DbTransaction,
+  attempt: CheckoutAttemptRow,
+  evidence: CheckoutSessionEvidence,
+  now: Date
+): Promise<CheckoutSessionDisposition> => {
+  const stripeSubscriptionId = evidence.stripeSubscriptionId ?? attempt.stripeSubscriptionId;
+  const terminal = evidence.status !== 'open';
+  const resolved = terminal && (stripeSubscriptionId === null || attempt.terminalLifecycleAt !== null);
+  await transaction.update(soloCheckoutAttempts).set({
+    stripeSessionId: evidence.id,
+    stripeSessionStatus: evidence.status,
+    stripeCustomerId: evidence.stripeCustomerId ?? attempt.stripeCustomerId,
+    stripeSubscriptionId,
+    resolvedAt: resolved ? now : null,
+    updatedAt: now
+  }).where(eq(soloCheckoutAttempts.id, attempt.id));
+  if (resolved) return 'RESOLVED';
+  return terminal || stripeSubscriptionId !== null ? 'FENCED' : 'OPEN';
+};
+
+const lockCheckoutSessionOwnership = (
+  transaction: DbTransaction,
+  evidence: CheckoutSessionEvidence,
+  currentSubscriptionId: string | null
+): Promise<void> => lockStripeSubscriptionOwnership(transaction, [
+  evidence.id,
+  evidence.stripeSubscriptionId,
+  evidence.stripeCustomerId,
+  currentSubscriptionId
+]);
+
+const isRetiredStripeSubscription = async (
+  transaction: DbTransaction,
+  stripeSubscriptionId: string | null
+): Promise<boolean> => {
+  if (stripeSubscriptionId === null) return false;
+  const [retired] = await transaction.select({ id: retiredStripeSubscriptions.stripeSubscriptionId })
+    .from(retiredStripeSubscriptions)
+    .where(eq(retiredStripeSubscriptions.stripeSubscriptionId, stripeSubscriptionId))
+    .limit(1);
+  return retired !== undefined;
+};
+
 export const createPostgresSubscriptionRepository = (
   database: Database,
   clock: { now(): Date }
@@ -306,6 +526,123 @@ export const createPostgresSubscriptionRepository = (
       : 'HASH_MISMATCH';
   };
 
+  const reserveCheckout: SubscriptionRepository['reserveCheckout'] = async (input) =>
+    database.transaction(async (transaction) => {
+      const { organisation, subscription } = await lockBillingRows(transaction, input.organisationId);
+      if (organisation === undefined || subscription === undefined) {
+        throw new SubscriptionFailure('SUBSCRIPTION_NOT_FOUND');
+      }
+      if (organisation.edition !== 'SOLO') throw new SubscriptionFailure('BILLING_NOT_APPLICABLE');
+
+      const [actor] = await transaction.select({ email: users.email })
+        .from(memberships)
+        .innerJoin(users, eq(users.id, memberships.userId))
+        .where(and(
+          eq(memberships.organisationId, input.organisationId),
+          eq(memberships.userId, input.userId),
+          eq(memberships.role, 'ADMIN'),
+          isNull(memberships.disabledAt),
+          isNull(users.disabledAt)
+        ))
+        .for('share')
+        .limit(1);
+      if (actor === undefined) throw new SubscriptionFailure('FORBIDDEN');
+
+      const [existing] = await transaction.select().from(soloCheckoutAttempts)
+        .where(and(
+          eq(soloCheckoutAttempts.organisationId, input.organisationId),
+          isNull(soloCheckoutAttempts.resolvedAt)
+        ))
+        .for('update')
+        .limit(1);
+      if (existing !== undefined) return attemptRequest(existing);
+      if (!canReplaceSubscription(subscription)) throw new SubscriptionFailure('CHECKOUT_NOT_AVAILABLE');
+
+      const now = clock.now();
+      const immutableInputs = {
+        organisationId: input.organisationId,
+        predecessorStripeSubscriptionId: subscription.stripeSubscriptionId,
+        requestedStripeCustomerId: subscription.stripeCustomerId,
+        billingCadence: input.billingCadence,
+        initiatingUserId: input.userId,
+        customerEmail: subscription.stripeCustomerId === null ? actor.email.trim() : null,
+        priceId: input.configuration.priceId,
+        automaticTaxEnabled: input.configuration.automaticTaxEnabled,
+        publicOrigin: input.configuration.publicOrigin,
+        expiresAt: new Date(Math.floor(now.getTime() / 1000) * 1000 + 3_600_000)
+      };
+      const requestFingerprint = createHash('sha256').update(JSON.stringify(immutableInputs)).digest('hex');
+      const [created] = await transaction.insert(soloCheckoutAttempts).values({
+        ...immutableInputs,
+        requestFingerprint,
+        createdAt: now,
+        updatedAt: now
+      }).returning();
+      if (created === undefined) throw new Error('Could not reserve paid Checkout');
+      return attemptRequest(created);
+    });
+
+  const recordCheckoutSession: SubscriptionRepository['recordCheckoutSession'] = async (input) =>
+    database.transaction(async (transaction) => {
+      const { organisation, subscription } = await lockBillingRows(transaction, input.organisationId);
+      if (organisation?.edition !== 'SOLO' || subscription === undefined) {
+        throw new SubscriptionFailure('CHECKOUT_NOT_AVAILABLE');
+      }
+      await lockCheckoutSessionOwnership(transaction, input, subscription.stripeSubscriptionId);
+      const attempt = await lockCheckoutAttempt(transaction, input.organisationId, input.attemptId);
+      if (attempt?.resolvedAt && attempt.stripeSessionId === input.id) return 'RESOLVED';
+      if (
+        attempt === undefined ||
+        !sessionMatchesAttempt(attempt, subscription, input) ||
+        await checkoutIdentityOwnedElsewhere(transaction, input) ||
+        await isRetiredStripeSubscription(transaction, input.stripeSubscriptionId)
+      ) {
+        return 'FENCED';
+      }
+      return persistAttemptSession(transaction, attempt, input, clock.now());
+    });
+
+  const applyCheckoutExpired: SubscriptionRepository['applyCheckoutExpired'] = async (input) => {
+    try {
+      return await database.transaction(async (transaction) => {
+        const { organisation, subscription } = await lockBillingRows(transaction, input.organisationId);
+        if (organisation === undefined || subscription === undefined) return 'REJECTED';
+
+        const [duplicate] = await transaction.select({ payloadHash: subscriptionEvents.payloadHash })
+          .from(subscriptionEvents)
+          .where(eq(subscriptionEvents.stripeEventId, input.eventId))
+          .limit(1);
+        if (duplicate !== undefined) {
+          if (duplicate.payloadHash !== input.payloadHash) throw new Error('STRIPE_EVENT_PAYLOAD_MISMATCH');
+          return 'DUPLICATE';
+        }
+
+        const evidence = input.checkoutSession;
+        await lockCheckoutSessionOwnership(transaction, evidence, subscription.stripeSubscriptionId);
+        const attempt = await lockCheckoutAttempt(transaction, input.organisationId, evidence.attemptId);
+        const valid =
+          organisation.edition === 'SOLO' &&
+          evidence.organisationId === input.organisationId &&
+          evidence.status === 'expired' &&
+          attempt !== undefined &&
+          sessionMatchesAttempt(attempt, subscription, evidence) &&
+          !(await checkoutIdentityOwnedElsewhere(transaction, evidence)) &&
+          !(await isRetiredStripeSubscription(transaction, evidence.stripeSubscriptionId));
+        if (valid) await persistAttemptSession(transaction, attempt, evidence, clock.now());
+        const outcome = valid ? 'APPLIED' : 'REJECTED';
+        await insertEvent(transaction, input, outcome);
+        return outcome;
+      });
+    } catch (error) {
+      if (postgresErrorCode(error) === '23505') {
+        const replay = await lookupEventReplay(input);
+        if (replay === 'DUPLICATE') return 'DUPLICATE';
+        if (replay === 'HASH_MISMATCH') throw new Error('STRIPE_EVENT_PAYLOAD_MISMATCH');
+      }
+      throw error;
+    }
+  };
+
   const applyCheckoutCompleted = async (
     input: StripeCheckoutCompletedInput
   ): Promise<StripeEventApplicationOutcome> => {
@@ -323,18 +660,7 @@ export const createPostgresSubscriptionRepository = (
           return 'DUPLICATE';
         }
 
-        const [organisation] = await transaction
-          .select({ edition: organisations.edition })
-          .from(organisations)
-          .where(eq(organisations.id, input.organisationId))
-          .for('update')
-          .limit(1);
-        const [subscription] = await transaction
-          .select()
-          .from(subscriptions)
-          .where(eq(subscriptions.organisationId, input.organisationId))
-          .for('update')
-          .limit(1);
+        const { organisation, subscription } = await lockBillingRows(transaction, input.organisationId);
         if (organisation === undefined || subscription === undefined) {
           throw new Error('SUBSCRIPTION_NOT_FOUND');
         }
@@ -343,29 +669,48 @@ export const createPostgresSubscriptionRepository = (
           return 'REJECTED';
         }
 
+        const evidence = input.checkoutSession;
         await lockStripeSubscriptionOwnership(transaction, [
+          evidence?.id ?? null,
+          input.stripeCustomerId,
           input.stripeSubscriptionId,
           subscription.stripeSubscriptionId
         ]);
+        const attempt = evidence === undefined
+          ? undefined
+          : await lockCheckoutAttempt(transaction, input.organisationId, evidence.attemptId);
+        if (evidence === undefined
+          ? await conflictsWithCheckoutHistory(transaction, subscription, input.stripeSubscriptionId) ||
+            await checkoutAttemptIdentityConflict(transaction, input.organisationId, undefined, input.stripeCustomerId, input.stripeSubscriptionId)
+          : attempt === undefined ||
+            evidence.organisationId !== input.organisationId ||
+            evidence.status !== 'complete' ||
+            evidence.stripeCustomerId !== input.stripeCustomerId ||
+            evidence.stripeSubscriptionId !== input.stripeSubscriptionId ||
+            !sessionMatchesAttempt(attempt, subscription, evidence, true) ||
+            await checkoutIdentityOwnedElsewhere(transaction, evidence)
+        ) {
+          await insertEvent(transaction, input, 'REJECTED');
+          return 'REJECTED';
+        }
 
         const [retired] = await transaction.select({ id: retiredStripeSubscriptions.stripeSubscriptionId })
           .from(retiredStripeSubscriptions)
           .where(eq(retiredStripeSubscriptions.stripeSubscriptionId, input.stripeSubscriptionId)).limit(1);
-        const latestCheckoutAt = await latestAppliedCheckoutAt(
-          transaction,
-          input.organisationId
-        );
+        const latestCheckoutAt = attempt === undefined
+          ? await latestAppliedCheckoutAt(transaction, input.organisationId)
+          : null;
         const decision = decideStripeEventApplication({
           eventAlreadyProcessed: false,
           eventCreatedAt: input.eventCreatedAt,
-          lastAppliedAt: subscription.stripeSubscriptionId !== input.stripeSubscriptionId ? subscription.lastStripeEventCreatedAt : null,
+          lastAppliedAt: attempt === undefined && subscription.stripeSubscriptionId !== input.stripeSubscriptionId ? subscription.lastStripeEventCreatedAt : null,
           lastAppliedCheckoutAt: latestCheckoutAt,
           existingCustomerId: subscription.stripeCustomerId,
           incomingCustomerId: input.stripeCustomerId,
           existingSubscriptionId: subscription.stripeSubscriptionId,
           incomingSubscriptionId: input.stripeSubscriptionId,
           existingStatus: subscription.status,
-          allowReplacement: true,
+          allowReplacement: canReplaceSubscription(subscription),
           isRetired: retired !== undefined
         });
         if (decision !== 'APPLIED') {
@@ -412,7 +757,8 @@ export const createPostgresSubscriptionRepository = (
           return 'REJECTED';
         }
 
-        if (subscription.stripeSubscriptionId !== null && subscription.stripeSubscriptionId !== input.stripeSubscriptionId) {
+        const replacesBillingEpisode = subscription.stripeSubscriptionId !== input.stripeSubscriptionId;
+        if (subscription.stripeSubscriptionId !== null && replacesBillingEpisode) {
           await transaction.insert(retiredStripeSubscriptions).values({ stripeSubscriptionId: subscription.stripeSubscriptionId, organisationId: input.organisationId });
         }
         const sameBillingEpisode =
@@ -423,6 +769,14 @@ export const createPostgresSubscriptionRepository = (
           .set({
             stripeCustomerId: input.stripeCustomerId,
             stripeSubscriptionId: input.stripeSubscriptionId,
+            // Checkout establishes payment evidence. The prior subscription's
+            // lifecycle evidence must never follow its replacement.
+            ...(replacesBillingEpisode
+              ? {
+                  stripeProviderStatus: null,
+                  ...(attempt === undefined ? {} : { lastStripeEventCreatedAt: null })
+                }
+              : {}),
             initialCardStripeSubscriptionId: input.stripeSubscriptionId,
             initialCardInvoiceId:
               sameBillingEpisode
@@ -437,6 +791,9 @@ export const createPostgresSubscriptionRepository = (
             updatedAt: clock.now()
           })
           .where(eq(subscriptions.organisationId, input.organisationId));
+        if (attempt !== undefined && attempt.resolvedAt === null && evidence !== undefined) {
+          await persistAttemptSession(transaction, attempt, evidence, clock.now());
+        }
         await insertEvent(transaction, input, 'APPLIED');
         await transaction.insert(auditEvents).values({
           organisationId: input.organisationId,
@@ -480,18 +837,7 @@ export const createPostgresSubscriptionRepository = (
           return 'DUPLICATE';
         }
 
-        const [organisation] = await transaction
-          .select({ edition: organisations.edition })
-          .from(organisations)
-          .where(eq(organisations.id, input.organisationId))
-          .for('update')
-          .limit(1);
-        const [subscription] = await transaction
-          .select()
-          .from(subscriptions)
-          .where(eq(subscriptions.organisationId, input.organisationId))
-          .for('update')
-          .limit(1);
+        const { organisation, subscription } = await lockBillingRows(transaction, input.organisationId);
         if (organisation === undefined || subscription === undefined) {
           throw new Error('SUBSCRIPTION_NOT_FOUND');
         }
@@ -501,9 +847,24 @@ export const createPostgresSubscriptionRepository = (
         }
 
         await lockStripeSubscriptionOwnership(transaction, [
+          input.stripeCustomerId,
           input.stripeSubscriptionId,
           subscription.stripeSubscriptionId
         ]);
+
+        const attempt = input.attemptId === undefined
+          ? undefined
+          : await lockCheckoutAttempt(transaction, input.organisationId, input.attemptId);
+        if (input.attemptId === undefined
+          ? await conflictsWithCheckoutHistory(transaction, subscription, input.stripeSubscriptionId)
+          : attempt === undefined ||
+            !attemptMatchesEpisode(attempt, subscription, input.stripeCustomerId, input.stripeSubscriptionId) ||
+            attempt.billingCadence !== input.billingCadence ||
+            attempt.priceId !== input.priceId
+        ) {
+          await insertEvent(transaction, input, 'REJECTED');
+          return 'REJECTED';
+        }
 
         const [ownedElsewhere] = await transaction
           .select({ organisationId: subscriptions.organisationId })
@@ -521,27 +882,33 @@ export const createPostgresSubscriptionRepository = (
         const [retired] = await transaction.select({ id: retiredStripeSubscriptions.stripeSubscriptionId })
           .from(retiredStripeSubscriptions)
           .where(eq(retiredStripeSubscriptions.stripeSubscriptionId, input.stripeSubscriptionId)).limit(1);
-        const latestCheckoutAt = await latestAppliedCheckoutAt(
-          transaction,
-          input.organisationId
-        );
+        const latestCheckoutAt = attempt === undefined
+          ? await latestAppliedCheckoutAt(transaction, input.organisationId)
+          : null;
         const ownershipMismatch =
-          ownedElsewhere !== undefined &&
-          ownedElsewhere.organisationId !== input.organisationId;
-        const decision = ownershipMismatch
+          (ownedElsewhere !== undefined && ownedElsewhere.organisationId !== input.organisationId) ||
+          await checkoutAttemptIdentityConflict(transaction, input.organisationId, input.attemptId, input.stripeCustomerId, input.stripeSubscriptionId);
+        const terminalLifecycle = isTerminalStripeSubscription(input.stripeProviderStatus);
+        const sameSubscription = subscription.stripeSubscriptionId === input.stripeSubscriptionId;
+        const existingTerminalLifecycle = sameSubscription &&
+          isTerminalStripeSubscription(subscription.trustedStripeProviderStatus);
+        const terminalOverSameSecond = terminalLifecycle && !existingTerminalLifecycle &&
+          sameSubscription &&
+          subscription.lastStripeEventCreatedAt?.getTime() === input.eventCreatedAt.getTime();
+        const decision = ownershipMismatch || (existingTerminalLifecycle && !terminalLifecycle)
           ? 'REJECTED'
           : decideStripeEventApplication({
               eventAlreadyProcessed: false,
               eventCreatedAt: input.eventCreatedAt,
-              lastAppliedAt: subscription.lastStripeEventCreatedAt,
+              lastAppliedAt: attempt !== undefined && !sameSubscription ? null : subscription.lastStripeEventCreatedAt,
               lastAppliedCheckoutAt: latestCheckoutAt,
               existingCustomerId: subscription.stripeCustomerId,
               incomingCustomerId: input.stripeCustomerId,
               existingSubscriptionId: subscription.stripeSubscriptionId,
               incomingSubscriptionId: input.stripeSubscriptionId,
-              existingStatus: subscription.status,
+              ...(terminalOverSameSecond ? {} : { existingStatus: subscription.status }),
               incomingStatus: input.status,
-              allowReplacement: true,
+              allowReplacement: canReplaceSubscription(subscription),
               isRetired: retired !== undefined
             });
         if (decision !== 'APPLIED') {
@@ -598,6 +965,17 @@ export const createPostgresSubscriptionRepository = (
             updatedAt: now
           })
           .where(eq(subscriptions.organisationId, input.organisationId));
+        if (attempt !== undefined) {
+          const terminalLifecycleAt = terminalLifecycle ? input.eventCreatedAt : null;
+          const sessionTerminal = attempt.stripeSessionStatus === 'complete' || attempt.stripeSessionStatus === 'expired';
+          await transaction.update(soloCheckoutAttempts).set({
+            stripeCustomerId: input.stripeCustomerId,
+            stripeSubscriptionId: input.stripeSubscriptionId,
+            terminalLifecycleAt,
+            resolvedAt: terminalLifecycle && sessionTerminal ? now : null,
+            updatedAt: now
+          }).where(eq(soloCheckoutAttempts.id, attempt.id));
+        }
         if (unsafeForSending.has(input.status)) {
           await transaction
             .update(organisations)
@@ -1906,6 +2284,9 @@ export const createPostgresSubscriptionRepository = (
 
   return {
     loadBillingAccount,
+    reserveCheckout,
+    recordCheckoutSession,
+    applyCheckoutExpired,
     lookupEventReplay,
     applyLifecycleEvent,
     applyCheckoutCompleted,

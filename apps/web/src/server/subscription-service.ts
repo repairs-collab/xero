@@ -6,13 +6,21 @@ import type {
   AccountPulseSubscriptionStatus,
   DirectDebitActivationRequest,
   DirectDebitSetupRequest,
+  SoloBillingCadence,
+  SoloCheckoutConfiguration,
   SoloCheckoutRequest,
   StripeChargeOwnership,
+  StripeCheckoutSession,
   StripeHostedSession,
   StripeHostedSetupSession,
   StripeWebhookEvent
 } from '@bc5000/integrations/stripe';
-import { mapStripeSubscriptionStatus } from '@bc5000/integrations/stripe';
+import {
+  isStripeCheckoutAttemptId,
+  mapStripeSubscriptionStatus,
+  parseStripeCheckoutSession,
+  StripeProviderFailure
+} from '@bc5000/integrations/stripe';
 
 export interface BillingAccount {
   organisationId: string;
@@ -44,7 +52,9 @@ export interface BillingAccount {
 }
 
 export interface StripeBillingGateway {
-  createSoloCheckout(request: SoloCheckoutRequest): Promise<StripeHostedSession>;
+  checkoutConfiguration(cadence: SoloBillingCadence): SoloCheckoutConfiguration;
+  createSoloCheckout(request: SoloCheckoutRequest): Promise<StripeCheckoutSession>;
+  retrieveSoloCheckout(sessionId: string): Promise<StripeCheckoutSession>;
   createBillingPortal(customerId: string): Promise<StripeHostedSession>;
   createDirectDebitSetup(
     request: DirectDebitSetupRequest
@@ -82,6 +92,8 @@ export interface StripeLifecycleEventInput {
   trialEndsAt: Date | null;
   cancelAt: Date | null;
   cancelledAt: Date | null;
+  attemptId?: string;
+  priceId?: string;
 }
 
 export interface StripeCheckoutCompletedInput {
@@ -94,7 +106,29 @@ export interface StripeCheckoutCompletedInput {
   stripeSubscriptionId: string;
   initialCardInvoiceId: string;
   initialCardPaymentSucceededAt: Date;
+  checkoutSession?: CheckoutSessionEvidence;
 }
+
+export type CheckoutSessionEvidence = Omit<StripeCheckoutSession, 'url'>;
+
+export interface StripeCheckoutExpiredInput {
+  organisationId: string;
+  eventId: string;
+  eventType: 'checkout.session.expired';
+  eventCreatedAt: Date;
+  payloadHash: string;
+  checkoutSession: CheckoutSessionEvidence;
+}
+
+export interface SoloCheckoutAttempt {
+  request: SoloCheckoutRequest;
+  stripeSessionId: string | null;
+}
+
+export type CheckoutSessionDisposition = 'OPEN' | 'FENCED' | 'RESOLVED';
+
+export const isTerminalStripeSubscription = (status: string | null | undefined): boolean =>
+  status === 'canceled' || status === 'incomplete_expired';
 
 export interface StripeOperationalEventInput {
   eventId: string;
@@ -208,6 +242,14 @@ export interface SubscriptionRepository {
     organisationId: string,
     userId: string
   ): Promise<BillingAccount | null>;
+  reserveCheckout(input: {
+    organisationId: string;
+    userId: string;
+    billingCadence: SoloBillingCadence;
+    configuration: SoloCheckoutConfiguration;
+  }): Promise<SoloCheckoutAttempt>;
+  recordCheckoutSession(input: CheckoutSessionEvidence): Promise<CheckoutSessionDisposition>;
+  applyCheckoutExpired(input: StripeCheckoutExpiredInput): Promise<StripeEventApplicationOutcome>;
   applyLifecycleEvent(
     input: StripeLifecycleEventInput
   ): Promise<StripeEventApplicationOutcome>;
@@ -290,6 +332,13 @@ export class SubscriptionFailure extends Error {
   }
 }
 
+export class CheckoutAttemptConflict extends SubscriptionFailure {
+  constructor() {
+    super('CHECKOUT_ATTEMPT_CONFLICT');
+    this.name = 'CheckoutAttemptConflict';
+  }
+}
+
 interface StripeEventDecisionInput {
   eventAlreadyProcessed: boolean;
   eventCreatedAt: Date;
@@ -310,6 +359,15 @@ export const decideStripeEventApplication = (
 ): StripeEventApplicationOutcome => {
   if (input.eventAlreadyProcessed) return 'DUPLICATE';
   if (
+    input.existingStatus === 'CANCELLED' && input.existingSubscriptionId !== null &&
+    input.existingSubscriptionId !== input.incomingSubscriptionId &&
+    input.existingCustomerId === input.incomingCustomerId && !input.isRetired &&
+    input.lastAppliedCheckoutAt != null &&
+    input.eventCreatedAt.getTime() <= input.lastAppliedCheckoutAt.getTime()
+  ) {
+    return 'IGNORED_OUT_OF_ORDER';
+  }
+  if (
     (input.existingCustomerId !== null &&
       input.existingCustomerId !== input.incomingCustomerId) ||
     (input.existingSubscriptionId !== null &&
@@ -322,11 +380,6 @@ export const decideStripeEventApplication = (
     input.lastAppliedAt !== null &&
     input.eventCreatedAt.getTime() < input.lastAppliedAt.getTime()
   ) {
-    return 'IGNORED_OUT_OF_ORDER';
-  }
-  if (input.existingStatus === 'CANCELLED' && input.existingSubscriptionId !== null &&
-    input.existingSubscriptionId !== input.incomingSubscriptionId && input.lastAppliedCheckoutAt != null &&
-    input.eventCreatedAt.getTime() <= input.lastAppliedCheckoutAt.getTime()) {
     return 'IGNORED_OUT_OF_ORDER';
   }
   const risk: Record<AccountPulseSubscriptionStatus, number> = {
@@ -444,6 +497,34 @@ const directDebitMetadataFor = (
 const payloadHash = (rawBody: string | Buffer): string =>
   createHash('sha256').update(rawBody).digest('hex');
 
+const parseAttemptCheckoutSession = (
+  object: Record<string, unknown>
+): CheckoutSessionEvidence => {
+  try {
+    return parseStripeCheckoutSession(object);
+  } catch (error) {
+    if (!(error instanceof StripeProviderFailure)) throw error;
+    throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
+  }
+};
+
+const parseCheckoutExpired = (
+  event: StripeWebhookEvent,
+  hash: string,
+  object: Record<string, unknown>
+): StripeCheckoutExpiredInput => {
+  const checkoutSession = parseAttemptCheckoutSession(object);
+  if (checkoutSession.status !== 'expired') throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
+  return {
+    organisationId: checkoutSession.organisationId,
+    eventId: event.id,
+    eventType: 'checkout.session.expired',
+    eventCreatedAt: eventDate(event.created),
+    payloadHash: hash,
+    checkoutSession
+  };
+};
+
 const parseCheckoutCompleted = (
   event: StripeWebhookEvent,
   hash: string
@@ -478,7 +559,10 @@ const parseCheckoutCompleted = (
     stripeCustomerId: requiredString(object.customer),
     stripeSubscriptionId: requiredString(object.subscription),
     initialCardInvoiceId: requiredString(object.invoice),
-    initialCardPaymentSucceededAt: paidAt
+    initialCardPaymentSucceededAt: paidAt,
+    ...('checkout_attempt_id' in objectValue(object.metadata)
+      ? { checkoutSession: parseAttemptCheckoutSession(object) }
+      : {})
   };
 };
 
@@ -500,19 +584,23 @@ const parseLifecycleEvent = (
   const price = objectValue(item.price);
   const recurring = objectValue(price.recurring);
   const intervalCount = recurring.interval_count ?? 1;
-  const billingCadence =
-    price.id === expectedPriceIds.monthly &&
-    recurring.interval === 'month' &&
-    intervalCount === 1
-      ? ('MONTHLY' as const)
-      : expectedPriceIds.annual !== null &&
-          price.id === expectedPriceIds.annual &&
-          recurring.interval === 'year' &&
-          intervalCount === 1
-        ? ('ANNUAL' as const)
-        : null;
+  const stripeMetadata = objectValue(object.metadata);
+  const attemptId = stripeMetadata.checkout_attempt_id;
+  if ('checkout_attempt_id' in stripeMetadata && !isStripeCheckoutAttemptId(attemptId)) {
+    throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
+  }
+  const priceId = requiredString(price.id, 'STRIPE_PLAN_MISMATCH');
+  const billingCadence = recurring.interval === 'month'
+    ? 'MONTHLY'
+    : recurring.interval === 'year'
+      ? 'ANNUAL'
+      : null;
   if (
     billingCadence === null ||
+    intervalCount !== 1 ||
+    (attemptId === undefined
+      ? priceId !== (billingCadence === 'MONTHLY' ? expectedPriceIds.monthly : expectedPriceIds.annual)
+      : object.object !== 'subscription' || stripeMetadata.billing_cadence !== billingCadence) ||
     price.currency !== 'aud' ||
     object.currency !== 'aud' ||
     !Number.isSafeInteger(intervalCount)
@@ -554,7 +642,8 @@ const parseLifecycleEvent = (
     currentPeriodEnd,
     trialEndsAt: nullableEventDate(object.trial_end),
     cancelAt: nullableEventDate(object.cancel_at),
-    cancelledAt: nullableEventDate(object.canceled_at)
+    cancelledAt: nullableEventDate(object.canceled_at),
+    ...(typeof attemptId === 'string' ? { attemptId, priceId } : {})
   };
 };
 
@@ -836,30 +925,55 @@ export const createSubscriptionService = (dependencies: {
       throw new SubscriptionFailure('BILLING_CADENCE_INVALID');
     }
     authorise(session, 'billing.manage', organisationId);
-    const account = requireSoloAccount(
-      await dependencies.repository.loadBillingAccount(
-        organisationId,
-        session.userId
-      )
-    );
-    if (
-      account.stripeSubscriptionId !== null &&
-      account.status !== 'CANCELLED'
-    ) {
-      throw new SubscriptionFailure('CHECKOUT_NOT_AVAILABLE');
-    }
-    const attemptVersion =
-      account.lastStripeEventCreatedAt ?? account.createdAt;
-    const result = await dependencies.stripe.createSoloCheckout({
+    const reserve = () => dependencies.repository.reserveCheckout({
       organisationId,
       userId: session.userId,
-      customerEmail: account.billingEmail,
       billingCadence,
-      ...(account.stripeCustomerId === null
-        ? {}
-        : { stripeCustomerId: account.stripeCustomerId }),
-      idempotencyKey: `solo-checkout:${organisationId}:${billingCadence}:${attemptVersion.toISOString()}`
+      configuration: dependencies.stripe.checkoutConfiguration(billingCadence)
     });
+    const attempt = await reserve();
+
+    const reconcile = async (value: SoloCheckoutAttempt) => {
+      if (value.stripeSessionId !== null) {
+        return dependencies.stripe.retrieveSoloCheckout(value.stripeSessionId);
+      }
+      if (
+        value.request.billingCadence !== billingCadence ||
+        value.request.expiresAt <= dependencies.clock.now()
+      ) {
+        throw new CheckoutAttemptConflict();
+      }
+      return dependencies.stripe.createSoloCheckout(value.request);
+    };
+
+    const record = (value: SoloCheckoutAttempt, result: StripeCheckoutSession) => {
+      if (
+        result.attemptId !== value.request.attemptId ||
+        result.organisationId !== organisationId ||
+        (value.stripeSessionId !== null && result.id !== value.stripeSessionId)
+      ) {
+        throw new StripeProviderFailure();
+      }
+      return dependencies.repository.recordCheckoutSession(result);
+    };
+
+    let selectedAttempt = attempt;
+    let result = await reconcile(selectedAttempt);
+    let disposition = await record(selectedAttempt, result);
+    if (disposition === 'RESOLVED') {
+      selectedAttempt = await reserve();
+      result = await reconcile(selectedAttempt);
+      disposition = await record(selectedAttempt, result);
+    }
+    if (
+      selectedAttempt.request.billingCadence !== billingCadence ||
+      disposition !== 'OPEN' ||
+      result.status !== 'open' ||
+      result.url === null ||
+      result.expiresAt <= dependencies.clock.now()
+    ) {
+      throw new CheckoutAttemptConflict();
+    }
     await dependencies.repository.recordBillingAudit({
       organisationId,
       actorUserId: session.userId,
@@ -870,7 +984,7 @@ export const createSubscriptionService = (dependencies: {
       },
       occurredAt: dependencies.clock.now()
     });
-    return result;
+    return { id: result.id, url: result.url };
   };
 
   const createPortal = async (
@@ -1147,6 +1261,13 @@ export const createSubscriptionService = (dependencies: {
     if (replay === 'DUPLICATE') return 'DUPLICATE';
     if (replay === 'HASH_MISMATCH') {
       throw new SubscriptionFailure('STRIPE_EVENT_PAYLOAD_MISMATCH');
+    }
+    if (event.type === 'checkout.session.expired') {
+      const object = objectValue(event.data.object);
+      if (object.mode !== 'subscription' || !('checkout_attempt_id' in objectValue(object.metadata))) {
+        return 'REJECTED';
+      }
+      return dependencies.repository.applyCheckoutExpired(parseCheckoutExpired(event, hash, object));
     }
     if (event.type === 'checkout.session.completed') {
       const object = objectValue(event.data.object);
