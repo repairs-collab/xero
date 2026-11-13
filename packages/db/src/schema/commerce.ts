@@ -126,11 +126,13 @@ export const directDebitRequests = pgTable(
       .references(() => subscriptions.organisationId, { onDelete: 'cascade' }),
     stripeSubscriptionId: varchar('stripe_subscription_id', {
       length: 128
-    }).notNull(),
+    }),
     status: varchar('status', { length: 24 })
-      .$type<DirectDebitRequestStatus>()
+      .$type<DirectDebitRequestStatus | 'LEGACY_UNBOUND'>()
       .notNull()
       .default('REQUESTED'),
+    legacyStatus: varchar('legacy_status', { length: 24 })
+      .$type<DirectDebitRequestStatus>(),
     requestedByUserId: uuid('requested_by_user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'restrict' }),
@@ -186,7 +188,20 @@ export const directDebitRequests = pgTable(
     ),
     check(
       'direct_debit_requests_status_ck',
-      sql`${table.status} in ('REQUESTED', 'SETUP_PENDING', 'MANDATE_CONFIRMED', 'ACTIVE')`
+      sql`${table.status} in ('REQUESTED', 'SETUP_PENDING', 'MANDATE_CONFIRMED', 'ACTIVE', 'LEGACY_UNBOUND')`
+    ),
+    check(
+      'direct_debit_requests_episode_ck',
+      sql`(
+        ${table.status} = 'LEGACY_UNBOUND' and
+        ${table.stripeSubscriptionId} is null and
+        ${table.legacyStatus} is not null and
+        ${table.legacyStatus} in ('REQUESTED', 'SETUP_PENDING', 'MANDATE_CONFIRMED', 'ACTIVE')
+      ) or (
+        ${table.status} <> 'LEGACY_UNBOUND' and
+        ${table.stripeSubscriptionId} is not null and
+        ${table.legacyStatus} is null
+      )`
     ),
     check(
       'direct_debit_requests_setup_version_ck',
@@ -195,6 +210,11 @@ export const directDebitRequests = pgTable(
     check(
       'direct_debit_requests_state_ck',
       sql`(
+        ${table.status} = 'LEGACY_UNBOUND' and
+        ${table.setupAttemptVersion} = 0 and
+        ${table.setupSessionExpiresAt} is null and
+        ${table.setupCheckoutCompletedAt} is null
+      ) or (
         ${table.status} = 'REQUESTED' and
         ${table.setupAttemptVersion} = 0 and
         ${table.setupSessionId} is null and

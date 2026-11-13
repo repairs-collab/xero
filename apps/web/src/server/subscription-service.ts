@@ -633,7 +633,7 @@ const parseDirectDebitSetupCheckout = (
     object.object !== 'checkout.session' ||
     object.mode !== 'setup' ||
     object.status !== 'complete' ||
-    object.payment_status !== 'no_payment' ||
+    object.payment_status !== 'no_payment_required' ||
     object.currency !== 'aud' ||
     !Array.isArray(object.payment_method_types) ||
     object.payment_method_types.length !== 1 ||

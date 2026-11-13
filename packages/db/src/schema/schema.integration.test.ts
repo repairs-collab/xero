@@ -234,6 +234,144 @@ const seedVoiceCall = async (
 };
 
 describe('database invariants', () => {
+  it('migrates first-card evidence only for a provable current episode and preserves legacy mandates as history', async () => {
+    const client = await database.pool.connect();
+    const schemaName = `billing_upgrade_${randomUUID().replaceAll('-', '_')}`;
+    const firstEpisode = randomUUID();
+    const replacement = randomUUID();
+    const tiedCheckouts = randomUUID();
+    const requester = randomUUID();
+    const paidAt = new Date('2026-11-09T10:00:00.000Z');
+    const requestedAt = new Date('2026-11-09T11:00:00.000Z');
+    try {
+      await client.query('begin');
+      await client.query(`create schema "${schemaName}"`);
+      await client.query(`set local search_path to "${schemaName}"`);
+      await client.query(`
+        create table organisations (id uuid primary key);
+        create table users (id uuid primary key);
+      `);
+      const applyMigration = async (name: string) => {
+        const migration = await readFile(
+          new URL(`../../drizzle/${name}.sql`, import.meta.url),
+          'utf8'
+        );
+        for (const statement of migration.split('--> statement-breakpoint')) {
+          await client.query(statement.replaceAll('"public".', `"${schemaName}".`));
+        }
+      };
+      await applyMigration('0014_accountpulse_solo_commerce');
+      await applyMigration('0024_lyrical_may_parker');
+      await applyMigration('0035_same_azazel');
+
+      await client.query('insert into organisations (id) values ($1), ($2), ($3)', [
+        firstEpisode,
+        replacement,
+        tiedCheckouts
+      ]);
+      await client.query('insert into users (id) values ($1)', [requester]);
+      await client.query(
+        `insert into subscriptions (
+           organisation_id, plan_code, status, stripe_subscription_id,
+           initial_card_invoice_id, initial_card_payment_succeeded_at
+         ) values
+           ($1, 'SOLO_AU_2000', 'ACTIVE', 'sub_first', 'in_first', $4),
+           ($2, 'SOLO_AU_2000', 'ACTIVE', 'sub_replacement', 'in_old', $4),
+           ($3, 'SOLO_AU_2000', 'ACTIVE', 'sub_tied', 'in_tied', $4)`,
+        [firstEpisode, replacement, tiedCheckouts, paidAt]
+      );
+      await client.query(
+        `insert into retired_stripe_subscriptions (stripe_subscription_id, organisation_id)
+         values ('sub_retired', $1)`,
+        [replacement]
+      );
+      await client.query(
+        `insert into subscription_events (
+           organisation_id, stripe_event_id, event_type,
+           stripe_event_created_at, payload_hash, outcome
+         ) values
+           ($1, 'evt_first', 'checkout.session.completed', $4, repeat('a', 64), 'APPLIED'),
+           ($2, 'evt_old', 'checkout.session.completed', $4, repeat('b', 64), 'APPLIED'),
+           ($3, 'evt_tied_1', 'checkout.session.completed', $4, repeat('c', 64), 'APPLIED'),
+           ($3, 'evt_tied_2', 'checkout.session.completed', $4, repeat('d', 64), 'APPLIED')`,
+        [firstEpisode, replacement, tiedCheckouts, paidAt]
+      );
+      await client.query(
+        `insert into direct_debit_requests (
+           organisation_id, status, requested_by_user_id, requested_at, setup_session_id,
+           setup_intent_id, stripe_payment_method_id, stripe_mandate_id,
+           mandate_confirmed_at, activated_by_user_id, activated_at
+         ) values
+           ($1, 'MANDATE_CONFIRMED', $3, $4, 'cs_first', 'seti_first', 'pm_first',
+            'mandate_first', $4, null, null),
+           ($2, 'ACTIVE', $3, $4, 'cs_old', 'seti_old', 'pm_old',
+            'mandate_old', $4, $3, $4)`,
+        [firstEpisode, replacement, requester, requestedAt]
+      );
+
+      await applyMigration('0037_watery_tombstone');
+
+      const card = await client.query(
+        `select stripe_subscription_id, initial_card_stripe_subscription_id,
+                initial_card_invoice_id, initial_card_payment_succeeded_at
+           from subscriptions order by stripe_subscription_id`
+      );
+      expect(card.rows).toEqual([
+        {
+          stripe_subscription_id: 'sub_first',
+          initial_card_stripe_subscription_id: 'sub_first',
+          initial_card_invoice_id: 'in_first',
+          initial_card_payment_succeeded_at: paidAt
+        },
+        {
+          stripe_subscription_id: 'sub_replacement',
+          initial_card_stripe_subscription_id: null,
+          initial_card_invoice_id: null,
+          initial_card_payment_succeeded_at: null
+        },
+        {
+          stripe_subscription_id: 'sub_tied',
+          initial_card_stripe_subscription_id: null,
+          initial_card_invoice_id: null,
+          initial_card_payment_succeeded_at: null
+        }
+      ]);
+      const currentRequests = await client.query(
+        `select d.id from direct_debit_requests d
+           join subscriptions s using (organisation_id, stripe_subscription_id)`
+      );
+      expect(currentRequests.rows).toEqual([]);
+      const history = await client.query(
+        `select status, legacy_status, setup_session_id, setup_intent_id,
+                stripe_mandate_id, setup_checkout_completed_at, activated_at
+           from direct_debit_requests order by setup_session_id`
+      );
+      expect(history.rows).toEqual([
+        {
+          status: 'LEGACY_UNBOUND',
+          legacy_status: 'MANDATE_CONFIRMED',
+          setup_session_id: 'cs_first',
+          setup_intent_id: 'seti_first',
+          stripe_mandate_id: 'mandate_first',
+          setup_checkout_completed_at: null,
+          activated_at: null
+        },
+        {
+          status: 'LEGACY_UNBOUND',
+          legacy_status: 'ACTIVE',
+          setup_session_id: 'cs_old',
+          setup_intent_id: 'seti_old',
+          stripe_mandate_id: 'mandate_old',
+          setup_checkout_completed_at: null,
+          activated_at: requestedAt
+        }
+      ]);
+    } finally {
+      await client.query('rollback');
+      client.release();
+    }
+  });
+
   it('persists billing incidents and held notices with fail-closed constraints', async () => {
     expect('billingCases' in schema).toBe(true);
     expect('transactionalEmailOutbox' in schema).toBe(true);

@@ -176,6 +176,7 @@ describe('Solo commerce schema contract', () => {
         'organisation_id',
         'stripe_subscription_id',
         'status',
+        'legacy_status',
         'requested_by_user_id',
         'requested_at',
         'setup_attempt_version',
@@ -196,6 +197,7 @@ describe('Solo commerce schema contract', () => {
     expect(directDebit.checks.map((constraint) => constraint.name)).toEqual(
       expect.arrayContaining([
         'direct_debit_requests_status_ck',
+        'direct_debit_requests_episode_ck',
         'direct_debit_requests_state_ck'
       ])
     );
@@ -422,7 +424,7 @@ describe('Solo commerce schema contract', () => {
     expect(migration).not.toMatch(/bank_(?:account|details)|bsb|account_number/i);
   });
 
-  it('forwards current-subscription direct debit evidence without dropping historical requests', async () => {
+  it('adds subscription episode identity and retains the legacy request status', async () => {
     const migration = await readFile(
       new URL('../../drizzle/0037_watery_tombstone.sql', import.meta.url),
       'utf8'
@@ -431,18 +433,14 @@ describe('Solo commerce schema contract', () => {
     expect(migration).toContain(
       'DROP CONSTRAINT "direct_debit_requests_pkey"'
     );
-    expect(migration).toMatch(
-      /UPDATE "direct_debit_requests" AS d[\s\S]*?SET "stripe_subscription_id" = s\."stripe_subscription_id"/i
-    );
-    expect(migration).toMatch(
-      /UPDATE "subscriptions"[\s\S]*?SET "initial_card_stripe_subscription_id" = "stripe_subscription_id"/i
-    );
+    expect(migration).toContain('ADD COLUMN "legacy_status" varchar(24)');
     expect(migration).toContain(
       'ADD CONSTRAINT "direct_debit_requests_pkey" PRIMARY KEY ("id")'
     );
     expect(migration).toContain(
       'direct_debit_requests_org_subscription_uq'
     );
+    expect(migration).toContain('direct_debit_requests_episode_ck');
     expect(migration).not.toMatch(/bank_(?:account|details)|bsb|account_number/i);
   });
 });

@@ -76,6 +76,103 @@ const seed = async (withInitialCardEvidence = false) => {
 };
 
 describe('request-only direct debit persistence', () => {
+  it('excludes legacy mandates from current billing and requires a fresh explicit request', async () => {
+    const seeded = await seed(true);
+    const repository = createPostgresSubscriptionRepository(client.db, {
+      now: () => now
+    });
+    const legacyId = randomUUID();
+    const stripePaymentMethodId = `pm_legacy_${legacyId}`;
+    const stripeMandateId = `mandate_legacy_${legacyId}`;
+    await client.db.insert(directDebitRequests).values({
+      id: legacyId,
+      organisationId: seeded.organisationId,
+      status: 'LEGACY_UNBOUND',
+      legacyStatus: 'ACTIVE',
+      requestedByUserId: seeded.userId,
+      requestedAt: now,
+      setupSessionId: `cs_legacy_${legacyId}`,
+      setupIntentId: `seti_legacy_${legacyId}`,
+      stripePaymentMethodId,
+      stripeMandateId,
+      mandateConfirmedAt: now,
+      activatedByUserId: seeded.userId,
+      activatedAt: now
+    });
+    await expect(
+      client.db
+        .update(directDebitRequests)
+        .set({ stripeSubscriptionId: seeded.stripeSubscriptionId })
+        .where(eq(directDebitRequests.id, legacyId))
+    ).rejects.toMatchObject({
+      cause: { constraint: 'direct_debit_requests_episode_ck' }
+    });
+    await expect(
+      client.db
+        .update(directDebitRequests)
+        .set({
+          stripeSubscriptionId: seeded.stripeSubscriptionId,
+          status: 'ACTIVE',
+          legacyStatus: null,
+          setupAttemptVersion: 1,
+          setupSessionExpiresAt: new Date('2026-11-10T12:00:00.000Z')
+        })
+        .where(eq(directDebitRequests.id, legacyId))
+    ).rejects.toMatchObject({
+      cause: { constraint: 'direct_debit_requests_state_ck' }
+    });
+
+    await expect(
+      repository.loadBillingAccount(seeded.organisationId, seeded.userId)
+    ).resolves.toMatchObject({ directDebitStatus: null });
+    await expect(
+      repository.loadDirectDebitRequest(seeded.organisationId)
+    ).resolves.toBeNull();
+    await expect(
+      repository.loadDirectDebitRequesterEmail(seeded.organisationId)
+    ).resolves.toBeNull();
+    await expect(
+      repository.markDirectDebitSetupPending({
+        organisationId: seeded.organisationId,
+        directDebitRequestId: legacyId,
+        stripeSubscriptionId: seeded.stripeSubscriptionId,
+        actorUserId: seeded.userId,
+        setupAttemptVersion: 1,
+        setupSessionId: `cs_fresh_${legacyId}`,
+        setupSessionExpiresAt: new Date('2026-11-10T12:00:00.000Z'),
+        occurredAt: now
+      })
+    ).rejects.toThrow('DIRECT_DEBIT_REQUEST_REQUIRED');
+    await expect(
+      repository.activateDirectDebit({
+        organisationId: seeded.organisationId,
+        directDebitRequestId: legacyId,
+        stripeSubscriptionId: seeded.stripeSubscriptionId,
+        activatedByUserId: seeded.userId,
+        activatedAt: now,
+        stripePaymentMethodId,
+        stripeMandateId
+      })
+    ).rejects.toThrow('DIRECT_DEBIT_MANDATE_REQUIRED');
+
+    const request = await repository.requestDirectDebit({
+      organisationId: seeded.organisationId,
+      requestedByUserId: seeded.userId,
+      requestedAt: now
+    });
+    expect(request.id).not.toBe(legacyId);
+    expect(request).toMatchObject({
+      stripeSubscriptionId: seeded.stripeSubscriptionId,
+      status: 'REQUESTED',
+      setupSessionId: null,
+      setupIntentId: null,
+      stripeMandateId: null
+    });
+    await expect(
+      repository.loadDirectDebitRequesterEmail(seeded.organisationId)
+    ).resolves.toBe(`${seeded.userId}@example.invalid`);
+  });
+
   it('requires a positive paid card Checkout before allowing an idempotent request', async () => {
     const seeded = await seed();
     const repository = createPostgresSubscriptionRepository(client.db, {

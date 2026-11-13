@@ -175,22 +175,27 @@ const lockStripeSubscriptionOwnership = async (
 
 const toDirectDebitRequestRecord = (
   row: typeof directDebitRequests.$inferSelect
-): DirectDebitRequestRecord => ({
-  id: row.id,
-  organisationId: row.organisationId,
-  stripeSubscriptionId: row.stripeSubscriptionId,
-  status: row.status,
-  requestedAt: row.requestedAt,
-  setupAttemptVersion: row.setupAttemptVersion,
-  setupSessionId: row.setupSessionId,
-  setupSessionExpiresAt: row.setupSessionExpiresAt,
-  setupCheckoutCompletedAt: row.setupCheckoutCompletedAt,
-  setupIntentId: row.setupIntentId,
-  stripePaymentMethodId: row.stripePaymentMethodId,
-  stripeMandateId: row.stripeMandateId,
-  mandateConfirmedAt: row.mandateConfirmedAt,
-  activatedAt: row.activatedAt
-});
+): DirectDebitRequestRecord => {
+  if (row.stripeSubscriptionId === null || row.status === 'LEGACY_UNBOUND') {
+    throw new Error('DIRECT_DEBIT_REQUEST_NOT_CURRENT');
+  }
+  return {
+    id: row.id,
+    organisationId: row.organisationId,
+    stripeSubscriptionId: row.stripeSubscriptionId,
+    status: row.status,
+    requestedAt: row.requestedAt,
+    setupAttemptVersion: row.setupAttemptVersion,
+    setupSessionId: row.setupSessionId,
+    setupSessionExpiresAt: row.setupSessionExpiresAt,
+    setupCheckoutCompletedAt: row.setupCheckoutCompletedAt,
+    setupIntentId: row.setupIntentId,
+    stripePaymentMethodId: row.stripePaymentMethodId,
+    stripeMandateId: row.stripeMandateId,
+    mandateConfirmedAt: row.mandateConfirmedAt,
+    activatedAt: row.activatedAt
+  };
+};
 
 export const createPostgresSubscriptionRepository = (
   database: Database,
@@ -248,7 +253,10 @@ export const createPostgresSubscriptionRepository = (
         )
       )
       .limit(1);
-    return row ?? null;
+    if (row === undefined) return null;
+    const directDebitStatus =
+      row.directDebitStatus === 'LEGACY_UNBOUND' ? null : row.directDebitStatus;
+    return { ...row, directDebitStatus };
   };
 
   const lookupEventReplay: SubscriptionRepository['lookupEventReplay'] = async (
