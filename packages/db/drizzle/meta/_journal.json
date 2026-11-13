@@ -288,6 +288,13 @@
       "when": 1794537428843,
       "tag": "0040_orange_namor",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1794538082752,
+      "tag": "0041_careless_nemesis",
+      "breakpoints": true
     }
   ]
 }

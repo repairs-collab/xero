@@ -75,6 +75,7 @@ type ProviderEvidence =
     }
   | {
       edition: 'SOLO';
+      xeroConnectionId: string | null;
       xeroConnectedAt: Date | null;
       replyNumberReadyAt: Date | null;
     };
@@ -90,7 +91,10 @@ export interface CustomerRolloutReadiness {
       rolloutScope: 'CONTROLLED' | 'CUSTOMER';
     }>;
     providersHealthy: ReadinessGate<ProviderEvidence>;
-    syncFresh: ReadinessGate<{ timestamp: Date | null }>;
+    syncFresh: ReadinessGate<{
+      timestamp: Date | null;
+      xeroConnectionId: string | null;
+    }>;
     importedDataPresent: ReadinessGate<{
       activeContactCount: number;
       outstandingInvoiceCount: number;
@@ -106,6 +110,7 @@ export interface CustomerRolloutReadiness {
     }>;
     reconciliationCurrent: ReadinessGate<{
       id: string;
+      syncId: string;
       syncCompletedAt: Date;
       acknowledgedAt: Date;
     } | null>;
@@ -405,7 +410,10 @@ async function getProviderEvidence(
 ): Promise<ProviderEvidence> {
   if (organisation.edition === 'SOLO') {
     const [connection] = await database
-      .select({ connectedAt: xeroConnections.connectedAt })
+      .select({
+        id: xeroConnections.id,
+        connectedAt: xeroConnections.connectedAt
+      })
       .from(xeroConnections)
       .where(and(
         eq(xeroConnections.organisationId, organisation.id),
@@ -434,6 +442,7 @@ async function getProviderEvidence(
       number.readyAt.getTime() <= now.getTime();
     return {
       edition: 'SOLO',
+      xeroConnectionId: connection?.id ?? null,
       xeroConnectedAt: connection?.connectedAt ?? null,
       replyNumberReadyAt: numberVerified ? number.readyAt : null
     };
@@ -466,7 +475,9 @@ async function getProviderEvidence(
 
 const hasHealthyProviders = (evidence: ProviderEvidence, now: Date): boolean =>
   evidence.edition === 'SOLO'
-    ? evidence.xeroConnectedAt !== null && evidence.replyNumberReadyAt !== null
+    ? evidence.xeroConnectionId !== null &&
+      evidence.xeroConnectedAt !== null &&
+      evidence.replyNumberReadyAt !== null
     : legacyProviders.every((provider) =>
         evidence.authentications.some((authentication) =>
           authentication.provider === provider &&
@@ -476,13 +487,15 @@ const hasHealthyProviders = (evidence: ProviderEvidence, now: Date): boolean =>
 
 const hasFreshSync = (
   timestamp: Date | null,
+  successfulXeroConnectionId: string | null,
   evidence: ProviderEvidence,
   now: Date
 ): boolean =>
   timestamp !== null &&
   isRecent(timestamp, now, syncFreshnessMs) &&
   (evidence.edition === 'INTERNAL_LEGACY' ||
-    (evidence.xeroConnectedAt !== null && timestamp >= evidence.xeroConnectedAt));
+    (successfulXeroConnectionId !== null &&
+      successfulXeroConnectionId === evidence.xeroConnectionId));
 
 async function getControlledSmsEvidence(
   database: Executor,
@@ -565,7 +578,12 @@ const failedReadinessGatesAt = (
     .filter(([, gate]) => !gate.passed)
     .map(([key]) => key));
   if (!hasHealthyProviders(providerEvidence, now)) failed.add('providersHealthy');
-  if (!hasFreshSync(gates.syncFresh.evidence.timestamp, providerEvidence, now)) {
+  if (!hasFreshSync(
+    gates.syncFresh.evidence.timestamp,
+    gates.syncFresh.evidence.xeroConnectionId,
+    providerEvidence,
+    now
+  )) {
     failed.add('syncFresh');
   }
   if (!isRecent(gates.controlledSmsEvidence.evidence?.timestamp ?? null, now, controlledSmsFreshnessMs)) {
@@ -602,11 +620,13 @@ async function calculateCustomerRolloutReadiness(
     .limit(1);
 
   const [reconciliation] =
-    organisation.lastSuccessfulSyncAt === null
+    organisation.lastSuccessfulSyncAt === null ||
+    organisation.lastSuccessfulSyncId === null
       ? []
       : await database
           .select({
             id: rolloutReconciliations.id,
+            syncId: rolloutReconciliations.syncId,
             syncCompletedAt: rolloutReconciliations.syncCompletedAt,
             acknowledgedAt: rolloutReconciliations.acknowledgedAt,
             activeContactCount: rolloutReconciliations.activeContactCount,
@@ -626,10 +646,7 @@ async function calculateCustomerRolloutReadiness(
                 rolloutReconciliations.organisationId,
                 input.organisationId
               ),
-              eq(
-                rolloutReconciliations.syncCompletedAt,
-                organisation.lastSuccessfulSyncAt
-              )
+              eq(rolloutReconciliations.syncId, organisation.lastSuccessfulSyncId)
             )
           )
           .limit(1);
@@ -672,8 +689,16 @@ async function calculateCustomerRolloutReadiness(
       evidence: providerEvidence
     },
     syncFresh: {
-      passed: hasFreshSync(organisation.lastSuccessfulSyncAt, providerEvidence, input.now),
-      evidence: { timestamp: organisation.lastSuccessfulSyncAt }
+      passed: hasFreshSync(
+        organisation.lastSuccessfulSyncAt,
+        organisation.lastSuccessfulXeroConnectionId,
+        providerEvidence,
+        input.now
+      ),
+      evidence: {
+        timestamp: organisation.lastSuccessfulSyncAt,
+        xeroConnectionId: organisation.lastSuccessfulXeroConnectionId
+      }
     },
     importedDataPresent: {
       passed:
@@ -703,6 +728,7 @@ async function calculateCustomerRolloutReadiness(
           ? null
           : {
               id: reconciliation.id,
+              syncId: reconciliation.syncId,
               syncCompletedAt: reconciliation.syncCompletedAt,
               acknowledgedAt: reconciliation.acknowledgedAt
             }
@@ -809,7 +835,12 @@ export function createSendingSettings(dependencies: {
       if (!hasHealthyProviders(providerEvidence, now)) {
         throw new Error('PROVIDERS_UNHEALTHY');
       }
-      if (!hasFreshSync(organisation.lastSuccessfulSyncAt, providerEvidence, now)) {
+      if (!hasFreshSync(
+        organisation.lastSuccessfulSyncAt,
+        organisation.lastSuccessfulXeroConnectionId,
+        providerEvidence,
+        now
+      )) {
         throw new Error('XERO_SYNC_STALE');
       }
       if (organisation.recipientAllowlist.length === 0) {
@@ -848,6 +879,7 @@ export function createSendingSettings(dependencies: {
       acknowledgement: string;
       expectedVersion: number;
       expected: {
+        syncId: string;
         syncCompletedAt: string;
         metrics: ReconciliationMetrics;
       };
@@ -870,6 +902,7 @@ export function createSendingSettings(dependencies: {
         throw new Error('OPERATIONAL_STATE_CONFLICT');
       }
       if (
+        organisation.lastSuccessfulSyncId !== input.expected.syncId ||
         !sameTimestamp(
           organisation.lastSuccessfulSyncAt,
           input.expected.syncCompletedAt
@@ -884,7 +917,10 @@ export function createSendingSettings(dependencies: {
       if (canonicalMetrics(metrics) !== canonicalMetrics(input.expected.metrics)) {
         throw new Error('RECONCILIATION_METRICS_CHANGED');
       }
-      if (organisation.lastSuccessfulSyncAt === null) {
+      if (
+        organisation.lastSuccessfulSyncAt === null ||
+        organisation.lastSuccessfulSyncId === null
+      ) {
         throw new Error('SYNC_REQUIRED');
       }
       const [reconciliation] = await transaction
@@ -892,6 +928,7 @@ export function createSendingSettings(dependencies: {
         .values({
           organisationId: input.organisationId,
           syncCompletedAt: organisation.lastSuccessfulSyncAt,
+          syncId: organisation.lastSuccessfulSyncId,
           ...metrics,
           acknowledgedByUserId: session.userId,
           acknowledgedAt: now
@@ -916,6 +953,7 @@ export function createSendingSettings(dependencies: {
         entityType: 'ROLLOUT_RECONCILIATION',
         entityId: reconciliation.id,
         afterValue: {
+          syncId: organisation.lastSuccessfulSyncId,
           syncCompletedAt: organisation.lastSuccessfulSyncAt.toISOString(),
           ...metrics
         },

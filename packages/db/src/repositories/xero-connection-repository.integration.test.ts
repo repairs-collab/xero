@@ -140,12 +140,13 @@ describe('PostgresXeroConnectionRepository', () => {
     const firstOrganisationId = await seedOrganisation('First pending organisation');
     const secondOrganisationId = await seedOrganisation('Second pending organisation');
     const now = new Date('2026-11-09T02:00:00.000Z');
+    const xeroOrganisationId = randomUUID();
     const candidate = {
       connectionId: randomUUID(),
       tenantId: randomUUID(),
       tenantName: 'Example Pty Ltd',
       tenantType: 'ORGANISATION',
-      xeroOrganisationId: 'xero-example-organisation',
+      xeroOrganisationId,
       organisationName: 'Example Pty Ltd',
       baseCurrency: 'AUD',
       timeZone: 'Australia/Sydney'
@@ -177,7 +178,7 @@ describe('PostgresXeroConnectionRepository', () => {
       .from(organisations)
       .where(eq(organisations.id, firstOrganisationId));
     expect(updatedOrganisation).toMatchObject({
-      xeroOrganisationId: 'xero-example-organisation',
+      xeroOrganisationId,
       name: 'Example Pty Ltd',
       baseCurrency: 'AUD',
       timeZone: 'Australia/Sydney'
@@ -300,6 +301,8 @@ describe('PostgresXeroConnectionRepository', () => {
     await firstClient.db.update(organisations).set({
       xeroSyncCursor: syncAt.toISOString(),
       lastSuccessfulSyncAt: syncAt,
+      lastSuccessfulSyncId: randomUUID(),
+      lastSuccessfulXeroConnectionId: first.id,
       latestReconciledSyncAt: syncAt
     }).where(eq(organisations.id, organisationId));
     const pendingAuthorisationId = await firstRepository.createPendingAuthorisation({
@@ -319,12 +322,15 @@ describe('PostgresXeroConnectionRepository', () => {
       organisationId,
       now: startedAt
     });
-    expect(reconnected.connectedAt.getTime()).toBeGreaterThan(first.connectedAt.getTime());
+    expect(reconnected.id).not.toBe(first.id);
+    expect(reconnected.connectedAt).toEqual(first.connectedAt);
     const [organisation] = await firstClient.db.select().from(organisations)
       .where(eq(organisations.id, organisationId));
     expect(organisation).toMatchObject({
       xeroSyncCursor: null,
       lastSuccessfulSyncAt: null,
+      lastSuccessfulSyncId: null,
+      lastSuccessfulXeroConnectionId: null,
       latestReconciledSyncAt: null
     });
   });

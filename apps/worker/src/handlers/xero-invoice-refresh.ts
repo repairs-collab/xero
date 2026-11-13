@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { Database } from '@bc5000/db';
+import type { Database, DbTransaction } from '@bc5000/db';
 import {
   approvals,
   contactChannels,
@@ -58,7 +58,7 @@ const assertXeroSyncAllowed = async (
 export type XeroSyncJobDependencies = Pick<XeroSyncDependencies, 'database' | 'clock'> &
   ({ xero: XeroSyncClient } | { loadXero(): Promise<XeroSyncClient> });
 
-type XeroSyncConnection = Pick<typeof xeroConnections.$inferSelect, 'id' | 'connectedAt'>;
+type XeroSyncConnection = Pick<typeof xeroConnections.$inferSelect, 'id'>;
 
 export async function startXeroSync(
   dependencies: XeroSyncJobDependencies,
@@ -68,7 +68,7 @@ export async function startXeroSync(
   let connection: XeroSyncConnection | null = null;
   if (organisation.edition === 'SOLO') {
     const [current] = await dependencies.database
-      .select({ id: xeroConnections.id, connectedAt: xeroConnections.connectedAt })
+      .select({ id: xeroConnections.id })
       .from(xeroConnections)
       .where(and(
         eq(xeroConnections.organisationId, organisationId),
@@ -132,21 +132,14 @@ const terminalReason = (
   return null;
 };
 
-export async function synchroniseInvoiceSnapshot(
+const applyInvoiceSnapshot = async (
+  transaction: DbTransaction,
   dependencies: XeroSyncDependencies,
   organisationId: string,
   invoice: XeroInvoice,
-  preloadedContact?: XeroContact
-): Promise<void> {
-  const contact =
-    preloadedContact ??
-    (await dependencies.xero.getContact(invoice.contactId)).data;
-  const now = dependencies.clock.now();
-
-  await dependencies.database.transaction(async (transaction) => {
-    await new PostgresOrganisationSafetyRepository(
-      dependencies.database
-    ).assertOperationalMutationAllowed(transaction, organisationId);
+  contact: XeroContact,
+  now: Date
+): Promise<void> => {
     const existingContacts = await transaction
       .select()
       .from(contacts)
@@ -377,34 +370,120 @@ export async function synchroniseInvoiceSnapshot(
           )
         );
     }
+};
+
+export async function synchroniseInvoiceSnapshot(
+  dependencies: XeroSyncDependencies,
+  organisationId: string,
+  invoice: XeroInvoice,
+  preloadedContact?: XeroContact
+): Promise<void> {
+  const contact =
+    preloadedContact ??
+    (await dependencies.xero.getContact(invoice.contactId)).data;
+  const now = dependencies.clock.now();
+
+  await dependencies.database.transaction(async (transaction) => {
+    await new PostgresOrganisationSafetyRepository(
+      dependencies.database
+    ).assertOperationalMutationAllowed(transaction, organisationId);
+    await applyInvoiceSnapshot(
+      transaction,
+      dependencies,
+      organisationId,
+      invoice,
+      contact,
+      now
+    );
   });
 }
 
-export async function synchroniseInvoiceCollection(
+const loadContactsForInvoices = async (
   dependencies: XeroSyncDependencies,
-  organisationId: string,
   invoiceSnapshots: XeroInvoice[]
-): Promise<void> {
+): Promise<Map<string, XeroContact>> => {
   const contactIds = [
     ...new Set(invoiceSnapshots.map((invoice) => invoice.contactId))
   ];
   const contactResult = await dependencies.xero.listContacts(contactIds);
-  const contactsById = new Map(
+  return new Map(
     contactResult.data.map((contact) => [contact.id, contact])
   );
+};
 
-  for (const invoice of invoiceSnapshots) {
-    const contact = contactsById.get(invoice.contactId);
-    if (contact === undefined) {
-      throw new Error(`Xero contact was not returned for invoice ${invoice.id}`);
-    }
-    await synchroniseInvoiceSnapshot(
-      dependencies,
+export async function commitXeroSync(
+  dependencies: XeroSyncDependencies,
+  organisationId: string,
+  connection: XeroSyncConnection | null,
+  invoiceSnapshots: XeroInvoice[]
+): Promise<void> {
+  const contactsById = await loadContactsForInvoices(
+    dependencies,
+    invoiceSnapshots
+  );
+  const now = dependencies.clock.now();
+  const safety = new PostgresOrganisationSafetyRepository(
+    dependencies.database
+  );
+
+  await dependencies.database.transaction(async (transaction) => {
+    const organisation = await safety.assertOperationalMutationAllowed(
+      transaction,
       organisationId,
-      invoice,
-      contact
+      'no key update'
     );
-  }
+    if (organisation.edition === 'SOLO') {
+      if (!connection) throw new Error('XERO_SYNC_CONNECTION_CHANGED');
+      const [current] = await transaction
+        .select({ id: xeroConnections.id })
+        .from(xeroConnections)
+        .where(and(
+          eq(xeroConnections.organisationId, organisationId),
+          eq(xeroConnections.id, connection.id),
+          eq(xeroConnections.status, 'CONNECTED')
+        ))
+        .for('share', { noWait: true });
+      if (!current) throw new Error('XERO_SYNC_CONNECTION_CHANGED');
+    }
+
+    for (const invoice of invoiceSnapshots) {
+      const contact = contactsById.get(invoice.contactId);
+      if (contact === undefined) {
+        throw new Error(`Xero contact was not returned for invoice ${invoice.id}`);
+      }
+      await applyInvoiceSnapshot(
+        transaction,
+        dependencies,
+        organisationId,
+        invoice,
+        contact,
+        now
+      );
+    }
+
+    const invalidatesReconciliation = [
+      'SYNC_REQUIRED',
+      'RECONCILIATION_REQUIRED',
+      'RECONCILED'
+    ].includes(organisation.operationalState);
+    await transaction
+      .update(organisations)
+      .set({
+        xeroSyncCursor: now.toISOString(),
+        lastSuccessfulSyncAt: now,
+        lastSuccessfulSyncId: randomUUID(),
+        lastSuccessfulXeroConnectionId: connection?.id ?? null,
+        latestReconciledSyncAt: null,
+        ...(invalidatesReconciliation
+          ? {
+              operationalState: 'RECONCILIATION_REQUIRED' as const,
+              operationalStateVersion: sql`${organisations.operationalStateVersion} + 1`
+            }
+          : {}),
+        updatedAt: now
+      })
+      .where(eq(organisations.id, organisationId));
+  });
 }
 
 export async function runInvoiceRefresh(
@@ -419,57 +498,3 @@ export async function runInvoiceRefresh(
     invoice.data
   );
 }
-
-export const recordSuccessfulSync = async (
-  dependencies: XeroSyncDependencies,
-  organisationId: string,
-  connection: XeroSyncConnection | null
-): Promise<void> => {
-  const safety = new PostgresOrganisationSafetyRepository(
-    dependencies.database
-  );
-  await dependencies.database.transaction(async (transaction) => {
-    const organisation = await safety.assertOperationalMutationAllowed(
-      transaction,
-      organisationId,
-      'no key update'
-    );
-    if (organisation.edition === 'SOLO') {
-      if (!connection) throw new Error('XERO_SYNC_CONNECTION_CHANGED');
-      // Refresh work can hold this row through another session. A busy
-      // connection fails this job and lets the queue retry it.
-      const [current] = await transaction
-        .select({ id: xeroConnections.id })
-        .from(xeroConnections)
-        .where(and(
-          eq(xeroConnections.organisationId, organisationId),
-          eq(xeroConnections.id, connection.id),
-          eq(xeroConnections.connectedAt, connection.connectedAt),
-          eq(xeroConnections.status, 'CONNECTED')
-        ))
-        .for('share', { noWait: true });
-      if (!current) throw new Error('XERO_SYNC_CONNECTION_CHANGED');
-    }
-    const now = dependencies.clock.now();
-    const invalidatesReconciliation = [
-      'SYNC_REQUIRED',
-      'RECONCILIATION_REQUIRED',
-      'RECONCILED'
-    ].includes(organisation.operationalState);
-    await transaction
-      .update(organisations)
-      .set({
-        xeroSyncCursor: now.toISOString(),
-        lastSuccessfulSyncAt: now,
-        latestReconciledSyncAt: null,
-        ...(invalidatesReconciliation
-          ? {
-              operationalState: 'RECONCILIATION_REQUIRED' as const,
-              operationalStateVersion: sql`${organisations.operationalStateVersion} + 1`
-            }
-          : {}),
-        updatedAt: now
-      })
-      .where(eq(organisations.id, organisationId));
-  });
-};

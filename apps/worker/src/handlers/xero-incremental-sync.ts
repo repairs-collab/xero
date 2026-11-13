@@ -3,9 +3,8 @@ import type { XeroIncrementalSyncJob } from '@bc5000/jobs';
 import { eq } from 'drizzle-orm';
 
 import {
-  recordSuccessfulSync,
+  commitXeroSync,
   startXeroSync,
-  synchroniseInvoiceCollection,
   type XeroSyncJobDependencies
 } from './xero-invoice-refresh.js';
 
@@ -34,10 +33,10 @@ export async function runIncrementalSync(
         };
   const response =
     await sync.xero.listOutstandingInvoices(options);
-  await synchroniseInvoiceCollection(
+  await commitXeroSync(
     sync,
     payload.organisationId,
+    connection,
     response.data
   );
-  await recordSuccessfulSync(sync, payload.organisationId, connection);
 }

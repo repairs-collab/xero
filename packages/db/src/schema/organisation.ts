@@ -81,6 +81,10 @@ export const organisations = pgTable(
     lastSuccessfulSyncAt: timestamp('last_successful_sync_at', {
       withTimezone: true
     }),
+    lastSuccessfulSyncId: uuid('last_successful_sync_id'),
+    lastSuccessfulXeroConnectionId: uuid(
+      'last_successful_xero_connection_id'
+    ),
     latestReconciledSyncAt: timestamp('latest_reconciled_sync_at', {
       withTimezone: true
     }),

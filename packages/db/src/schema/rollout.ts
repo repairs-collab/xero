@@ -86,6 +86,7 @@ export const rolloutReconciliations = pgTable(
     syncCompletedAt: timestamp('sync_completed_at', {
       withTimezone: true
     }).notNull(),
+    syncId: uuid('sync_id').notNull(),
     activeContactCount: integer('active_contact_count').notNull(),
     outstandingInvoiceCount: integer('outstanding_invoice_count').notNull(),
     outstandingTotals: jsonb('outstanding_totals')
@@ -105,9 +106,9 @@ export const rolloutReconciliations = pgTable(
       .defaultNow()
   },
   (table) => [
-    uniqueIndex('rollout_reconciliations_org_sync_uq').on(
+    uniqueIndex('rollout_reconciliations_org_sync_id_uq').on(
       table.organisationId,
-      table.syncCompletedAt
+      table.syncId
     ),
     check(
       'rollout_reconciliations_nonnegative_counts_ck',

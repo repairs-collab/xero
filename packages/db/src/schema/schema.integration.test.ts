@@ -977,6 +977,16 @@ describe('database invariants', () => {
     expect(schema).toHaveProperty('rolloutReconciliations');
   });
 
+  it('stores immutable sync and Xero connection generations for rollout evidence', async () => {
+    expect(await tableColumns('organisations')).toEqual(
+      expect.arrayContaining([
+        'last_successful_sync_id',
+        'last_successful_xero_connection_id'
+      ])
+    );
+    expect(await tableColumns('rollout_reconciliations')).toContain('sync_id');
+  });
+
   it('exports the tenant-aware Xero OAuth tables without token leakage columns', async () => {
     expect(schema).toHaveProperty('xeroOAuthTransactions');
     expect(schema).toHaveProperty('xeroPendingAuthorisations');
@@ -1689,6 +1699,7 @@ JSON.stringify([{ connectionId: 'connection-one', tenantId: 'tenant-one', tenant
     const organisationId = randomUUID();
     const userId = randomUUID();
     const syncCompletedAt = new Date('2026-09-29T01:00:00.000Z');
+    const syncId = randomUUID();
     await database.db.insert(organisations).values({
       id: organisationId,
       name: 'Reconciliation uniqueness test',
@@ -1702,19 +1713,20 @@ JSON.stringify([{ connectionId: 'connection-one', tenantId: 'tenant-one', tenant
       email: `${userId}@example.invalid`,
       displayName: 'Reconciliation administrator'
     });
-    const insertReconciliation = () =>
+    const insertReconciliation = (evidenceId = syncId) =>
       database.pool.query(
         `insert into rollout_reconciliations
-          (id, organisation_id, sync_completed_at, active_contact_count,
+          (id, organisation_id, sync_completed_at, sync_id, active_contact_count,
            outstanding_invoice_count, outstanding_totals,
            generated_approval_count, enabled_sequence_count,
            all_enabled_sequences_review, acknowledged_by_user_id,
            acknowledged_at)
-         values ($1, $2, $3, 4, 5, $4, 6, 1, true, $5, $6)`,
+         values ($1, $2, $3, $4, 4, 5, $5, 6, 1, true, $6, $7)`,
         [
           randomUUID(),
           organisationId,
           syncCompletedAt,
+          evidenceId,
           { AUD: '1234.5000' },
           userId,
           new Date('2026-09-29T01:05:00.000Z')
@@ -1725,19 +1737,23 @@ JSON.stringify([{ connectionId: 'connection-one', tenantId: 'tenant-one', tenant
     await expect(insertReconciliation()).rejects.toMatchObject({
       code: '23505'
     });
+    await expect(insertReconciliation(randomUUID())).resolves.toMatchObject({
+      rowCount: 1
+    });
     await expect(
       database.pool.query(
         `insert into rollout_reconciliations
-          (id, organisation_id, sync_completed_at, active_contact_count,
+          (id, organisation_id, sync_completed_at, sync_id, active_contact_count,
            outstanding_invoice_count, outstanding_totals,
            generated_approval_count, enabled_sequence_count,
            all_enabled_sequences_review, acknowledged_by_user_id,
            acknowledged_at)
-         values ($1, $2, $3, 0, 0, '{}'::jsonb, 0, 0, true, $4, $5)`,
+         values ($1, $2, $3, $4, 0, 0, '{}'::jsonb, 0, 0, true, $5, $6)`,
         [
           randomUUID(),
           randomUUID(),
           syncCompletedAt,
+          randomUUID(),
           userId,
           new Date('2026-09-29T01:05:00.000Z')
         ]

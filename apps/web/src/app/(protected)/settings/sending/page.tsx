@@ -117,7 +117,8 @@ export default async function SendingSettingsPage({
     readiness.gates.reconciliationCurrent.passed;
   const canAcknowledgeReconciliation =
     organisation.operationalState === 'RECONCILIATION_REQUIRED' &&
-    organisation.lastSuccessfulSyncAt !== null;
+    organisation.lastSuccessfulSyncAt !== null &&
+    organisation.lastSuccessfulSyncId !== null;
   const canRequestCustomerRollout =
     organisation.sendMode === 'live' &&
     organisation.rolloutScope === 'CONTROLLED' &&
@@ -222,6 +223,11 @@ export default async function SendingSettingsPage({
             <HiddenOrganisationState
               organisationId={organisationId}
               version={organisation.operationalStateVersion}
+            />
+            <input
+              type="hidden"
+              name="syncId"
+              value={organisation.lastSuccessfulSyncId ?? undefined}
             />
             <input
               type="hidden"

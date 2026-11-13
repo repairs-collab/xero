@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import {
   and,
   eq,
@@ -112,10 +114,6 @@ const postgresErrorCode = (error: unknown): string | null => {
   return postgresErrorCode(value.cause);
 };
 
-// Reauthorising within one clock tick still creates a distinct generation.
-const nextConnectedAt = (now: Date, previous: Date): Date =>
-  new Date(Math.max(now.getTime(), previous.getTime() + 1));
-
 async function lockOrganisationForConnectionChange(
   transaction: DbTransaction,
   organisationId: string
@@ -138,6 +136,8 @@ async function clearSoloSyncEvidence(
     .set({
       xeroSyncCursor: null,
       lastSuccessfulSyncAt: null,
+      lastSuccessfulSyncId: null,
+      lastSuccessfulXeroConnectionId: null,
       latestReconciledSyncAt: null
     })
     .where(and(eq(organisations.id, organisationId), eq(organisations.edition, 'SOLO')));
@@ -303,13 +303,14 @@ export class PostgresXeroConnectionRepository {
         const [updated] = await transaction
           .update(xeroConnections)
           .set({
+            id: randomUUID(),
             status: 'CONNECTED',
             encryptedRefreshToken: pending.encryptedRefreshToken,
             grantedScopes: pending.grantedScopes,
             refreshTokenVersion: sql`${xeroConnections.refreshTokenVersion} + 1`,
             refreshLeaseId: null,
             refreshLeaseExpiresAt: null,
-            connectedAt: nextConnectedAt(input.now, existingForOrganisation.connectedAt),
+            connectedAt: input.now,
             disconnectedAt: null,
             updatedAt: input.now
           })
@@ -391,13 +392,14 @@ export class PostgresXeroConnectionRepository {
       const [updated] = await transaction
         .update(xeroConnections)
         .set({
+          id: randomUUID(),
           status: 'CONNECTED',
           encryptedRefreshToken: input.encryptedRefreshToken,
           grantedScopes: input.grantedScopes,
           refreshTokenVersion: sql`${xeroConnections.refreshTokenVersion} + 1`,
           refreshLeaseId: null,
           refreshLeaseExpiresAt: null,
-          connectedAt: nextConnectedAt(input.now, existing.connectedAt),
+          connectedAt: input.now,
           disconnectedAt: null,
           updatedAt: input.now
         })

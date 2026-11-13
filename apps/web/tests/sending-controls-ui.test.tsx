@@ -50,7 +50,10 @@ const readiness: CustomerRolloutReadiness = {
         ]
       }
     },
-    syncFresh: { passed: true, evidence: { timestamp: now } },
+    syncFresh: {
+      passed: true,
+      evidence: { timestamp: now, xeroConnectionId: null }
+    },
     importedDataPresent: {
       passed: true,
       evidence: { activeContactCount: 18, outstandingInvoiceCount: 23 }
@@ -72,6 +75,7 @@ const readiness: CustomerRolloutReadiness = {
       passed: true,
       evidence: {
         id: 'reconciliation-id',
+        syncId: '10000000-0000-4000-8000-000000000099',
         syncCompletedAt: now,
         acknowledgedAt: now
       }
@@ -118,7 +122,12 @@ describe('final rollout controls', () => {
             ...readiness.gates,
             providersHealthy: {
               passed: false,
-              evidence: { edition: 'SOLO', xeroConnectedAt: now, replyNumberReadyAt: null }
+              evidence: {
+                edition: 'SOLO',
+                xeroConnectionId: '10000000-0000-4000-8000-000000000098',
+                xeroConnectedAt: now,
+                replyNumberReadyAt: null
+              }
             },
             controlledSmsEvidence: { passed: false, evidence: null }
           }

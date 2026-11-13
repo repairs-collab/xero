@@ -347,6 +347,9 @@ export async function seedLaunchScenario(
         operationalStateVersion: finalScenario.operationalStateVersion,
         xeroSyncCursor: finalScenario.freshSync ? 'e2e-current-sync' : null,
         lastSuccessfulSyncAt: successfulSyncAt,
+        lastSuccessfulSyncId: finalScenario.freshSync
+          ? finalRolloutFixtureIds.reconciliationId
+          : null,
         latestReconciledSyncAt: finalScenario.reconciliationCurrent
           ? successfulSyncAt
           : null,
@@ -402,6 +405,7 @@ export async function seedLaunchScenario(
         id: finalRolloutFixtureIds.reconciliationId,
         organisationId: scenario.organisationId,
         syncCompletedAt: successfulSyncAt,
+        syncId: finalRolloutFixtureIds.reconciliationId,
         activeContactCount: 1,
         outstandingInvoiceCount: 1,
         outstandingTotals: { AUD: '100.0000' },

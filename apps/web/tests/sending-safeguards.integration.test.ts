@@ -64,13 +64,15 @@ afterAll(async () => client.pool.end());
 async function seedBasic() {
   const organisationId = randomUUID();
   const userId = randomUUID();
+  const syncId = randomUUID();
   await client.db.insert(organisations).values({
     id: organisationId,
     xeroOrganisationId: randomUUID(),
     name: 'Sending test',
     timeZone: 'Australia/Sydney',
     baseCurrency: 'AUD',
-    lastSuccessfulSyncAt: syncCompletedAt
+    lastSuccessfulSyncAt: syncCompletedAt,
+    lastSuccessfulSyncId: syncId
   });
   await client.db.insert(users).values({
     id: userId,
@@ -85,7 +87,7 @@ async function seedBasic() {
     expiresAt: '2026-09-18T10:00:00Z',
     memberships: [{ organisationId, role, active: true, organisationStatus: 'ACTIVE' }]
   });
-  return { organisationId, userId, session };
+  return { organisationId, userId, syncId, session };
 }
 
 async function seedCustomerRolloutReady() {
@@ -254,7 +256,11 @@ async function recordTestSms(
 }
 
 async function reconcile(
-  seeded: { organisationId: string; session(role: 'ADMIN'): AppSession }
+  seeded: {
+    organisationId: string;
+    syncId: string;
+    session(role: 'ADMIN'): AppSession;
+  }
 ) {
   const service = createSendingSettings({
     database: client.db,
@@ -269,6 +275,7 @@ async function reconcile(
     acknowledgement: RECONCILIATION_ACKNOWLEDGEMENT,
     expectedVersion: 3,
     expected: {
+      syncId: seeded.syncId,
       syncCompletedAt: syncCompletedAt.toISOString(),
       metrics: readiness.metrics
     }
@@ -321,6 +328,12 @@ async function seedOwnerCreatedSolo() {
       tenantId,
       now: soloConnectedAt
     });
+  const [xeroConnection] = await client.db
+    .select({ id: xeroConnections.id })
+    .from(xeroConnections)
+    .where(eq(xeroConnections.organisationId, organisationId));
+  if (!xeroConnection) throw new Error('TEST_XERO_CONNECTION_NOT_CREATED');
+  const syncId = randomUUID();
   const session = (): AppSession => ({
     ...owner.session('ADMIN'),
     memberships: [{ organisationId, role: 'ADMIN', active: true, organisationStatus: 'ACTIVE' }]
@@ -330,7 +343,9 @@ async function seedOwnerCreatedSolo() {
       operationalState: 'RECONCILIATION_REQUIRED',
       operationalStateVersion: 2,
       recipientAllowlist: [controlledNumber],
-      lastSuccessfulSyncAt: syncCompletedAt
+      lastSuccessfulSyncAt: syncCompletedAt,
+      lastSuccessfulSyncId: syncId,
+      lastSuccessfulXeroConnectionId: xeroConnection.id
     })
     .where(eq(organisations.id, organisationId));
 
@@ -374,7 +389,13 @@ async function seedOwnerCreatedSolo() {
     })
     .where(eq(organisationOnboarding.organisationId, organisationId));
 
-  return { organisationId, userId: owner.userId, session, numberId: number.id };
+  return {
+    organisationId,
+    userId: owner.userId,
+    syncId,
+    session,
+    numberId: number.id
+  };
 }
 
 async function recordDedicatedTestSms(
@@ -471,15 +492,19 @@ describe('owner-created Solo rollout', () => {
   });
 
   it.each([
-    ['no successful sync', null, soloConnectedAt, false],
-    ['sync before reconnect', syncCompletedAt, new Date(syncCompletedAt.getTime() + 1), false],
-    ['stale sync', new Date(now.getTime() - 15 * 60_000 - 1), soloConnectedAt, false],
-    ['future sync', new Date(now.getTime() + 1), soloConnectedAt, false],
-    ['sync exactly 15 minutes old and as recent as connection', new Date(now.getTime() - 15 * 60_000), new Date(now.getTime() - 15 * 60_000), true]
-  ] as const)('checks Xero freshness with %s', async (_, syncAt, connectedAt, expected) => {
+    ['no successful sync', null, soloConnectedAt, false, false],
+    ['sync before reconnect', syncCompletedAt, syncCompletedAt, true, false],
+    ['stale sync', new Date(now.getTime() - 15 * 60_000 - 1), soloConnectedAt, false, false],
+    ['future sync', new Date(now.getTime() + 1), soloConnectedAt, false, false],
+    ['sync exactly 15 minutes old in the current generation', new Date(now.getTime() - 15 * 60_000), new Date(now.getTime() - 15 * 60_000), false, true]
+  ] as const)('checks Xero freshness with %s', async (_, syncAt, connectedAt, reconnect, expected) => {
     const seeded = await seedOwnerCreatedSolo();
     await client.db.update(xeroConnections)
-      .set({ connectedAt, lastRefreshedAt: now })
+      .set({
+        connectedAt,
+        lastRefreshedAt: now,
+        ...(reconnect ? { id: randomUUID() } : {})
+      })
       .where(eq(xeroConnections.organisationId, seeded.organisationId));
     await client.db.update(organisations)
       .set({ lastSuccessfulSyncAt: syncAt })
@@ -586,11 +611,21 @@ describe('owner-created Solo rollout', () => {
     const connectionLocked = deferred();
     const finishReconnect = deferred();
     const reconnect = client.db.transaction(async (transaction) => {
-      await transaction.update(xeroConnections).set({ connectedAt: now })
+      await transaction.update(xeroConnections).set({
+        id: randomUUID(),
+        connectedAt: now
+      })
         .where(eq(xeroConnections.organisationId, seeded.organisationId));
       connectionLocked.resolve();
       await finishReconnect.promise;
-      await transaction.update(organisations).set({ updatedAt: now })
+      await transaction.update(organisations).set({
+        xeroSyncCursor: null,
+        lastSuccessfulSyncAt: null,
+        lastSuccessfulSyncId: null,
+        lastSuccessfulXeroConnectionId: null,
+        latestReconciledSyncAt: null,
+        updatedAt: now
+      })
         .where(eq(organisations.id, seeded.organisationId));
     });
     await connectionLocked.promise;
@@ -857,6 +892,7 @@ describe('global sending safeguards', () => {
         acknowledgement: RECONCILIATION_ACKNOWLEDGEMENT,
         expectedVersion: 3,
         expected: {
+          syncId: seeded.syncId,
           syncCompletedAt: syncCompletedAt.toISOString(),
           metrics: before.metrics
         }
@@ -868,6 +904,7 @@ describe('global sending safeguards', () => {
         acknowledgement: 'yes',
         expectedVersion: 3,
         expected: {
+          syncId: seeded.syncId,
           syncCompletedAt: syncCompletedAt.toISOString(),
           metrics: before.metrics
         }
@@ -879,6 +916,7 @@ describe('global sending safeguards', () => {
         acknowledgement: RECONCILIATION_ACKNOWLEDGEMENT,
         expectedVersion: 2,
         expected: {
+          syncId: seeded.syncId,
           syncCompletedAt: syncCompletedAt.toISOString(),
           metrics: before.metrics
         }
@@ -890,6 +928,7 @@ describe('global sending safeguards', () => {
       acknowledgement: RECONCILIATION_ACKNOWLEDGEMENT,
       expectedVersion: 3,
       expected: {
+        syncId: seeded.syncId,
         syncCompletedAt: syncCompletedAt.toISOString(),
         metrics: before.metrics
       }
@@ -902,6 +941,7 @@ describe('global sending safeguards', () => {
         eq(rolloutReconciliations.organisationId, seeded.organisationId)
       );
     expect(reconciliation).toMatchObject({
+      syncId: seeded.syncId,
       syncCompletedAt,
       activeContactCount: 1,
       outstandingInvoiceCount: 2,
@@ -917,6 +957,96 @@ describe('global sending safeguards', () => {
       now
     });
     expect(after.readyForCustomerAcknowledgement).toBe(true);
+    expect(after.gates.reconciliationCurrent.passed).toBe(true);
+  });
+
+  it('keeps same-timestamp reconnect syncs and reconciliations generation-bound', async () => {
+    const seeded = await seedOwnerCreatedSolo();
+    await seedImportedReceivables(seeded.organisationId);
+    const service = createSendingSettings({
+      database: client.db,
+      clock: { now: () => now }
+    });
+    const first = await getCustomerRolloutReadiness(client.db, {
+      organisationId: seeded.organisationId,
+      now
+    });
+    await service.acknowledgeReconciliation(seeded.session(), {
+      organisationId: seeded.organisationId,
+      acknowledgement: RECONCILIATION_ACKNOWLEDGEMENT,
+      expectedVersion: 2,
+      expected: {
+        syncId: seeded.syncId,
+        syncCompletedAt: syncCompletedAt.toISOString(),
+        metrics: first.metrics
+      }
+    });
+
+    const nextConnectionId = randomUUID();
+    const nextSyncId = randomUUID();
+    await client.db
+      .update(xeroConnections)
+      .set({ id: nextConnectionId, connectedAt: syncCompletedAt })
+      .where(eq(xeroConnections.organisationId, seeded.organisationId));
+    await client.db
+      .update(organisations)
+      .set({
+        operationalState: 'RECONCILIATION_REQUIRED',
+        operationalStateVersion: 4,
+        lastSuccessfulSyncAt: syncCompletedAt,
+        lastSuccessfulSyncId: nextSyncId,
+        lastSuccessfulXeroConnectionId: nextConnectionId,
+        latestReconciledSyncAt: null
+      })
+      .where(eq(organisations.id, seeded.organisationId));
+
+    const second = await getCustomerRolloutReadiness(client.db, {
+      organisationId: seeded.organisationId,
+      now
+    });
+    expect(second.gates.syncFresh.passed).toBe(true);
+    expect(second.gates.reconciliationCurrent.passed).toBe(false);
+    await expect(
+      service.acknowledgeReconciliation(seeded.session(), {
+        organisationId: seeded.organisationId,
+        acknowledgement: RECONCILIATION_ACKNOWLEDGEMENT,
+        expectedVersion: 4,
+        expected: {
+          syncId: seeded.syncId,
+          syncCompletedAt: syncCompletedAt.toISOString(),
+          metrics: second.metrics
+        }
+      })
+    ).rejects.toThrow('SYNC_SUPERSEDED');
+    await service.acknowledgeReconciliation(seeded.session(), {
+      organisationId: seeded.organisationId,
+      acknowledgement: RECONCILIATION_ACKNOWLEDGEMENT,
+      expectedVersion: 4,
+      expected: {
+        syncId: nextSyncId,
+        syncCompletedAt: syncCompletedAt.toISOString(),
+        metrics: second.metrics
+      }
+    });
+
+    const reconciliations = await client.db
+      .select({ syncId: rolloutReconciliations.syncId })
+      .from(rolloutReconciliations)
+      .where(and(
+        eq(rolloutReconciliations.organisationId, seeded.organisationId),
+        eq(rolloutReconciliations.syncCompletedAt, syncCompletedAt)
+      ));
+    expect(reconciliations).toEqual(
+      expect.arrayContaining([
+        { syncId: seeded.syncId },
+        { syncId: nextSyncId }
+      ])
+    );
+    expect(reconciliations).toHaveLength(2);
+    const after = await getCustomerRolloutReadiness(client.db, {
+      organisationId: seeded.organisationId,
+      now
+    });
     expect(after.gates.reconciliationCurrent.passed).toBe(true);
   });
 
@@ -936,6 +1066,7 @@ describe('global sending safeguards', () => {
         acknowledgement: RECONCILIATION_ACKNOWLEDGEMENT,
         expectedVersion: 3,
         expected: {
+          syncId: seeded.syncId,
           syncCompletedAt: syncCompletedAt.toISOString(),
           metrics: { ...readiness.metrics, outstandingInvoiceCount: 99 }
         }
@@ -947,6 +1078,7 @@ describe('global sending safeguards', () => {
         acknowledgement: RECONCILIATION_ACKNOWLEDGEMENT,
         expectedVersion: 3,
         expected: {
+          syncId: seeded.syncId,
           syncCompletedAt: new Date(
             syncCompletedAt.getTime() - 60_000
           ).toISOString(),

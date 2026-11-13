@@ -265,7 +265,7 @@ describe('targeted Xero invoice refresh', () => {
     ['initial', runInitialSync],
     ['incremental', runIncrementalSync],
     ['nightly', reconcileNightly]
-  ] as const)('discards %s sync success after a concurrent OAuth reconnect', async (_, sync) => {
+  ] as const)('prevents a pre-reconnect %s sync from overwriting newer imported data', async (_, sync) => {
     const organisationId = await seedOrganisation();
     await database.db.update(organisations)
       .set({ edition: 'SOLO', operationalState: 'SYNC_REQUIRED' })
@@ -287,32 +287,64 @@ describe('targeted Xero invoice refresh', () => {
     const before = new Date('2026-09-18T01:00:00.000Z');
     const reconnectedAt = new Date('2026-09-18T01:59:00.000Z');
     await connections.upsertConnection({ ...connection, now: before });
-    const xero = new FakeXeroSyncClient();
+    const xeroContactId = randomUUID();
+    const xeroInvoiceId = randomUUID();
+    const staleXero = new FakeXeroSyncClient();
+    const currentXero = new FakeXeroSyncClient();
+    const staleInvoice = xeroInvoice(xeroInvoiceId, xeroContactId, {
+      amountDue: '80.00'
+    });
+    const currentInvoice = xeroInvoice(xeroInvoiceId, xeroContactId, {
+      amountDue: '220.00',
+      updatedAt: '2026-09-18T01:59:30Z'
+    });
+    staleXero.contacts.set(xeroContactId, {
+      ...xeroContact(xeroContactId),
+      name: 'Stale customer name'
+    });
+    currentXero.listedInvoices = [currentInvoice];
+    currentXero.contacts.set(xeroContactId, {
+      ...xeroContact(xeroContactId),
+      name: 'Current customer name'
+    });
     const remoteStarted = deferred();
     const finishRemote = deferred();
-    xero.listOutstandingInvoices = async () => {
+    staleXero.listOutstandingInvoices = async () => {
       remoteStarted.resolve();
       await finishRemote.promise;
-      return result([]);
+      return result([staleInvoice]);
     };
-    const outcome = sync({ database: database.db, xero, clock: fixedClock }, { organisationId })
+    const outcome = sync({ database: database.db, xero: staleXero, clock: fixedClock }, { organisationId })
       .then(() => null, (error: unknown) => error);
     await remoteStarted.promise;
     await connections.upsertConnection({ ...connection, now: reconnectedAt });
+    await sync(
+      { database: database.db, xero: currentXero, clock: fixedClock },
+      { organisationId }
+    );
     finishRemote.resolve();
 
     expect(await outcome).toMatchObject({ message: 'XERO_SYNC_CONNECTION_CHANGED' });
-    const [organisation] = await database.db.select().from(organisations)
+    const [storedInvoice] = await database.db.select().from(invoices)
+      .where(eq(invoices.xeroInvoiceId, xeroInvoiceId));
+    const [storedContact] = await database.db.select().from(contacts)
+      .where(eq(contacts.xeroContactId, xeroContactId));
+    const [successfulGeneration] = await database.db
+      .select({
+        syncId: organisations.lastSuccessfulSyncId,
+        xeroConnectionId: organisations.lastSuccessfulXeroConnectionId
+      })
+      .from(organisations)
       .where(eq(organisations.id, organisationId));
-    expect(organisation).toMatchObject({
-      xeroSyncCursor: null,
-      lastSuccessfulSyncAt: null,
-      operationalState: 'SYNC_REQUIRED'
-    });
-    await sync({ database: database.db, xero, clock: fixedClock }, { organisationId });
-    const [retried] = await database.db.select().from(organisations)
-      .where(eq(organisations.id, organisationId));
-    expect(retried?.lastSuccessfulSyncAt).toEqual(fixedClock.now());
+    const currentConnection = await connections.findByOrganisationId(
+      organisationId
+    );
+    expect(storedInvoice).toMatchObject({ amountDue: '220.0000' });
+    expect(storedContact).toMatchObject({ name: 'Current customer name' });
+    expect(successfulGeneration?.syncId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    );
+    expect(successfulGeneration?.xeroConnectionId).toBe(currentConnection?.id);
   });
 
   it('upserts changed invoices and invalidates stale approvals', async () => {
