@@ -280,6 +280,8 @@ export const getStripeConfiguration = (): StripeRuntimeConfiguration => {
   const soloMonthlyPriceId =
     process.env.STRIPE_SOLO_MONTHLY_PRICE_ID?.trim();
   const soloAnnualPriceId = process.env.STRIPE_SOLO_ANNUAL_PRICE_ID?.trim();
+  const soloSmsOveragePriceId =
+    process.env.STRIPE_SMS_OVERAGE_PRICE_ID?.trim();
   const portalConfigurationId =
     process.env.STRIPE_PORTAL_CONFIGURATION_ID?.trim();
   const publicBaseUrl = process.env.PUBLIC_BASE_URL?.trim();
@@ -288,13 +290,20 @@ export const getStripeConfiguration = (): StripeRuntimeConfiguration => {
     !webhookSecret ||
     !soloMonthlyPriceId ||
     !soloAnnualPriceId ||
+    !soloSmsOveragePriceId ||
     !portalConfigurationId ||
     !publicBaseUrl
   ) {
     throw new Error('Stripe billing configuration is incomplete');
   }
-  if (soloMonthlyPriceId === soloAnnualPriceId) {
-    throw new Error('Stripe monthly and annual Price IDs must be distinct');
+  if (
+    new Set([
+      soloMonthlyPriceId,
+      soloAnnualPriceId,
+      soloSmsOveragePriceId
+    ]).size !== 3
+  ) {
+    throw new Error('Stripe billing Price IDs must be distinct');
   }
   let publicUrl: URL;
   try {
@@ -317,6 +326,7 @@ export const getStripeConfiguration = (): StripeRuntimeConfiguration => {
     webhookSecret,
     soloMonthlyPriceId,
     soloAnnualPriceId,
+    soloSmsOveragePriceId,
     portalConfigurationId,
     publicBaseUrl: publicUrl.origin,
     priceCurrency: 'aud',

@@ -1,5 +1,7 @@
 import Link from 'next/link';
 
+import { soloIncludedSmsParts } from '@bc5000/domain';
+
 import { australianTimeZones } from '../../../../server/australian-time-zones.js';
 import { requirePlatformOwnerPage } from '../../../../server/platform-page-authorization.js';
 import { createCustomerAction } from './actions.js';
@@ -106,7 +108,7 @@ export default async function NewPlatformCustomerPage({
           <div className="form-grid">
             <label>
               Included SMS parts
-              <input name="includedSmsParts" type="number" min={1} max={1_000_000} defaultValue={2_000} required />
+              <input name="includedSmsParts" type="number" min={1} max={1_000_000} defaultValue={soloIncludedSmsParts} required />
             </label>
             <label>
               Usage warning (%)

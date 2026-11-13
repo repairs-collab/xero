@@ -54,11 +54,12 @@ export default function TermsPage() {
       </p>
       <p>
         An SMS may consume more than one part because of message length or
-        character encoding. Included SMS parts reset at the end of each monthly
-        allowance period, including for annually billed subscriptions. They do
-        not roll over, have no cash value and are not refundable. Sends that
-        would exceed the included SMS allowance are blocked and are not submitted
-        to the SMS provider. Blocked sends are not automatically replayed.
+        character encoding. The Solo subscription includes 1,000 outbound SMS
+        parts in each monthly allowance period, including for annually billed
+        subscriptions. Each additional outbound SMS part is billed as overage
+        at A$0.11 excluding GST. Included parts reset at the end of each monthly
+        allowance period. Unused included parts and overage do not roll over,
+        have no cash value and are not refundable.
         Dedicated-number or provisioning fees are not refundable once incurred,
         except where required by law or where the service cannot be supplied.
       </p>

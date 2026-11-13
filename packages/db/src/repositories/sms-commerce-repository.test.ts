@@ -100,8 +100,8 @@ const createExecutor = (options: FakeExecutorOptions) => {
   };
 };
 
-describe('PostgresSmsCommerceRepository hard allowance', () => {
-  it('blocks a crossing send despite valid persisted legacy overage settings', async () => {
+describe('PostgresSmsCommerceRepository SMS allowance', () => {
+  it('blocks a crossing send when persisted legacy overage uses an unapproved rate', async () => {
     const { executor, insertedUsage } = createExecutor({
       includedParts: 2_000,
       entries: [{ entryType: 'RESERVE', partDelta: 1_999 }]
@@ -121,7 +121,7 @@ describe('PostgresSmsCommerceRepository hard allowance', () => {
       )
     ).resolves.toEqual({
       kind: 'blocked',
-      reason: 'SMS_ALLOWANCE_EXHAUSTED',
+      reason: 'SMS_OVERAGE_BILLING_NOT_READY',
       projectedParts: 2_001
     });
     expect(insertedUsage).toEqual([]);
@@ -163,7 +163,7 @@ describe('PostgresSmsCommerceRepository hard allowance', () => {
     expect(insertedUsage).toEqual([]);
   });
 
-  it('blocks a retry of a legacy reservation that already exceeds the allowance', async () => {
+  it('blocks a retry of an over-limit reservation with an unapproved legacy rate', async () => {
     const { executor, insertedUsage } = createExecutor({
       includedParts: 2_000,
       entries: [{ entryType: 'RESERVE', partDelta: 2_001 }],
@@ -188,7 +188,7 @@ describe('PostgresSmsCommerceRepository hard allowance', () => {
       )
     ).resolves.toEqual({
       kind: 'blocked',
-      reason: 'SMS_ALLOWANCE_EXHAUSTED',
+      reason: 'SMS_OVERAGE_BILLING_NOT_READY',
       projectedParts: 2_001
     });
     expect(insertedUsage).toEqual([]);
@@ -298,11 +298,14 @@ describe('PostgresSmsCommerceRepository hard allowance', () => {
 
     await expect(repository.loadAllowance('org-solo', executor)).resolves.toEqual({
       includedParts: 2_500,
-      warningPercent: 80
+      warningPercent: 80,
+      overageEnabled: true,
+      overageCapCents: 100_000,
+      overageCentsPerPart: 1
     });
   });
 
-  it('returns included, used inputs and remaining parts without runtime overage fields', async () => {
+  it('returns included, used and overage inputs for the billing view', async () => {
     const { executor } = createExecutor({
       includedParts: 2_500,
       entries: [
@@ -320,7 +323,11 @@ describe('PostgresSmsCommerceRepository hard allowance', () => {
       warningPercent: 80,
       committedParts: 1_200,
       reservedParts: 40,
-      remainingParts: 1_260
+      remainingParts: 1_260,
+      overageParts: 0,
+      overageEnabled: true,
+      overageCentsPerPart: 1,
+      estimatedOverageCents: 0
     });
   });
 });

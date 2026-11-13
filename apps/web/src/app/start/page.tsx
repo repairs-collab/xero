@@ -9,12 +9,18 @@ export default function StartPage() {
         <span className="eyebrow">AccountPulse Solo</span>
         <h1>Connect Xero and start chasing overdue accounts</h1>
         <p>
-          Invited beta customers can connect one Xero organisation in
-          controlled review mode. For paid commercial access, card payment is
-          due during signup and does not include a free trial.
+          Create your AccountPulse account, connect one Xero organisation and
+          begin in controlled review mode. Card payment is due during signup
+          and does not include a free trial.
         </p>
         <div className="button-row">
-          <Link href="/auth/login?returnTo=%2Fonboarding" className="button button--primary">
+          <Link
+            href="/auth/login?mode=signup&returnTo=%2Fonboarding"
+            className="button button--primary"
+          >
+            Create account
+          </Link>
+          <Link href="/auth/login?returnTo=%2Fonboarding" className="button">
             Sign in
           </Link>
           <a href={`mailto:${support.supportEmail}?subject=AccountPulse%20beta%20access`} className="button">

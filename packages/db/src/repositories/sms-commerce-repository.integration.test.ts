@@ -11,6 +11,7 @@ import {
   replyNumberProvisioningRequests,
   smsAllowanceSettings,
   smsNumberPool,
+  smsOverageStatements,
   smsUsageLedger,
   subscriptions
 } from '../schema/index.js';
@@ -48,6 +49,8 @@ const seedPaidOrganisation = async (options: {
     status: 'ACTIVE',
     stripeProviderStatus: 'active',
     trustedStripeProviderStatus: 'active',
+    stripeCustomerId: `cus_${organisationId}`,
+    stripeSubscriptionId: `sub_${organisationId}`,
     currentPeriodStart: options.currentPeriodStart ?? periodStart,
     currentPeriodEnd: options.currentPeriodEnd ?? periodEnd
   });
@@ -187,6 +190,13 @@ describe('PostgresSmsCommerceRepository', () => {
 
   it('reserves and commits final rendered parts idempotently per tenant', async () => {
     const organisationId = await seedPaidOrganisation();
+    await client.db.insert(smsAllowanceSettings).values({
+      organisationId,
+      includedParts: 1_000,
+      warningPercent: 80,
+      overageEnabled: false,
+      overageCentsPerPart: 11
+    });
     await seedPoolNumber({ verified: true, createdAt: new Date(-Date.now()) });
     const number = await repository.reserveAvailableNumber(organisationId, now);
     await repository.markNumberReady(organisationId, number.id, now);
@@ -206,7 +216,7 @@ describe('PostgresSmsCommerceRepository', () => {
     await expect(repository.loadUsage(organisationId)).resolves.toMatchObject({
       committedParts: 2,
       reservedParts: 0,
-      includedParts: 2_000
+      includedParts: 1_000
     });
 
     const blockedOutboundId = await seedOutbound(organisationId);
@@ -215,13 +225,13 @@ describe('PostgresSmsCommerceRepository', () => {
         organisationId,
         outboundMessageId: blockedOutboundId,
         source: 'MANUAL_REMINDER',
-        partCount: 1_999,
+        partCount: 999,
         now
       })
     ).resolves.toEqual({
       kind: 'blocked',
       reason: 'SMS_ALLOWANCE_EXHAUSTED',
-      projectedParts: 2_001
+      projectedParts: 1_001
     });
   });
 
@@ -285,15 +295,15 @@ describe('PostgresSmsCommerceRepository', () => {
     clockTime = now;
   });
 
-  it('hard-caps persisted legacy overage settings at the exact multipart boundary', async () => {
+  it('allows approved 11-cent overage and records one idempotent period statement on commit', async () => {
     const organisationId = await seedPaidOrganisation();
     await client.db.insert(smsAllowanceSettings).values({
       organisationId,
       includedParts: 3,
       warningPercent: 80,
       overageEnabled: true,
-      overageCapCents: 10_000,
-      overageCentsPerPart: 1
+      overageCapCents: null,
+      overageCentsPerPart: 11
     });
     await seedPoolNumber({ verified: true, createdAt: new Date(-Date.now()) });
     const number = await repository.reserveAvailableNumber(organisationId, now);
@@ -330,37 +340,115 @@ describe('PostgresSmsCommerceRepository', () => {
         partCount: 2,
         now
       })
-    ).resolves.toEqual({
-      kind: 'blocked',
-      reason: 'SMS_ALLOWANCE_EXHAUSTED',
-      projectedParts: 5
-    });
-    await expect(
-      client.db
-        .select()
-        .from(smsUsageLedger)
-        .where(eq(smsUsageLedger.outboundMessageId, crossingOutboundId))
-    ).resolves.toEqual([]);
+    ).resolves.toMatchObject({ kind: 'reserved', alreadyReserved: false });
+    await repository.commitUsage(organisationId, firstOutboundId, now);
+    await repository.commitUsage(organisationId, exactBoundaryOutboundId, now);
+    await repository.commitUsage(organisationId, crossingOutboundId, now);
+    await repository.commitUsage(organisationId, crossingOutboundId, now);
     await expect(repository.loadUsage(organisationId)).resolves.toEqual({
       billingPeriodStart: periodStart,
       billingPeriodEnd: periodEnd,
       includedParts: 3,
       warningPercent: 80,
-      committedParts: 0,
-      reservedParts: 3,
-      remainingParts: 0
+      committedParts: 5,
+      reservedParts: 0,
+      remainingParts: 0,
+      overageParts: 2,
+      overageEnabled: true,
+      overageCentsPerPart: 11,
+      estimatedOverageCents: 22
+    });
+    await expect(
+      client.db
+        .select()
+        .from(smsOverageStatements)
+        .where(eq(smsOverageStatements.organisationId, organisationId))
+    ).resolves.toMatchObject([
+      {
+        billingPeriodStart: periodStart,
+        billingPeriodEnd: periodEnd,
+        committedParts: 5,
+        includedParts: 3,
+        billableParts: 2,
+        unitCents: 11,
+        subtotalCents: 22,
+        stripeCustomerId: `cus_${organisationId}`,
+        stripeSubscriptionId: `sub_${organisationId}`,
+        status: 'OPEN',
+        attemptCount: 0,
+        stripeInvoiceItemId: null,
+        stripeInvoiceId: null
+      }
+    ]);
+
+    await expect(
+      repository.claimDueOverageStatement(
+        new Date('2026-11-30T23:59:59.999Z'),
+        15 * 60 * 1_000
+      )
+    ).resolves.toBeNull();
+    const firstClaim = await repository.claimDueOverageStatement(
+      periodEnd,
+      15 * 60 * 1_000
+    );
+    expect(firstClaim).toMatchObject({
+      organisationId,
+      status: 'PROCESSING',
+      attemptCount: 1,
+      billableParts: 2,
+      subtotalCents: 22
+    });
+    if (firstClaim === null) throw new Error('statement not claimed');
+    await repository.markOverageStatementFailed(
+      firstClaim.id,
+      'STRIPE_TEMPORARY_FAILURE',
+      periodEnd
+    );
+    const retryClaim = await repository.claimDueOverageStatement(
+      new Date(periodEnd.getTime() + 1),
+      15 * 60 * 1_000
+    );
+    expect(retryClaim).toMatchObject({
+      id: firstClaim.id,
+      status: 'PROCESSING',
+      attemptCount: 2
+    });
+    await repository.recordOverageInvoice(
+      firstClaim.id,
+      'in_sms_overage',
+      periodEnd
+    );
+    await repository.recordOverageInvoiceItem(
+      firstClaim.id,
+      'ii_sms_overage',
+      periodEnd
+    );
+    await repository.markOverageStatementInvoiced(
+      firstClaim.id,
+      periodEnd
+    );
+    await expect(
+      client.db.query.smsOverageStatements.findFirst({
+        where: (table, { eq }) => eq(table.id, firstClaim.id)
+      })
+    ).resolves.toMatchObject({
+      status: 'INVOICED',
+      stripeInvoiceItemId: 'ii_sms_overage',
+      stripeInvoiceId: 'in_sms_overage',
+      attemptCount: 2,
+      lastErrorCode: null
     });
   });
 
-  it('blocks a retry of a legacy over-limit reservation', async () => {
+  it('allows an idempotent retry of an approved over-limit reservation', async () => {
     const organisationId = await seedPaidOrganisation();
     await client.db.insert(smsAllowanceSettings).values({
       organisationId,
       includedParts: 2,
       warningPercent: 80,
       overageEnabled: true,
-      overageCapCents: 10_000,
-      overageCentsPerPart: 1
+      overageCapCents: null,
+      overageCentsPerPart: 11
     });
     await seedPoolNumber({ verified: true, createdAt: new Date(-Date.now()) });
     const number = await repository.reserveAvailableNumber(organisationId, now);
@@ -386,17 +474,54 @@ describe('PostgresSmsCommerceRepository', () => {
         partCount: 3,
         now
       })
-    ).resolves.toEqual({
-      kind: 'blocked',
-      reason: 'SMS_ALLOWANCE_EXHAUSTED',
-      projectedParts: 3
-    });
+    ).resolves.toMatchObject({ kind: 'reserved', alreadyReserved: true });
     await expect(
       client.db
         .select()
         .from(smsUsageLedger)
         .where(eq(smsUsageLedger.outboundMessageId, outboundMessageId))
     ).resolves.toHaveLength(1);
+  });
+
+  it('never creates an overage statement for a released reservation', async () => {
+    const organisationId = await seedPaidOrganisation();
+    await client.db.insert(smsAllowanceSettings).values({
+      organisationId,
+      includedParts: 1,
+      warningPercent: 80,
+      overageEnabled: true,
+      overageCapCents: null,
+      overageCentsPerPart: 11
+    });
+    await seedPoolNumber({ verified: true, createdAt: new Date(-Date.now()) });
+    const number = await repository.reserveAvailableNumber(organisationId, now);
+    await repository.markNumberReady(organisationId, number.id, now);
+    const outboundMessageId = await seedOutbound(organisationId);
+
+    await expect(
+      repository.reserveUsage({
+        organisationId,
+        outboundMessageId,
+        source: 'MANUAL_REMINDER',
+        partCount: 2,
+        now
+      })
+    ).resolves.toMatchObject({ kind: 'reserved' });
+    await repository.releaseUsage(organisationId, outboundMessageId, now);
+    await repository.releaseUsage(organisationId, outboundMessageId, now);
+
+    await expect(
+      client.db
+        .select()
+        .from(smsOverageStatements)
+        .where(eq(smsOverageStatements.organisationId, organisationId))
+    ).resolves.toEqual([]);
+    await expect(repository.loadUsage(organisationId)).resolves.toMatchObject({
+      committedParts: 0,
+      reservedParts: 0,
+      overageParts: 0,
+      estimatedOverageCents: 0
+    });
   });
 
   it('fails closed when the organisation already has an unverified reservation', async () => {

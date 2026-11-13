@@ -39,6 +39,7 @@ const composeEnvironment = {
   STRIPE_WEBHOOK_SECRET: 'whsec_test_example',
   STRIPE_SOLO_MONTHLY_PRICE_ID: 'price_test_solo_monthly',
   STRIPE_SOLO_ANNUAL_PRICE_ID: 'price_test_solo_annual',
+  STRIPE_SMS_OVERAGE_PRICE_ID: 'price_test_sms_overage',
   STRIPE_PORTAL_CONFIGURATION_ID: 'bpc_test_solo',
   SINCH_CALLBACK_PUBLIC_KEYS_JSON: '{}',
   SINCH_WEBHOOK_TOKEN: 'test-sinch-token',
@@ -163,6 +164,8 @@ describe('OVH voice deployment', () => {
           composeEnvironment.STRIPE_SOLO_MONTHLY_PRICE_ID,
         STRIPE_SOLO_ANNUAL_PRICE_ID:
           composeEnvironment.STRIPE_SOLO_ANNUAL_PRICE_ID,
+        STRIPE_SMS_OVERAGE_PRICE_ID:
+          composeEnvironment.STRIPE_SMS_OVERAGE_PRICE_ID,
         STRIPE_PORTAL_CONFIGURATION_ID: composeEnvironment.STRIPE_PORTAL_CONFIGURATION_ID
       })
     );
@@ -175,11 +178,13 @@ describe('OVH voice deployment', () => {
         DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION:
           composeEnvironment.DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION,
         DEBT_CONTACT_HOLIDAY_COVERAGE_END:
-          composeEnvironment.DEBT_CONTACT_HOLIDAY_COVERAGE_END
+          composeEnvironment.DEBT_CONTACT_HOLIDAY_COVERAGE_END,
+        STRIPE_SECRET_KEY: composeEnvironment.STRIPE_SECRET_KEY,
+        STRIPE_WEBHOOK_SECRET: composeEnvironment.STRIPE_WEBHOOK_SECRET,
+        STRIPE_SMS_OVERAGE_PRICE_ID:
+          composeEnvironment.STRIPE_SMS_OVERAGE_PRICE_ID
       })
     );
-    expect(resolved.services.worker?.environment).not.toHaveProperty('STRIPE_SECRET_KEY');
-    expect(resolved.services.worker?.environment).not.toHaveProperty('STRIPE_WEBHOOK_SECRET');
     expect(resolved.services.worker?.environment).not.toHaveProperty('COGNITO_DOMAIN');
     expect(resolved.services.worker?.environment).not.toHaveProperty('COGNITO_CLIENT_ID');
     expect(resolved.services.worker?.environment).not.toHaveProperty('XERO_WEBHOOK_KEY');

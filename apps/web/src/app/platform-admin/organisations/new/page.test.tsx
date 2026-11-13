@@ -23,6 +23,7 @@ describe('platform customer creation page', () => {
 
     expect(markup).toContain('controlled Solo beta workspace');
     expect(markup).toContain('paid subscription is activated');
+    expect(markup).toMatch(/name="includedSmsParts"[^>]*value="1000"/);
     expect(markup).not.toContain('name="trialDays"');
     expect(markup).not.toContain('Trial length');
     expect(markup).not.toContain('safe Solo trial');
