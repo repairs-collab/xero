@@ -91,12 +91,25 @@ describe('billing SMS hard-cap copy', () => {
   });
 
   it('shows a recoverable conflict when another Checkout is still being resolved', async () => {
+    getBillingAccountSnapshot.mockResolvedValue({
+      ...(await getBillingAccountSnapshot()),
+      status: 'INCOMPLETE',
+      stripeCustomerId: null,
+      stripeSubscriptionId: null,
+      currentPeriodStart: null,
+      currentPeriodEnd: null
+    });
     const markup = renderToStaticMarkup(await BillingSettingsPage({
-      searchParams: Promise.resolve({ checkout: 'attempt-conflict' })
+      searchParams: Promise.resolve({
+        checkout: 'attempt-conflict',
+        checkoutCadence: 'MONTHLY'
+      })
     }));
 
     expect(markup).toContain('A Stripe checkout is already in progress');
-    expect(markup).toContain('Choose the same billing option to reopen it');
+    expect(markup).toContain('Monthly checkout is already in progress');
+    expect(markup).toContain('Reopen monthly checkout');
+    expect(markup).toContain('Annual unavailable while monthly checkout is in progress');
   });
 
   it('renders exact monthly and derived annual AUD pricing before paid signup', async () => {

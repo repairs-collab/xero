@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { SubscriptionFailure } from '../../../../server/subscription-service.js';
+import {
+  CheckoutAttemptConflict,
+  SubscriptionFailure
+} from '../../../../server/subscription-service.js';
 import { startSoloCheckout } from './actions.js';
 
 const createCheckout = vi.hoisted(() => vi.fn());
@@ -25,6 +28,17 @@ describe('start Solo Checkout action', () => {
     form.set('billingCadence', 'ANNUAL');
 
     await expect(startSoloCheckout(form)).rejects.toThrow('redirect:/settings/billing?checkout=attempt-conflict');
+  });
+
+  it('carries the reserved cadence from a verified conflict into the recovery view', async () => {
+    createCheckout.mockRejectedValue(new CheckoutAttemptConflict('MONTHLY'));
+    const form = new FormData();
+    form.set('organisationId', 'org_solo');
+    form.set('billingCadence', 'ANNUAL');
+
+    await expect(startSoloCheckout(form)).rejects.toThrow(
+      'redirect:/settings/billing?checkout=attempt-conflict&checkoutCadence=MONTHLY'
+    );
   });
 
   it('keeps redirecting a successful start to the hosted Checkout', async () => {

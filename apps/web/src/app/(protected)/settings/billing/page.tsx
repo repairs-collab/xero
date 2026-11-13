@@ -48,9 +48,18 @@ const date = (value: Date | null): string =>
 export default async function BillingSettingsPage({
   searchParams
 }: {
-  searchParams?: Promise<{ checkout?: string | string[] }>;
+  searchParams?: Promise<{
+    checkout?: string | string[];
+    checkoutCadence?: string | string[];
+  }>;
 }) {
-  const checkoutConflict = (await searchParams)?.checkout === 'attempt-conflict';
+  const query = await searchParams;
+  const checkoutConflict = query?.checkout === 'attempt-conflict';
+  const checkoutConflictCadence =
+    checkoutConflict &&
+    (query?.checkoutCadence === 'MONTHLY' || query?.checkoutCadence === 'ANNUAL')
+      ? query.checkoutCadence
+      : null;
   const session = await requireWebSession(
     new Request('http://localhost/', { headers: await headers() })
   );
@@ -94,7 +103,12 @@ export default async function BillingSettingsPage({
       {checkoutConflict && admin && !legacySmsExempt ? (
         <div className="callout callout--warning" role="status">
           <strong>A Stripe checkout is already in progress</strong>
-          <p>Choose the same billing option to reopen it if it is still available. You can change billing options after Stripe confirms the earlier checkout has expired or ended.</p>
+          <p>
+            {checkoutConflictCadence === null
+              ? 'Choose the same billing option to reopen it if it is still available.'
+              : `${checkoutConflictCadence === 'MONTHLY' ? 'Monthly' : 'Annual'} checkout is already in progress. Reopen that checkout to continue.`}{' '}
+            You can change billing options after Stripe confirms the earlier checkout has expired or ended.
+          </p>
         </div>
       ) : null}
 
@@ -166,6 +180,9 @@ export default async function BillingSettingsPage({
                 (account.stripeSubscriptionId === null ||
                   (account.status === 'CANCELLED' &&
                     isTerminalStripeSubscription(account.stripeProviderStatus)));
+              const blockedByOtherCheckout =
+                checkoutConflictCadence !== null &&
+                checkoutConflictCadence !== plan.cadence;
               return (
                 <article key={plan.cadence}>
                   <h3>{plan.title}</h3>
@@ -178,7 +195,7 @@ export default async function BillingSettingsPage({
                     GST {aud(gst)}; payable total {aud(total)}.
                   </p>
                   <p>{plan.note}.</p>
-                  {checkoutAvailable ? (
+                  {checkoutAvailable && !blockedByOtherCheckout ? (
                     <form action={startSoloCheckout}>
                       <input
                         type="hidden"
@@ -191,9 +208,17 @@ export default async function BillingSettingsPage({
                         value={plan.cadence}
                       />
                       <button className="button button--primary">
-                        Choose {plan.title.toLocaleLowerCase('en-AU')}
+                        {checkoutConflictCadence === plan.cadence
+                          ? `Reopen ${plan.title.toLocaleLowerCase('en-AU')} checkout`
+                          : `Choose ${plan.title.toLocaleLowerCase('en-AU')}`}
                       </button>
                     </form>
+                  ) : blockedByOtherCheckout ? (
+                    <p className="muted-copy">
+                      {plan.title} unavailable while{' '}
+                      {checkoutConflictCadence.toLocaleLowerCase('en-AU')}{' '}
+                      checkout is in progress.
+                    </p>
                   ) : null}
                 </article>
               );

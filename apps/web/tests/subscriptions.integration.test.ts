@@ -14,7 +14,11 @@ import {
   subscriptions,
   users
 } from '@bc5000/db';
-import type { SoloCheckoutRequest, StripeCheckoutSession, StripeWebhookEvent } from '@bc5000/integrations/stripe';
+import {
+  type SoloCheckoutRequest,
+  type StripeCheckoutSession,
+  type StripeWebhookEvent
+} from '@bc5000/integrations/stripe';
 
 import { createPostgresSubscriptionRepository } from '../src/server/subscription-repository.js';
 import {
@@ -37,6 +41,8 @@ class FakeStripe implements StripeBillingGateway {
   checkoutRequests: SoloCheckoutRequest[] = [];
   checkoutSessions = new Map<string, StripeCheckoutSession>();
   loseResponse = false;
+  loseBeforeCreate = false;
+  rejectBeforeCreate = false;
 
   checkoutConfiguration(cadence: 'MONTHLY' | 'ANNUAL') {
     return {
@@ -48,6 +54,19 @@ class FakeStripe implements StripeBillingGateway {
 
   createSoloCheckout(request: SoloCheckoutRequest) {
     this.checkoutRequests.push(request);
+    if (this.loseBeforeCreate) {
+      this.loseBeforeCreate = false;
+      return Promise.reject(new Error('lost response before execution'));
+    }
+    if (this.rejectBeforeCreate) {
+      this.rejectBeforeCreate = false;
+      return Promise.reject(
+        Object.assign(new Error('Stripe rejected the Checkout request'), {
+          code: 'STRIPE_CHECKOUT_REQUEST_REJECTED',
+          providerRequestId: 'req_expired_checkout'
+        })
+      );
+    }
     let session = this.checkoutSessions.get(request.idempotencyKey);
     if (session === undefined) {
       session = {
@@ -615,6 +634,25 @@ describe('single paid Checkout across cadences', () => {
     expect(stripe.checkoutSessions.size).toBe(1);
   });
 
+  it('releases only a definitively rejected unbound attempt and retries with a fresh provider window', async () => {
+    const { checkout, stripe, advance } = await checkoutFixture();
+    stripe.loseBeforeCreate = true;
+    await expect(checkout()).rejects.toThrow('lost response before execution');
+    const firstAttempt = stripe.checkoutRequests[0]!;
+
+    advance(2 * 60 * 60);
+    stripe.rejectBeforeCreate = true;
+    await expect(checkout()).resolves.toBeDefined();
+
+    expect(stripe.checkoutRequests).toHaveLength(3);
+    expect(stripe.checkoutRequests[1]).toEqual(firstAttempt);
+    expect(stripe.checkoutRequests[2]?.attemptId).not.toBe(firstAttempt.attemptId);
+    expect(stripe.checkoutRequests[2]?.expiresAt.getTime()).toBeGreaterThan(
+      firstAttempt.expiresAt.getTime()
+    );
+    expect(stripe.checkoutSessions.size).toBe(1);
+  });
+
   it('reuses the provider Session after the first local bind fails', async () => {
     const { checkout, stripe, repository } = await checkoutFixture();
     const bind = vi.spyOn(repository, 'recordCheckoutSession').mockRejectedValueOnce(new Error('bind failed'));
@@ -728,6 +766,25 @@ describe('single paid Checkout across cadences', () => {
     const [row] = await client.db.select().from(subscriptions).where(eq(subscriptions.organisationId, organisationId));
     expect(row?.stripeSubscriptionId).toBeNull();
     await expect(webhook(checkoutEvent)).resolves.toBe('APPLIED');
+  });
+
+  it('does not accept contradictory evidence for an attempt resolved by a racing webhook', async () => {
+    const { checkout, stripe, repository, webhook } = await checkoutFixture();
+    const hosted = await checkout();
+    const request = stripe.checkoutRequests[0]!;
+    const expired = attemptCheckoutEvent(request, hosted.id, 'expired');
+    await expect(webhook(expired)).resolves.toBe('APPLIED');
+
+    await expect(repository.recordCheckoutSession({
+      id: hosted.id,
+      organisationId: request.organisationId,
+      attemptId: request.attemptId,
+      billingCadence: 'ANNUAL',
+      expiresAt: new Date(request.expiresAt.getTime() + 60_000),
+      status: 'open',
+      stripeCustomerId: 'cus_contradictory',
+      stripeSubscriptionId: 'sub_contradictory'
+    })).resolves.toBe('FENCED');
   });
 
   it('does not let another tenant claim a customer already observed on a different attempt', async () => {

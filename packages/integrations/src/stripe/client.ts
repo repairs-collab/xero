@@ -148,6 +148,15 @@ export class StripeProviderFailure extends Error {
   }
 }
 
+export class StripeCheckoutRequestRejected extends Error {
+  readonly code = 'STRIPE_CHECKOUT_REQUEST_REJECTED';
+
+  constructor(readonly providerRequestId: string) {
+    super('Stripe rejected the Checkout request before creating a Session');
+    this.name = 'StripeCheckoutRequestRejected';
+  }
+}
+
 export class StripeWebhookSignatureFailure extends Error {
   readonly code = 'STRIPE_WEBHOOK_SIGNATURE_INVALID';
 
@@ -161,6 +170,23 @@ const requireNonEmpty = (value: string): string => {
   const trimmed = value.trim();
   if (trimmed.length === 0) throw new StripeConfigurationFailure();
   return trimmed;
+};
+
+const definitiveCheckoutExpiryRejection = (
+  error: unknown
+): string | null => {
+  if (typeof error !== 'object' || error === null) return null;
+  const candidate = error as Record<string, unknown>;
+  const requestId = candidate.requestId;
+  return candidate.type === 'StripeInvalidRequestError' &&
+    candidate.rawType === 'invalid_request_error' &&
+    candidate.statusCode === 400 &&
+    candidate.param === 'expires_at' &&
+    typeof requestId === 'string' &&
+    requestId.trim().length > 0 &&
+    requestId.length <= 128
+    ? requestId
+    : null;
 };
 
 const parsePublicOrigin = (value: string): string => {
@@ -510,7 +536,11 @@ export class StripeBillingClient {
         { idempotencyKey: request.idempotencyKey }
       );
       return parseStripeCheckoutSession(session);
-    } catch {
+    } catch (error) {
+      const providerRequestId = definitiveCheckoutExpiryRejection(error);
+      if (providerRequestId !== null) {
+        throw new StripeCheckoutRequestRejected(providerRequestId);
+      }
       throw new StripeProviderFailure();
     }
   }

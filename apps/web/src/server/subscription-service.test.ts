@@ -192,8 +192,11 @@ class FakeRepository implements SubscriptionRepository {
   }
 
   checkoutAttempt: Awaited<ReturnType<SubscriptionRepository['reserveCheckout']>> | null = null;
+  checkoutReserveCalls = 0;
+  checkoutDisposition: 'OPEN' | 'FENCED' | 'RESOLVED' = 'OPEN';
 
   reserveCheckout(input: Parameters<SubscriptionRepository['reserveCheckout']>[0]) {
+    this.checkoutReserveCalls += 1;
     const account = this.currentAccount;
     if (account === null) return Promise.reject(new SubscriptionFailure('SUBSCRIPTION_NOT_FOUND'));
     if (account.edition !== 'SOLO') return Promise.reject(new SubscriptionFailure('BILLING_NOT_APPLICABLE'));
@@ -210,14 +213,20 @@ class FakeRepository implements SubscriptionRepository {
         expiresAt: new Date('2026-11-09T13:00:00.000Z'),
         idempotencyKey: 'solo-checkout:' + attemptId
       },
-      stripeSessionId: null
+      stripeSessionId: null,
+      reservedAt: new Date('2026-11-09T12:00:00.000Z')
     };
     return Promise.resolve(this.checkoutAttempt);
   }
 
   recordCheckoutSession(input: Parameters<SubscriptionRepository['recordCheckoutSession']>[0]) {
     if (this.checkoutAttempt !== null) this.checkoutAttempt.stripeSessionId = input.id;
-    return Promise.resolve('OPEN' as const);
+    return Promise.resolve(this.checkoutDisposition);
+  }
+
+  releaseRejectedCheckoutAttempt() {
+    this.checkoutAttempt = null;
+    return Promise.resolve(true);
   }
 
   applyCheckoutExpired() {
@@ -605,6 +614,16 @@ describe('subscription checkout and portal', () => {
       )
     ).rejects.toMatchObject({ code: 'BILLING_CADENCE_INVALID' });
     expect(forged.stripe.checkoutRequests).toEqual([]);
+  });
+
+  it('never reserves a replacement when a racing webhook already resolved the selected attempt', async () => {
+    const { service, repository } = createService();
+    repository.checkoutDisposition = 'RESOLVED';
+
+    await expect(
+      service.createCheckout(adminSession, 'org_solo', 'MONTHLY')
+    ).rejects.toMatchObject({ code: 'CHECKOUT_ATTEMPT_CONFLICT' });
+    expect(repository.checkoutReserveCalls).toBe(1);
   });
 
   it('rejects Operators and legacy internal organisations', async () => {

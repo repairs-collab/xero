@@ -125,6 +125,7 @@ export interface StripeCheckoutExpiredInput {
 export interface SoloCheckoutAttempt {
   request: SoloCheckoutRequest;
   stripeSessionId: string | null;
+  reservedAt: Date;
 }
 
 export type CheckoutSessionDisposition = 'OPEN' | 'FENCED' | 'RESOLVED';
@@ -252,6 +253,13 @@ export interface SubscriptionRepository {
     configuration: SoloCheckoutConfiguration;
   }): Promise<SoloCheckoutAttempt>;
   recordCheckoutSession(input: CheckoutSessionEvidence): Promise<CheckoutSessionDisposition>;
+  releaseRejectedCheckoutAttempt(input: {
+    organisationId: string;
+    attemptId: string;
+    actorUserId: string;
+    providerRequestId: string;
+    rejectedAt: Date;
+  }): Promise<boolean>;
   applyCheckoutExpired(input: StripeCheckoutExpiredInput): Promise<StripeEventApplicationOutcome>;
   applyLifecycleEvent(
     input: StripeLifecycleEventInput
@@ -338,7 +346,9 @@ export class SubscriptionFailure extends Error {
 }
 
 export class CheckoutAttemptConflict extends SubscriptionFailure {
-  constructor() {
+  constructor(
+    readonly billingCadence: 'MONTHLY' | 'ANNUAL' | null = null
+  ) {
     super('CHECKOUT_ATTEMPT_CONFLICT');
     this.name = 'CheckoutAttemptConflict';
   }
@@ -918,6 +928,18 @@ export const createSubscriptionService = (dependencies: {
   }): Promise<void>;
   publishNumberProvision(input: { organisationId: string }): Promise<void>;
 }) => {
+  const definiteCheckoutRejection = (
+    error: unknown
+  ): { providerRequestId: string } | null => {
+    if (typeof error !== 'object' || error === null) return null;
+    const candidate = error as Record<string, unknown>;
+    return candidate.code === 'STRIPE_CHECKOUT_REQUEST_REJECTED' &&
+      typeof candidate.providerRequestId === 'string' &&
+      /^req_[A-Za-z0-9_-]{1,124}$/u.test(candidate.providerRequestId)
+      ? { providerRequestId: candidate.providerRequestId }
+      : null;
+  };
+
   const createCheckout = async (
     session: AppSession,
     organisationId: string,
@@ -944,9 +966,10 @@ export const createSubscriptionService = (dependencies: {
       }
       if (
         value.request.billingCadence !== billingCadence ||
-        value.request.expiresAt <= dependencies.clock.now()
+        dependencies.clock.now().getTime() >=
+          value.reservedAt.getTime() + 24 * 60 * 60 * 1000
       ) {
-        throw new CheckoutAttemptConflict();
+        throw new CheckoutAttemptConflict(value.request.billingCadence);
       }
       return dependencies.stripe.createSoloCheckout(value.request);
     };
@@ -962,12 +985,51 @@ export const createSubscriptionService = (dependencies: {
       return dependencies.repository.recordCheckoutSession(result);
     };
 
-    let selectedAttempt = attempt;
-    let result = await reconcile(selectedAttempt);
+    const reconcileWithRejectedRequestRecovery = async (
+      initialAttempt: SoloCheckoutAttempt
+    ): Promise<{
+      selectedAttempt: SoloCheckoutAttempt;
+      result: StripeCheckoutSession;
+    }> => {
+      let selectedAttempt = initialAttempt;
+      for (let recovery = 0; ; recovery += 1) {
+        try {
+          return {
+            selectedAttempt,
+            result: await reconcile(selectedAttempt)
+          };
+        } catch (error) {
+          const rejection = definiteCheckoutRejection(error);
+          if (rejection === null) throw error;
+          const released = await dependencies.repository.releaseRejectedCheckoutAttempt({
+            organisationId,
+            attemptId: selectedAttempt.request.attemptId,
+            actorUserId: session.userId,
+            providerRequestId: rejection.providerRequestId,
+            rejectedAt: dependencies.clock.now()
+          });
+          if (!released) {
+            throw new CheckoutAttemptConflict(
+              selectedAttempt.request.billingCadence
+            );
+          }
+          if (recovery >= 1) throw new StripeProviderFailure();
+          selectedAttempt = await reserve();
+        }
+      }
+    };
+
+    let { selectedAttempt, result } =
+      await reconcileWithRejectedRequestRecovery(attempt);
     let disposition = await record(selectedAttempt, result);
     if (disposition === 'RESOLVED') {
-      selectedAttempt = await reserve();
-      result = await reconcile(selectedAttempt);
+      if (result.status !== 'expired') {
+        throw new CheckoutAttemptConflict(
+          selectedAttempt.request.billingCadence
+        );
+      }
+      ({ selectedAttempt, result } =
+        await reconcileWithRejectedRequestRecovery(await reserve()));
       disposition = await record(selectedAttempt, result);
     }
     if (
@@ -977,7 +1039,7 @@ export const createSubscriptionService = (dependencies: {
       result.url === null ||
       result.expiresAt <= dependencies.clock.now()
     ) {
-      throw new CheckoutAttemptConflict();
+      throw new CheckoutAttemptConflict(selectedAttempt.request.billingCadence);
     }
     await dependencies.repository.recordBillingAudit({
       organisationId,

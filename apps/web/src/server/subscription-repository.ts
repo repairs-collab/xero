@@ -250,6 +250,7 @@ const canReplaceSubscription = (subscription: SubscriptionRow): boolean =>
 
 const attemptRequest = (row: CheckoutAttemptRow): SoloCheckoutAttempt => ({
   stripeSessionId: row.stripeSessionId,
+  reservedAt: row.createdAt,
   request: {
     organisationId: row.organisationId,
     userId: row.initiatingUserId,
@@ -592,16 +593,84 @@ export const createPostgresSubscriptionRepository = (
       }
       await lockCheckoutSessionOwnership(transaction, input, subscription.stripeSubscriptionId);
       const attempt = await lockCheckoutAttempt(transaction, input.organisationId, input.attemptId);
-      if (attempt?.resolvedAt && attempt.stripeSessionId === input.id) return 'RESOLVED';
       if (
         attempt === undefined ||
-        !sessionMatchesAttempt(attempt, subscription, input) ||
+        !sessionMatchesAttempt(
+          attempt,
+          subscription,
+          input,
+          attempt.resolvedAt !== null
+        ) ||
         await checkoutIdentityOwnedElsewhere(transaction, input) ||
         await isRetiredStripeSubscription(transaction, input.stripeSubscriptionId)
       ) {
         return 'FENCED';
       }
+      if (attempt.resolvedAt !== null) return 'RESOLVED';
       return persistAttemptSession(transaction, attempt, input, clock.now());
+    });
+
+  const releaseRejectedCheckoutAttempt: SubscriptionRepository['releaseRejectedCheckoutAttempt'] = async (input) =>
+    database.transaction(async (transaction) => {
+      const { organisation, subscription } = await lockBillingRows(
+        transaction,
+        input.organisationId
+      );
+      if (organisation?.edition !== 'SOLO' || subscription === undefined) {
+        return false;
+      }
+      if (!/^req_[A-Za-z0-9_-]{1,124}$/u.test(input.providerRequestId)) {
+        return false;
+      }
+      const attempt = await lockCheckoutAttempt(
+        transaction,
+        input.organisationId,
+        input.attemptId
+      );
+      if (
+        attempt === undefined ||
+        attempt.resolvedAt !== null ||
+        attempt.stripeSessionId !== null ||
+        attempt.stripeSessionStatus !== null ||
+        attempt.stripeCustomerId !== null ||
+        attempt.stripeSubscriptionId !== null ||
+        attempt.terminalLifecycleAt !== null ||
+        input.rejectedAt.getTime() < attempt.createdAt.getTime() ||
+        input.rejectedAt.getTime() >=
+          attempt.createdAt.getTime() + 24 * 60 * 60 * 1000
+      ) {
+        return false;
+      }
+      const [deleted] = await transaction
+        .delete(soloCheckoutAttempts)
+        .where(
+          and(
+            eq(soloCheckoutAttempts.id, attempt.id),
+            eq(soloCheckoutAttempts.organisationId, input.organisationId),
+            isNull(soloCheckoutAttempts.resolvedAt),
+            isNull(soloCheckoutAttempts.stripeSessionId)
+          )
+        )
+        .returning({ id: soloCheckoutAttempts.id });
+      if (deleted === undefined) return false;
+      await transaction.insert(auditEvents).values({
+        organisationId: input.organisationId,
+        actorUserId: input.actorUserId,
+        eventType: 'STRIPE_CHECKOUT_REQUEST_REJECTED',
+        entityType: 'CHECKOUT_ATTEMPT',
+        entityId: attempt.id,
+        beforeValue: {
+          billingCadence: attempt.billingCadence,
+          expiresAt: attempt.expiresAt.toISOString(),
+          requestFingerprint: attempt.requestFingerprint
+        },
+        afterValue: {
+          outcome: 'PROVIDER_CONFIRMED_NO_SESSION',
+          providerRequestId: input.providerRequestId
+        },
+        occurredAt: input.rejectedAt
+      });
+      return true;
     });
 
   const applyCheckoutExpired: SubscriptionRepository['applyCheckoutExpired'] = async (input) => {
@@ -2302,6 +2371,7 @@ export const createPostgresSubscriptionRepository = (
     loadBillingAccount,
     reserveCheckout,
     recordCheckoutSession,
+    releaseRejectedCheckoutAttempt,
     applyCheckoutExpired,
     lookupEventReplay,
     applyLifecycleEvent,

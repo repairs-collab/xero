@@ -8,7 +8,10 @@ import {
   requireWebAcceptedSession
 } from '../../../../server/runtime.js';
 
-import { SubscriptionFailure } from '../../../../server/subscription-service.js';
+import {
+  CheckoutAttemptConflict,
+  SubscriptionFailure
+} from '../../../../server/subscription-service.js';
 
 const organisationIdFrom = (formData: FormData): string => {
   const value = formData.get('organisationId');
@@ -43,7 +46,15 @@ export async function startSoloCheckout(formData: FormData): Promise<void> {
     billingCadenceFrom(formData)
   ).catch((error: unknown) => {
     if (error instanceof SubscriptionFailure && error.code === 'CHECKOUT_ATTEMPT_CONFLICT') {
-      redirect('/settings/billing?checkout=attempt-conflict');
+      const cadence =
+        error instanceof CheckoutAttemptConflict
+          ? error.billingCadence
+          : null;
+      redirect(
+        cadence === null
+          ? '/settings/billing?checkout=attempt-conflict'
+          : `/settings/billing?checkout=attempt-conflict&checkoutCadence=${cadence}`
+      );
     }
     throw error;
   });

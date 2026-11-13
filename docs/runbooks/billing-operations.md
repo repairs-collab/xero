@@ -51,10 +51,20 @@ subscription or organisation rows directly in the database.
    automatic Stripe expiry, cancellation or refunds.
 
 If a new Checkout attempt has no Session ID after a lost provider response, a
-same-option retry during the original attempt window can recover the Session.
-After that window, use Stripe's Session history and signed event delivery to
-match the organisation and attempt UUID. Keep the hold until Stripe evidence
-resolves it. Do not reset or delete an attempt to reopen checkout.
+same-option retry replays the frozen request with its original Stripe
+idempotency key while that key remains inside the 24-hour safety window. If
+Stripe returns the original Session, AccountPulse binds that exact Session. If
+Stripe definitively rejects the stale `expires_at` parameter with a provider
+request ID, AccountPulse records the rejection in the audit trail, releases
+only the still-unbound attempt and creates a fresh attempt. Network failures,
+timeouts and provider errors without that exact evidence never release the
+hold.
+
+After the 24-hour idempotency safety window, use Stripe's Session history and
+signed event delivery to match the organisation and attempt UUID. Keep the
+hold until Stripe evidence resolves it and escalate an absent-Session case to
+the release owner. Do not reset or delete an attempt manually to reopen
+checkout.
 
 ## Daily review
 

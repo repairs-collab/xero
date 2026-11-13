@@ -66,6 +66,7 @@ class FakeStripeApi implements StripeApi {
   };
 
   checkoutResponse: unknown;
+  checkoutFailure: Error | Record<string, unknown> | undefined;
   checkoutRetrieveResponse: unknown;
   checkoutRetrieveCalls: string[] = [];
 
@@ -76,6 +77,15 @@ class FakeStripeApi implements StripeApi {
         options: { idempotencyKey: string }
       ) => {
         this.checkoutCalls.push({ parameters, options });
+        if (this.checkoutFailure !== undefined) {
+          const failure =
+            this.checkoutFailure instanceof Error
+              ? this.checkoutFailure
+              : Object.assign(new Error('Fake Stripe checkout failure'), {
+                  ...this.checkoutFailure
+                });
+          return Promise.reject(failure);
+        }
         return Promise.resolve(this.checkoutResponse ?? {
           id: 'cs_solo_checkout',
           object: 'checkout.session',
@@ -185,6 +195,27 @@ const checkoutRequest = (client: StripeBillingClient, billingCadence: 'MONTHLY' 
 });
 
 describe('StripeBillingClient checkout', () => {
+  it('distinguishes a definitive expires_at validation rejection from an uncertain provider failure', async () => {
+    const api = new FakeStripeApi();
+    const client = createClient(api);
+    api.checkoutFailure = {
+      type: 'StripeInvalidRequestError',
+      rawType: 'invalid_request_error',
+      statusCode: 400,
+      param: 'expires_at',
+      requestId: 'req_expired_checkout'
+    };
+
+    await expect(
+      client.createSoloCheckout(checkoutRequest(client))
+    ).rejects.toMatchObject({ code: 'STRIPE_CHECKOUT_REQUEST_REJECTED' });
+
+    api.checkoutFailure = new Error('connection lost after dispatch');
+    await expect(
+      client.createSoloCheckout(checkoutRequest(client))
+    ).rejects.toBeInstanceOf(StripeProviderFailure);
+  });
+
   it('creates exactly one recurring Solo price with tax, ownership metadata and idempotency', async () => {
     const api = new FakeStripeApi();
     const client = createClient(api);
