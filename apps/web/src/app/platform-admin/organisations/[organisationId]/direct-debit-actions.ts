@@ -128,13 +128,20 @@ export const createPlatformDirectDebitActions = (
   ): Promise<PlatformDirectDebitActionState> {
     try {
       const organisationId = confirmedOrganisationId(formData);
+      const directDebitRequestId = text(formData, 'directDebitRequestId');
       const outcome = reconciliationOutcomeFrom(formData);
+      const providerReference = text(
+        formData,
+        'providerReconciliationReference'
+      );
       const session = await dependencies.getOwnerSession();
       const service = await dependencies.getService();
       await service.reconcileLegacyDirectDebit(
         session,
         organisationId,
-        outcome
+        directDebitRequestId,
+        outcome,
+        providerReference
       );
       dependencies.revalidate(
         `/platform-admin/organisations/${encodeURIComponent(organisationId)}`

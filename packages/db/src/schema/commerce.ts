@@ -216,6 +216,10 @@ export const directDebitRequests = pgTable(
       'provider_reconciliation_outcome',
       { length: 32 }
     ).$type<DirectDebitProviderReconciliationOutcome>(),
+    providerReconciliationReference: varchar(
+      'provider_reconciliation_reference',
+      { length: 384 }
+    ),
     requestedByUserId: uuid('requested_by_user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'restrict' }),
@@ -293,19 +297,23 @@ export const directDebitRequests = pgTable(
           (
             ${table.providerReconciledAt} is null and
             ${table.providerReconciledByUserId} is null and
-            ${table.providerReconciliationOutcome} is null
+            ${table.providerReconciliationOutcome} is null and
+            ${table.providerReconciliationReference} is null
           ) or (
             ${table.providerReconciledAt} is not null and
             ${table.providerReconciledByUserId} is not null and
             ${table.providerReconciliationOutcome} is not null and
-            ${table.providerReconciliationOutcome} in ('NO_LEGACY_DEFAULT', 'LEGACY_DEFAULT_REMOVED')
+            ${table.providerReconciliationOutcome} in ('NO_LEGACY_DEFAULT', 'LEGACY_DEFAULT_REMOVED') and
+            ${table.providerReconciliationReference} is not null and
+            ${table.providerReconciliationReference} ~ '^cus_[A-Za-z0-9_-]{3,120}[|]sub_[A-Za-z0-9_-]{3,120}[|](pm_[A-Za-z0-9_-]{3,120}|none)$'
           )
         )
       ) or (
         ${table.status} <> 'LEGACY_UNBOUND' and
         ${table.providerReconciledAt} is null and
         ${table.providerReconciledByUserId} is null and
-        ${table.providerReconciliationOutcome} is null
+        ${table.providerReconciliationOutcome} is null and
+        ${table.providerReconciliationReference} is null
       )`
     ),
     check(

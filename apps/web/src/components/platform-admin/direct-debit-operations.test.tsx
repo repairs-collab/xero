@@ -121,7 +121,8 @@ describe('platform direct-debit operations', () => {
             requestedAt: new Date('2026-10-01T10:00:00.000Z'),
             providerReconciledAt: null,
             providerReconciledByUserId: null,
-            providerReconciliationOutcome: null
+            providerReconciliationOutcome: null,
+            providerReconciliationReference: null
           }
         }}
         setupState={{ kind: 'IDLE' }}
@@ -134,9 +135,17 @@ describe('platform direct-debit operations', () => {
     );
 
     expect(html).toContain('Provider reconciliation required');
+    expect(html).toContain('Legacy request ID');
+    expect(html).toContain('legacy-request-1');
+    expect(html).toContain('name="directDebitRequestId"');
     expect(html).toContain('name="reconciliationOutcome"');
+    expect(html).toContain('name="providerReconciliationReference"');
     expect(html).toContain(
-      'I inspected the Stripe subscription default payment method'
+      'customer invoice default and source fallback'
+    );
+    expect(html).toContain('scheduled invoice retries');
+    expect(html).toContain(
+      'I inspected every effective Stripe collection path'
     );
     expect(html).not.toContain('Generate customer setup link');
     expect(html).not.toContain('Activate direct debit');

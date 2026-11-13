@@ -89,6 +89,12 @@ cd /the/protected/OVH_DEPLOY_PATH
 
 The rollback script accepts only a manifest previously recorded for that exact immutable SHA. It takes the same exclusive lock, stops web and worker, and transactionally changes scheduled cancellations to incomplete and pauses the affected organisations before starting the selected images. Automatic rollback uses the same safeguard. If stopping services or reconciliation fails, older images must remain stopped until the failure is resolved. PostgreSQL and its records are preserved; no database restore occurs. The script checks `/health/ready`. Review forward database migrations for compatibility before rolling application code back.
 
+Before a paid beta release or rollback involving the direct-debit migrations,
+complete the fail-closed preflight in
+[`paid-beta-direct-debit.md`](paid-beta-direct-debit.md). Never assume a
+card-only Billing Portal configuration proves the effective Stripe collection
+path is card-only.
+
 If a database restore is genuinely required, stop and use the separate restore procedure with a new database target. Never overwrite the current database or replay customer communications as part of a normal rollback.
 
 ## Backup and release evidence

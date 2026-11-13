@@ -65,6 +65,13 @@ WHERE s."initial_card_stripe_subscription_id" IS NOT NULL
         AND evidence."event_type" = 'checkout.session.completed'
         AND evidence."outcome" = 'APPLIED'
         AND evidence."stripe_event_created_at" >= s."initial_card_payment_succeeded_at"
+        AND NOT EXISTS (
+          SELECT 1
+          FROM "audit_events" AS setup_audit
+          WHERE setup_audit."organisation_id" = s."organisation_id"
+            AND setup_audit."event_type" = 'DIRECT_DEBIT_SETUP_COMPLETED'
+            AND setup_audit."correlation_id" = evidence."stripe_event_id"
+        )
       HAVING count(*) = 1
         AND min(evidence."stripe_event_created_at") = s."initial_card_payment_succeeded_at"
     )

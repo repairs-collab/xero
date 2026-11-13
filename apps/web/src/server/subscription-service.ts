@@ -22,6 +22,8 @@ import {
   StripeProviderFailure
 } from '@bc5000/integrations/stripe';
 
+import { parseDirectDebitProviderReference } from './direct-debit-reconciliation.js';
+
 export interface BillingAccount {
   organisationId: string;
   billingEmail: string;
@@ -196,6 +198,7 @@ export interface LegacyDirectDebitReconciliation {
     | 'NO_LEGACY_DEFAULT'
     | 'LEGACY_DEFAULT_REMOVED'
     | null;
+  providerReconciliationReference: string | null;
 }
 
 export interface DirectDebitOwnerSnapshot {
@@ -273,9 +276,11 @@ export interface SubscriptionRepository {
   ): Promise<LegacyDirectDebitReconciliation | null>;
   reconcileLegacyDirectDebit(input: {
     organisationId: string;
+    directDebitRequestId: string;
     reconciledByUserId: string;
     reconciledAt: Date;
     outcome: 'NO_LEGACY_DEFAULT' | 'LEGACY_DEFAULT_REMOVED';
+    providerReference: string;
   }): Promise<LegacyDirectDebitReconciliation>;
   markDirectDebitSetupPending(input: {
     organisationId: string;
@@ -1179,7 +1184,9 @@ export const createSubscriptionService = (dependencies: {
   const reconcileLegacyDirectDebit = async (
     session: AppSession,
     organisationId: string,
-    outcome: 'NO_LEGACY_DEFAULT' | 'LEGACY_DEFAULT_REMOVED'
+    directDebitRequestId: string,
+    outcome: 'NO_LEGACY_DEFAULT' | 'LEGACY_DEFAULT_REMOVED',
+    providerReferenceInput: string
   ): Promise<LegacyDirectDebitReconciliation> => {
     await requirePlatformOwner(session);
     if (
@@ -1190,11 +1197,23 @@ export const createSubscriptionService = (dependencies: {
         'DIRECT_DEBIT_RECONCILIATION_OUTCOME_REQUIRED'
       );
     }
+    let providerReference: string;
+    try {
+      providerReference = parseDirectDebitProviderReference(
+        providerReferenceInput
+      );
+    } catch {
+      throw new SubscriptionFailure(
+        'DIRECT_DEBIT_RECONCILIATION_REFERENCE_REQUIRED'
+      );
+    }
     return dependencies.repository.reconcileLegacyDirectDebit({
       organisationId,
+      directDebitRequestId,
       reconciledByUserId: session.userId,
       reconciledAt: dependencies.clock.now(),
-      outcome
+      outcome,
+      providerReference
     });
   };
 

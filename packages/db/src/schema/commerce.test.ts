@@ -181,6 +181,7 @@ describe('Solo commerce schema contract', () => {
         'provider_reconciled_at',
         'provider_reconciled_by_user_id',
         'provider_reconciliation_outcome',
+        'provider_reconciliation_reference',
         'requested_by_user_id',
         'requested_at',
         'setup_attempt_version',

@@ -129,13 +129,31 @@ export function PlatformDirectDebitOperationsView({
             name="organisationId"
             value={snapshot.organisationId}
           />
+          <input
+            type="hidden"
+            name="directDebitRequestId"
+            value={legacy.id}
+          />
           <div className="callout callout--warning">
             <strong>Provider reconciliation required</strong>
             <p>
-              Historical state ({legacy.legacyStatus}) cannot be treated as a
-              current customer request. Inspect the Stripe subscription’s
-              default payment method and resolve or record the result before
-              allowing another direct-debit request.
+              Historical state ({legacy.legacyStatus}) for this exact request
+              cannot be treated as a current customer request.
+            </p>
+            <dl className="detail-grid">
+              <div>
+                <dt>Legacy request ID</dt>
+                <dd>
+                  <code>{legacy.id}</code>
+                </dd>
+              </div>
+            </dl>
+            <p>
+              In Stripe, inspect the subscription default, the customer
+              invoice default and source fallback, every relevant current or
+              historical subscription episode, and open or scheduled invoice
+              retries. Resolve provider-side defaults or retries manually
+              before recording a safe outcome here.
             </p>
           </div>
           <label>
@@ -152,9 +170,22 @@ export function PlatformDirectDebitOperationsView({
               </option>
             </select>
           </label>
+          <label>
+            Provider evidence reference
+            <input
+              name="providerReconciliationReference"
+              required
+              maxLength={384}
+              pattern="cus_[A-Za-z0-9_-]{3,120}\|sub_[A-Za-z0-9_-]{3,120}\|(pm_[A-Za-z0-9_-]{3,120}|none)"
+              placeholder="cus_…|sub_…|pm_… (or none)"
+              autoComplete="off"
+            />
+          </label>
           <p className="muted-copy">
-            AccountPulse records only this outcome, the owner, and the time. It
-            does not store bank account, BSB, card, or other payment details.
+            Record only the opaque Stripe customer, subscription and payment
+            method IDs in the displayed format. Use “none” only when no
+            effective payment method remains. AccountPulse does not store bank
+            account, BSB, card, or unrestricted note details.
           </p>
           <label className="platform-confirm">
             <input
@@ -164,8 +195,10 @@ export function PlatformDirectDebitOperationsView({
               required
             />
             <span>
-              I inspected the Stripe subscription default payment method and
-              confirm the selected safe outcome is true.
+              I inspected every effective Stripe collection path and scheduled
+              retry for this exact legacy request, performed any required
+              provider action manually, and confirm the selected safe outcome
+              is true.
             </span>
           </label>
           <button className="button button--primary">

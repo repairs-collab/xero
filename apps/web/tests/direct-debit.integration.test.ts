@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 
 import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
@@ -85,7 +85,7 @@ describe('request-only direct debit persistence', () => {
       now: () => now
     });
     const legacyId = randomUUID();
-    const stripePaymentMethodId = `pm_legacy_${legacyId}`;
+    const stripePaymentMethodId = `pm_${legacyId}`;
     const stripeMandateId = `mandate_legacy_${legacyId}`;
     await client.db.insert(directDebitRequests).values({
       id: legacyId,
@@ -122,7 +122,7 @@ describe('request-only direct debit persistence', () => {
         })
         .where(eq(directDebitRequests.id, legacyId))
     ).rejects.toMatchObject({
-      cause: { constraint: 'direct_debit_requests_state_ck' }
+      cause: { code: 'P0001' }
     });
 
     await expect(
@@ -171,14 +171,17 @@ describe('request-only direct debit persistence', () => {
     await expect(
       repository.reconcileLegacyDirectDebit({
         organisationId: seeded.organisationId,
+        directDebitRequestId: legacyId,
         reconciledByUserId: seeded.userId,
         reconciledAt: now,
-        outcome: 'LEGACY_DEFAULT_REMOVED'
+        outcome: 'LEGACY_DEFAULT_REMOVED',
+        providerReference: `${seeded.stripeCustomerId}|${seeded.stripeSubscriptionId}|${stripePaymentMethodId}`
       })
     ).resolves.toMatchObject({
       id: legacyId,
       providerReconciledByUserId: seeded.userId,
-      providerReconciledAt: now
+      providerReconciledAt: now,
+      providerReconciliationReference: `${seeded.stripeCustomerId}|${seeded.stripeSubscriptionId}|${stripePaymentMethodId}`
     });
     await expect(
       repository.loadBillingAccount(seeded.organisationId, seeded.userId)
@@ -308,7 +311,44 @@ describe('request-only direct debit persistence', () => {
         [organisationId, userId, paidAt]
       );
       await applyMigration('0037_watery_tombstone');
+      const firstLegacy = await connection.query<{ id: string }>(
+        `select id from direct_debit_requests where organisation_id = $1`,
+        [organisationId]
+      );
+      const firstLegacyId = firstLegacy.rows[0]!.id;
+      const secondLegacyId = randomUUID();
+      await connection.query(
+        `update subscriptions
+            set stripe_subscription_id = 'sub_forward_current',
+                initial_card_stripe_subscription_id = 'sub_forward_current',
+                initial_card_invoice_id = 'in_forward_current'
+          where organisation_id = $1`,
+        [organisationId]
+      );
+      await connection.query(
+        `insert into direct_debit_requests (
+           id, organisation_id, stripe_subscription_id, status,
+           requested_by_user_id, requested_at, setup_attempt_version
+         ) values ($1, $2, 'sub_forward_current', 'REQUESTED', $3, $4, 0)`,
+        [secondLegacyId, organisationId, userId, now]
+      );
       await applyMigration('0038_flawless_talon');
+      await connection.query(
+        `update direct_debit_requests
+            set provider_reconciled_at = $1,
+                provider_reconciled_by_user_id = $2,
+                provider_reconciliation_outcome = 'NO_LEGACY_DEFAULT'
+          where id = $3`,
+        [now, userId, secondLegacyId]
+      );
+      const migrations = await readdir(
+        new URL('../../../packages/db/drizzle/', import.meta.url)
+      );
+      const reconciliationMigration = migrations.find((name) =>
+        /^0040_.*\.sql$/.test(name)
+      );
+      expect(reconciliationMigration).toBeDefined();
+      await applyMigration(reconciliationMigration!.replace(/\.sql$/, ''));
 
       const scopedDatabase = drizzle(connection, { schema: databaseSchema });
       const repository = createPostgresSubscriptionRepository(scopedDatabase, {
@@ -330,16 +370,60 @@ describe('request-only direct debit persistence', () => {
         })
       ).rejects.toThrow('DIRECT_DEBIT_RECONCILIATION_REQUIRED');
       await expect(
+        connection.query(
+          `insert into direct_debit_requests (
+             organisation_id, stripe_subscription_id, status,
+             requested_by_user_id, requested_at, setup_attempt_version
+           ) values ($1, 'sub_forward_current', 'REQUESTED', $2, $3, 0)`,
+          [organisationId, userId, now]
+        )
+      ).rejects.toMatchObject({ code: 'P0001' });
+      await expect(
         repository.reconcileLegacyDirectDebit({
           organisationId,
+          directDebitRequestId: secondLegacyId,
           reconciledByUserId: userId,
           reconciledAt: now,
-          outcome: 'NO_LEGACY_DEFAULT'
+          outcome: 'NO_LEGACY_DEFAULT',
+          providerReference:
+            'cus_forward|sub_forward_current|none'
         })
       ).resolves.toMatchObject({
-        legacyStatus: 'ACTIVE',
-        providerReconciliationOutcome: 'NO_LEGACY_DEFAULT'
+        id: secondLegacyId,
+        legacyStatus: 'REQUESTED',
+        providerReconciliationOutcome: 'NO_LEGACY_DEFAULT',
+        providerReconciliationReference:
+          'cus_forward|sub_forward_current|none'
       });
+      await expect(
+        repository.reconcileLegacyDirectDebit({
+          organisationId,
+          directDebitRequestId: secondLegacyId,
+          reconciledByUserId: userId,
+          reconciledAt: now,
+          outcome: 'NO_LEGACY_DEFAULT',
+          providerReference:
+            'cus_forward|sub_forward_current|none'
+        })
+      ).rejects.toThrow('DIRECT_DEBIT_RECONCILIATION_NOT_REQUIRED');
+      await expect(
+        repository.requestDirectDebit({
+          organisationId,
+          requestedByUserId: userId,
+          requestedAt: now
+        })
+      ).rejects.toThrow('DIRECT_DEBIT_RECONCILIATION_REQUIRED');
+      await expect(
+        repository.reconcileLegacyDirectDebit({
+          organisationId,
+          directDebitRequestId: firstLegacyId,
+          reconciledByUserId: userId,
+          reconciledAt: new Date(now.getTime() + 1_000),
+          outcome: 'LEGACY_DEFAULT_REMOVED',
+          providerReference:
+            'cus_forward|sub_forward|pm_legacy_forward'
+        })
+      ).resolves.toMatchObject({ id: firstLegacyId });
       await expect(
         repository.requestDirectDebit({
           organisationId,
@@ -347,12 +431,39 @@ describe('request-only direct debit persistence', () => {
           requestedAt: now
         })
       ).resolves.toMatchObject({ status: 'REQUESTED' });
+      const reconciliationAudit = await connection.query<{
+        entity_id: string;
+        after_value: {
+          providerReconciliationReference: string;
+        };
+      }>(
+        `select entity_id, after_value
+           from audit_events
+          where event_type = 'DIRECT_DEBIT_PROVIDER_RECONCILED'
+          order by occurred_at`,
+        []
+      );
+      expect(reconciliationAudit.rows).toHaveLength(2);
+      expect(reconciliationAudit.rows[0]).toMatchObject({
+        entity_id: secondLegacyId,
+        after_value: {
+          providerReconciliationReference:
+            'cus_forward|sub_forward_current|none'
+        }
+      });
+      expect(reconciliationAudit.rows[1]).toMatchObject({
+        entity_id: firstLegacyId,
+        after_value: {
+          providerReconciliationReference:
+            'cus_forward|sub_forward|pm_legacy_forward'
+        }
+      });
     } finally {
       await connection.query('set search_path to public');
       await connection.query(`drop schema if exists "${schemaName}" cascade`);
       connection.release();
     }
-  });
+  }, 15_000);
 
   it('requires a positive paid card Checkout before allowing an idempotent request', async () => {
     const seeded = await seed();

@@ -240,6 +240,7 @@ describe('database invariants', () => {
     const firstEpisode = randomUUID();
     const replacement = randomUUID();
     const tiedCheckouts = randomUUID();
+    const cardWithSetups = randomUUID();
     const requester = randomUUID();
     const paidAt = new Date('2026-11-09T10:00:00.000Z');
     const requestedAt = new Date('2026-11-09T11:00:00.000Z');
@@ -250,6 +251,15 @@ describe('database invariants', () => {
       await client.query(`
         create table organisations (id uuid primary key);
         create table users (id uuid primary key);
+        create table audit_events (
+          id uuid default gen_random_uuid() primary key,
+          organisation_id uuid not null,
+          event_type varchar(64) not null,
+          entity_type varchar(64) not null,
+          entity_id text not null,
+          correlation_id text,
+          occurred_at timestamp with time zone not null default now()
+        );
       `);
       const applyMigration = async (name: string) => {
         const migration = await readFile(
@@ -264,10 +274,11 @@ describe('database invariants', () => {
       await applyMigration('0024_lyrical_may_parker');
       await applyMigration('0035_same_azazel');
 
-      await client.query('insert into organisations (id) values ($1), ($2), ($3)', [
+      await client.query('insert into organisations (id) values ($1), ($2), ($3), ($4)', [
         firstEpisode,
         replacement,
-        tiedCheckouts
+        tiedCheckouts,
+        cardWithSetups
       ]);
       await client.query('insert into users (id) values ($1)', [requester]);
       await client.query(
@@ -275,10 +286,11 @@ describe('database invariants', () => {
            organisation_id, plan_code, status, stripe_subscription_id,
            initial_card_invoice_id, initial_card_payment_succeeded_at
          ) values
-           ($1, 'SOLO_AU_2000', 'ACTIVE', 'sub_first', 'in_first', $4),
-           ($2, 'SOLO_AU_2000', 'ACTIVE', 'sub_replacement', 'in_old', $4),
-           ($3, 'SOLO_AU_2000', 'ACTIVE', 'sub_tied', 'in_tied', $4)`,
-        [firstEpisode, replacement, tiedCheckouts, paidAt]
+           ($1, 'SOLO_AU_2000', 'ACTIVE', 'sub_first', 'in_first', $5),
+           ($2, 'SOLO_AU_2000', 'ACTIVE', 'sub_replacement', 'in_old', $5),
+           ($3, 'SOLO_AU_2000', 'ACTIVE', 'sub_tied', 'in_tied', $5),
+           ($4, 'SOLO_AU_2000', 'ACTIVE', 'sub_card_setup', 'in_card_setup', $5)`,
+        [firstEpisode, replacement, tiedCheckouts, cardWithSetups, paidAt]
       );
       await client.query(
         `insert into retired_stripe_subscriptions (stripe_subscription_id, organisation_id)
@@ -293,8 +305,32 @@ describe('database invariants', () => {
            ($1, 'evt_first', 'checkout.session.completed', $4, repeat('a', 64), 'APPLIED'),
            ($2, 'evt_old', 'checkout.session.completed', $4, repeat('b', 64), 'APPLIED'),
            ($3, 'evt_tied_1', 'checkout.session.completed', $4, repeat('c', 64), 'APPLIED'),
-           ($3, 'evt_tied_2', 'checkout.session.completed', $4, repeat('d', 64), 'APPLIED')`,
-        [firstEpisode, replacement, tiedCheckouts, paidAt]
+           ($3, 'evt_tied_2', 'checkout.session.completed', $4, repeat('d', 64), 'APPLIED'),
+           ($5, 'evt_card_setup', 'checkout.session.completed', $4, repeat('e', 64), 'APPLIED'),
+           ($5, 'evt_setup_1', 'checkout.session.completed', $6, repeat('f', 64), 'APPLIED'),
+           ($5, 'evt_setup_2', 'checkout.session.completed', $7, repeat('0', 64), 'APPLIED')`,
+        [
+          firstEpisode,
+          replacement,
+          tiedCheckouts,
+          paidAt,
+          cardWithSetups,
+          new Date('2026-11-09T10:30:00.000Z'),
+          new Date('2026-11-09T10:45:00.000Z')
+        ]
+      );
+      await client.query(
+        `insert into audit_events (
+           organisation_id, event_type, entity_type, entity_id,
+           correlation_id, occurred_at
+         ) values
+           ($1, 'DIRECT_DEBIT_SETUP_COMPLETED', 'DIRECT_DEBIT_REQUEST', 'legacy-setup-1', 'evt_setup_1', $2),
+           ($1, 'DIRECT_DEBIT_SETUP_COMPLETED', 'DIRECT_DEBIT_REQUEST', 'legacy-setup-2', 'evt_setup_2', $3)`,
+        [
+          cardWithSetups,
+          new Date('2026-11-09T10:30:00.000Z'),
+          new Date('2026-11-09T10:45:00.000Z')
+        ]
       );
       await client.query(
         `insert into direct_debit_requests (
@@ -321,6 +357,15 @@ describe('database invariants', () => {
            from subscriptions order by stripe_subscription_id`
       );
       expect(card.rows).toEqual([
+        {
+          stripe_subscription_id: 'sub_card_setup',
+          initial_card_stripe_subscription_id: 'sub_card_setup',
+          initial_card_invoice_id: 'in_card_setup',
+          initial_card_payment_succeeded_at: paidAt,
+          legacy_initial_card_stripe_subscription_id: null,
+          legacy_initial_card_invoice_id: null,
+          legacy_initial_card_payment_succeeded_at: null
+        },
         {
           stripe_subscription_id: 'sub_first',
           initial_card_stripe_subscription_id: 'sub_first',

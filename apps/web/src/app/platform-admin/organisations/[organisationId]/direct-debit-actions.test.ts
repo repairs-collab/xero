@@ -22,7 +22,12 @@ const form = (organisationId = 'organisation-1') => {
 
 const reconciliationForm = (organisationId = 'organisation-1') => {
   const data = form(organisationId);
+  data.set('directDebitRequestId', 'legacy-request-1');
   data.set('reconciliationOutcome', 'LEGACY_DEFAULT_REMOVED');
+  data.set(
+    'providerReconciliationReference',
+    'cus_customer|sub_legacy|pm_legacy'
+  );
   return data;
 };
 
@@ -111,7 +116,9 @@ describe('platform direct-debit owner actions', () => {
     expect(reconcileLegacyDirectDebit).toHaveBeenCalledWith(
       ownerSession,
       'organisation-target',
-      'LEGACY_DEFAULT_REMOVED'
+      'legacy-request-1',
+      'LEGACY_DEFAULT_REMOVED',
+      'cus_customer|sub_legacy|pm_legacy'
     );
     expect(revalidate).toHaveBeenCalledWith(
       '/platform-admin/organisations/organisation-target'

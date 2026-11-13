@@ -336,7 +336,8 @@ class FakeRepository implements SubscriptionRepository {
       ...this.legacyDirectDebitReconciliation,
       providerReconciledAt: input.reconciledAt,
       providerReconciledByUserId: input.reconciledByUserId,
-      providerReconciliationOutcome: input.outcome
+      providerReconciliationOutcome: input.outcome,
+      providerReconciliationReference: input.providerReference
     };
     if (this.currentAccount !== null) {
       this.currentAccount = { ...this.currentAccount, directDebitStatus: null };
@@ -670,7 +671,8 @@ describe('request-only direct debit', () => {
       requestedAt: new Date('2026-10-01T10:00:00.000Z'),
       providerReconciledAt: null,
       providerReconciledByUserId: null,
-      providerReconciliationOutcome: null
+      providerReconciliationOutcome: null,
+      providerReconciliationReference: null
     };
 
     await expect(
@@ -690,14 +692,18 @@ describe('request-only direct debit', () => {
       service.reconcileLegacyDirectDebit(
         adminSession,
         'org_solo',
-        'NO_LEGACY_DEFAULT'
+        'ddr_legacy',
+        'NO_LEGACY_DEFAULT',
+        'cus_solo|sub_solo|none'
       )
     ).rejects.toMatchObject({ code: 'PLATFORM_OWNER_REQUIRED' });
     await expect(
       service.reconcileLegacyDirectDebit(
         platformOwnerSession,
         'org_solo',
-        'LEGACY_DEFAULT_STILL_ACTIVE' as never
+        'ddr_legacy',
+        'LEGACY_DEFAULT_STILL_ACTIVE' as never,
+        'cus_solo|sub_solo|none'
       )
     ).rejects.toMatchObject({
       code: 'DIRECT_DEBIT_RECONCILIATION_OUTCOME_REQUIRED'
@@ -710,7 +716,21 @@ describe('request-only direct debit', () => {
       service.reconcileLegacyDirectDebit(
         platformOwnerSession,
         'org_solo',
-        'LEGACY_DEFAULT_REMOVED'
+        'ddr_legacy',
+        'LEGACY_DEFAULT_REMOVED',
+        'card 4242 4242 4242 4242'
+      )
+    ).rejects.toMatchObject({
+      code: 'DIRECT_DEBIT_RECONCILIATION_REFERENCE_REQUIRED'
+    });
+    expect(repository.reconciliationCalls).toEqual([]);
+    await expect(
+      service.reconcileLegacyDirectDebit(
+        platformOwnerSession,
+        'org_solo',
+        'ddr_legacy',
+        'LEGACY_DEFAULT_REMOVED',
+        'cus_solo|sub_solo|pm_legacy'
       )
     ).resolves.toMatchObject({
       providerReconciledByUserId: 'platform_owner',
@@ -719,8 +739,10 @@ describe('request-only direct debit', () => {
     expect(repository.reconciliationCalls).toEqual([
       expect.objectContaining({
         organisationId: 'org_solo',
+        directDebitRequestId: 'ddr_legacy',
         reconciledByUserId: 'platform_owner',
-        outcome: 'LEGACY_DEFAULT_REMOVED'
+        outcome: 'LEGACY_DEFAULT_REMOVED',
+        providerReference: 'cus_solo|sub_solo|pm_legacy'
       })
     ]);
   });

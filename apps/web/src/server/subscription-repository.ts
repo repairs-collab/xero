@@ -37,6 +37,7 @@ import {
   type StripeOperationalEventInput,
   type SubscriptionRepository
 } from './subscription-service.js';
+import { parseDirectDebitProviderReference } from './direct-debit-reconciliation.js';
 
 const postgresErrorCode = (error: unknown): string | null => {
   if (typeof error !== 'object' || error === null) return null;
@@ -217,7 +218,8 @@ const toLegacyDirectDebitReconciliation = (
     requestedAt: row.requestedAt,
     providerReconciledAt: row.providerReconciledAt,
     providerReconciledByUserId: row.providerReconciledByUserId,
-    providerReconciliationOutcome: row.providerReconciliationOutcome
+    providerReconciliationOutcome: row.providerReconciliationOutcome,
+    providerReconciliationReference: row.providerReconciliationReference
   };
 };
 
@@ -1760,17 +1762,20 @@ export const createPostgresSubscriptionRepository = (
         ) {
           throw new Error('DIRECT_DEBIT_RECONCILIATION_OUTCOME_REQUIRED');
         }
+        const providerReference = parseDirectDebitProviderReference(
+          input.providerReference
+        );
         const [legacy] = await transaction
           .select()
           .from(directDebitRequests)
           .where(
             and(
               eq(directDebitRequests.organisationId, input.organisationId),
+              eq(directDebitRequests.id, input.directDebitRequestId),
               eq(directDebitRequests.status, 'LEGACY_UNBOUND'),
               isNull(directDebitRequests.providerReconciledAt)
             )
           )
-          .orderBy(desc(directDebitRequests.requestedAt))
           .for('update')
           .limit(1);
         if (legacy === undefined) {
@@ -1782,9 +1787,17 @@ export const createPostgresSubscriptionRepository = (
             providerReconciledAt: input.reconciledAt,
             providerReconciledByUserId: input.reconciledByUserId,
             providerReconciliationOutcome: input.outcome,
+            providerReconciliationReference: providerReference,
             updatedAt: input.reconciledAt
           })
-          .where(eq(directDebitRequests.id, legacy.id))
+          .where(
+            and(
+              eq(directDebitRequests.id, input.directDebitRequestId),
+              eq(directDebitRequests.organisationId, input.organisationId),
+              eq(directDebitRequests.status, 'LEGACY_UNBOUND'),
+              isNull(directDebitRequests.providerReconciledAt)
+            )
+          )
           .returning();
         if (updated === undefined) {
           throw new Error('DIRECT_DEBIT_RECONCILIATION_WRITE_FAILED');
@@ -1797,11 +1810,14 @@ export const createPostgresSubscriptionRepository = (
           entityId: legacy.id,
           beforeValue: {
             status: 'RECONCILIATION_REQUIRED',
-            legacyStatus: legacy.legacyStatus
+            legacyStatus: legacy.legacyStatus,
+            directDebitRequestId: legacy.id
           },
           afterValue: {
             status: 'RECONCILED',
-            providerReconciliationOutcome: input.outcome
+            providerReconciliationOutcome: input.outcome,
+            directDebitRequestId: legacy.id,
+            providerReconciliationReference: providerReference
           },
           occurredAt: input.reconciledAt
         });
