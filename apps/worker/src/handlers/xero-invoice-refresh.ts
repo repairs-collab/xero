@@ -10,7 +10,8 @@ import {
   organisations,
   PostgresOrganisationSafetyRepository,
   stageInstances,
-  tasks
+  tasks,
+  xeroConnections
 } from '@bc5000/db';
 import type {
   ListOutstandingInvoicesOptions,
@@ -45,14 +46,42 @@ export interface XeroSyncDependencies {
   clock: SyncClock;
 }
 
-export const assertXeroSyncAllowed = async (
-  dependencies: XeroSyncDependencies,
+const assertXeroSyncAllowed = async (
+  dependencies: Pick<XeroSyncDependencies, 'database'>,
   organisationId: string
-): Promise<void> => {
-  await new PostgresOrganisationSafetyRepository(
+): Promise<typeof organisations.$inferSelect> => {
+  return new PostgresOrganisationSafetyRepository(
     dependencies.database
   ).assertOperationalMutationAllowed(dependencies.database, organisationId);
 };
+
+export type XeroSyncJobDependencies = Pick<XeroSyncDependencies, 'database' | 'clock'> &
+  ({ xero: XeroSyncClient } | { loadXero(): Promise<XeroSyncClient> });
+
+type XeroSyncConnection = Pick<typeof xeroConnections.$inferSelect, 'id' | 'connectedAt'>;
+
+export async function startXeroSync(
+  dependencies: XeroSyncJobDependencies,
+  organisationId: string
+): Promise<{ sync: XeroSyncDependencies; connection: XeroSyncConnection | null }> {
+  const organisation = await assertXeroSyncAllowed(dependencies, organisationId);
+  let connection: XeroSyncConnection | null = null;
+  if (organisation.edition === 'SOLO') {
+    const [current] = await dependencies.database
+      .select({ id: xeroConnections.id, connectedAt: xeroConnections.connectedAt })
+      .from(xeroConnections)
+      .where(and(
+        eq(xeroConnections.organisationId, organisationId),
+        eq(xeroConnections.status, 'CONNECTED')
+      ));
+    if (!current) throw new Error('XERO_CONNECTION_REQUIRED');
+    connection = current;
+  }
+  // Resolve the client after capturing the generation, including the choice of
+  // OAuth or legacy credentials. A reconnect from this point invalidates the job.
+  const xero = 'xero' in dependencies ? dependencies.xero : await dependencies.loadXero();
+  return { sync: { database: dependencies.database, clock: dependencies.clock, xero }, connection };
+}
 
 const money = (value: string): string => new Decimal(value).toFixed(4);
 
@@ -393,17 +422,35 @@ export async function runInvoiceRefresh(
 
 export const recordSuccessfulSync = async (
   dependencies: XeroSyncDependencies,
-  organisationId: string
+  organisationId: string,
+  connection: XeroSyncConnection | null
 ): Promise<void> => {
-  const now = dependencies.clock.now();
   const safety = new PostgresOrganisationSafetyRepository(
     dependencies.database
   );
   await dependencies.database.transaction(async (transaction) => {
     const organisation = await safety.assertOperationalMutationAllowed(
       transaction,
-      organisationId
+      organisationId,
+      'no key update'
     );
+    if (organisation.edition === 'SOLO') {
+      if (!connection) throw new Error('XERO_SYNC_CONNECTION_CHANGED');
+      // Refresh work can hold this row through another session. A busy
+      // connection fails this job and lets the queue retry it.
+      const [current] = await transaction
+        .select({ id: xeroConnections.id })
+        .from(xeroConnections)
+        .where(and(
+          eq(xeroConnections.organisationId, organisationId),
+          eq(xeroConnections.id, connection.id),
+          eq(xeroConnections.connectedAt, connection.connectedAt),
+          eq(xeroConnections.status, 'CONNECTED')
+        ))
+        .for('share', { noWait: true });
+      if (!current) throw new Error('XERO_SYNC_CONNECTION_CHANGED');
+    }
+    const now = dependencies.clock.now();
     const invalidatesReconciliation = [
       'SYNC_REQUIRED',
       'RECONCILIATION_REQUIRED',

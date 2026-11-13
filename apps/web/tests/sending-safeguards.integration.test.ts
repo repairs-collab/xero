@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import type { AppSession } from '@bc5000/auth';
@@ -11,6 +11,7 @@ import {
   createDatabase,
   invoiceChases,
   invoices,
+  messageAttempts,
   migrateDatabase,
   operationalResetRuns,
   organisationOnboarding,
@@ -415,6 +416,15 @@ describe('owner-created Solo rollout', () => {
     expectedVersion: 4
   });
 
+  const prepareSoloApproval = async () => {
+    const seeded = await seedOwnerCreatedSolo();
+    await seedImportedReceivables(seeded.organisationId);
+    await activate(seeded);
+    const service = await reconcile(seeded);
+    const testId = await recordDedicatedTestSms(seeded, dedicatedTestAt);
+    return { seeded, service, testId };
+  };
+
   it('activates Controlled Live and Customer Live using only native evidence', async () => {
     const seeded = await seedOwnerCreatedSolo();
     await seedImportedReceivables(seeded.organisationId);
@@ -547,13 +557,32 @@ describe('owner-created Solo rollout', () => {
     await expect(approve(seeded, service)).rejects.toThrow('PAYMENT_PAST_DUE');
   });
 
-  it('rechecks the connection after a concurrent reconnect takes the organisation lock', async () => {
-    const seeded = await seedOwnerCreatedSolo();
-    await seedImportedReceivables(seeded.organisationId);
-    await activate(seeded);
-    const service = await reconcile(seeded);
-    await recordDedicatedTestSms(seeded, dedicatedTestAt);
+  it('does not hold Xero while waiting for a sending worker holding the organisation', async () => {
+    const { seeded, service } = await prepareSoloApproval();
+    const organisationLocked = deferred();
+    const refresh = deferred();
+    const emailWorker = client.db.transaction(async (transaction) => {
+      await transaction.select().from(organisations)
+        .where(eq(organisations.id, seeded.organisationId)).for('update');
+      organisationLocked.resolve();
+      await refresh.promise;
+      // OAuth refresh obtains the lease using its own connection.
+      await client.db.transaction(async (lease) => {
+        await lease.execute(sql`set local lock_timeout = '500ms'`);
+        await lease.update(xeroConnections).set({ lastRefreshedAt: now })
+          .where(eq(xeroConnections.organisationId, seeded.organisationId));
+      });
+    }).then(() => null, (error: unknown) => error);
+    await organisationLocked.promise;
+    const outcome = approve(seeded, service).then(() => null, (error: unknown) => error);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    refresh.resolve();
+    expect(await emailWorker).toBeNull();
+    expect(await outcome).toBeNull();
+  });
 
+  it('refuses busy Xero evidence and rejects the pre-reconnect sync after retry', async () => {
+    const { seeded, service } = await prepareSoloApproval();
     const connectionLocked = deferred();
     const finishReconnect = deferred();
     const reconnect = client.db.transaction(async (transaction) => {
@@ -565,15 +594,106 @@ describe('owner-created Solo rollout', () => {
         .where(eq(organisations.id, seeded.organisationId));
     });
     await connectionLocked.promise;
-    const outcome = approve(seeded, service).then(
-      () => null,
-      (error: unknown) => error
-    );
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    const outcome = approve(seeded, service).then(() => null, (error: unknown) => error);
+    const firstResult = await Promise.race([
+      outcome,
+      new Promise((resolve) => setTimeout(() => resolve('still waiting'), 500))
+    ]);
     finishReconnect.resolve();
     await reconnect;
+    await outcome;
+    expect(firstResult).toMatchObject({ message: 'OPERATIONAL_STATE_CONFLICT' });
+    await expect(approve(seeded, service)).rejects.toThrow(
+      'CUSTOMER_ROLLOUT_NOT_READY:syncFresh'
+    );
+  });
+
+  it('rechecks paid entitlement when the cancellation cutoff elapses during an evidence wait', async () => {
+    const { seeded } = await prepareSoloApproval();
+    const cutoff = new Date(now.getTime() + 1000);
+    await client.db.update(subscriptions).set({ cancelAt: cutoff })
+      .where(eq(subscriptions.organisationId, seeded.organisationId));
+
+    const numberLocked = deferred();
+    const release = deferred();
+    const blocker = client.db.transaction(async (transaction) => {
+      await transaction.select().from(smsNumberPool)
+        .where(eq(smsNumberPool.id, seeded.numberId)).for('update');
+      numberLocked.resolve();
+      await release.promise;
+    });
+    await numberLocked.promise;
+
+    let decisionTime = now;
+    const entitlementClockRead = deferred();
+    const service = createSendingSettings({
+      database: client.db,
+      clock: { now: () => {
+        entitlementClockRead.resolve();
+        return decisionTime;
+      } }
+    });
+    const outcome = approve(seeded, service).then(() => null, (error: unknown) => error);
+    try {
+      await Promise.race([
+        entitlementClockRead.promise,
+        new Promise((resolve) => setTimeout(resolve, 300))
+      ]);
+      decisionTime = cutoff;
+    } finally {
+      release.resolve();
+      await blocker;
+    }
+    expect(await outcome).toMatchObject({ message: 'SUBSCRIPTION_REQUIRED' });
+    const [organisation] = await client.db.select().from(organisations)
+      .where(eq(organisations.id, seeded.organisationId));
+    expect(organisation?.rolloutScope).toBe('CONTROLLED');
+  });
+
+  it('waits for a worker claim without blocking its organisation FK or accepting a queued test', async () => {
+    const { seeded, testId } = await prepareSoloApproval();
+    await client.db.update(outboundMessages).set({ status: 'QUEUED', completedAt: null })
+      .where(eq(outboundMessages.id, testId));
+    const messageLocked = deferred();
+    const finishClaim = deferred();
+    const workerClaim = client.db.transaction(async (transaction) => {
+      await transaction.execute(sql`set local lock_timeout = '500ms'`);
+      await transaction.select().from(outboundMessages)
+        .where(eq(outboundMessages.id, testId)).for('update');
+      messageLocked.resolve();
+      await finishClaim.promise;
+      await transaction.insert(messageAttempts).values({
+        organisationId: seeded.organisationId,
+        outboundMessageId: testId,
+        attemptNumber: 1,
+        provider: 'SINCH',
+        status: 'SENDING'
+      });
+      await transaction.update(outboundMessages).set({ status: 'SENDING' })
+        .where(eq(outboundMessages.id, testId));
+    }).then(() => null, (error: unknown) => error);
+    await messageLocked.promise;
+    const organisationLocked = deferred();
+    const service = createSendingSettings({
+      database: client.db,
+      clock: { now: () => {
+        organisationLocked.resolve();
+        return now;
+      } }
+    });
+    const outcome = approve(seeded, service).then(() => null, (error: unknown) => error);
+    try {
+      await Promise.race([
+        organisationLocked.promise,
+        new Promise((resolve) => setTimeout(resolve, 300))
+      ]);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } finally {
+      finishClaim.resolve();
+    }
+    expect(await workerClaim).toBeNull();
     expect(await outcome).toMatchObject({
-      message: 'CUSTOMER_ROLLOUT_NOT_READY:syncFresh'
+      message: 'CUSTOMER_ROLLOUT_NOT_READY:controlledSmsEvidence'
     });
   });
 

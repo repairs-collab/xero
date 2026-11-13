@@ -132,6 +132,7 @@ const activationErrors = new Set([
   'PROVIDERS_UNHEALTHY',
   'XERO_SYNC_STALE',
   'ALLOWLIST_REQUIRED',
+  'OPERATIONAL_STATE_CONFLICT',
   'FORBIDDEN'
 ]);
 
@@ -311,16 +312,21 @@ async function lockSoloXeroConnection(
   transaction: DbTransaction,
   organisationId: string
 ): Promise<void> {
-  // OAuth finalisation acquires the connection before updating the organisation.
-  await transaction
-    .select({ id: xeroConnections.id })
-    .from(xeroConnections)
-    .innerJoin(organisations, eq(organisations.id, xeroConnections.organisationId))
-    .where(and(
-      eq(xeroConnections.organisationId, organisationId),
-      eq(organisations.edition, 'SOLO')
-    ))
-    .for('update', { of: xeroConnections });
+  // Another session may already be refreshing or replacing this connection.
+  // Never wait for it while holding the organisation lock.
+  try {
+    await transaction
+      .select({ id: xeroConnections.id })
+      .from(xeroConnections)
+      .where(eq(xeroConnections.organisationId, organisationId))
+      .for('share', { noWait: true });
+  } catch (error) {
+    const cause: unknown = error instanceof Error ? error.cause : error;
+    if (cause && typeof cause === 'object' && 'code' in cause && cause.code === '55P03') {
+      throw new Error('OPERATIONAL_STATE_CONFLICT');
+    }
+    throw error;
+  }
 }
 
 async function lockSoloReplyNumber(
@@ -781,7 +787,6 @@ export function createSendingSettings(dependencies: {
       throw new Error('ACKNOWLEDGEMENT_MISMATCH');
     }
     await dependencies.database.transaction(async (transaction) => {
-      await lockSoloXeroConnection(transaction, input.organisationId);
       const organisation = await safety.assertOperationalMutationAllowed(
         transaction,
         input.organisationId
@@ -797,6 +802,7 @@ export function createSendingSettings(dependencies: {
       }
       if (organisation.edition === 'SOLO') {
         await lockSoloReplyNumber(transaction, organisation.id);
+        await lockSoloXeroConnection(transaction, organisation.id);
       }
       const now = dependencies.clock.now();
       const providerEvidence = await getProviderEvidence(transaction, organisation, now);
@@ -932,10 +938,12 @@ export function createSendingSettings(dependencies: {
       throw new Error('CUSTOMER_ROLLOUT_ACKNOWLEDGEMENT_MISMATCH');
     }
     return dependencies.database.transaction(async (transaction) => {
-      await lockSoloXeroConnection(transaction, input.organisationId);
+      // Updating the organisation's non-key fields must not block the FK
+      // check in an SMS worker that already holds an outbound message lock.
       const organisation = await safety.assertOperationalMutationAllowed(
         transaction,
-        input.organisationId
+        input.organisationId,
+        'no key update'
       );
       if (
         organisation.operationalState !== 'RECONCILED' ||
@@ -943,19 +951,36 @@ export function createSendingSettings(dependencies: {
       ) {
         throw new Error('OPERATIONAL_STATE_CONFLICT');
       }
-      const entitlements = await new PostgresEntitlementRepository(
+      const entitlementRepository = new PostgresEntitlementRepository(
         dependencies.database
-      ).decide(input.organisationId, dependencies.clock.now(), transaction);
+      );
+      const entitlements = await entitlementRepository.decide(
+        input.organisationId, () => dependencies.clock.now(), transaction
+      );
       if (!entitlements.canCustomerSend) {
         throw new Error(entitlements.blocker ?? 'SUBSCRIPTION_REQUIRED');
       }
       await lockCustomerRolloutEvidence(transaction, organisation);
+      if (organisation.edition === 'SOLO') {
+        await lockSoloXeroConnection(transaction, organisation.id);
+      }
       const readinessTime = dependencies.clock.now();
       const readiness = await calculateCustomerRolloutReadiness(transaction, {
         organisationId: input.organisationId,
         now: readinessTime
       });
-      const now = dependencies.clock.now();
+      let now = readinessTime;
+      const finalEntitlements = await entitlementRepository.decide(
+        input.organisationId,
+        () => {
+          now = dependencies.clock.now();
+          return now;
+        },
+        transaction
+      );
+      if (!finalEntitlements.canCustomerSend) {
+        throw new Error(finalEntitlements.blocker ?? 'SUBSCRIPTION_REQUIRED');
+      }
       const failed = failedReadinessGatesAt(readiness, now);
       if (failed.length > 0) {
         throw new Error(`CUSTOMER_ROLLOUT_NOT_READY:${failed.join(',')}`);
@@ -1011,7 +1036,8 @@ export function createSendingSettings(dependencies: {
     return dependencies.database.transaction(async (transaction) => {
       const organisation = await safety.assertOperationalMutationAllowed(
         transaction,
-        input.organisationId
+        input.organisationId,
+        'no key update'
       );
       if (organisation.operationalStateVersion !== input.expectedVersion) {
         throw new Error('OPERATIONAL_STATE_CONFLICT');

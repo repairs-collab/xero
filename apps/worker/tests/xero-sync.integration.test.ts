@@ -11,6 +11,7 @@ import {
   invoiceChases,
   invoices,
   organisations,
+  PostgresXeroConnectionRepository,
   reminderSequenceVersions,
   reminderSequences,
   stageInstances,
@@ -24,6 +25,7 @@ import {
   type XeroResult
 } from '@bc5000/integrations/xero';
 
+import { reconcileNightly } from '../src/handlers/reconcile-nightly.js';
 import { runIncrementalSync } from '../src/handlers/xero-incremental-sync.js';
 import {
   runInvoiceRefresh,
@@ -106,6 +108,12 @@ class FakeXeroSyncClient implements XeroSyncClient {
     );
   }
 }
+
+const deferred = () => {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+};
 
 const fixedClock = {
   now: () => new Date('2026-09-18T02:00:00.000Z')
@@ -253,6 +261,60 @@ const xeroInvoice = (
 });
 
 describe('targeted Xero invoice refresh', () => {
+  it.each([
+    ['initial', runInitialSync],
+    ['incremental', runIncrementalSync],
+    ['nightly', reconcileNightly]
+  ] as const)('discards %s sync success after a concurrent OAuth reconnect', async (_, sync) => {
+    const organisationId = await seedOrganisation();
+    await database.db.update(organisations)
+      .set({ edition: 'SOLO', operationalState: 'SYNC_REQUIRED' })
+      .where(eq(organisations.id, organisationId));
+    const connections = new PostgresXeroConnectionRepository(database.db);
+    const connection = {
+      organisationId,
+      connectionId: randomUUID(),
+      tenantId: randomUUID(),
+      encryptedRefreshToken: {
+        version: 1,
+        keyId: 'test',
+        iv: 'iv',
+        ciphertext: 'ciphertext',
+        tag: 'tag'
+      },
+      grantedScopes: ['offline_access', 'accounting.invoices']
+    };
+    const before = new Date('2026-09-18T01:00:00.000Z');
+    const reconnectedAt = new Date('2026-09-18T01:59:00.000Z');
+    await connections.upsertConnection({ ...connection, now: before });
+    const xero = new FakeXeroSyncClient();
+    const remoteStarted = deferred();
+    const finishRemote = deferred();
+    xero.listOutstandingInvoices = async () => {
+      remoteStarted.resolve();
+      await finishRemote.promise;
+      return result([]);
+    };
+    const outcome = sync({ database: database.db, xero, clock: fixedClock }, { organisationId })
+      .then(() => null, (error: unknown) => error);
+    await remoteStarted.promise;
+    await connections.upsertConnection({ ...connection, now: reconnectedAt });
+    finishRemote.resolve();
+
+    expect(await outcome).toMatchObject({ message: 'XERO_SYNC_CONNECTION_CHANGED' });
+    const [organisation] = await database.db.select().from(organisations)
+      .where(eq(organisations.id, organisationId));
+    expect(organisation).toMatchObject({
+      xeroSyncCursor: null,
+      lastSuccessfulSyncAt: null,
+      operationalState: 'SYNC_REQUIRED'
+    });
+    await sync({ database: database.db, xero, clock: fixedClock }, { organisationId });
+    const [retried] = await database.db.select().from(organisations)
+      .where(eq(organisations.id, organisationId));
+    expect(retried?.lastSuccessfulSyncAt).toEqual(fixedClock.now());
+  });
+
   it('upserts changed invoices and invalidates stale approvals', async () => {
     const seeded = await seedApprovedReminder();
     const xero = new FakeXeroSyncClient();

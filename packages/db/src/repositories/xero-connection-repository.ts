@@ -112,6 +112,37 @@ const postgresErrorCode = (error: unknown): string | null => {
   return postgresErrorCode(value.cause);
 };
 
+// Reauthorising within one clock tick still creates a distinct generation.
+const nextConnectedAt = (now: Date, previous: Date): Date =>
+  new Date(Math.max(now.getTime(), previous.getTime() + 1));
+
+async function lockOrganisationForConnectionChange(
+  transaction: DbTransaction,
+  organisationId: string
+): Promise<void> {
+  // Xero email dispatch holds the organisation while refreshing in another
+  // session. Acquire the organisation before any connection row locks.
+  await transaction
+    .select({ id: organisations.id })
+    .from(organisations)
+    .where(eq(organisations.id, organisationId))
+    .for('no key update');
+}
+
+async function clearSoloSyncEvidence(
+  transaction: DbTransaction,
+  organisationId: string
+): Promise<void> {
+  await transaction
+    .update(organisations)
+    .set({
+      xeroSyncCursor: null,
+      lastSuccessfulSyncAt: null,
+      latestReconciledSyncAt: null
+    })
+    .where(and(eq(organisations.id, organisationId), eq(organisations.edition, 'SOLO')));
+}
+
 export class PostgresXeroConnectionRepository {
   constructor(private readonly database: Database) {}
 
@@ -176,6 +207,7 @@ export class PostgresXeroConnectionRepository {
   ): Promise<XeroConnectionRecord> {
     try {
       return await this.database.transaction(async (transaction) => {
+      await lockOrganisationForConnectionChange(transaction, input.organisationId);
       const [existingForOrganisation] = await transaction
         .select()
         .from(xeroConnections)
@@ -277,7 +309,7 @@ export class PostgresXeroConnectionRepository {
             refreshTokenVersion: sql`${xeroConnections.refreshTokenVersion} + 1`,
             refreshLeaseId: null,
             refreshLeaseExpiresAt: null,
-            connectedAt: input.now,
+            connectedAt: nextConnectedAt(input.now, existingForOrganisation.connectedAt),
             disconnectedAt: null,
             updatedAt: input.now
           })
@@ -287,6 +319,7 @@ export class PostgresXeroConnectionRepository {
         connection = updated;
       }
 
+      await clearSoloSyncEvidence(transaction, input.organisationId);
       await transaction
         .delete(xeroPendingAuthorisations)
         .where(eq(xeroPendingAuthorisations.id, pending.id));
@@ -305,6 +338,7 @@ export class PostgresXeroConnectionRepository {
   ): Promise<XeroConnectionRecord> {
     try {
       return await this.database.transaction(async (transaction) => {
+      await lockOrganisationForConnectionChange(transaction, input.organisationId);
       const [ownedElsewhere] = await transaction
         .select({ organisationId: xeroConnections.organisationId })
         .from(xeroConnections)
@@ -344,6 +378,7 @@ export class PostgresXeroConnectionRepository {
           })
           .returning();
         if (inserted === undefined) throw new Error('XERO_CONNECTION_CREATE_FAILED');
+        await clearSoloSyncEvidence(transaction, input.organisationId);
         return inserted;
       }
       if (
@@ -362,13 +397,14 @@ export class PostgresXeroConnectionRepository {
           refreshTokenVersion: sql`${xeroConnections.refreshTokenVersion} + 1`,
           refreshLeaseId: null,
           refreshLeaseExpiresAt: null,
-          connectedAt: input.now,
+          connectedAt: nextConnectedAt(input.now, existing.connectedAt),
           disconnectedAt: null,
           updatedAt: input.now
         })
         .where(eq(xeroConnections.id, existing.id))
         .returning();
       if (updated === undefined) throw new Error('XERO_CONNECTION_UPDATE_FAILED');
+        await clearSoloSyncEvidence(transaction, input.organisationId);
         return updated;
       });
     } catch (error) {

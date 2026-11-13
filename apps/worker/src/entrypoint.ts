@@ -426,7 +426,7 @@ async function main() {
         runInitialSync(
           {
             database: databaseClient.db,
-            xero: await xeroFactory.forOrganisation(payload.organisationId),
+            loadXero: () => xeroFactory.forOrganisation(payload.organisationId),
             clock
           },
           payload
@@ -435,7 +435,7 @@ async function main() {
         runIncrementalSync(
           {
             database: databaseClient.db,
-            xero: await xeroFactory.forOrganisation(payload.organisationId),
+            loadXero: () => xeroFactory.forOrganisation(payload.organisationId),
             clock
           },
           payload
@@ -453,7 +453,7 @@ async function main() {
         reconcileNightly(
           {
             database: databaseClient.db,
-            xero: await xeroFactory.forOrganisation(payload.organisationId),
+            loadXero: () => xeroFactory.forOrganisation(payload.organisationId),
             clock
           },
           payload

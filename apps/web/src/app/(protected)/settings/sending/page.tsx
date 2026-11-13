@@ -141,8 +141,8 @@ export default async function SendingSettingsPage({
           <span className="eyebrow">Delivery safety</span>
           <h1>Sending controls</h1>
           <p>
-            Customer sending opens only after a protected reset, a fresh Xero
-            sync, reconciliation, and final Administrator approval.
+            Customer sending requires a fresh Xero sync, reconciliation, and final
+            Administrator approval. The reset workflow must be idle.
           </p>
         </div>
         <div className="rollout-state-legend" aria-label="Sending states">

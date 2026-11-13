@@ -3,17 +3,17 @@ import type { XeroIncrementalSyncJob } from '@bc5000/jobs';
 import { eq } from 'drizzle-orm';
 
 import {
-  assertXeroSyncAllowed,
   recordSuccessfulSync,
+  startXeroSync,
   synchroniseInvoiceCollection,
-  type XeroSyncDependencies
+  type XeroSyncJobDependencies
 } from './xero-invoice-refresh.js';
 
 export async function runIncrementalSync(
-  dependencies: XeroSyncDependencies,
+  dependencies: XeroSyncJobDependencies,
   payload: XeroIncrementalSyncJob
 ): Promise<void> {
-  await assertXeroSyncAllowed(dependencies, payload.organisationId);
+  const { sync, connection } = await startXeroSync(dependencies, payload.organisationId);
   const rows = await dependencies.database
     .select({ cursor: organisations.xeroSyncCursor })
     .from(organisations)
@@ -33,11 +33,11 @@ export async function runIncrementalSync(
           ).toISOString()
         };
   const response =
-    await dependencies.xero.listOutstandingInvoices(options);
+    await sync.xero.listOutstandingInvoices(options);
   await synchroniseInvoiceCollection(
-    dependencies,
+    sync,
     payload.organisationId,
     response.data
   );
-  await recordSuccessfulSync(dependencies, payload.organisationId);
+  await recordSuccessfulSync(sync, payload.organisationId, connection);
 }

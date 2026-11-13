@@ -26,13 +26,14 @@ export class PostgresOrganisationSafetyRepository {
 
   async assertOperationalMutationAllowed(
     executor: Executor,
-    organisationId: string
+    organisationId: string,
+    lock: 'update' | 'no key update' = 'update'
   ): Promise<typeof organisations.$inferSelect> {
     const [organisation] = await executor
       .select()
       .from(organisations)
       .where(eq(organisations.id, organisationId))
-      .for('update')
+      .for(lock)
       .limit(1);
     if (organisation === undefined) throw new Error('ORGANISATION_NOT_FOUND');
     if (organisation.maintenanceMode) {
