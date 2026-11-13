@@ -99,9 +99,11 @@ Pre-release backups are stored in `${OVH_DEPLOY_PATH}/backups` and named with th
 
 The AccountPulse Owner console reads a sanitized host snapshot from a read-only
 mount. It never receives the Docker socket, a shell, host credentials or a host
-filesystem path. The snapshot contains only uptime, CPU load, memory and disk
-capacity, a UTC check time, and the health of the fixed `web`, `worker`,
-`postgres` and `caddy` containers.
+filesystem path. The snapshot contains uptime, CPU load, memory and root disk
+capacity, the live capacity and ID of OVH disk 698708443 (nominal 200 GB), a UTC
+check time, and the health of the fixed `web`, `worker`, `postgres` and `caddy`
+containers. The HUD shows Unavailable until it receives a current snapshot with
+valid metrics for both disks.
 
 After the reviewed monitor files have been transferred to the OVH deploy path,
 install the collector through a separately approved host change:

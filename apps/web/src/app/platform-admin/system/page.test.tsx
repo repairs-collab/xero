@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
     host: null,
     memory: null,
     disk: null,
+    additionalDisk: null,
     services: []
   })
 }));

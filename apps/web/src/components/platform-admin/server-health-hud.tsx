@@ -60,17 +60,22 @@ const formatCheckedAt = (value: string): string =>
 
 const CapacityCard = ({
   label,
+  diskId,
   usedPercent,
+  usedBytes,
   freeBytes,
   totalBytes
 }: {
   label: string;
+  diskId?: number;
   usedPercent: number;
+  usedBytes: number;
   freeBytes: number;
   totalBytes: number;
 }) => (
   <article className="server-health-card">
     <span>{label}</span>
+    {diskId === undefined ? null : <small>OVH disk {diskId}</small>}
     <strong>{usedPercent}% used</strong>
     <div
       className="server-health-meter"
@@ -82,7 +87,7 @@ const CapacityCard = ({
     >
       <span style={{ width: `${Math.min(100, usedPercent)}%` }} />
     </div>
-    <small>{formatBytes(freeBytes)} free of {formatBytes(totalBytes)}</small>
+    <small>{formatBytes(usedBytes)} used · {formatBytes(freeBytes)} free of {formatBytes(totalBytes)}</small>
   </article>
 );
 
@@ -122,7 +127,7 @@ export function ServerHealthHud({ health }: { health: ServerHealthView }) {
         </small>
       </section>
 
-      {health.host && health.memory && health.disk ? (
+      {health.host && health.memory && health.disk && health.additionalDisk ? (
         <>
           <section className="server-health-grid" aria-label="Host capacity">
             <article className="server-health-card">
@@ -138,7 +143,8 @@ export function ServerHealthHud({ health }: { health: ServerHealthView }) {
               </small>
             </article>
             <CapacityCard label="Memory" {...health.memory} />
-            <CapacityCard label="Disk" {...health.disk} />
+            <CapacityCard label="Root disk" {...health.disk} />
+            <CapacityCard label="Additional storage" {...health.additionalDisk} />
           </section>
 
           <section className="panel server-health-services">

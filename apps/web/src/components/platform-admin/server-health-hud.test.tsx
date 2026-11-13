@@ -29,6 +29,13 @@ const healthy: ServerHealthView = {
     freeBytes: 50_000_000_000,
     usedPercent: 50
   },
+  additionalDisk: {
+    diskId: 698708443,
+    totalBytes: 200_000_000_000,
+    usedBytes: 75_000_000_000,
+    freeBytes: 125_000_000_000,
+    usedPercent: 38
+  },
   services: [
     { name: 'web', label: 'Web app', status: 'HEALTHY' },
     { name: 'worker', label: 'Worker', status: 'HEALTHY' },
@@ -55,6 +62,19 @@ describe('owner server health HUD', () => {
     expect(html).toContain('Web gateway');
     expect(html).toContain('Warning at 80%');
     expect(html).toContain('Critical at 90%');
+  });
+
+  it('shows separate root and OVH additional storage metrics using safe labels', () => {
+    const html = renderToStaticMarkup(<ServerHealthHud health={healthy} />);
+
+    expect(html).toContain('Root disk');
+    expect(html).toContain('Additional storage');
+    expect(html).toContain('OVH disk 698708443');
+    expect(html).toContain('38% used');
+    expect(html).toContain('75.0 GB used');
+    expect(html).toContain('125.0 GB free of 200.0 GB');
+    expect(html).not.toContain('/srv/data');
+    expect(html).not.toContain('/dev/sdb');
   });
 
   it('uses urgent presentation for a critical snapshot without adding controls', () => {
@@ -90,6 +110,7 @@ describe('owner server health HUD', () => {
           host: null,
           memory: null,
           disk: null,
+          additionalDisk: null,
           services: []
         }}
       />

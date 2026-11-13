@@ -68,6 +68,19 @@ done
   exit 65
 }
 
+ADDITIONAL_DISK=null
+# Match the exact device and mount so df cannot report the parent filesystem.
+if read -r ADDITIONAL_TOTAL ADDITIONAL_USED ADDITIONAL_FREE < <(
+  df -B1 --output=source,target,size,used,avail -- /srv/data 2>/dev/null |
+    awk '$1 == "/dev/sdb" && $2 == "/srv/data" { print $3, $4, $5 }'
+); then
+  for value in "$ADDITIONAL_TOTAL" "$ADDITIONAL_USED" "$ADDITIONAL_FREE"; do
+    require_unsigned_integer "$value"
+  done
+  printf -v ADDITIONAL_DISK '{"diskId":698708443,"totalBytes":%s,"usedBytes":%s,"freeBytes":%s}' \
+    "$ADDITIONAL_TOTAL" "$ADDITIONAL_USED" "$ADDITIONAL_FREE"
+fi
+
 container_status() {
   local container_name=$1
   local state running health
@@ -115,6 +128,7 @@ cat > "$TEMP_FILE" <<JSON
     "usedBytes": $DISK_USED,
     "freeBytes": $DISK_FREE
   },
+  "additionalDisk": $ADDITIONAL_DISK,
   "services": [
     {"name": "web", "status": "$WEB_STATUS"},
     {"name": "worker", "status": "$WORKER_STATUS"},
