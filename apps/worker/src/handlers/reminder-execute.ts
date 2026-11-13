@@ -226,10 +226,18 @@ const nextAutomaticSmsAttemptAt = (
   scheduledAt: Date,
   holidays: readonly string[]
 ): Date => {
+  const currentWindow = decideDebtContactWindow(now, holidays);
   if (scheduledAt > now) {
     return decideDebtContactWindow(scheduledAt, holidays).allowed
       ? scheduledAt
       : nextDebtContactOpening(scheduledAt, holidays);
+  }
+  if (
+    currentWindow.allowed &&
+    decideDebtContactWindow(scheduledAt, holidays).localDate !==
+      currentWindow.localDate
+  ) {
+    return now;
   }
   return nextDebtContactOpening(now, holidays);
 };
@@ -649,7 +657,7 @@ export async function executeReminder(
         return { kind: 'cancelled', reason };
       };
       if (openDispute !== undefined) {
-        return blockBeforeProvider('DISPUTE_OPEN');
+        return await blockBeforeProvider('DISPUTE_OPEN');
       }
       if (
         !contactWindow.allowed &&
@@ -663,10 +671,10 @@ export async function executeReminder(
         );
         if (deferral.kind === 'deferred') return deferral;
         if (deferral.kind === 'blocked') {
-          return blockBeforeProvider(deferral.reason);
+          return await blockBeforeProvider(deferral.reason);
         }
         if (deferral.kind === 'not-queued') {
-          return blockBeforeProvider('SOURCE_CHANGED');
+          return await blockBeforeProvider('SOURCE_CHANGED');
         }
         contactAt = deferral.checkedAt;
         contactWindow = decideDebtContactWindow(
@@ -675,7 +683,7 @@ export async function executeReminder(
         );
       }
       if (!contactWindow.allowed) {
-        return blockBeforeProvider('CONTACT_WINDOW_CLOSED');
+        return await blockBeforeProvider('CONTACT_WINDOW_CLOSED');
       }
       const debtContactClaim = await new PostgresDebtContactRepository(
         dependencies.database
@@ -688,7 +696,7 @@ export async function executeReminder(
         claimedAt: contactAt
       });
       if (debtContactClaim.kind === 'already-claimed') {
-        return blockBeforeProvider('DAILY_CONTACT_LIMIT');
+        return await blockBeforeProvider('DAILY_CONTACT_LIMIT');
       }
       claimedDebtContactLocalDate = contactWindow.localDate;
     }

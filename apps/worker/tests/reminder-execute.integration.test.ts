@@ -507,6 +507,115 @@ describe('executeReminder', () => {
     );
   });
 
+  it('re-keys a published Friday SMS consumed at the Monday legal opening', async () => {
+    const publishedAt = new Date('2026-09-18T01:00:00.000Z');
+    const mondayOpening = new Date('2026-09-20T22:30:00.000Z');
+    const seeded = await seedApprovedReminder({
+      sequenceMode: 'AUTOMATIC',
+      createApproval: false,
+      rolloutScope: 'CUSTOMER',
+      allowlisted: false,
+      stageScheduledAt: publishedAt
+    });
+    await client.db.insert(auditEvents).values({
+      organisationId: seeded.organisationId,
+      eventType: 'AUTOMATIC_REMINDER_JOB_PUBLISHED',
+      entityType: 'STAGE_INSTANCE',
+      entityId: seeded.stageInstanceId,
+      correlationId: `automatic-reminder:${seeded.stageInstanceId}:3:${publishedAt.toISOString()}`,
+      afterValue: {
+        jobId: randomUUID(),
+        scheduledAt: publishedAt.toISOString(),
+        sourceVersion: 3
+      },
+      occurredAt: publishedAt
+    });
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    const sinch = new FakeSinch();
+    const execute = () =>
+      executeReminder(dependencies(xero, sinch, true, mondayOpening), {
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId
+      });
+
+    await expect(execute()).resolves.toEqual({
+      kind: 'deferred',
+      scheduledAt: mondayOpening
+    });
+    await expect(
+      client.db
+        .select({
+          status: stageInstances.status,
+          scheduledAt: stageInstances.scheduledAt
+        })
+        .from(stageInstances)
+        .where(eq(stageInstances.id, seeded.stageInstanceId))
+    ).resolves.toEqual([
+      { status: 'SCHEDULED', scheduledAt: mondayOpening }
+    ]);
+
+    const publish = vi.fn<JobPublisher['publish']>(() =>
+      Promise.resolve('monday-replacement-job')
+    );
+    const dispatch = () =>
+      dispatchAutomaticReminderWork(
+        {
+          database: client.db,
+          clock: { now: () => mondayOpening },
+          holidays: { list: () => [] },
+          publisher: { publish }
+        },
+        seeded.organisationId
+      );
+    await expect(dispatch()).resolves.toMatchObject({
+      candidateCount: 1,
+      queuedCount: 1,
+      publishedCount: 1
+    });
+    await expect(dispatch()).resolves.toMatchObject({
+      candidateCount: 0,
+      publishedCount: 0
+    });
+    expect(publish).toHaveBeenCalledOnce();
+    expect(publish).toHaveBeenCalledWith(
+      jobNames.reminderExecute,
+      {
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId
+      },
+      {
+        deduplicateWhileActive: true,
+        singletonKey: `automatic-reminder:${seeded.stageInstanceId}:3:${mondayOpening.toISOString()}`,
+        startAfter: mondayOpening
+      }
+    );
+
+    await expect(execute()).resolves.toEqual({
+      kind: 'sent',
+      provider: 'SINCH',
+      providerMessageId: 'sinch-message-1'
+    });
+    await expect(execute()).resolves.toEqual({
+      kind: 'sent',
+      provider: 'SINCH',
+      providerMessageId: 'sinch-message-1'
+    });
+    expect(sinch.sendCalls).toHaveLength(1);
+    await expect(
+      client.db
+        .select()
+        .from(outboundMessages)
+        .where(eq(outboundMessages.stageInstanceId, seeded.stageInstanceId))
+    ).resolves.toHaveLength(1);
+    await expect(
+      client.db
+        .select()
+        .from(debtContactClaims)
+        .where(eq(debtContactClaims.organisationId, seeded.organisationId))
+    ).resolves.toHaveLength(1);
+  });
+
   it('keeps the daily contact claim when Sinch accepts before a later database failure', async () => {
     const seeded = await seedApprovedReminder({
       sequenceMode: 'AUTOMATIC',
@@ -821,6 +930,87 @@ describe('executeReminder', () => {
     ).resolves.toEqual({ kind: 'unknown' });
     claimFailure.mockRestore();
 
+    expect(sinch.sendCalls).toHaveLength(0);
+    await expect(
+      client.db
+        .select({ status: outboundMessages.status })
+        .from(outboundMessages)
+        .where(eq(outboundMessages.stageInstanceId, seeded.stageInstanceId))
+    ).resolves.toEqual([{ status: 'UNKNOWN' }]);
+    await expect(
+      client.db
+        .select({ status: messageAttempts.status })
+        .from(messageAttempts)
+        .innerJoin(
+          outboundMessages,
+          eq(outboundMessages.id, messageAttempts.outboundMessageId)
+        )
+        .where(eq(outboundMessages.stageInstanceId, seeded.stageInstanceId))
+    ).resolves.toEqual([{ status: 'UNKNOWN' }]);
+    await expect(
+      client.db
+        .select({ status: stageInstances.status })
+        .from(stageInstances)
+        .where(eq(stageInstances.id, seeded.stageInstanceId))
+    ).resolves.toEqual([{ status: 'UNKNOWN' }]);
+    await expect(
+      executeReminder(dependencies(xero, sinch), {
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId
+      })
+    ).resolves.toEqual({ kind: 'unknown' });
+  });
+
+  it('records UNKNOWN when daily-limit cancellation fails after beginReminder', async () => {
+    const seeded = await seedApprovedReminder({
+      sequenceMode: 'AUTOMATIC',
+      createApproval: false,
+      rolloutScope: 'CUSTOMER',
+      allowlisted: false,
+      stageScheduledAt: now
+    });
+    await client.db.insert(debtContactClaims).values({
+      organisationId: seeded.organisationId,
+      contactId: seeded.contactId,
+      localDate: '2026-09-18',
+      channel: 'VOICE',
+      sourceId: randomUUID(),
+      claimedAt: now
+    });
+    const xero = new FakeXero();
+    xero.invoice = xeroInvoice(seeded);
+    const sinch = new FakeSinch();
+    const originalRepository = new PostgresMessageRepository(client.db);
+    const originalBegin = originalRepository.beginReminder.bind(
+      originalRepository
+    );
+    const transaction = vi.spyOn(client.db, 'transaction');
+    const begin = vi
+      .spyOn(PostgresMessageRepository.prototype, 'beginReminder')
+      .mockImplementationOnce(async (input) => {
+        const result = await originalBegin(input);
+        transaction.mockRejectedValueOnce(
+          new Error('injected cancellation write failure')
+        );
+        return result;
+      });
+    let outcome: ExecutionOutcome | undefined;
+    let thrown: unknown;
+
+    try {
+      outcome = await executeReminder(dependencies(xero, sinch), {
+        organisationId: seeded.organisationId,
+        stageInstanceId: seeded.stageInstanceId
+      });
+    } catch (error) {
+      thrown = error;
+    } finally {
+      begin.mockRestore();
+      transaction.mockRestore();
+    }
+
+    expect(thrown).toBeUndefined();
+    expect(outcome).toEqual({ kind: 'unknown' });
     expect(sinch.sendCalls).toHaveLength(0);
     await expect(
       client.db
