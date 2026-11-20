@@ -37,3 +37,15 @@ export const reconcileCancelledSubscriptionLifecycles = async (dependencies: {
   }
   return candidates.length;
 };
+
+export const reconcileDuePaymentRecoveries = async (dependencies: {
+  repository: {
+    markDueForReview(input: { now: Date; limit: number }): Promise<number>;
+  };
+  clock: { now(): Date };
+  limit?: number;
+}): Promise<number> =>
+  dependencies.repository.markDueForReview({
+    now: dependencies.clock.now(),
+    limit: dependencies.limit ?? 100
+  });

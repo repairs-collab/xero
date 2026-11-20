@@ -18,6 +18,10 @@ export type RolloutScope = 'CONTROLLED' | 'CUSTOMER';
 
 export type PlatformRole = 'OWNER';
 export type PlatformAccountStatus = 'ACTIVE' | 'SUSPENDED';
+export type PlatformSuspensionSource =
+  | 'OWNER'
+  | 'PAYMENT_FAILURE'
+  | 'BILLING_REVIEW';
 
 export type OperationalState =
   | 'READY'
@@ -74,6 +78,7 @@ export const organisations = pgTable(
       .default('ACTIVE'),
     suspendedAt: timestamp('suspended_at', { withTimezone: true }),
     suspensionReason: text('suspension_reason'),
+    suspensionSource: varchar('suspension_source', { length: 24 }).$type<PlatformSuspensionSource>(),
     platformStatusVersion: integer('platform_status_version')
       .notNull()
       .default(0),
@@ -126,8 +131,8 @@ export const organisations = pgTable(
     ),
     check(
       'organisations_platform_suspension_metadata_ck',
-      sql`(${table.platformStatus} = 'ACTIVE' and ${table.suspendedAt} is null and ${table.suspensionReason} is null)
-          or (${table.platformStatus} = 'SUSPENDED' and ${table.suspendedAt} is not null and nullif(btrim(${table.suspensionReason}), '') is not null)`
+      sql`(${table.platformStatus} = 'ACTIVE' and ${table.suspendedAt} is null and ${table.suspensionReason} is null and ${table.suspensionSource} is null)
+          or (${table.platformStatus} = 'SUSPENDED' and ${table.suspendedAt} is not null and nullif(btrim(${table.suspensionReason}), '') is not null and ${table.suspensionSource} in ('OWNER', 'PAYMENT_FAILURE', 'BILLING_REVIEW'))`
     )
   ]
 );

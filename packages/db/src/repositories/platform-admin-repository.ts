@@ -96,6 +96,7 @@ export interface PlatformBillingCaseView {
   currency: string;
   blocksSending: boolean;
   openedAt: Date;
+  recoveryEndsAt: Date | null;
   resolvedAt: Date | null;
   createdAt: Date;
 }
@@ -933,6 +934,7 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
               currency: billingCases.currency,
               blocksSending: billingCases.blocksSending,
               openedAt: billingCases.openedAt,
+              recoveryEndsAt: billingCases.recoveryEndsAt,
               resolvedAt: billingCases.resolvedAt,
               createdAt: billingCases.createdAt
             })
@@ -1156,6 +1158,8 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
           platformStatusVersion: nextVersion,
           suspendedAt: input.targetStatus === 'SUSPENDED' ? input.now : null,
           suspensionReason: input.targetStatus === 'SUSPENDED' ? reason : null,
+          suspensionSource:
+            input.targetStatus === 'SUSPENDED' ? 'OWNER' : null,
           updatedAt: input.now
         })
         .where(eq(organisations.id, input.organisationId));
@@ -1170,14 +1174,17 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
           platformStatus: organisation.platformStatus,
           platformStatusVersion: organisation.platformStatusVersion,
           suspendedAt: organisation.suspendedAt?.toISOString() ?? null,
-          suspensionReason: organisation.suspensionReason
+          suspensionReason: organisation.suspensionReason,
+          suspensionSource: organisation.suspensionSource
         },
         afterValue: {
           platformStatus: input.targetStatus,
           platformStatusVersion: nextVersion,
           suspendedAt:
             input.targetStatus === 'SUSPENDED' ? input.now.toISOString() : null,
-          suspensionReason: input.targetStatus === 'SUSPENDED' ? reason : null
+          suspensionReason: input.targetStatus === 'SUSPENDED' ? reason : null,
+          suspensionSource:
+            input.targetStatus === 'SUSPENDED' ? 'OWNER' : null
         },
         occurredAt: input.now
       });

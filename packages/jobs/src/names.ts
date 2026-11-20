@@ -20,6 +20,7 @@ export const jobNames = {
   retentionApply: 'retention.apply',
   subscriptionLifecycle: 'subscription.lifecycle',
   subscriptionLifecycleReconcile: 'subscription.lifecycle-reconcile',
+  paymentRecoveryReconcile: 'payment-recovery.reconcile',
   subscriptionTrialExpiry: 'subscription.trial-expiry'
 } as const;
 

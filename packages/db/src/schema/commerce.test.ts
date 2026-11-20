@@ -38,13 +38,17 @@ describe('Solo commerce schema contract', () => {
         'latest_provider_event_id',
         'latest_provider_event_created_at',
         'opened_at',
+        'recovery_ends_at',
         'resolved_at',
         'created_at',
         'updated_at'
       ])
     );
-    expect(cases.indexes.map((index) => index.config.name)).toContain(
-      'billing_cases_org_kind_provider_uq'
+    expect(cases.indexes.map((index) => index.config.name)).toEqual(
+      expect.arrayContaining([
+        'billing_cases_org_kind_provider_uq',
+        'billing_cases_recovery_due_idx'
+      ])
     );
     expect(cases.checks.map((constraint) => constraint.name)).toEqual(
       expect.arrayContaining([
@@ -54,6 +58,7 @@ describe('Solo commerce schema contract', () => {
         'billing_cases_subscription_relation_ck',
         'billing_cases_amount_ck',
         'billing_cases_currency_ck',
+        'billing_cases_recovery_deadline_ck',
         'billing_cases_resolution_ck'
       ])
     );
@@ -458,8 +463,8 @@ describe('Solo commerce schema contract', () => {
     expect(forwardMigration).toContain(
       'legacy_initial_card_invoice_id'
     );
-    expect(forwardMigration).toContain(
-      'SET\n  "legacy_status" = "status",\n  "status" = \'LEGACY_UNBOUND\''
+    expect(forwardMigration).toMatch(
+      /SET\r?\n {2}"legacy_status" = "status",\r?\n {2}"status" = 'LEGACY_UNBOUND'/
     );
     expect(forwardMigration).toContain(
       'direct_debit_requests_reconciliation_ck'
@@ -467,5 +472,31 @@ describe('Solo commerce schema contract', () => {
     expect(forwardMigration).not.toMatch(
       /bank_(?:account|details)|bsb|account_number/i
     );
+  });
+
+  it('adds a recoverable 30-day payment-failure deadline in migration 0046', async () => {
+    const migrationDirectory = new URL('../../drizzle/', import.meta.url);
+    const migrationName = (await readdir(migrationDirectory)).find((name) =>
+      /^0046_.*\.sql$/.test(name)
+    );
+    expect(migrationName).toBeDefined();
+    if (migrationName === undefined) return;
+
+    const migration = await readFile(
+      new URL(migrationName, migrationDirectory),
+      'utf8'
+    );
+    expect(migration).toContain(
+      'ADD COLUMN "recovery_ends_at" timestamp with time zone'
+    );
+    expect(migration).toContain(
+      'SET "recovery_ends_at" = "opened_at" + interval \'30 days\''
+    );
+    expect(migration).toContain(
+      'billing_cases_recovery_deadline_compat_trg'
+    );
+    expect(migration).toContain('organisations_suspension_source_compat_trg');
+    expect(migration).toContain('billing_cases_recovery_due_idx');
+    expect(migration).toContain('billing_cases_recovery_deadline_ck');
   });
 });

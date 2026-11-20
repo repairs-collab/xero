@@ -6,6 +6,7 @@ import {
   migrateDatabase,
   operationalResetRuns,
   organisations,
+  PostgresPaymentRecoveryRepository,
   PostgresReplyNumberProvisioningRepository,
   PostgresSmsCommerceRepository,
   PostgresXeroConnectionRepository,
@@ -59,7 +60,10 @@ import {
 } from './operations/inbound-reply-recovery.js';
 import { createOperationalResetService } from './operations/operational-reset.js';
 import { backfillPaidSmsNumberProvisioning } from './operations/sms-number-provisioning-backfill.js';
-import { reconcileCancelledSubscriptionLifecycles } from './operations/subscription-lifecycle-reconciliation.js';
+import {
+  reconcileCancelledSubscriptionLifecycles,
+  reconcileDuePaymentRecoveries
+} from './operations/subscription-lifecycle-reconciliation.js';
 import { evaluateVoiceMonitor } from './operations/voice-monitor.js';
 import {
   createDatabaseXeroOAuthReadinessLoader,
@@ -409,6 +413,8 @@ async function main() {
   );
   const replyNumberProvisioningRepository =
     new PostgresReplyNumberProvisioningRepository(databaseClient.db);
+  const paymentRecoveryRepository =
+    new PostgresPaymentRecoveryRepository(databaseClient.db);
   const voiceGateway = new VoiceGatewayClient({
     http,
     signingSecret: required('VOICE_GATEWAY_SIGNING_SECRET'),
@@ -707,6 +713,16 @@ async function main() {
             'Cancelled subscription lifecycle reconciliation completed',
             { candidates: candidateCount }
           );
+        }),
+      [jobNames.paymentRecoveryReconcile]: () =>
+        reconcileDuePaymentRecoveries({
+          repository: paymentRecoveryRepository,
+          clock,
+          limit: 100
+        }).then((candidateCount) => {
+          console.info('Failed-payment recovery reconciliation completed', {
+            candidates: candidateCount
+          });
         }),
       [jobNames.subscriptionTrialExpiry]: (payload) =>
         processTrialExpiry(

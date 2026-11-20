@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { and, desc, eq, isNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 
 import {
   auditEvents,
@@ -1166,7 +1166,8 @@ export const createPostgresSubscriptionRepository = (
             platformStatus: organisations.platformStatus,
             platformStatusVersion: organisations.platformStatusVersion,
             suspendedAt: organisations.suspendedAt,
-            suspensionReason: organisations.suspensionReason
+            suspensionReason: organisations.suspensionReason,
+            suspensionSource: organisations.suspensionSource
           })
           .from(organisations)
           .where(eq(organisations.id, candidate.organisationId))
@@ -1284,6 +1285,12 @@ export const createPostgresSubscriptionRepository = (
           return 'REJECTED';
         }
         const blocksSending = operationalEventBlocksSending(input, relation);
+        const targetStatus =
+          input.caseKind === 'PAYMENT_FAILURE' &&
+          input.targetStatus === 'OPEN' &&
+          existingCase?.status === 'REVIEW_REQUIRED'
+            ? 'REVIEW_REQUIRED'
+            : input.targetStatus;
         const [latestAppliedEvidence] = await transaction
           .select({
             eventId: subscriptionEvents.stripeEventId,
@@ -1334,7 +1341,7 @@ export const createPostgresSubscriptionRepository = (
           const incomingTime = input.eventCreatedAt.getTime();
           const previousTime = previousWinner.eventCreatedAt.getTime();
           const incomingRisk = operationalRiskRank({
-            status: input.targetStatus,
+            status: targetStatus,
             blocksSending
           });
           const previousRisk = operationalRiskRank(previousWinner);
@@ -1372,7 +1379,16 @@ export const createPostgresSubscriptionRepository = (
 
         const actionNow = clock.now();
         const resolvedAt =
-          input.targetStatus === 'RESOLVED' ? input.eventCreatedAt : null;
+          targetStatus === 'RESOLVED' ? input.eventCreatedAt : null;
+        const recoveryEndsAt =
+          input.caseKind === 'PAYMENT_FAILURE'
+            ? targetStatus !== 'RESOLVED' &&
+              (existingCase === undefined || existingCase.status === 'RESOLVED')
+              ? new Date(
+                  input.eventCreatedAt.getTime() + 30 * 24 * 60 * 60 * 1_000
+                )
+              : existingCase?.recoveryEndsAt ?? null
+            : null;
         const [billingCase] =
           existingCase === undefined
             ? await transaction
@@ -1380,7 +1396,7 @@ export const createPostgresSubscriptionRepository = (
                 .values({
                   organisationId: organisation.id,
                   kind: input.caseKind,
-                  status: input.targetStatus,
+                  status: targetStatus,
                   providerObjectType: input.providerObjectType,
                   providerObjectId: input.providerObjectId,
                   providerStatus: input.providerStatus,
@@ -1392,6 +1408,7 @@ export const createPostgresSubscriptionRepository = (
                   latestProviderEventId: input.eventId,
                   latestProviderEventCreatedAt: input.eventCreatedAt,
                   openedAt: input.eventCreatedAt,
+                  recoveryEndsAt,
                   resolvedAt,
                   createdAt: actionNow,
                   updatedAt: actionNow
@@ -1400,7 +1417,7 @@ export const createPostgresSubscriptionRepository = (
             : await transaction
                 .update(billingCases)
                 .set({
-                  status: input.targetStatus,
+                  status: targetStatus,
                   providerStatus: input.providerStatus,
                   stripeSubscriptionId: input.stripeSubscriptionId,
                   subscriptionRelation: relation,
@@ -1409,6 +1426,7 @@ export const createPostgresSubscriptionRepository = (
                   blocksSending,
                   latestProviderEventId: input.eventId,
                   latestProviderEventCreatedAt: input.eventCreatedAt,
+                  recoveryEndsAt,
                   resolvedAt,
                   updatedAt: actionNow
                 })
@@ -1431,6 +1449,10 @@ export const createPostgresSubscriptionRepository = (
             );
         }
 
+        const riskSuspensionSource =
+          input.caseKind === 'PAYMENT_FAILURE'
+            ? ('PAYMENT_FAILURE' as const)
+            : ('BILLING_REVIEW' as const);
         if (blocksSending && organisation.platformStatus === 'ACTIVE') {
           await transaction
             .update(organisations)
@@ -1439,6 +1461,7 @@ export const createPostgresSubscriptionRepository = (
               platformStatusVersion: organisation.platformStatusVersion + 1,
               suspendedAt: actionNow,
               suspensionReason: 'Stripe billing risk requires owner review',
+              suspensionSource: riskSuspensionSource,
               updatedAt: actionNow
             })
             .where(eq(organisations.id, organisation.id));
@@ -1451,10 +1474,81 @@ export const createPostgresSubscriptionRepository = (
             beforeValue: { platformStatus: 'ACTIVE' },
             afterValue: {
               platformStatus: 'SUSPENDED',
-              reason: 'Stripe billing risk requires owner review'
+              reason: 'Stripe billing risk requires owner review',
+              suspensionSource: riskSuspensionSource
             },
             occurredAt: actionNow
           });
+        }
+        if (
+          blocksSending &&
+          organisation.platformStatus === 'SUSPENDED' &&
+          organisation.suspensionSource === 'PAYMENT_FAILURE' &&
+          riskSuspensionSource === 'BILLING_REVIEW'
+        ) {
+          await transaction
+            .update(organisations)
+            .set({
+              platformStatusVersion: organisation.platformStatusVersion + 1,
+              suspensionSource: 'BILLING_REVIEW',
+              updatedAt: actionNow
+            })
+            .where(eq(organisations.id, organisation.id));
+          await transaction.insert(auditEvents).values({
+            organisationId: organisation.id,
+            eventType: 'BILLING_RISK_ESCALATED',
+            entityType: 'ORGANISATION',
+            entityId: organisation.id,
+            correlationId: input.eventId,
+            beforeValue: { suspensionSource: 'PAYMENT_FAILURE' },
+            afterValue: { suspensionSource: 'BILLING_REVIEW' },
+            occurredAt: actionNow
+          });
+        }
+        if (
+          input.caseKind === 'PAYMENT_FAILURE' &&
+          targetStatus === 'RESOLVED' &&
+          organisation.platformStatus === 'SUSPENDED' &&
+          organisation.suspensionSource === 'PAYMENT_FAILURE'
+        ) {
+          const [remainingBlocker] = await transaction
+            .select({ id: billingCases.id })
+            .from(billingCases)
+            .where(
+              and(
+                eq(billingCases.organisationId, organisation.id),
+                eq(billingCases.blocksSending, true),
+                inArray(billingCases.status, ['OPEN', 'REVIEW_REQUIRED'])
+              )
+            )
+            .limit(1);
+          if (remainingBlocker === undefined) {
+            await transaction
+              .update(organisations)
+              .set({
+                platformStatus: 'ACTIVE',
+                platformStatusVersion:
+                  organisation.platformStatusVersion + 1,
+                suspendedAt: null,
+                suspensionReason: null,
+                suspensionSource: null,
+                updatedAt: actionNow
+              })
+              .where(eq(organisations.id, organisation.id));
+            await transaction.insert(auditEvents).values({
+              organisationId: organisation.id,
+              eventType: 'BILLING_RISK_RECOVERED',
+              entityType: 'ORGANISATION',
+              entityId: organisation.id,
+              correlationId: input.eventId,
+              beforeValue: {
+                platformStatus: 'SUSPENDED',
+                reason: 'Stripe billing risk requires owner review'
+              },
+              afterValue: { platformStatus: 'ACTIVE' },
+              occurredAt: actionNow
+            });
+          }
         }
 
         const createNotice = !(
@@ -1537,7 +1631,9 @@ export const createPostgresSubscriptionRepository = (
                           providerObjectId: input.providerObjectId,
                           providerStatus: input.providerStatus,
                           amountMinor: input.amountMinor,
-                          currency: input.currency
+                          currency: input.currency,
+                          recoveryEndsAt:
+                            billingCase.recoveryEndsAt?.toISOString() ?? null
                         },
                         idempotencyKey: noticeIdempotencyKey(
                           input.eventId,
@@ -1605,7 +1701,7 @@ export const createPostgresSubscriptionRepository = (
                 },
           afterValue: {
             kind: input.caseKind,
-            status: input.targetStatus,
+            status: targetStatus,
             blocksSending,
             subscriptionRelation: relation
           },
@@ -1613,7 +1709,11 @@ export const createPostgresSubscriptionRepository = (
         });
         await insertEvent(
           transaction,
-          operationalEventEvidence(input, organisation.id, blocksSending),
+          operationalEventEvidence(
+            { ...input, targetStatus },
+            organisation.id,
+            blocksSending
+          ),
           'APPLIED'
         );
         return 'APPLIED';

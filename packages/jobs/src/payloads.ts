@@ -62,6 +62,7 @@ export const jobPayloadSchemas = {
     })
     .strict(),
   [jobNames.subscriptionLifecycleReconcile]: z.object({}).strict(),
+  [jobNames.paymentRecoveryReconcile]: z.object({}).strict(),
   [jobNames.subscriptionTrialExpiry]: organisationPayload
 } satisfies Record<JobName, z.ZodType>;
 

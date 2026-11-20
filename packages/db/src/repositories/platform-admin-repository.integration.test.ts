@@ -404,6 +404,7 @@ describe('PostgresPlatformAdminRepository reads', () => {
           latestProviderEventId: `evt-secret-old-${runId}`,
           latestProviderEventCreatedAt: created[2]!,
           openedAt: created[2]!,
+          recoveryEndsAt: new Date('2026-12-11T01:00:00.000Z'),
           createdAt: created[2]!,
           updatedAt: created[2]!
         }
@@ -476,7 +477,8 @@ describe('PostgresPlatformAdminRepository reads', () => {
       currency: 'aud',
       providerReference: `in-old-${runId}`,
       subscriptionRelation: 'CURRENT',
-      blocksSending: true
+      blocksSending: true,
+      recoveryEndsAt: new Date('2026-12-11T01:00:00.000Z')
     });
     const serialized = JSON.stringify({ first, nextCases, nextHeldEmails, filtered });
     expect(serialized).not.toContain('renderData');
@@ -690,7 +692,10 @@ describe('PostgresPlatformAdminRepository mutations', () => {
       blocksSending: true,
       latestProviderEventId: `evt_${randomUUID()}`,
       latestProviderEventCreatedAt: suspendedAt,
-      openedAt: suspendedAt
+      openedAt: suspendedAt,
+      recoveryEndsAt: new Date(
+        suspendedAt.getTime() + 30 * 24 * 60 * 60 * 1_000
+      )
     });
 
     const stale = await repository.reactivateOrganisation({

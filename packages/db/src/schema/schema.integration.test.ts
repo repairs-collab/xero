@@ -468,6 +468,7 @@ describe('database invariants', () => {
         'latest_provider_event_id',
         'latest_provider_event_created_at',
         'opened_at',
+        'recovery_ends_at',
         'resolved_at'
       ])
     );
@@ -497,6 +498,34 @@ describe('database invariants', () => {
       timeZone: 'Australia/Sydney',
       baseCurrency: 'AUD'
     });
+    const legacyProviderObjectId = `in_${randomUUID()}`;
+    await database.pool.query(
+      `insert into billing_cases (
+         organisation_id, kind, status, provider_object_type,
+         provider_object_id, provider_status, stripe_subscription_id,
+         subscription_relation, amount_minor, currency, blocks_sending,
+         latest_provider_event_id, latest_provider_event_created_at, opened_at
+       ) values ($1, 'PAYMENT_FAILURE', 'OPEN', 'INVOICE', $2,
+         'payment_failed', $3, 'CURRENT', 12345, 'aud', true, $4, $5, $5)`,
+      [
+        organisationId,
+        legacyProviderObjectId,
+        `sub_${randomUUID()}`,
+        `evt_${randomUUID()}`,
+        new Date('2026-10-01T00:00:00.000Z')
+      ]
+    );
+    const legacyCompatible = await database.pool.query<{
+      recovery_ends_at: Date;
+    }>(
+      `select recovery_ends_at
+         from billing_cases
+        where provider_object_id = $1`,
+      [legacyProviderObjectId]
+    );
+    expect(legacyCompatible.rows[0]?.recovery_ends_at).toEqual(
+      new Date('2026-10-31T00:00:00.000Z')
+    );
     const [billingCase] = await database.db
       .insert(billingCases)
       .values({
@@ -513,7 +542,8 @@ describe('database invariants', () => {
         blocksSending: true,
         latestProviderEventId: `evt_${randomUUID()}`,
         latestProviderEventCreatedAt: new Date('2026-11-12T00:00:00.000Z'),
-        openedAt: new Date('2026-11-12T00:00:00.000Z')
+        openedAt: new Date('2026-11-12T00:00:00.000Z'),
+        recoveryEndsAt: new Date('2026-12-12T00:00:00.000Z')
       })
       .returning({ id: billingCases.id });
 
@@ -642,6 +672,7 @@ describe('database invariants', () => {
         'platformStatus',
         'suspendedAt',
         'suspensionReason',
+        'suspensionSource',
         'platformStatusVersion'
       ])
     );
@@ -653,6 +684,7 @@ describe('database invariants', () => {
         'platform_status',
         'suspended_at',
         'suspension_reason',
+        'suspension_source',
         'platform_status_version'
       ])
     );
@@ -685,9 +717,10 @@ describe('database invariants', () => {
       platform_status_version: number;
       suspended_at: Date | null;
       suspension_reason: string | null;
+      suspension_source: string | null;
     }>(
       `select platform_status, platform_status_version, suspended_at,
-              suspension_reason
+              suspension_reason, suspension_source
          from organisations where id = $1`,
       [organisationId]
     );
@@ -695,8 +728,41 @@ describe('database invariants', () => {
       platform_status: 'ACTIVE',
       platform_status_version: 0,
       suspended_at: null,
-      suspension_reason: null
+      suspension_reason: null,
+      suspension_source: null
     });
+
+    await database.pool.query(
+      `update organisations
+          set platform_status = 'SUSPENDED',
+              suspended_at = now(),
+              suspension_reason = 'Legacy owner suspension'
+        where id = $1`,
+      [organisationId]
+    );
+    const legacySuspension = await database.pool.query<{
+      suspension_source: string | null;
+    }>(
+      `select suspension_source from organisations where id = $1`,
+      [organisationId]
+    );
+    expect(legacySuspension.rows[0]?.suspension_source).toBe('OWNER');
+
+    await database.pool.query(
+      `update organisations
+          set platform_status = 'ACTIVE',
+              suspended_at = null,
+              suspension_reason = null
+        where id = $1`,
+      [organisationId]
+    );
+    const legacyReactivation = await database.pool.query<{
+      suspension_source: string | null;
+    }>(
+      `select suspension_source from organisations where id = $1`,
+      [organisationId]
+    );
+    expect(legacyReactivation.rows[0]?.suspension_source).toBeNull();
   });
 
   it('seeds only the active normalized owner email in the platform migration', async () => {
