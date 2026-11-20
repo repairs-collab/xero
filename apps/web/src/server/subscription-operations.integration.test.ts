@@ -10,6 +10,7 @@ import {
   memberships,
   migrateDatabase,
   organisations,
+  PostgresPaymentRecoveryRepository,
   retiredStripeSubscriptions,
   subscriptionEvents,
   subscriptions,
@@ -25,9 +26,28 @@ const client = createDatabase(
     'postgres://bc5000:bc5000@localhost:5432/bc5000'
 );
 const clockNow = new Date('2026-11-12T01:00:00.000Z');
+const recoverySuiteLockKey = 791_827_463;
+let recoverySuiteLock: {
+  query(text: string, values?: unknown[]): Promise<unknown>;
+  release(): void;
+} | null = null;
 
-beforeAll(async () => migrateDatabase(client.db));
-afterAll(async () => client.pool.end());
+beforeAll(async () => {
+  recoverySuiteLock = await client.pool.connect();
+  await recoverySuiteLock.query('select pg_advisory_lock($1)', [
+    recoverySuiteLockKey
+  ]);
+  await migrateDatabase(client.db);
+}, 120_000);
+afterAll(async () => {
+  if (recoverySuiteLock !== null) {
+    await recoverySuiteLock.query('select pg_advisory_unlock($1)', [
+      recoverySuiteLockKey
+    ]);
+    recoverySuiteLock.release();
+  }
+  await client.pool.end();
+}, 120_000);
 
 const addMember = async (
   organisationId: string,
@@ -181,7 +201,7 @@ describe('operational Stripe event persistence', () => {
     ).rejects.toThrow('STRIPE_EVENT_PAYLOAD_MISMATCH');
   });
 
-  it('atomically suspends a current payment failure, fans out held notices, deduplicates, and never reactivates on recovery', async () => {
+  it('atomically suspends a current payment failure, fans out held notices, and reactivates after verified recovery', async () => {
     const seeded = await seedOrganisation();
     const eventId = `evt_${randomUUID()}`;
     const invoiceId = `in_${randomUUID()}`;
@@ -216,13 +236,20 @@ describe('operational Stripe event persistence', () => {
       organisationId: seeded.organisationId,
       status: 'OPEN',
       subscriptionRelation: 'CURRENT',
-      blocksSending: true
+      blocksSending: true,
+      recoveryEndsAt: new Date('2026-12-12T00:00:00.000Z')
     });
     expect(held).toHaveLength(2);
     expect(held.map((row) => row.recipient).sort()).toEqual(
       [0, 1].map((index) => `admin-${index}-${seeded.organisationId}@example.invalid`).sort()
     );
     expect(held.every((row) => row.status === 'HELD' && row.attempts === 0)).toBe(true);
+    expect(
+      held.every(
+        (row) =>
+          row.renderData.recoveryEndsAt === '2026-12-12T00:00:00.000Z'
+      )
+    ).toBe(true);
     expect(organisation).toMatchObject({
       platformStatus: 'SUSPENDED',
       platformStatusVersion: 1,
@@ -264,8 +291,17 @@ describe('operational Stripe event persistence', () => {
           eq(transactionalEmailOutbox.template, 'PAYMENT_RECOVERED')
         )
       );
-    expect(resolved).toMatchObject({ status: 'RESOLVED', blocksSending: false });
-    expect(stillSuspended?.platformStatus).toBe('SUSPENDED');
+    expect(resolved).toMatchObject({
+      status: 'RESOLVED',
+      blocksSending: false,
+      recoveryEndsAt: new Date('2026-12-12T00:00:00.000Z')
+    });
+    expect(stillSuspended).toMatchObject({
+      platformStatus: 'ACTIVE',
+      platformStatusVersion: 2,
+      suspendedAt: null,
+      suspensionReason: null
+    });
     expect(recoveryNotices).toHaveLength(2);
 
     await expect(
@@ -280,6 +316,351 @@ describe('operational Stripe event persistence', () => {
       .from(billingCases)
       .where(eq(billingCases.id, paymentCase!.id));
     expect(afterOlderRisk?.status).toBe('RESOLVED');
+  });
+
+  it('keeps the account suspended until every blocking payment failure recovers', async () => {
+    const seeded = await seedOrganisation();
+    const firstFailure = operationalEvent({
+      eventId: `evt_${randomUUID()}`,
+      providerObjectId: `in_${randomUUID()}`,
+      stripeCustomerId: seeded.stripeCustomerId,
+      stripeSubscriptionId: seeded.stripeSubscriptionId
+    });
+    const secondFailure = operationalEvent({
+      eventId: `evt_${randomUUID()}`,
+      providerObjectId: `in_${randomUUID()}`,
+      stripeCustomerId: seeded.stripeCustomerId,
+      stripeSubscriptionId: seeded.stripeSubscriptionId,
+      eventCreatedAt: new Date('2026-11-12T00:01:00.000Z')
+    });
+
+    await expect(repository().applyOperationalEvent(firstFailure)).resolves.toBe(
+      'APPLIED'
+    );
+    await expect(repository().applyOperationalEvent(secondFailure)).resolves.toBe(
+      'APPLIED'
+    );
+    await expect(
+      repository().applyOperationalEvent({
+        ...firstFailure,
+        eventId: `evt_${randomUUID()}`,
+        eventType: 'invoice.paid',
+        eventCreatedAt: new Date('2026-11-12T00:02:00.000Z'),
+        providerStatus: 'paid',
+        amountMinor: 0,
+        targetStatus: 'RESOLVED',
+        suspensionPolicy: 'NEVER',
+        heldTemplate: 'PAYMENT_RECOVERED',
+        resolveExistingOnly: true
+      })
+    ).resolves.toBe('APPLIED');
+
+    const [stillSuspended] = await client.db
+      .select()
+      .from(organisations)
+      .where(eq(organisations.id, seeded.organisationId));
+    expect(stillSuspended?.platformStatus).toBe('SUSPENDED');
+
+    await expect(
+      repository().applyOperationalEvent({
+        ...secondFailure,
+        eventId: `evt_${randomUUID()}`,
+        eventType: 'invoice.paid',
+        eventCreatedAt: new Date('2026-11-12T00:03:00.000Z'),
+        providerStatus: 'paid',
+        amountMinor: 0,
+        targetStatus: 'RESOLVED',
+        suspensionPolicy: 'NEVER',
+        heldTemplate: 'PAYMENT_RECOVERED',
+        resolveExistingOnly: true
+      })
+    ).resolves.toBe('APPLIED');
+
+    const [reactivated] = await client.db
+      .select()
+      .from(organisations)
+      .where(eq(organisations.id, seeded.organisationId));
+    expect(reactivated).toMatchObject({
+      platformStatus: 'ACTIVE',
+      platformStatusVersion: 2,
+      suspendedAt: null,
+      suspensionReason: null
+    });
+  });
+
+  it('never clears an owner suspension even when its reason matches billing copy', async () => {
+    const seeded = await seedOrganisation();
+    await client.db
+      .update(organisations)
+      .set({
+        platformStatus: 'SUSPENDED',
+        platformStatusVersion: 1,
+        suspendedAt: clockNow,
+        suspensionReason: 'Stripe billing risk requires owner review',
+        suspensionSource: 'OWNER',
+        updatedAt: clockNow
+      })
+      .where(eq(organisations.id, seeded.organisationId));
+    const failure = operationalEvent({
+      eventId: `evt_${randomUUID()}`,
+      providerObjectId: `in_${randomUUID()}`,
+      stripeCustomerId: seeded.stripeCustomerId,
+      stripeSubscriptionId: seeded.stripeSubscriptionId
+    });
+
+    await expect(repository().applyOperationalEvent(failure)).resolves.toBe(
+      'APPLIED'
+    );
+    await expect(
+      repository().applyOperationalEvent({
+        ...failure,
+        eventId: `evt_${randomUUID()}`,
+        eventType: 'invoice.paid',
+        eventCreatedAt: new Date('2026-11-12T00:01:00.000Z'),
+        providerStatus: 'paid',
+        amountMinor: 0,
+        targetStatus: 'RESOLVED',
+        suspensionPolicy: 'NEVER',
+        heldTemplate: 'PAYMENT_RECOVERED',
+        resolveExistingOnly: true
+      })
+    ).resolves.toBe('APPLIED');
+
+    const [organisation] = await client.db
+      .select()
+      .from(organisations)
+      .where(eq(organisations.id, seeded.organisationId));
+    expect(organisation).toMatchObject({
+      platformStatus: 'SUSPENDED',
+      platformStatusVersion: 1,
+      suspensionReason: 'Stripe billing risk requires owner review',
+      suspensionSource: 'OWNER'
+    });
+  });
+
+  it('never clears an explicit billing review after a dispute overlaps payment recovery', async () => {
+    const seeded = await seedOrganisation();
+    const paymentFailure = operationalEvent({
+      eventId: `evt_${randomUUID()}`,
+      providerObjectId: `in_${randomUUID()}`,
+      stripeCustomerId: seeded.stripeCustomerId,
+      stripeSubscriptionId: seeded.stripeSubscriptionId
+    });
+    const disputeOpened = operationalEvent({
+      eventId: `evt_${randomUUID()}`,
+      eventType: 'charge.dispute.created',
+      eventCreatedAt: new Date('2026-11-12T00:01:00.000Z'),
+      providerObjectType: 'DISPUTE',
+      providerObjectId: `dp_${randomUUID()}`,
+      providerStatus: 'needs_response',
+      caseKind: 'DISPUTE',
+      targetStatus: 'OPEN',
+      suspensionPolicy: 'ALWAYS',
+      heldTemplate: 'DISPUTE_OPENED',
+      stripeCustomerId: seeded.stripeCustomerId,
+      stripeSubscriptionId: seeded.stripeSubscriptionId
+    });
+
+    await expect(
+      repository().applyOperationalEvent(paymentFailure)
+    ).resolves.toBe('APPLIED');
+    await expect(
+      repository().applyOperationalEvent(disputeOpened)
+    ).resolves.toBe('APPLIED');
+    await expect(
+      repository().applyOperationalEvent({
+        ...disputeOpened,
+        eventId: `evt_${randomUUID()}`,
+        eventType: 'charge.dispute.closed',
+        eventCreatedAt: new Date('2026-11-12T00:02:00.000Z'),
+        providerStatus: 'won',
+        targetStatus: 'RESOLVED',
+        suspensionPolicy: 'NEVER',
+        heldTemplate: 'DISPUTE_CLOSED'
+      })
+    ).resolves.toBe('APPLIED');
+    await expect(
+      repository().applyOperationalEvent({
+        ...paymentFailure,
+        eventId: `evt_${randomUUID()}`,
+        eventType: 'invoice.paid',
+        eventCreatedAt: new Date('2026-11-12T00:03:00.000Z'),
+        providerStatus: 'paid',
+        amountMinor: 0,
+        targetStatus: 'RESOLVED',
+        suspensionPolicy: 'NEVER',
+        heldTemplate: 'PAYMENT_RECOVERED',
+        resolveExistingOnly: true
+      })
+    ).resolves.toBe('APPLIED');
+
+    const [organisation] = await client.db
+      .select()
+      .from(organisations)
+      .where(eq(organisations.id, seeded.organisationId));
+    expect(organisation).toMatchObject({
+      platformStatus: 'SUSPENDED',
+      platformStatusVersion: 2,
+      suspensionSource: 'BILLING_REVIEW'
+    });
+  });
+
+  it('serializes a deadline review racing the verified recovery event', async () => {
+    const seeded = await seedOrganisation();
+    const failure = operationalEvent({
+      eventId: `evt_${randomUUID()}`,
+      providerObjectId: `in_${randomUUID()}`,
+      stripeCustomerId: seeded.stripeCustomerId,
+      stripeSubscriptionId: seeded.stripeSubscriptionId,
+      eventCreatedAt: new Date('0799-12-01T00:00:00.000Z')
+    });
+    await expect(repository().applyOperationalEvent(failure)).resolves.toBe(
+      'APPLIED'
+    );
+
+    const blocker = await client.pool.connect();
+    let transactionOpen = false;
+    let review: Promise<number> | null = null;
+    let recovery: ReturnType<
+      ReturnType<typeof repository>['applyOperationalEvent']
+    > | null = null;
+    let reviewWaitedOnOrganisation = false;
+    try {
+      await blocker.query('begin');
+      transactionOpen = true;
+      const blockerIdentity = await blocker.query<{ pid: number }>(
+        'select pg_backend_pid() as pid'
+      );
+      const blockerPid = blockerIdentity.rows[0]?.pid;
+      if (blockerPid === undefined) {
+        throw new Error('Could not identify recovery race blocker');
+      }
+      await blocker.query(
+        'select id from organisations where id = $1 for update',
+        [seeded.organisationId]
+      );
+      review = new PostgresPaymentRecoveryRepository(
+        client.db
+      ).markDueForReview({
+        now: new Date('0800-01-01T00:00:00.000Z'),
+        limit: 100
+      });
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        const waiting = await client.pool.query<{ waiting: boolean }>(
+          `select exists (
+             select 1
+               from pg_stat_activity
+              where $1 = any(pg_blocking_pids(pid))
+                and wait_event_type = 'Lock'
+                and query ilike '%organisations%for update%'
+           ) as waiting`,
+          [blockerPid]
+        );
+        if (waiting.rows[0]?.waiting === true) {
+          reviewWaitedOnOrganisation = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      recovery = repository().applyOperationalEvent({
+        ...failure,
+        eventId: `evt_${randomUUID()}`,
+        eventType: 'invoice.paid',
+        eventCreatedAt: new Date('0800-01-01T00:01:00.000Z'),
+        providerStatus: 'paid',
+        amountMinor: 0,
+        targetStatus: 'RESOLVED',
+        suspensionPolicy: 'NEVER',
+        heldTemplate: 'PAYMENT_RECOVERED',
+        resolveExistingOnly: true
+      });
+      await blocker.query('commit');
+      transactionOpen = false;
+    } finally {
+      if (transactionOpen) await blocker.query('rollback');
+      blocker.release();
+    }
+    if (review === null || recovery === null) {
+      throw new Error('Recovery race did not start both operations');
+    }
+    const [, recoveryOutcome] = await Promise.all([review, recovery]);
+    expect(reviewWaitedOnOrganisation).toBe(true);
+    expect(recoveryOutcome).toBe('APPLIED');
+
+    const [paymentCase] = await client.db
+      .select()
+      .from(billingCases)
+      .where(eq(billingCases.providerObjectId, failure.providerObjectId));
+    const [organisation] = await client.db
+      .select()
+      .from(organisations)
+      .where(eq(organisations.id, seeded.organisationId));
+    expect(paymentCase).toMatchObject({
+      status: 'RESOLVED',
+      blocksSending: false,
+      recoveryEndsAt: new Date('0799-12-31T00:00:00.000Z')
+    });
+    expect(organisation).toMatchObject({
+      platformStatus: 'ACTIVE',
+      suspendedAt: null,
+      suspensionReason: null
+    });
+  });
+
+  it('does not restart the 30-day clock or clear overdue review when Stripe retries a failed invoice', async () => {
+    const seeded = await seedOrganisation();
+    const invoiceId = `in_${randomUUID()}`;
+    const firstFailure = operationalEvent({
+      eventId: `evt_${randomUUID()}`,
+      providerObjectId: invoiceId,
+      stripeCustomerId: seeded.stripeCustomerId,
+      stripeSubscriptionId: seeded.stripeSubscriptionId
+    });
+
+    await expect(repository().applyOperationalEvent(firstFailure)).resolves.toBe(
+      'APPLIED'
+    );
+    await expect(
+      repository().applyOperationalEvent({
+        ...firstFailure,
+        eventId: `evt_${randomUUID()}`,
+        eventCreatedAt: new Date('2026-11-20T00:00:00.000Z')
+      })
+    ).resolves.toBe('APPLIED');
+
+    const [beforeDeadline] = await client.db
+      .select()
+      .from(billingCases)
+      .where(eq(billingCases.providerObjectId, invoiceId));
+    expect(beforeDeadline).toMatchObject({
+      status: 'OPEN',
+      recoveryEndsAt: new Date('2026-12-12T00:00:00.000Z')
+    });
+
+    const recoveryRepository = new PostgresPaymentRecoveryRepository(client.db);
+    await expect(
+      recoveryRepository.markDueForReview({
+        now: new Date('2026-12-12T00:00:00.000Z'),
+        limit: 100
+      })
+    ).resolves.toBeGreaterThanOrEqual(1);
+
+    await expect(
+      repository().applyOperationalEvent({
+        ...firstFailure,
+        eventId: `evt_${randomUUID()}`,
+        eventCreatedAt: new Date('2026-12-13T00:00:00.000Z')
+      })
+    ).resolves.toBe('APPLIED');
+
+    const [afterDeadline] = await client.db
+      .select()
+      .from(billingCases)
+      .where(eq(billingCases.providerObjectId, invoiceId));
+    expect(afterDeadline).toMatchObject({
+      status: 'REVIEW_REQUIRED',
+      recoveryEndsAt: new Date('2026-12-12T00:00:00.000Z')
+    });
   });
 
   it('normalizes and deduplicates valid administrators while auditing invalid notice recipients', async () => {
@@ -774,6 +1155,9 @@ describe('operational Stripe event persistence', () => {
         latestProviderEventId: previousEventId,
         latestProviderEventCreatedAt: openedAt,
         openedAt,
+        recoveryEndsAt: new Date(
+          openedAt.getTime() + 30 * 24 * 60 * 60 * 1_000
+        ),
         resolvedAt: openedAt
       })
       .returning({ id: billingCases.id });

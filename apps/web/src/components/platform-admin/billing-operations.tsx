@@ -109,7 +109,7 @@ export function PlatformBillingOperations({
           <div>
             <span className="eyebrow">Financial risk</span>
             <h2 id="billing-cases-heading">Cases</h2>
-            <p>Newest evidence first. Case state can only change through verified provider events.</p>
+            <p>Newest evidence first. Case state changes through verified provider events or the recorded recovery deadline.</p>
           </div>
         </header>
         <div className="platform-audit-list">
@@ -135,6 +135,9 @@ export function PlatformBillingOperations({
               </div>
               <small>
                 Opened {dateTime(item.openedAt)}
+                {item.recoveryEndsAt
+                  ? ` · Recovery ends ${dateTime(item.recoveryEndsAt)}`
+                  : ''}
                 {item.resolvedAt ? ` · Resolved ${dateTime(item.resolvedAt)}` : ''}
               </small>
             </article>

@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { jobNames, parseJobPayload } from '@bc5000/jobs';
 
-import { reconcileCancelledSubscriptionLifecycles } from './subscription-lifecycle-reconciliation.js';
+import * as reconciliation from './subscription-lifecycle-reconciliation.js';
+
+const { reconcileCancelledSubscriptionLifecycles } = reconciliation;
 
 describe('cancelled subscription lifecycle reconciliation', () => {
   it('defines a strict global reconciliation job payload', () => {
@@ -71,5 +73,51 @@ describe('cancelled subscription lifecycle reconciliation', () => {
         }
       })
     ).rejects.toThrow('queue unavailable');
+  });
+});
+
+describe('failed-payment recovery reconciliation', () => {
+  it('defines a strict global recovery-review job payload', () => {
+    const paymentRecoveryReconcile = (
+      jobNames as typeof jobNames & { paymentRecoveryReconcile?: string }
+    ).paymentRecoveryReconcile;
+    expect(paymentRecoveryReconcile).toBe('payment-recovery.reconcile');
+    if (paymentRecoveryReconcile === undefined) return;
+    expect(
+      parseJobPayload(
+        paymentRecoveryReconcile as keyof typeof import('@bc5000/jobs').jobPayloadSchemas,
+        {}
+      )
+    ).toEqual({});
+  });
+
+  it('moves only a bounded batch of due cases into owner review', async () => {
+    const reconcileDuePaymentRecoveries = (
+      reconciliation as typeof reconciliation & {
+        reconcileDuePaymentRecoveries?: (dependencies: {
+          repository: {
+            markDueForReview(input: {
+              now: Date;
+              limit: number;
+            }): Promise<number>;
+          };
+          clock: { now(): Date };
+          limit?: number;
+        }) => Promise<number>;
+      }
+    ).reconcileDuePaymentRecoveries;
+    expect(reconcileDuePaymentRecoveries).toBeTypeOf('function');
+    if (reconcileDuePaymentRecoveries === undefined) return;
+
+    const now = new Date('2026-12-12T00:00:00.000Z');
+    const markDueForReview = vi.fn().mockResolvedValue(37);
+    await expect(
+      reconcileDuePaymentRecoveries({
+        repository: { markDueForReview },
+        clock: { now: () => now },
+        limit: 50
+      })
+    ).resolves.toBe(37);
+    expect(markDueForReview).toHaveBeenCalledWith({ now, limit: 50 });
   });
 });

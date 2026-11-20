@@ -8,6 +8,7 @@ export * from './repositories/entitlement-repository.js';
 export * from './repositories/activity-repository.js';
 export * from './repositories/task-repository.js';
 export * from './repositories/message-repository.js';
+export * from './repositories/payment-recovery-repository.js';
 export * from './repositories/platform-admin-repository.js';
 export * from './repositories/reply-number-provisioning-repository.js';
 export * from './repositories/sms-commerce-repository.js';

@@ -193,7 +193,7 @@ describe('platform owner views', () => {
               id: 'case-1',
               organisationId: organisation.id,
               organisationName: organisation.name,
-              kind: 'DISPUTE',
+              kind: 'PAYMENT_FAILURE',
               status: 'OPEN',
               providerObjectType: 'DISPUTE',
               providerReference: 'dp_safe_reference',
@@ -203,6 +203,7 @@ describe('platform owner views', () => {
               currency: 'aud',
               blocksSending: true,
               openedAt: now,
+              recoveryEndsAt: new Date('2026-12-12T00:00:00.000Z'),
               resolvedAt: null,
               createdAt: now
             }],
@@ -224,7 +225,7 @@ describe('platform owner views', () => {
         }}
         filters={{
           organisationId: organisation.id,
-          caseKind: 'DISPUTE',
+          caseKind: 'PAYMENT_FAILURE',
           caseStatus: 'OPEN',
           casesCursor: '',
           heldEmailsCursor: ''
@@ -237,6 +238,7 @@ describe('platform owner views', () => {
     expect(html).toContain('Alpha Repairs');
     expect(html).toContain('dp_safe_reference');
     expect(html).toContain('$123.45');
+    expect(html).toContain('Recovery ends 12 Dec 2026, 11:00 am');
     expect(html).toContain('billing@alpha.example');
     expect(html).toContain('casesCursor=next-cases');
     expect(html).toContain('heldEmailsCursor=next-emails');

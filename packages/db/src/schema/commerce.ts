@@ -505,6 +505,7 @@ export const billingCases = pgTable(
       { withTimezone: true }
     ).notNull(),
     openedAt: timestamp('opened_at', { withTimezone: true }).notNull(),
+    recoveryEndsAt: timestamp('recovery_ends_at', { withTimezone: true }),
     resolvedAt: timestamp('resolved_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
@@ -531,6 +532,11 @@ export const billingCases = pgTable(
       table.status,
       table.createdAt
     ),
+    index('billing_cases_recovery_due_idx').on(
+      table.status,
+      table.recoveryEndsAt,
+      table.id
+    ),
     check(
       'billing_cases_kind_ck',
       sql`${table.kind} in ('PAYMENT_FAILURE', 'REFUND', 'DISPUTE')`
@@ -549,6 +555,10 @@ export const billingCases = pgTable(
     ),
     check('billing_cases_amount_ck', sql`${table.amountMinor} >= 0`),
     check('billing_cases_currency_ck', sql`${table.currency} = 'aud'`),
+    check(
+      'billing_cases_recovery_deadline_ck',
+      sql`(${table.kind} = 'PAYMENT_FAILURE' and ${table.recoveryEndsAt} is not null) or (${table.kind} <> 'PAYMENT_FAILURE' and ${table.recoveryEndsAt} is null)`
+    ),
     check(
       'billing_cases_resolution_ck',
       sql`(${table.status} = 'RESOLVED' and ${table.resolvedAt} is not null) or (${table.status} <> 'RESOLVED' and ${table.resolvedAt} is null)`
