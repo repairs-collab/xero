@@ -1,5 +1,12 @@
 # AccountPulse Commercial Billing Safety Implementation Plan
 
+> **Superseded in part — 13 November 2026:** Task 3 records the completed
+> hard-cap safety release and is no longer the active commercial SMS rule. The
+> current implementation plan is
+> `2026-11-13-accountpulse-solo-1000-sms.md`: 1,000 included outbound SMS parts
+> per monthly allowance period, then A$0.11 excluding GST per additional part,
+> with no rollover and verified metered billing.
+
 > **For agentic workers:** Use subagent-driven development and test-driven development task by task. Prove each new test fails for the intended reason before changing production code.
 
 **Goal:** Make Stripe access, one-time trials, resubscription and Solo SMS allowances safe and internally consistent without purchasing or activating any external service.

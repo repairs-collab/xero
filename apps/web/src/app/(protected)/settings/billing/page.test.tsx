@@ -25,7 +25,7 @@ vi.mock('./actions.js', () => ({
 
 import BillingSettingsPage from './page.js';
 
-describe('billing SMS hard-cap copy', () => {
+describe('billing SMS allowance and overage copy', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     requireWebSession.mockResolvedValue({
@@ -75,7 +75,7 @@ describe('billing SMS hard-cap copy', () => {
     });
   });
 
-  it('renders configured included, used and remaining parts with an explicit blocked limit', async () => {
+  it('renders configured included usage and the approved paid overage rate', async () => {
     const markup = renderToStaticMarkup(await BillingSettingsPage({}));
 
     expect(markup).toContain('2,500 SMS parts per monthly allowance period');
@@ -83,11 +83,33 @@ describe('billing SMS hard-cap copy', () => {
     expect(markup).toContain('Used this monthly allowance period');
     expect(markup).toContain('Remaining this monthly allowance period');
     expect(markup).toContain('1,260');
-    expect(markup).toContain(
-      'Sends that would exceed the included allowance are blocked'
+    expect(markup).toContain('A$0.11 excluding GST per additional SMS part');
+    expect(markup).toContain('Paid overage enabled');
+    expect(markup).toContain('Overage parts this monthly allowance period');
+    expect(markup).not.toContain('Hard allowance');
+    expect(markup).not.toContain('Blocked sends are not automatically replayed');
+  });
+
+  it('shows overage parts and their current ex-GST estimate', async () => {
+    loadUsage.mockResolvedValue({
+      billingPeriodStart: new Date('2026-11-01T00:00:00.000Z'),
+      billingPeriodEnd: new Date('2026-12-01T00:00:00.000Z'),
+      includedParts: 1_000,
+      warningPercent: 80,
+      committedParts: 1_005,
+      reservedParts: 2,
+      remainingParts: 0
+    });
+
+    const markup = renderToStaticMarkup(await BillingSettingsPage({}));
+
+    expect(markup).toContain('1,007 of 1,000 parts used');
+    expect(markup).toMatch(
+      /Overage parts this monthly allowance period<\/dt><dd>7<\/dd>/
     );
-    expect(markup).toContain('Blocked sends are not automatically replayed');
-    expect(markup).not.toMatch(/overage/i);
+    expect(markup).toMatch(
+      /Estimated overage excluding GST<\/dt><dd>\$0\.77<\/dd>/
+    );
   });
 
   it('shows a recoverable conflict when another Checkout is still being resolved', async () => {
@@ -121,6 +143,8 @@ describe('billing SMS hard-cap copy', () => {
       currentPeriodStart: null,
       currentPeriodEnd: null
     });
+    loadAllowance.mockResolvedValue({ includedParts: 1_000, warningPercent: 80 });
+    loadUsage.mockResolvedValue(null);
 
     const markup = renderToStaticMarkup(await BillingSettingsPage({}));
 
@@ -131,7 +155,10 @@ describe('billing SMS hard-cap copy', () => {
     expect(markup).toContain('GST $340.86');
     expect(markup).toContain('payable total $3,749.46');
     expect(markup).toContain('5% less than twelve monthly charges');
-    expect(markup).toContain('2,000 included SMS parts reset every month');
+    expect(markup).toContain('1,000 included SMS parts reset every month');
+    expect(markup).toContain(
+      'Additional parts cost A$0.11 each excluding GST'
+    );
     expect(markup).toMatch(/name="billingCadence" value="MONTHLY"/);
     expect(markup).toMatch(/name="billingCadence" value="ANNUAL"/);
     expect(markup).toContain('First payment is collected by card on signup');
@@ -209,7 +236,7 @@ describe('billing SMS hard-cap copy', () => {
     expect(markup).toContain('2,500');
   });
 
-  it('shows the internal legacy SMS exemption instead of a Solo hard allowance', async () => {
+  it('shows the internal legacy SMS exemption instead of Solo paid overage', async () => {
     getBillingAccountSnapshot.mockResolvedValue({
       organisationId: 'org-solo',
       billingEmail: 'admin@example.com',
@@ -240,6 +267,7 @@ describe('billing SMS hard-cap copy', () => {
       'This internal legacy account is not subject to the Solo SMS allowance'
     );
     expect(markup).not.toContain('Hard allowance');
+    expect(markup).not.toContain('Paid overage enabled');
     expect(markup).not.toContain(
       'Sends that would exceed the included allowance are blocked'
     );

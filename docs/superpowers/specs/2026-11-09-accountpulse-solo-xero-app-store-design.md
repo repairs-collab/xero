@@ -6,18 +6,18 @@
 
 **Release:** AccountPulse Solo, Australia
 
-> **Superseded rule — 12 November 2026:** The paid SMS overage proposal in this
-> historical design, including its customer-controlled cap, metered billing and
-> related customer copy, is superseded by the approved commercial billing safety
-> design. Solo sends are now hard-capped at the configured included allowance;
-> legacy overage database columns remain only for compatibility. The original
-> narrative below is retained as the record of the 9 November decision.
+> **Commercial-rule update — 13 November 2026:** The 12 November hard-cap rule
+> is superseded. Solo now includes 1,000 outbound SMS parts per monthly allowance
+> period, followed by metered overage at A$0.11 per additional outbound SMS part
+> excluding GST. Unused included parts and overage do not roll over. Legacy
+> overage fields do not by themselves authorise sending; the signed billing and
+> current entitlement controls remain authoritative.
 >
 > **Commercial-rule update — 12 November 2026:** The public free-trial proposal
 > below is also superseded. The owner selected payment on signup, monthly and
 > annual billing with a 5% annual discount, cancellation at period end, no SMS
 > rollover, a 30-day failed-payment recovery period and five-year
-> post-cancellation retention. Annual customers still receive a monthly 2,000
+> post-cancellation retention. Annual customers still receive a monthly 1,000
 > SMS-part allowance cycle. Any manually granted beta access is a controlled
 > beta licence, not a public free trial.
 
@@ -32,11 +32,11 @@ The first commercial product is intentionally narrow:
 - one Xero organisation;
 - one primary AccountPulse user;
 - Australian customers and Australian mobile destinations;
-- 2,000 included SMS parts per billing month;
+- 1,000 included SMS parts per billing month;
 - one dedicated Australian reply number;
 - the existing Xero email, approval, sequencing, Inbox, Outbox, whitelist, escalation, audit, and reporting capabilities;
 - $299 AUD per month excluding GST;
-- optional SMS overage at $0.10 per part, with a customer-controlled monthly cap.
+- A$0.11 excluding GST for each additional outbound SMS part, with no rollover.
 
 AccountPulse production web, worker, PostgreSQL, queue, backups, monitoring and platform secrets run on OVH. Cognito remains the only AWS runtime dependency. The repository's historical AWS deployment code is not the source of truth for the commercial product; Phase 0 establishes and verifies the OVH deployment pipeline before customer-product work.
 
@@ -89,34 +89,38 @@ This is not viable. A Custom Connection can only connect one organisation, the c
 
 ### 4.1 AccountPulse Solo
 
-The initial plan is represented internally by the stable code `SOLO_AU_2000`.
+The initial plan continues to use the legacy stable code `SOLO_AU_2000` as an
+opaque Stripe/database identifier. It is not customer-facing and does not
+describe the current allowance.
 
 | Entitlement | Included value |
 | --- | --- |
 | Price | $299 AUD/month excluding GST |
 | Xero organisations | 1 |
 | Active users | 1 primary Administrator |
-| SMS allowance | 2,000 outbound SMS parts per billing period |
+| SMS allowance | 1,000 outbound SMS parts per monthly allowance period |
 | SMS reply number | 1 dedicated Australian number |
 | Inbound SMS | Included |
 | Xero invoice email | Included, subject to Xero limits |
 | Reminder sequences | Included |
 | Approval, Inbox, Outbox and escalation workflows | Included |
-| SMS overage | $0.10 per part when the customer enables it |
+| SMS overage | A$0.11 excluding GST per additional outbound SMS part |
 
 An SMS allowance is always described as **SMS parts**, not messages. AccountPulse calculates GSM-7 or Unicode parts before queueing and again before provider submission. The user sees the number of parts in every preview and the pricing/usage screens.
 
-Overage is disabled by default. An Administrator can enable it and set a monthly currency cap. At 80% of the included allowance, AccountPulse shows in-app and email warnings. At 100%, sends continue only when overage is enabled and within its cap. Otherwise affected work remains visible with the explicit reason `SMS_ALLOWANCE_EXHAUSTED`; it is not submitted to the provider or silently discarded.
+At 80% of the included allowance, AccountPulse shows in-app and email warnings.
+After the included allowance is exhausted, eligible outbound parts are recorded
+as metered overage at A$0.11 each excluding GST. A current billing entitlement
+and payment method are required; a billing hold or failed payment blocks new
+provider submissions. Unused included parts and overage do not roll over.
 
-### 4.2 Trial
+### 4.2 Signup and beta access
 
-The default trial is 14 days and does not require a payment card.
-
-The trial includes Xero connection, initial sync, invoice review, reminder previews and up to ten test SMS parts sent only to the verified AccountPulse Administrator's Australian mobile number. It does not include customer-live SMS, automatic sending, or a permanent dedicated number.
-
-Subscribing through Stripe converts the trial in place. The organisation retains its configuration and history. Customer-live sending remains in Review mode until onboarding is complete and the dedicated number is ready.
-
-At trial expiry, the application becomes read-only and all scheduled sends remain paused. If the customer does not subscribe, AccountPulse records a 30-day retention-review date. Reaching that date does not automatically purge the tenant: unresolved receivables, billing/audit exceptions, legal holds and verified backup expiry must be reviewed under the record-category matrix before a separately authorised destructive deletion.
+The commercial release has no public free trial. The first card payment is due
+on signup and only a signed Stripe payment event activates paid access. A
+manually granted invitation-only beta licence may be used for controlled
+testing, but it is not advertised as a customer trial and never bypasses
+tenant, legal-acceptance or sending controls.
 
 ### 4.3 Billing states
 
@@ -135,9 +139,18 @@ The Stripe adapter maps Stripe's external states explicitly. `trialing` maps to 
 
 Stripe webhooks are the source of truth for payment state. Webhook processing is signed, idempotent and auditable. A checkout success redirect never activates entitlements by itself.
 
-Stripe billing uses one recurring base-price item and, only when the customer has enabled overage, a metered overage item sourced from committed usage-ledger parts above 2,000. The $0.10 overage rate is quoted excluding GST.
+Stripe billing uses one recurring base-price item plus a metered overage item
+for committed outbound SMS parts above 1,000 in each monthly allowance period.
+The overage rate is A$0.11 per additional part excluding GST. Usage is reported
+idempotently from the committed SMS ledger; reserved, cancelled and failed-
+before-provider parts are not billed.
 
-On payment failure, new provider submissions pause immediately while the customer retains read-only access and billing recovery for seven days. Cancellation pauses all future sequence work immediately, even when paid access continues to the end of the billing period. This avoids contacting debtors after the business has chosen to stop the service. The customer can explicitly resume before the effective cancellation date.
+On payment failure, new provider submissions pause immediately while the
+customer retains read-only access and a 30-day billing recovery period.
+Cancellation pauses all future sequence work immediately, even when paid
+access continues to the end of the billing period. This avoids contacting
+debtors after the business has chosen to stop the service. The customer can
+explicitly resume before the effective cancellation date.
 
 ### 4.4 Existing Motts organisation
 
@@ -328,8 +341,9 @@ Prepare in the Xero Developer Centre:
 - unique app name **AccountPulse**;
 - concise value proposition focused on accounts-receivable reminders;
 - supported region: Australia;
-- $299 AUD/month excluding GST and 14-day trial details;
-- accurate description of 2,000 SMS parts and overage;
+- $299 AUD/month excluding GST, monthly or annual billing and no free trial;
+- accurate description of 1,000 included monthly SMS parts, A$0.11 excluding
+  GST per additional outbound SMS part and no rollover;
 - AccountPulse logo and approved screenshots;
 - onboarding/support URL, privacy URL and terms URL;
 - launcher login URL;
@@ -396,11 +410,11 @@ Standard OAuth, encrypted rotating tokens, tenant-aware Xero client, self-servic
 
 ### Implementation plan 2 — Stripe, SMS allowance and dedicated-number tenancy
 
-Stripe checkout/portal/webhooks, subscription entitlements, 14-day trial, SMS part ledger, allowance enforcement and provider-neutral SMS boundary.
+Stripe checkout/portal/webhooks, subscription entitlements with payment due on signup, a 1,000-part monthly SMS ledger, idempotent metered overage billing and a provider-neutral SMS boundary.
 
 ### Implementation plan 3 — Customer onboarding and beta readiness
 
-Xero sign-up entry, guided checklist, billing/usage interface, trial restrictions, plan-limit UI, support and legal pages, lifecycle emails and operational administration.
+Xero sign-up entry, guided checklist, billing/usage interface, paid-access restrictions, plan-limit UI, support and legal pages, lifecycle emails and operational administration.
 
 ### Operational checklist — Beta, certification and listing
 

@@ -1,5 +1,12 @@
 # AccountPulse Commercial Billing Safety Design
 
+> **Superseded in part — 13 November 2026:** Product rules 6 and 7 and the
+> corresponding hard-cap verification requirements are retained as dated
+> safety-release evidence only. The active Solo offer is defined by
+> `2026-11-13-accountpulse-solo-1000-sms-design.md`: 1,000 included outbound SMS
+> parts per monthly allowance period, then A$0.11 excluding GST per additional
+> part, with no rollover and fail-closed metered billing.
+
 **Date:** 2026-11-12
 
 **Status:** Approved for implementation by the owner's instruction to proceed autonomously with no-cost work

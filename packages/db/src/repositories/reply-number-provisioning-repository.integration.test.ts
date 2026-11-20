@@ -50,6 +50,7 @@ const seedOrganisation = async (
     trustedStatus?: string | null;
     platformStatus?: 'ACTIVE' | 'SUSPENDED';
     currentPeriodEnd?: Date;
+    initialCardEvidence?: 'CONFIRMED' | 'MISSING' | 'MISMATCHED';
   } = {}
 ) => {
   const organisationId = randomUUID();
@@ -65,6 +66,8 @@ const seedOrganisation = async (
     suspendedAt: platformStatus === 'SUSPENDED' ? now : null,
     suspensionReason: platformStatus === 'SUSPENDED' ? 'Owner review' : null
   });
+  const stripeSubscriptionId = `sub_${organisationId}`;
+  const initialCardEvidence = options.initialCardEvidence ?? 'CONFIRMED';
   await client.db.insert(subscriptions).values({
     organisationId,
     planCode: 'SOLO_AU_2000',
@@ -73,6 +76,19 @@ const seedOrganisation = async (
       options.trustedStatus === undefined ? 'active' : options.trustedStatus,
     currentPeriodStart: new Date('2026-11-01T00:00:00.000Z'),
     currentPeriodEnd: options.currentPeriodEnd ?? periodEnd,
+    stripeSubscriptionId,
+    initialCardStripeSubscriptionId:
+      initialCardEvidence === 'MISSING'
+        ? null
+        : initialCardEvidence === 'MISMATCHED'
+          ? `sub_other_${organisationId}`
+          : stripeSubscriptionId,
+    initialCardInvoiceId:
+      initialCardEvidence === 'MISSING' ? null : `in_${organisationId}`,
+    initialCardPaymentSucceededAt:
+      initialCardEvidence === 'MISSING'
+        ? null
+        : new Date('2026-11-01T00:01:00.000Z'),
     cancelAt:
       options.status === 'CANCEL_AT_PERIOD_END'
         ? new Date('2026-12-10T00:00:00.000Z')
@@ -146,6 +162,9 @@ describe('PostgresReplyNumberProvisioningRepository', () => {
       status: 'PAST_DUE',
       trustedStatus: 'past_due'
     });
+    const unpaidCardOrganisationId = await seedOrganisation({
+      initialCardEvidence: 'MISSING'
+    });
     const requested = await repository.ensureRequestForPaidOrganisation({
       organisationId: requestedOrganisationId,
       provider: 'SINCH',
@@ -172,6 +191,7 @@ describe('PostgresReplyNumberProvisioningRepository', () => {
     expect(candidateIds.has(requestedOrganisationId)).toBe(false);
     expect(candidateIds.has(numberedOrganisationId)).toBe(false);
     expect(candidateIds.has(unpaidOrganisationId)).toBe(false);
+    expect(candidateIds.has(unpaidCardOrganisationId)).toBe(false);
     expect(
       candidates.find((value) => value.organisationId === eligibleOrganisationId)
     ).toMatchObject({
@@ -285,6 +305,21 @@ describe('PostgresReplyNumberProvisioningRepository', () => {
       })
     ).resolves.toEqual({ ok: false, code: 'NOT_ELIGIBLE' });
   });
+
+  it.each(['MISSING', 'MISMATCHED'] as const)(
+    'does not create a request when initial card evidence is %s',
+    async (initialCardEvidence) => {
+      const organisationId = await seedOrganisation({ initialCardEvidence });
+
+      await expect(
+        repository.ensureRequestForPaidOrganisation({
+          organisationId,
+          provider: 'SINCH',
+          now
+        })
+      ).resolves.toEqual({ ok: false, code: 'NOT_ELIGIBLE' });
+    }
+  );
 
   it('allows a scheduled cancellation draft but blocks owner approval', async () => {
     const organisationId = await seedOrganisation({

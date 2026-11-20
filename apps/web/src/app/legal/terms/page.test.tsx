@@ -33,12 +33,11 @@ describe('AccountPulse commercial terms', () => {
     expect(markup).toContain('including for annually billed subscriptions');
     expect(markup).toContain('30-day payment-recovery period');
     expect(markup).toContain('five years after cancellation');
-    expect(markup).toContain(
-      'Sends that would exceed the included SMS allowance are blocked'
-    );
-    expect(markup).toContain('Blocked sends are not automatically replayed');
+    expect(markup).toContain('1,000 outbound SMS parts');
+    expect(markup).toContain('A$0.11 excluding GST');
+    expect(markup).toContain('additional outbound SMS part');
     expect(markup).toContain('does not currently offer a free trial');
     expect(markup).not.toContain('Trial limits');
-    expect(markup).not.toMatch(/overage/i);
+    expect(markup).toContain('overage');
   });
 });

@@ -28,6 +28,7 @@ afterAll(async () => client.pool.end());
 describe('SMS number provisioning worker manual control plane', () => {
   it('creates one request concurrently without claiming or promoting a pool number', async () => {
     const organisationId = randomUUID();
+    const stripeSubscriptionId = `sub_${organisationId}`;
     await client.db.insert(organisations).values({
       id: organisationId,
       xeroOrganisationId: `worker-reply-${organisationId}`,
@@ -43,7 +44,11 @@ describe('SMS number provisioning worker manual control plane', () => {
       status: 'ACTIVE',
       trustedStripeProviderStatus: 'active',
       currentPeriodStart: new Date('2026-11-01T00:00:00.000Z'),
-      currentPeriodEnd: new Date('2026-12-01T00:00:00.000Z')
+      currentPeriodEnd: new Date('2026-12-01T00:00:00.000Z'),
+      stripeSubscriptionId,
+      initialCardStripeSubscriptionId: stripeSubscriptionId,
+      initialCardInvoiceId: `in_${organisationId}`,
+      initialCardPaymentSucceededAt: new Date('2026-11-01T00:01:00.000Z')
     });
     const [available] = await client.db
       .insert(smsNumberPool)

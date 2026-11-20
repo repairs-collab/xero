@@ -33,7 +33,8 @@ accounting review before customers are charged.
 | Cancellation timing | End of the current billing period |
 | Refund position | No change-of-mind or non-use refund; Australian Consumer Law remedies remain available; approved refunds return to the original payment method within 14 business days |
 | Unused included SMS | Expires at the end of each monthly allowance period; no rollover, cash value or refund |
-| Annual-plan SMS cycle | The 2,000 included SMS parts reset monthly even when the subscription is paid annually |
+| Annual-plan SMS cycle | The 1,000 included SMS parts reset monthly even when the subscription is paid annually |
+| SMS overage | Additional outbound SMS parts above the included 1,000 are billed at A$0.11 each excluding GST; no rollover |
 | Dedicated-number fees | Non-refundable once incurred, except where required by law or the service cannot be supplied |
 | Failed-payment treatment | Customer sending pauses immediately; 30-day payment-recovery period before broader account suspension |
 | Post-cancellation retention | Five years, with earlier sensitive-content redaction and longer retention only where a legal hold requires it |

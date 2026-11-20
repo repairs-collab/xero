@@ -18,6 +18,14 @@ blocker.
 
 ## Safety update — 12 November 2026
 
+> **Commercial-policy update — 13 November 2026:** The hard-cap decision below
+> is retained as dated release evidence but is superseded for the next release.
+> The approved Solo offer is now 1,000 included outbound SMS parts per monthly
+> allowance period, then A$0.11 for each additional outbound SMS part excluding
+> GST, with no rollover. Metered billing, customer copy, payment-failure handling
+> and reconciliation must pass the focused release checks before the overage
+> offer is released.
+
 The commercial safety release selects a hard cap for Solo SMS usage. Every send
 whose complete part count would exceed the configured included allowance is
 blocked before provider submission, with no paid overage or automatic replay.
@@ -107,11 +115,13 @@ owner approves a spend ceiling. No number has been purchased by this release.
    customer visibly pending until provider confirmation, and prove outbound
    delivery plus inbound reply routing. Do not pre-purchase a spare pool or
    enable automatic purchase yet.
-5. **Selected SMS hard cap — verified.** Launch UI, Terms and support guidance
-   no longer promise paid overage, and runtime authorization blocks sends above
-   the configured included allowance even when legacy overage fields are set.
-   The PostgreSQL hard-cap regressions and full integration project pass. This
-   item is closed; genuine metered overage remains a future product feature.
+5. **Paid SMS overage — in progress.** The approved offer is 1,000 included
+   outbound SMS parts per monthly allowance period, then A$0.11 excluding GST
+   for each additional outbound part, with no rollover. Release requires a
+   verified Stripe metered item, explicit per-subscription overage enablement,
+   an idempotent durable usage-reporting outbox, customer-visible usage and a
+   focused crossing-boundary reconciliation test. Existing subscriptions stay
+   fail-closed until their metered billing attachment is verified.
 6. **Finish payment operations.** The tenant-safe cases, financial hold,
    reactivation guard, duplicate/out-of-order handling and private read-only
    owner queue are implemented in the release candidate. This P0 remains open
@@ -119,8 +129,8 @@ owner approves a spend ceiling. No number has been purchased by this release.
    Stripe receipt configuration, scheduled/effective cancellation and the
    complete provider-webhook journey have production-grade evidence. Follow
    `docs/runbooks/billing-operations.md`; held notices are not delivered.
-7. **Add essential lifecycle email.** Welcome, onboarding, usage warning, trial
-   expiry, payment failure, cancellation, export and deletion notices need a
+7. **Add essential lifecycle email.** Welcome, onboarding, payment confirmation,
+   usage warning, payment failure, cancellation, export and deletion notices need a
    monitored transactional mail service.
 8. **Make operations recoverable.** Add general uptime/worker/queue/database/
    disk/provider alerts with human delivery; maintain an off-host encrypted
@@ -159,7 +169,7 @@ owner approves a spend ceiling. No number has been purchased by this release.
 - Pre-funded number pools, automatic purchasing and provisioning beyond the
   five-customer just-in-time beta process.
 - Database row-level security as defence in depth.
-- Advanced reporting and fully metered overage automation.
+- Advanced reporting and customer-configurable overage controls.
 
 ## Completed in the current safety release
 
@@ -173,9 +183,9 @@ owner approves a spend ceiling. No number has been purchased by this release.
   during cooling. Owner release and every return to the shared pool clear
   verification before the number can be reused for a different customer.
 - Public Terms, Privacy and Acceptable Use pages no longer require login.
-- Solo SMS authorization, Billing, Terms and support guidance now use the same
-  hard-cap rule; legacy overage fields are retained only for database
-  compatibility.
+- The 12 November safety release proved a fail-closed hard cap. That dated
+  evidence is retained, but the rule is superseded by the 13 November paid
+  overage design and must not be treated as the active commercial offer.
 - Signed billing events create tenant-safe cases and held notice evidence;
   unresolved blocking cases prevent owner reactivation, and the private billing
   queue has no send, release or resolve controls.

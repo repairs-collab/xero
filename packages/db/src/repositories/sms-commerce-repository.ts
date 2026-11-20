@@ -1,8 +1,20 @@
-import { and, asc, eq, inArray, isNotNull } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  lte,
+  or,
+  sql
+} from 'drizzle-orm';
 
 import {
   decideSmsAllowance,
   hasPaidSubscriptionAccess,
+  soloIncludedSmsParts,
+  soloSmsOverageCentsPerPart,
   summariseSmsUsage,
   type SmsAllowanceBlocker
 } from '@bc5000/domain';
@@ -15,6 +27,7 @@ import {
   replyNumberProvisioningRequests,
   smsAllowanceSettings,
   smsNumberPool,
+  smsOverageStatements,
   smsUsageLedger,
   subscriptions,
   type OutboundSource
@@ -30,12 +43,21 @@ export interface SmsUsageView {
   committedParts: number;
   reservedParts: number;
   remainingParts: number;
+  overageParts: number;
+  overageEnabled: boolean;
+  overageCentsPerPart: number | null;
+  estimatedOverageCents: number;
 }
 
 export interface SmsAllowanceView {
   includedParts: number;
   warningPercent: number;
+  overageEnabled: boolean;
+  overageCapCents: number | null;
+  overageCentsPerPart: number | null;
 }
+
+export type SmsOverageStatement = typeof smsOverageStatements.$inferSelect;
 
 export type SmsUsageReservation =
   | { kind: 'bypassed'; sourceNumber: null }
@@ -191,7 +213,10 @@ export class PostgresSmsCommerceRepository {
     const [settings] = await executor
       .select({
         includedParts: smsAllowanceSettings.includedParts,
-        warningPercent: smsAllowanceSettings.warningPercent
+        warningPercent: smsAllowanceSettings.warningPercent,
+        overageEnabled: smsAllowanceSettings.overageEnabled,
+        overageCapCents: smsAllowanceSettings.overageCapCents,
+        overageCentsPerPart: smsAllowanceSettings.overageCentsPerPart
       })
       .from(smsAllowanceSettings)
       .where(eq(smsAllowanceSettings.organisationId, input.organisationId))
@@ -241,7 +266,10 @@ export class PostgresSmsCommerceRepository {
       requestedParts: input.partCount,
       requestedPartsAlreadyReserved: existingReservationMatches,
       includedParts: settings.includedParts,
-      warningPercent: settings.warningPercent
+      warningPercent: settings.warningPercent,
+      overageEnabled: settings.overageEnabled,
+      overageCapCents: settings.overageCapCents,
+      overageCentsPerPart: settings.overageCentsPerPart
     });
     if (decision.kind === 'blocked') return decision;
     if (existing !== undefined && !existingReservationMatches) {
@@ -392,6 +420,96 @@ export class PostgresSmsCommerceRepository {
           smsUsageLedger.idempotencyKey
         ]
       });
+    if (entryType === 'COMMIT') {
+      const [settings] = await executor
+        .select({
+          includedParts: smsAllowanceSettings.includedParts,
+          overageEnabled: smsAllowanceSettings.overageEnabled,
+          overageCentsPerPart: smsAllowanceSettings.overageCentsPerPart
+        })
+        .from(smsAllowanceSettings)
+        .where(eq(smsAllowanceSettings.organisationId, organisationId))
+        .for('update')
+        .limit(1);
+      if (settings === undefined) {
+        throw new Error('SMS_ALLOWANCE_SETTINGS_MISSING');
+      }
+      const periodEntries = await executor
+        .select({
+          entryType: smsUsageLedger.entryType,
+          partDelta: smsUsageLedger.partDelta
+        })
+        .from(smsUsageLedger)
+        .where(
+          and(
+            eq(smsUsageLedger.organisationId, organisationId),
+            eq(
+              smsUsageLedger.billingPeriodStart,
+              reservation.billingPeriodStart
+            )
+          )
+        );
+      const usageAfterCommit = summariseSmsUsage(periodEntries);
+      const billableParts = Math.max(
+        0,
+        usageAfterCommit.committedParts - settings.includedParts
+      );
+      if (billableParts > 0) {
+        if (
+          settings.overageEnabled !== true ||
+          settings.overageCentsPerPart !== soloSmsOverageCentsPerPart
+        ) {
+          throw new Error('SMS_OVERAGE_BILLING_NOT_READY');
+        }
+        const [billingIdentity] = await executor
+          .select({
+            stripeCustomerId: subscriptions.stripeCustomerId,
+            stripeSubscriptionId: subscriptions.stripeSubscriptionId
+          })
+          .from(subscriptions)
+          .where(eq(subscriptions.organisationId, organisationId))
+          .for('update')
+          .limit(1);
+        if (
+          billingIdentity?.stripeCustomerId === null ||
+          billingIdentity?.stripeCustomerId === undefined ||
+          billingIdentity.stripeSubscriptionId === null
+        ) {
+          throw new Error('SMS_OVERAGE_BILLING_NOT_READY');
+        }
+        await executor
+          .insert(smsOverageStatements)
+          .values({
+            organisationId,
+            stripeCustomerId: billingIdentity.stripeCustomerId,
+            stripeSubscriptionId: billingIdentity.stripeSubscriptionId,
+            billingPeriodStart: reservation.billingPeriodStart,
+            billingPeriodEnd: reservation.billingPeriodEnd,
+            committedParts: usageAfterCommit.committedParts,
+            includedParts: settings.includedParts,
+            billableParts,
+            unitCents: soloSmsOverageCentsPerPart,
+            subtotalCents: billableParts * soloSmsOverageCentsPerPart,
+            status: 'OPEN',
+            updatedAt: now
+          })
+          .onConflictDoUpdate({
+            target: [
+              smsOverageStatements.organisationId,
+              smsOverageStatements.billingPeriodStart,
+              smsOverageStatements.billingPeriodEnd
+            ],
+            set: {
+              committedParts: usageAfterCommit.committedParts,
+              includedParts: settings.includedParts,
+              billableParts,
+              unitCents: soloSmsOverageCentsPerPart,
+              subtotalCents: billableParts * soloSmsOverageCentsPerPart,
+              updatedAt: now
+            }
+          });
+      }
+    }
   }
 
   async loadUsage(
@@ -446,6 +564,10 @@ export class PostgresSmsCommerceRepository {
         )
       );
     const usage = summariseSmsUsage(entries);
+    const overageParts = Math.max(
+      0,
+      usage.committedParts + usage.reservedParts - effective.includedParts
+    );
     return {
       billingPeriodStart: allowancePeriod.start,
       billingPeriodEnd: allowancePeriod.end,
@@ -456,7 +578,12 @@ export class PostgresSmsCommerceRepository {
       remainingParts: Math.max(
         0,
         effective.includedParts - usage.committedParts - usage.reservedParts
-      )
+      ),
+      overageParts,
+      overageEnabled: effective.overageEnabled,
+      overageCentsPerPart: effective.overageCentsPerPart,
+      estimatedOverageCents:
+        overageParts * (effective.overageCentsPerPart ?? 0)
     };
   }
 
@@ -467,17 +594,207 @@ export class PostgresSmsCommerceRepository {
     const [settings] = await executor
       .select({
         includedParts: smsAllowanceSettings.includedParts,
-        warningPercent: smsAllowanceSettings.warningPercent
+        warningPercent: smsAllowanceSettings.warningPercent,
+        overageEnabled: smsAllowanceSettings.overageEnabled,
+        overageCapCents: smsAllowanceSettings.overageCapCents,
+        overageCentsPerPart: smsAllowanceSettings.overageCentsPerPart
       })
       .from(smsAllowanceSettings)
       .where(eq(smsAllowanceSettings.organisationId, organisationId))
       .limit(1);
     return settings === undefined
-      ? { includedParts: 2_000, warningPercent: 80 }
+      ? {
+          includedParts: soloIncludedSmsParts,
+          warningPercent: 80,
+          overageEnabled: true,
+          overageCapCents: null,
+          overageCentsPerPart: soloSmsOverageCentsPerPart
+        }
       : {
           includedParts: settings.includedParts,
-          warningPercent: settings.warningPercent
+          warningPercent: settings.warningPercent,
+          overageEnabled: settings.overageEnabled,
+          overageCapCents: settings.overageCapCents,
+          overageCentsPerPart: settings.overageCentsPerPart
         };
+  }
+
+  async claimDueOverageStatement(
+    now: Date,
+    processingStaleAfterMs: number,
+    executor?: Executor
+  ): Promise<SmsOverageStatement | null> {
+    if (
+      !Number.isSafeInteger(processingStaleAfterMs) ||
+      processingStaleAfterMs < 1
+    ) {
+      throw new Error('SMS_OVERAGE_STALE_WINDOW_INVALID');
+    }
+    if (executor === undefined) {
+      return this.database.transaction((transaction) =>
+        this.claimDueOverageStatement(now, processingStaleAfterMs, transaction)
+      );
+    }
+    const staleBefore = new Date(now.getTime() - processingStaleAfterMs);
+    const [candidate] = await executor
+      .select()
+      .from(smsOverageStatements)
+      .where(
+        and(
+          lte(smsOverageStatements.billingPeriodEnd, now),
+          or(
+            inArray(smsOverageStatements.status, ['OPEN', 'FAILED']),
+            and(
+              eq(smsOverageStatements.status, 'PROCESSING'),
+              or(
+                isNull(smsOverageStatements.lastAttemptAt),
+                lte(smsOverageStatements.lastAttemptAt, staleBefore)
+              )
+            )
+          )
+        )
+      )
+      .orderBy(
+        asc(smsOverageStatements.billingPeriodEnd),
+        asc(smsOverageStatements.createdAt)
+      )
+      .for('update', { skipLocked: true })
+      .limit(1);
+    if (candidate === undefined) return null;
+
+    const periodEntries = await executor
+      .select({
+        entryType: smsUsageLedger.entryType,
+        partDelta: smsUsageLedger.partDelta
+      })
+      .from(smsUsageLedger)
+      .where(
+        and(
+          eq(smsUsageLedger.organisationId, candidate.organisationId),
+          eq(smsUsageLedger.billingPeriodStart, candidate.billingPeriodStart),
+          eq(smsUsageLedger.billingPeriodEnd, candidate.billingPeriodEnd)
+        )
+      );
+    if (summariseSmsUsage(periodEntries).reservedParts !== 0) return null;
+
+    const [claimed] = await executor
+      .update(smsOverageStatements)
+      .set({
+        status: 'PROCESSING',
+        attemptCount: sql`${smsOverageStatements.attemptCount} + 1`,
+        lastAttemptAt: now,
+        lastErrorCode: null,
+        updatedAt: now
+      })
+      .where(eq(smsOverageStatements.id, candidate.id))
+      .returning();
+    return claimed ?? null;
+  }
+
+  async markOverageStatementFailed(
+    statementId: string,
+    errorCode: string,
+    now: Date,
+    executor: Executor = this.database
+  ): Promise<void> {
+    if (!/^[A-Z0-9_]{1,64}$/.test(errorCode)) {
+      throw new Error('SMS_OVERAGE_ERROR_CODE_INVALID');
+    }
+    const [updated] = await executor
+      .update(smsOverageStatements)
+      .set({ status: 'FAILED', lastErrorCode: errorCode, updatedAt: now })
+      .where(
+        and(
+          eq(smsOverageStatements.id, statementId),
+          eq(smsOverageStatements.status, 'PROCESSING')
+        )
+      )
+      .returning({ id: smsOverageStatements.id });
+    if (updated === undefined) throw new Error('SMS_OVERAGE_STATEMENT_NOT_PROCESSING');
+  }
+
+  async recordOverageInvoiceItem(
+    statementId: string,
+    stripeInvoiceItemId: string,
+    now: Date,
+    executor: Executor = this.database
+  ): Promise<void> {
+    if (
+      stripeInvoiceItemId.trim() !== stripeInvoiceItemId ||
+      stripeInvoiceItemId.length < 1 ||
+      stripeInvoiceItemId.length > 128
+    ) {
+      throw new Error('SMS_OVERAGE_INVOICE_ITEM_INVALID');
+    }
+    const [updated] = await executor
+      .update(smsOverageStatements)
+      .set({ stripeInvoiceItemId, updatedAt: now })
+      .where(
+        and(
+          eq(smsOverageStatements.id, statementId),
+          eq(smsOverageStatements.status, 'PROCESSING'),
+          or(
+            isNull(smsOverageStatements.stripeInvoiceItemId),
+            eq(smsOverageStatements.stripeInvoiceItemId, stripeInvoiceItemId)
+          )
+        )
+      )
+      .returning({ id: smsOverageStatements.id });
+    if (updated === undefined) throw new Error('SMS_OVERAGE_INVOICE_ITEM_CONFLICT');
+  }
+
+  async recordOverageInvoice(
+    statementId: string,
+    stripeInvoiceId: string,
+    now: Date,
+    executor: Executor = this.database
+  ): Promise<void> {
+    if (
+      stripeInvoiceId.trim() !== stripeInvoiceId ||
+      stripeInvoiceId.length < 1 ||
+      stripeInvoiceId.length > 128
+    ) {
+      throw new Error('SMS_OVERAGE_INVOICE_INVALID');
+    }
+    const [updated] = await executor
+      .update(smsOverageStatements)
+      .set({ stripeInvoiceId, updatedAt: now })
+      .where(
+        and(
+          eq(smsOverageStatements.id, statementId),
+          eq(smsOverageStatements.status, 'PROCESSING'),
+          or(
+            isNull(smsOverageStatements.stripeInvoiceId),
+            eq(smsOverageStatements.stripeInvoiceId, stripeInvoiceId)
+          )
+        )
+      )
+      .returning({ id: smsOverageStatements.id });
+    if (updated === undefined) throw new Error('SMS_OVERAGE_INVOICE_CONFLICT');
+  }
+
+  async markOverageStatementInvoiced(
+    statementId: string,
+    now: Date,
+    executor: Executor = this.database
+  ): Promise<void> {
+    const [updated] = await executor
+      .update(smsOverageStatements)
+      .set({
+        status: 'INVOICED',
+        lastErrorCode: null,
+        updatedAt: now
+      })
+      .where(
+        and(
+          eq(smsOverageStatements.id, statementId),
+          eq(smsOverageStatements.status, 'PROCESSING'),
+          isNotNull(smsOverageStatements.stripeInvoiceId),
+          isNotNull(smsOverageStatements.stripeInvoiceItemId)
+        )
+      )
+      .returning({ id: smsOverageStatements.id });
+    if (updated === undefined) throw new Error('SMS_OVERAGE_INVOICE_NOT_READY');
   }
 
   async reserveAvailableNumber(

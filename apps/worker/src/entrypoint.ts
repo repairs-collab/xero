@@ -7,6 +7,7 @@ import {
   operationalResetRuns,
   organisations,
   PostgresReplyNumberProvisioningRepository,
+  PostgresSmsCommerceRepository,
   PostgresXeroConnectionRepository,
   providerConnections,
   PostgresVoiceCallRepository,
@@ -19,6 +20,7 @@ import {
   type SinchCredentials
 } from '@bc5000/integrations/sinch';
 import { VoiceGatewayClient } from '@bc5000/integrations/voice-gateway';
+import { createStripeBillingClient } from '@bc5000/integrations/stripe';
 import {
   AesGcmTokenCipher,
   requiredLegacyXeroScopes,
@@ -37,6 +39,7 @@ import { runReminderCycle } from './handlers/automatic-reminder-dispatch.js';
 import { applyRetention } from './handlers/retention-apply.js';
 import { executeTestSms } from './handlers/test-sms-execute.js';
 import { provisionPaidSmsNumber } from './handlers/sms-number-provision.js';
+import { reconcileSmsOverageInvoices } from './handlers/sms-overage-invoice-reconcile.js';
 import { processSubscriptionLifecycle } from './handlers/subscription-lifecycle.js';
 import { processTrialExpiry } from './handlers/trial-expiry.js';
 import { executeVoiceCall } from './handlers/voice-call-execute.js';
@@ -385,6 +388,22 @@ async function main() {
     clock: { now: () => new Date() }
   });
   const clock = { now: () => new Date() };
+  const smsCommerceRepository = new PostgresSmsCommerceRepository(
+    databaseClient.db,
+    clock
+  );
+  const stripeBilling = createStripeBillingClient({
+    secretKey: required('STRIPE_SECRET_KEY'),
+    webhookSecret: required('STRIPE_WEBHOOK_SECRET'),
+    soloMonthlyPriceId: required('STRIPE_SOLO_MONTHLY_PRICE_ID'),
+    soloAnnualPriceId: required('STRIPE_SOLO_ANNUAL_PRICE_ID'),
+    soloSmsOveragePriceId: required('STRIPE_SMS_OVERAGE_PRICE_ID'),
+    portalConfigurationId: required('STRIPE_PORTAL_CONFIGURATION_ID'),
+    publicBaseUrl: required('PUBLIC_BASE_URL'),
+    priceCurrency: 'aud',
+    automaticTaxEnabled: true,
+    webhookToleranceSeconds: 300
+  });
   const voiceCallRepository = new PostgresVoiceCallRepository(
     databaseClient.db
   );
@@ -548,6 +567,41 @@ async function main() {
         ).then(() => undefined),
       [jobNames.smsNumberProvisionReconcile]: () =>
         reconcilePaidSmsNumberProvisioning().then(() => undefined),
+      [jobNames.smsOverageInvoiceReconcile]: () =>
+        reconcileSmsOverageInvoices({
+          repository: {
+            claimNextDue: (now) =>
+              smsCommerceRepository.claimDueOverageStatement(
+                now,
+                15 * 60 * 1000
+              ),
+            recordInvoiceCreated: (statementId, invoiceId, now) =>
+              smsCommerceRepository.recordOverageInvoice(
+                statementId,
+                invoiceId,
+                now
+              ),
+            recordInvoiceItemCreated: (statementId, invoiceItemId, now) =>
+              smsCommerceRepository.recordOverageInvoiceItem(
+                statementId,
+                invoiceItemId,
+                now
+              ),
+            markInvoiced: (statementId, now) =>
+              smsCommerceRepository.markOverageStatementInvoiced(
+                statementId,
+                now
+              ),
+            markFailed: (statementId, errorCode, now) =>
+              smsCommerceRepository.markOverageStatementFailed(
+                statementId,
+                errorCode,
+                now
+              )
+          },
+          stripe: stripeBilling,
+          clock
+        }).then(() => undefined),
       [jobNames.voiceCallExecute]: (payload) =>
         executeVoiceCall(
           {

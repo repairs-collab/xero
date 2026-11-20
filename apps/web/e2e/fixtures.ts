@@ -429,7 +429,7 @@ export async function seedPlatformAdminScenario(): Promise<void> {
     });
     await client.db.insert(smsAllowanceSettings).values({
       organisationId: launchScenario.organisationId,
-      includedParts: 2_000,
+      includedParts: 1_000,
       warningPercent: 80
     });
     await client.db.insert(xeroConnections).values({

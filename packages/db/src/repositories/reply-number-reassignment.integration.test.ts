@@ -30,6 +30,7 @@ afterAll(() => client.pool.end());
 
 const seedPaidOrganisation = async () => {
   const organisationId = randomUUID();
+  const stripeSubscriptionId = `sub_${organisationId}`;
   await client.db.insert(organisations).values({
     id: organisationId,
     xeroOrganisationId: `number-reassignment-${organisationId}`,
@@ -45,7 +46,11 @@ const seedPaidOrganisation = async () => {
     status: 'ACTIVE',
     trustedStripeProviderStatus: 'active',
     currentPeriodStart: new Date('2026-11-01T00:00:00.000Z'),
-    currentPeriodEnd: new Date('2026-12-12T00:00:00.000Z')
+    currentPeriodEnd: new Date('2026-12-12T00:00:00.000Z'),
+    stripeSubscriptionId,
+    initialCardStripeSubscriptionId: stripeSubscriptionId,
+    initialCardInvoiceId: `in_${organisationId}`,
+    initialCardPaymentSucceededAt: new Date('2026-11-01T00:01:00.000Z')
   });
   return organisationId;
 };

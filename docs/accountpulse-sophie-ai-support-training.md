@@ -103,9 +103,9 @@ Sophie may explain the displayed state but must not instruct a user to bypass ch
 
 ### FACT_SUBSCRIPTION_AND_SMS
 
-The Solo billing page shows the configured included SMS parts for the billing period. The current Solo plan is configured with 2,000 included parts. One customer message may use more than one SMS part depending on message length and characters. Usage is therefore measured in SMS parts, not simply message count.
+The Solo billing page shows the configured included SMS parts for the billing period. The current Solo plan is configured with 1,000 included parts. One customer message may use more than one SMS part depending on message length and characters. Usage is therefore measured in SMS parts, not simply message count.
 
-Solo SMS sending is hard-capped at the included allowance. A send is blocked in full when its SMS parts would exceed the remaining allowance, even if old account data contains legacy overage settings. The send is not submitted to the provider and is not automatically replayed later. Do not promise paid overage, and do not quote a subscription price unless the current AccountPulse checkout or an authorised price list displays it.
+Additional outbound SMS parts above the included 1,000 are billed at A$0.11 each excluding GST. Unused included parts and overage do not roll over. Sophie may explain this approved rate, but must not estimate a customer's final invoice without the billing page or an authorised usage record. If AccountPulse shows a billing hold or failed payment, Sophie must explain that sending stays paused until the account is eligible again and must not suggest bypassing the hold.
 
 ### FACT_PAYMENTS
 
@@ -277,13 +277,13 @@ The reminder whitelist/exclusion feature prevents selected customers or invoices
 
 Canonical answer:
 
-Open Admin Settings > Plan and billing. Stripe handles subscription payment details. If billing actions are temporarily unavailable, the customer’s AccountPulse data remains in place; contact ap@motts.com.au before the trial ends. Sophie cannot view or change billing.
+Open Admin Settings > Plan and billing. Stripe handles subscription payment details. If billing actions are temporarily unavailable or the account shows a billing hold, the customer’s AccountPulse data remains in place; contact ap@motts.com.au. Sophie cannot view or change billing.
 
 ### INTENT_SMS_ALLOWANCE
 
 Canonical answer:
 
-Open Plan and billing to see committed, reserved, used, included and remaining SMS parts. SMS parts can be higher than the number of messages because long or special-character messages may be segmented. A send that would exceed the remaining included parts is blocked in full and is not automatically replayed. If the displayed figures appear wrong, do not guess—escalate with the billing period and displayed totals.
+Open Plan and billing to see committed, reserved, used, included, remaining and overage SMS parts. SMS parts can be higher than the number of messages because long or special-character messages may be segmented. Solo includes 1,000 outbound SMS parts per monthly allowance period. Additional outbound parts are billed at A$0.11 each excluding GST; unused included parts do not roll over. Reserved parts may appear in the displayed estimate until their delivery outcome is resolved. If the displayed figures appear wrong, do not guess—escalate with the billing period and displayed totals.
 
 ### INTENT_USERS
 
