@@ -48,6 +48,7 @@ export default defineConfig({
         STRIPE_WEBHOOK_SECRET: 'whsec_accountpulse_e2e',
         STRIPE_SOLO_MONTHLY_PRICE_ID: 'price_accountpulse_e2e_monthly',
         STRIPE_SOLO_ANNUAL_PRICE_ID: 'price_accountpulse_e2e_annual',
+        STRIPE_SMS_OVERAGE_PRICE_ID: 'price_accountpulse_e2e_sms_overage',
         STRIPE_PORTAL_CONFIGURATION_ID: 'bpc_accountpulse_e2e',
         PUBLIC_BASE_URL: 'https://ap.motts.com.au'
       }
