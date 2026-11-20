@@ -24,8 +24,9 @@ describe('production container runtimes', () => {
     );
 
     expect(contents).toContain(
-      `--banner:js="import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);"`
+      `--banner:js="import { createRequire as accountPulseCreateRequire } from 'node:module'; const require = accountPulseCreateRequire(import.meta.url);"`
     );
+    expect(contents).toContain('node --check /workspace/worker.mjs');
   });
 
   it('ships web public assets in the production image', () => {
