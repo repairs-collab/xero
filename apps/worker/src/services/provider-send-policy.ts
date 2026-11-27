@@ -43,7 +43,7 @@ export type ProviderDispatchResult<Value> =
   | Exclude<ProviderSendPolicyDecision, { kind: 'provider-call' }>
   | { kind: 'blocked'; reason: EntitlementSendBlocker }
   | { kind: 'suppressed'; source: string }
-  | { kind: 'dispatched'; value: Value };
+  | { kind: 'dispatched'; value: Value; sinchAccountId: string | null };
 
 class FinalEntitlementBlocked extends Error {
   constructor(readonly reason: EntitlementSendBlocker, readonly checkedAt: Date) {
@@ -56,7 +56,11 @@ export async function dispatchWithProviderSendLock<Value>(
   input: ProviderSendDecisionInput,
   dispatch: (
     transaction: DbTransaction,
-    context: { smsSourceNumber: string | null; assertEntitlement(): Promise<void> }
+    context: {
+      smsSourceNumber: string | null;
+      sinchAccountId: string | null;
+      assertEntitlement(): Promise<void>;
+    }
   ) => Promise<Value>,
   wasDispatched: (value: Value) => boolean = () => true
 ): Promise<ProviderDispatchResult<Value>> {
@@ -124,7 +128,12 @@ export async function dispatchWithProviderSendLock<Value>(
       try {
         return {
           kind: 'dispatched',
-          value: await dispatch(transaction, { smsSourceNumber: null, assertEntitlement })
+          value: await dispatch(transaction, {
+            smsSourceNumber: null,
+            sinchAccountId: null,
+            assertEntitlement
+          }),
+          sinchAccountId: null
         };
       } catch (error) {
         if (error instanceof FinalEntitlementBlocked) {
@@ -163,6 +172,7 @@ export async function dispatchWithProviderSendLock<Value>(
     }
 
     let smsSourceNumber: string | null = null;
+    let sinchAccountId: string | null = null;
     let reserved = false;
     if (input.channel === 'SMS') {
       if (
@@ -188,10 +198,17 @@ export async function dispatchWithProviderSendLock<Value>(
       }
       smsSourceNumber = reservation.sourceNumber;
       reserved = reservation.kind === 'reserved';
+      if (reservation.kind === 'reserved') {
+        sinchAccountId = reservation.sinchAccountId ?? null;
+      }
     }
 
     try {
-      const value = await dispatch(transaction, { smsSourceNumber, assertEntitlement });
+      const value = await dispatch(transaction, {
+        smsSourceNumber,
+        sinchAccountId,
+        assertEntitlement
+      });
       if (reserved && input.outboundMessageId !== undefined) {
         const smsCommerce = new PostgresSmsCommerceRepository(database);
         if (wasDispatched(value)) {
@@ -210,7 +227,7 @@ export async function dispatchWithProviderSendLock<Value>(
           );
         }
       }
-      return { kind: 'dispatched', value } as const;
+      return { kind: 'dispatched', value, sinchAccountId } as const;
     } catch (error) {
       if (error instanceof FinalEntitlementBlocked) {
         if (reserved && input.outboundMessageId !== undefined) {

@@ -4,6 +4,7 @@ import type { SinchReplyEvent } from '@bc5000/integrations/sinch';
 
 import {
   assertInboundReplyRecoveryComplete,
+  createInboundReplyRecoveryProcessor,
   createInboundReplyRecoveryService
 } from './inbound-reply-recovery.js';
 
@@ -74,33 +75,51 @@ describe('inbound reply recovery', () => {
     expect(checkReplies).toHaveBeenCalledTimes(2);
   });
 
-  it('confirms but does not import replies deliberately skipped by the reset boundary', async () => {
+  it('confirms a scoped pre-reset reply whose outbound attempt was deleted', async () => {
+    const accountId = 'workspace-account';
+    const stale = { ...reply('stale'), accountId, messageId: 'deleted-attempt' };
+    const otherAccount = { ...reply('other-account'), accountId: 'different-account' };
+    const missingAccount = reply('missing-account');
+    const invalidDate = { ...reply('invalid-date'), accountId, receivedAt: 'invalid' };
+    const current = {
+      ...reply('current'),
+      accountId,
+      messageId: 'missing-current-attempt',
+      receivedAt: '2026-10-05T01:02:04Z'
+    };
     const checkReplies = vi
       .fn<() => Promise<SinchReplyEvent[]>>()
-      .mockResolvedValueOnce([reply('stale'), reply('current')])
-      .mockResolvedValueOnce([]);
+      .mockResolvedValueOnce([stale, otherAccount, missingAccount, invalidDate, current])
+      .mockResolvedValueOnce([otherAccount, missingAccount, invalidDate, current]);
     const confirmReplies = vi.fn(() => Promise.resolve());
-    const processReply = vi.fn(
-      (event: SinchReplyEvent): Promise<'processed' | 'skipped'> =>
-        Promise.resolve(
-          event.replyId === 'stale' ? 'skipped' : 'processed'
-        )
-    );
+    const importReply = vi.fn(() => Promise.resolve());
     const service = createInboundReplyRecoveryService({
       sinch: { checkReplies, confirmReplies },
-      processReply
+      processReply: createInboundReplyRecoveryProcessor({
+        organisationId: 'workspace',
+        accountId,
+        resetCompletedAt: new Date('2026-10-05T01:02:03Z'),
+        resolveSharedEvent: () => Promise.resolve({ kind: 'pending' }),
+        importReply
+      })
     });
 
     await expect(service.run()).resolves.toEqual({
-      batches: 1,
-      confirmed: 2,
-      drained: true,
-      failed: 0,
-      failures: [],
-      processed: 1,
+      batches: 2,
+      confirmed: 1,
+      drained: false,
+      failed: 4,
+      failures: [
+        { replyId: 'other-account', reason: 'PROCESSING_FAILED' },
+        { replyId: 'missing-account', reason: 'PROCESSING_FAILED' },
+        { replyId: 'invalid-date', reason: 'PROCESSING_FAILED' },
+        { replyId: 'current', reason: 'PROCESSING_FAILED' }
+      ],
+      processed: 0,
       skipped: 1
     });
-    expect(confirmReplies).toHaveBeenCalledWith(['stale', 'current']);
+    expect(confirmReplies).toHaveBeenCalledExactlyOnceWith(['stale']);
+    expect(importReply).not.toHaveBeenCalled();
   });
 
   it('signals incomplete recovery for failures and for the batch safety cap', async () => {

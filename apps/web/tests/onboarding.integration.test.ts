@@ -150,6 +150,27 @@ describe('guided Solo onboarding persistence', () => {
     });
   });
 
+  it('completes SMS setup for a linked shared sender without a dedicated number', async () => {
+    const seeded = await seedReadySolo();
+    await client.db.update(organisations)
+      .set({
+        sinchSharedAccountId: 'shared-' + randomUUID(),
+        sinchSharedAccountLinkedAt: new Date(now.getTime() - 60_000)
+      })
+      .where(eq(organisations.id, seeded.organisationId));
+    const service = createOnboardingService({
+      repository: createPostgresOnboardingRepository(client.db, {
+        verifiedAdminMobile: () =>
+          Promise.resolve({ number: '+61412345678', verifiedAt: now })
+      }),
+      clock: { now: () => now }
+    });
+
+    await expect(
+      service.getStatus(seeded.session, seeded.organisationId)
+    ).resolves.toMatchObject({ completedCount: 8, complete: true });
+  });
+
   it('does not accept another tenant membership as access', async () => {
     const seeded = await seedReadySolo();
     const service = createOnboardingService({

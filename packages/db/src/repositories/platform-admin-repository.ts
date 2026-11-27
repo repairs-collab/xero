@@ -1434,11 +1434,13 @@ export class PostgresPlatformAdminRepository implements PlatformAdminRepository 
         return { ok: false, code: 'CONFLICT' } as const;
       }
       const [organisation] = await transaction
-        .select({ id: organisations.id })
+        .select({ id: organisations.id, sinchSharedAccountId: organisations.sinchSharedAccountId })
         .from(organisations)
         .where(eq(organisations.id, input.organisationId))
         .limit(1);
-      if (!organisation) return { ok: false, code: 'INVALID_STATE' } as const;
+      if (!organisation || organisation.sinchSharedAccountId !== null) {
+        return { ok: false, code: 'INVALID_STATE' } as const;
+      }
       const [active] = await transaction
         .select({ id: smsNumberPool.id })
         .from(smsNumberPool)

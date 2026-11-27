@@ -21,6 +21,8 @@ export interface SinchMessageStatus {
 
 export interface SinchDeliveryEvent {
   kind: 'delivery';
+  accountId?: string;
+  from?: string;
   messageId: string;
   status: string;
   statusCode: number;
@@ -31,6 +33,7 @@ export interface SinchDeliveryEvent {
 
 export interface SinchReplyEvent {
   kind: 'reply';
+  accountId?: string;
   replyId: string;
   messageId?: string;
   from: string;
@@ -42,12 +45,14 @@ export interface SinchReplyEvent {
 
 export interface SinchOptOutEvent {
   kind: 'opt-out';
+  accountId?: string;
   notificationId: string;
   messageId?: string;
   from: string;
-  to: string;
+  to?: string;
   receivedAt: string;
   content: string;
+  metadata?: Record<string, string>;
 }
 
 export type SinchEvent =

@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 
 import { authorise, type AppSession } from '@bc5000/auth';
 import type { DbTransaction } from '@bc5000/db/web';
-import { hasPaidSubscriptionAccess } from '@bc5000/domain';
 import type {
   AccountPulseSubscriptionStatus,
   DirectDebitActivationRequest,
@@ -936,10 +935,6 @@ export const createSubscriptionService = (dependencies: {
     stripeSubscriptionId: string;
     cancelledAt: string;
   }): Promise<void>;
-  enqueueNumberProvision(transaction: DbTransaction, input: {
-    organisationId: string;
-    eventId: string;
-  }): Promise<void>;
 }) => {
   const definiteCheckoutRejection = (
     error: unknown
@@ -1371,13 +1366,7 @@ export const createSubscriptionService = (dependencies: {
         );
       }
       const input = parseCheckoutCompleted(event, hash);
-      return dependencies.repository.applyCheckoutCompleted(input, {
-        onApplied: (transaction) =>
-          dependencies.enqueueNumberProvision(transaction, {
-            organisationId: input.organisationId,
-            eventId: input.eventId
-          })
-      });
+      return dependencies.repository.applyCheckoutCompleted(input);
     }
     if (event.type === 'setup_intent.succeeded') {
       return dependencies.repository.confirmDirectDebitMandate(
@@ -1424,36 +1413,21 @@ export const createSubscriptionService = (dependencies: {
     const enqueueCancellation =
       input.status === 'CANCELLED' &&
       input.stripeProviderStatus === 'canceled';
-    const enqueueProvisioning = hasPaidSubscriptionAccess({
-      subscriptionStatus: input.status,
-      stripeProviderStatus: input.stripeProviderStatus,
-      currentPeriodEnd: input.currentPeriodEnd,
-      cancelAt: input.cancelAt,
-      now: dependencies.clock.now()
-    });
     return dependencies.repository.applyLifecycleEvent(
       input,
-      enqueueCancellation || enqueueProvisioning
+      enqueueCancellation
         ? {
             onApplied: async (transaction) => {
-              if (enqueueCancellation) {
-                if (input.cancelledAt === null) {
-                  throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
-                }
-                await dependencies.enqueueLifecycle(transaction, {
-                  organisationId: input.organisationId,
-                  status: 'CANCELLED',
-                  eventId: input.eventId,
-                  stripeSubscriptionId: input.stripeSubscriptionId,
-                  cancelledAt: input.cancelledAt.toISOString()
-                });
+              if (input.cancelledAt === null) {
+                throw new SubscriptionFailure('STRIPE_EVENT_INVALID');
               }
-              if (enqueueProvisioning) {
-                await dependencies.enqueueNumberProvision(transaction, {
-                  organisationId: input.organisationId,
-                  eventId: input.eventId
-                });
-              }
+              await dependencies.enqueueLifecycle(transaction, {
+                organisationId: input.organisationId,
+                status: 'CANCELLED',
+                eventId: input.eventId,
+                stripeSubscriptionId: input.stripeSubscriptionId,
+                cancelledAt: input.cancelledAt.toISOString()
+              });
             }
           }
         : undefined

@@ -2,6 +2,7 @@ export interface SmsSendInput {
   content: string;
   destinationNumber: string;
   sourceNumber?: string;
+  accountId?: string;
   callbackUrl: string;
   metadata: Record<string, string>;
 }

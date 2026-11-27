@@ -113,7 +113,7 @@ describe('final rollout controls', () => {
     expect(html).not.toMatch(/test xero email/i);
   });
 
-  it('explains the dedicated reply-number requirements for Solo rollout', () => {
+  it('explains the SMS setup requirements for Solo rollout', () => {
     const html = renderToStaticMarkup(
       createElement(RolloutGateList, {
         readiness: {
@@ -126,7 +126,8 @@ describe('final rollout controls', () => {
                 edition: 'SOLO',
                 xeroConnectionId: '10000000-0000-4000-8000-000000000098',
                 xeroConnectedAt: now,
-                replyNumberReadyAt: null
+                replyNumberReadyAt: null,
+                sharedSenderLinkedAt: null
               }
             },
             controlledSmsEvidence: { passed: false, evidence: null }
@@ -134,8 +135,8 @@ describe('final rollout controls', () => {
         }
       })
     );
-    expect(html).toContain('Xero is connected and your reply number is ready');
-    expect(html).toContain('After completing onboarding, send a Test SMS from your dedicated reply number');
+    expect(html).toContain('Xero is connected and SMS sending is ready');
+    expect(html).toContain('After completing onboarding and SMS setup, send a Test SMS to an allowlisted mobile.');
     expect(html).not.toContain('Sinch');
   });
 

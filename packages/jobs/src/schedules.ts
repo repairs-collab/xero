@@ -13,14 +13,13 @@ const scheduleDefinitions = [
 
 const globalScheduleDefinitions = [
   { name: jobNames.xeroOAuthCleanup, cron: '*/15 * * * *' },
-  { name: jobNames.smsNumberProvisionReconcile, cron: '20 * * * *' },
   { name: jobNames.smsOverageInvoiceReconcile, cron: '35 * * * *' },
   { name: jobNames.paymentRecoveryReconcile, cron: '15 * * * *' },
   { name: jobNames.subscriptionLifecycleReconcile, cron: '10 * * * *' }
 ] as const;
 
 export async function ensureRecurringSchedules(
-  queue: DurableJobQueue,
+  queue: Pick<DurableJobQueue, 'schedule'>,
   organisationIds: string[]
 ): Promise<void> {
   for (const organisationId of organisationIds) {

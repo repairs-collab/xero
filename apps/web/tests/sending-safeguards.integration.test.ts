@@ -24,6 +24,7 @@ import {
   reminderSequenceVersions,
   rolloutReconciliations,
   smsNumberPool,
+  smsUsageLedger,
   stageInstances,
   subscriptions,
   users,
@@ -469,6 +470,89 @@ describe('owner-created Solo rollout', () => {
       sendMode: 'live',
       rolloutScope: 'CUSTOMER'
     });
+  });
+
+  it('proves a linked shared sender with a metered test through the current account after onboarding', async () => {
+    const seeded = await seedOwnerCreatedSolo();
+    const account = 'tenant-' + randomUUID();
+    const linkedAt = new Date(now.getTime() - 3 * 60_000);
+    await client.db.delete(smsNumberPool).where(eq(smsNumberPool.id, seeded.numberId));
+    await client.db.update(organisations)
+      .set({ sinchSharedAccountId: account, sinchSharedAccountLinkedAt: linkedAt })
+      .where(eq(organisations.id, seeded.organisationId));
+    await seedImportedReceivables(seeded.organisationId);
+    await activate(seeded);
+    const service = await reconcile(seeded);
+    const readiness = () => getCustomerRolloutReadiness(client.db, {
+      organisationId: seeded.organisationId, now
+    });
+    const record = async (
+      sinchAccountId: string | null,
+      sentAt: Date,
+      committedAt: Date | null
+    ) => {
+      const outboundMessageId = await recordTestSms(seeded, sentAt);
+      await client.db.insert(messageAttempts).values({
+        organisationId: seeded.organisationId,
+        outboundMessageId,
+        attemptNumber: 1,
+        provider: 'SINCH',
+        providerMessageId: randomUUID(),
+        sinchAccountId,
+        status: 'ACCEPTED',
+        requestDispatchedAt: sentAt,
+        responseReceivedAt: sentAt
+      });
+      if (committedAt !== null) {
+        await client.db.insert(smsUsageLedger).values({
+          organisationId: seeded.organisationId,
+          outboundMessageId,
+          billingPeriodStart: new Date('2026-09-01T00:00:00.000Z'),
+          billingPeriodEnd: new Date('2026-10-01T00:00:00.000Z'),
+          source: 'TEST_SMS',
+          entryType: 'COMMIT',
+          partDelta: 1,
+          idempotencyKey: randomUUID(),
+          occurredAt: committedAt
+        });
+      }
+      return outboundMessageId;
+    };
+
+    await record(null, dedicatedTestAt, dedicatedTestAt);
+    await record('tenant-' + randomUUID(), dedicatedTestAt, dedicatedTestAt);
+    await record(account, new Date(linkedAt.getTime() - 1), dedicatedTestAt);
+    await record(account, dedicatedTestAt, null);
+    const before = await readiness();
+    expect(before.gates.providersHealthy.passed).toBe(true);
+    expect(before.gates.controlledSmsEvidence).toEqual({ passed: false, evidence: null });
+    await expect(approve(seeded, service)).rejects.toThrow(
+      'CUSTOMER_ROLLOUT_NOT_READY:controlledSmsEvidence'
+    );
+
+    const testId = await record(account, dedicatedTestAt, dedicatedTestAt);
+    const after = await readiness();
+    expect(JSON.stringify(after)).not.toContain(account);
+    expect(after).toMatchObject({
+      readyForCustomerAcknowledgement: true,
+      gates: { controlledSmsEvidence: { evidence: { id: testId } } }
+    });
+
+    await client.db.update(organisations)
+      .set({ sinchSharedAccountId: 'tenant-' + randomUUID() })
+      .where(eq(organisations.id, seeded.organisationId));
+    await expect(approve(seeded, service)).rejects.toThrow(
+      'CUSTOMER_ROLLOUT_NOT_READY:controlledSmsEvidence'
+    );
+
+    await client.db.update(organisations)
+      .set({ sinchSharedAccountId: account })
+      .where(eq(organisations.id, seeded.organisationId));
+    await approve(seeded, service);
+    const [organisation] = await client.db.select({ rolloutScope: organisations.rolloutScope })
+      .from(organisations)
+      .where(eq(organisations.id, seeded.organisationId));
+    expect(organisation?.rolloutScope).toBe('CUSTOMER');
   });
 
   it.each([

@@ -6,6 +6,7 @@ import {
   SinchAuthenticationFailure,
   SinchPermanentSubmissionFailure,
   SinchTransientFailure,
+  SinchUnknownSubmissionOutcome,
   SinchValidationFailure
 } from './types.js';
 
@@ -69,6 +70,7 @@ describe('SinchClient.sendSms', () => {
     expect(http.requests[0]?.headers.Authorization).toContain(
       'headers="Date Content-MD5 request-line"'
     );
+    expect(http.requests[0]?.headers).not.toHaveProperty('Account');
     expect(JSON.parse(http.requests[0]?.body ?? '')).toEqual({
       messages: [
         {
@@ -93,6 +95,61 @@ describe('SinchClient.sendSms', () => {
       })
     ).rejects.toBeInstanceOf(SinchValidationFailure);
     expect(http.requests).toHaveLength(0);
+  });
+
+  it('uses the selected sub-account and leaves the sender to Sinch', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push({
+      status: 202,
+      headers: {},
+      body: JSON.stringify({
+        messages: [{ message_id: 'pooled-message', status: 'QUEUED' }]
+      })
+    });
+    const { content, destinationNumber, callbackUrl, metadata } = submitInput;
+
+    await expect(createClient(http).sendSms({
+      content,
+      destinationNumber,
+      callbackUrl,
+      metadata,
+      accountId: 'AP_Workspace-1'
+    })).resolves.toMatchObject({ messageId: 'pooled-message' });
+
+    expect(http.requests[0]?.headers.Account).toBe('AP_Workspace-1');
+    const body = JSON.parse(http.requests[0]?.body ?? '') as {
+      messages: Array<Record<string, unknown>>;
+    };
+    const [message] = body.messages;
+    expect(message).not.toHaveProperty('source_number');
+    expect(message?.metadata).toEqual(submitInput.metadata);
+  });
+
+  it('rejects a malformed sub-account before submitting', async () => {
+    const http = new FakeHttpClient();
+    await expect(createClient(http).sendSms({
+      ...submitInput,
+      accountId: 'invalid\r\nAccount: other'
+    })).rejects.toBeInstanceOf(SinchValidationFailure);
+    expect(http.requests).toHaveLength(0);
+  });
+
+  it('treats a pooled acceptance without a provider message ID as unknown', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push({
+      status: 202,
+      headers: {},
+      body: JSON.stringify({ messages: [{ status: 'QUEUED' }] })
+    });
+
+    const { content, destinationNumber, callbackUrl, metadata } = submitInput;
+    await expect(createClient(http).sendSms({
+      content,
+      destinationNumber,
+      callbackUrl,
+      metadata,
+      accountId: 'AP_Workspace-1'
+    })).rejects.toBeInstanceOf(SinchUnknownSubmissionOutcome);
   });
 
   it('rejects a non-E.164 dedicated source number before making a request', async () => {
@@ -188,6 +245,38 @@ describe('SinchClient.checkConnection', () => {
 });
 
 describe('SinchClient reply recovery', () => {
+  it('scopes polling and confirmation to the selected Sinch sub-account', async () => {
+    const http = new FakeHttpClient();
+    http.responses.push(
+      {
+        status: 200,
+        headers: {},
+        body: JSON.stringify({
+          replies: [{
+            reply_id: 'shared-reply-1',
+            message_id: 'shared-outbound-1',
+            date_received: '2026-11-27T01:02:03Z',
+            source_number: '+61400000001',
+            vendor_account_id: { account_id: 'account-customer-a' },
+            content: 'Call me'
+          }]
+        })
+      },
+      { status: 202, headers: {}, body: '' }
+    );
+    const client = createClient(http);
+    const replies = await client.checkReplies('account-customer-a');
+    expect(replies[0]).toMatchObject({
+      replyId: 'shared-reply-1',
+      accountId: 'account-customer-a'
+    });
+    await client.confirmReplies(['shared-reply-1'], 'account-customer-a');
+    expect(http.requests.map((request) => request.headers.Account)).toEqual([
+      'account-customer-a',
+      'account-customer-a'
+    ]);
+  });
+
   it('maps unconfirmed APAC replies and confirms only processed ids', async () => {
     const http = new FakeHttpClient();
     http.responses.push(

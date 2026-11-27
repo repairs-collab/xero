@@ -28,6 +28,7 @@ const seedOrganisation = async (input: {
   trialEndsAt?: Date | null;
   completed?: boolean;
   numberReady?: boolean;
+  sinchSharedAccountId?: string;
   platformStatus?: 'ACTIVE' | 'SUSPENDED';
 }) => {
   const organisationId = randomUUID();
@@ -38,6 +39,8 @@ const seedOrganisation = async (input: {
     timeZone: 'Australia/Sydney',
     baseCurrency: 'AUD',
     edition: input.edition,
+    sinchSharedAccountId: input.sinchSharedAccountId ?? null,
+    sinchSharedAccountLinkedAt: input.sinchSharedAccountId === undefined ? null : now,
     platformStatus: input.platformStatus ?? 'ACTIVE',
     suspendedAt: input.platformStatus === 'SUSPENDED' ? now : null,
     suspensionReason:
@@ -121,6 +124,20 @@ describe('PostgresEntitlementRepository', () => {
       blocker: 'ONBOARDING_INCOMPLETE'
     });
     await expect(repository.decide(readySoloId, now)).resolves.toMatchObject({
+      canCustomerSend: true,
+      canAutomaticDispatch: true,
+      blocker: null
+    });
+  });
+
+  it('allows completed paid Solo workspaces with a shared Sinch sub-account', async () => {
+    const organisationId = await seedOrganisation({
+      edition: 'SOLO',
+      subscriptionStatus: 'ACTIVE',
+      completed: true,
+      sinchSharedAccountId: `AP_${randomUUID()}`
+    });
+    await expect(repository.decide(organisationId, now)).resolves.toMatchObject({
       canCustomerSend: true,
       canAutomaticDispatch: true,
       blocker: null

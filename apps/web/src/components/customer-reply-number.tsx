@@ -21,16 +21,27 @@ const statusCopy: Record<SmsNumberStatus, string> = {
 };
 
 export function CustomerReplyNumber({
-  number
+  number,
+  sharedSmsReady = false
 }: {
   number: CustomerReplyNumberValue | null;
+  sharedSmsReady?: boolean;
 }) {
+  if (sharedSmsReady) {
+    return (
+      <aside className="reply-number-card" aria-label="AccountPulse SMS sending">
+        <span>AccountPulse SMS sending</span>
+        <strong>Shared SMS numbers</strong>
+        <small>Replies to your messages appear in your workspace inbox.</small>
+      </aside>
+    );
+  }
+
   if (number === null) {
     return (
-      <aside className="reply-number-card" aria-label="AccountPulse reply number">
-        <span>AccountPulse reply number</span>
-        <strong>Your reply number is being prepared</strong>
-        <small>AccountPulse will show it here when it is ready.</small>
+      <aside className="reply-number-card" aria-label="AccountPulse SMS sending">
+        <span>AccountPulse SMS sending</span>
+        <strong>SMS setup is pending</strong>
       </aside>
     );
   }

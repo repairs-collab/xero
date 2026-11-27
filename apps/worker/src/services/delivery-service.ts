@@ -5,6 +5,7 @@ import {
   messageAttempts,
   operatorReplies,
   outboundMessages,
+  resolveSharedSinchEvent,
   stageInstances
 } from '@bc5000/db';
 import type { SinchDeliveryEvent } from '@bc5000/integrations/sinch';
@@ -14,6 +15,14 @@ export async function processDeliveryEvent(
   organisationId: string,
   event: SinchDeliveryEvent
 ): Promise<void> {
+  const shared = await resolveSharedSinchEvent(database, event);
+  if (
+    shared.kind === 'ignored' ||
+    shared.kind === 'pending' ||
+    (shared.kind === 'shared' && shared.organisationId !== organisationId)
+  ) {
+    throw new Error('SINCH_DELIVERY_CORRELATION_MISMATCH');
+  }
   await database.transaction(async (transaction) => {
     const [row] = await transaction
       .select({ attempt: messageAttempts, outbound: outboundMessages })

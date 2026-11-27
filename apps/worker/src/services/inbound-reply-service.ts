@@ -13,6 +13,7 @@ import {
   outboundMessages,
   pauses,
   PostgresSmsCommerceRepository,
+  resolveSharedSinchEvent,
   stageInstances,
   suppressions
 } from '@bc5000/db';
@@ -44,12 +45,21 @@ const findContactByNumber = async (
   return channel?.contactId ?? null;
 };
 
-export async function processInboundReply(
+const resolveInboundContact = async (
   database: Database,
   organisationId: string,
-  event: SinchReplyEvent,
-  providerPayload: Record<string, unknown>
-): Promise<void> {
+  event: SinchReplyEvent | SinchOptOutEvent
+): Promise<string | null> => {
+  const shared = await resolveSharedSinchEvent(database, event);
+  if (shared.kind === 'ignored' || shared.kind === 'pending') {
+    throw new Error('INBOUND_SMS_CORRELATION_MISMATCH');
+  }
+  if (shared.kind === 'shared') {
+    if (shared.organisationId !== organisationId) {
+      throw new Error('INBOUND_SMS_CORRELATION_MISMATCH');
+    }
+    return shared.contactId;
+  }
   const [account] = await database
     .select({ edition: organisations.edition })
     .from(organisations)
@@ -67,11 +77,16 @@ export async function processInboundReply(
       throw new Error('INBOUND_SMS_DESTINATION_MISMATCH');
     }
   }
-  const contactId = await findContactByNumber(
-    database,
-    organisationId,
-    event.from
-  );
+  return findContactByNumber(database, organisationId, event.from);
+};
+
+export async function processInboundReply(
+  database: Database,
+  organisationId: string,
+  event: SinchReplyEvent,
+  providerPayload: Record<string, unknown>
+): Promise<void> {
+  const contactId = await resolveInboundContact(database, organisationId, event);
   if (contactId === null) {
     throw new Error('Inbound reply number could not be matched to a customer');
   }
@@ -174,26 +189,8 @@ export async function processOptOut(
   organisationId: string,
   event: SinchOptOutEvent
 ): Promise<void> {
-  const [account] = await database
-    .select({ edition: organisations.edition })
-    .from(organisations)
-    .where(eq(organisations.id, organisationId))
-    .limit(1);
-  if (account === undefined) throw new Error('ORGANISATION_NOT_FOUND');
-  if (account.edition === 'SOLO') {
-    const routedOrganisationId = await new PostgresSmsCommerceRepository(
-      database
-    ).findOrganisationIdByDestinationNumber(event.to);
-    if (routedOrganisationId !== organisationId) {
-      throw new Error('INBOUND_SMS_DESTINATION_MISMATCH');
-    }
-  }
   const recordedAt = new Date(event.receivedAt);
-  const contactId = await findContactByNumber(
-    database,
-    organisationId,
-    event.from
-  );
+  const contactId = await resolveInboundContact(database, organisationId, event);
   await database.transaction(async (transaction) => {
     const [organisation] = await transaction
       .select({ id: organisations.id })

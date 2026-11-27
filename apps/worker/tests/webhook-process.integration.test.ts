@@ -140,6 +140,202 @@ const seedCustomerChase = async () => {
   };
 };
 
+describe('Sinch shared pool reply routing', () => {
+  it.each([
+    ['queued before', '2026-11-26T23:00:00Z'],
+    ['delivered after', '2026-11-27T01:00:00Z']
+  ])('preserves a shared STOP %s a reset that deleted its original outbound', async (_, webhookReceivedAt) => {
+    const seeded = await seedCustomerChase();
+    const accountId = `Shared_${randomUUID()}`;
+    await client.db.update(organisations).set({
+      edition: 'SOLO',
+      sinchSharedAccountId: accountId,
+      sinchSharedAccountLinkedAt: new Date('2026-11-25T00:00:00Z')
+    }).where(eq(organisations.id, seeded.organisationId));
+    const outboundId = randomUUID();
+    const providerMessageId = randomUUID();
+    await client.db.insert(outboundMessages).values({
+      id: outboundId,
+      organisationId: seeded.organisationId,
+      contactId: seeded.contactId,
+      channel: 'SMS',
+      recipientKey: seeded.phone,
+      status: 'ACCEPTED',
+      idempotencyKey: randomUUID()
+    });
+    await client.db.insert(messageAttempts).values({
+      organisationId: seeded.organisationId,
+      outboundMessageId: outboundId,
+      attemptNumber: 1,
+      provider: 'SINCH',
+      providerMessageId,
+      sinchAccountId: accountId,
+      status: 'ACCEPTED'
+    });
+    const notificationId = randomUUID();
+    const recorded = await recordEvent(seeded.organisationId, 'SINCH', notificationId, {
+      account_id: accountId,
+      notification_id: notificationId,
+      message_id: providerMessageId,
+      source_number: seeded.phone,
+      date_received: '2026-11-26T22:58:00Z',
+      content: 'STOP',
+      metadata: { outboundMessageId: outboundId }
+    });
+    await client.db.update(webhookEvents).set({ receivedAt: new Date(webhookReceivedAt) })
+      .where(eq(webhookEvents.id, recorded.id));
+    await client.db.delete(outboundMessages).where(eq(outboundMessages.id, outboundId));
+    await recordCompletedReset(seeded.organisationId, new Date('2026-11-27T00:00:00Z'));
+
+    await processWebhookEvent({ database: client.db, publisher }, {
+      organisationId: seeded.organisationId,
+      webhookEventId: recorded.id,
+      provider: 'SINCH'
+    });
+
+    const [suppression] = await client.db.select().from(suppressions).where(and(
+      eq(suppressions.organisationId, seeded.organisationId),
+      eq(suppressions.normalisedDestination, seeded.phone)
+    ));
+    expect(suppression).toMatchObject({ source: 'SINCH_OPT_OUT', consentState: 'SUPPRESSED' });
+    const replies = await client.db.select().from(inboundMessages)
+      .where(eq(inboundMessages.organisationId, seeded.organisationId));
+    expect(replies).toHaveLength(0);
+  });
+
+  it.each(['workspace', 'recipient'] as const)(
+    'rejects a shared STOP with a conflicting persisted %s reference',
+    async (conflict) => {
+      const seeded = await seedCustomerChase();
+      const accountId = `Shared_${randomUUID()}`;
+      await client.db.update(organisations).set({
+        edition: 'SOLO',
+        sinchSharedAccountId: accountId,
+        sinchSharedAccountLinkedAt: new Date('2026-11-25T00:00:00Z')
+      }).where(eq(organisations.id, seeded.organisationId));
+      const outboundWorkspace = conflict === 'workspace' ? await seedCustomerChase() : seeded;
+      const outboundId = randomUUID();
+      await client.db.insert(outboundMessages).values({
+        id: outboundId,
+        organisationId: outboundWorkspace.organisationId,
+        contactId: outboundWorkspace.contactId,
+        channel: 'SMS',
+        recipientKey: conflict === 'recipient' ? '+61400000009' : seeded.phone,
+        status: 'ACCEPTED',
+        idempotencyKey: randomUUID()
+      });
+      const notificationId = randomUUID();
+      const recorded = await recordEvent(seeded.organisationId, 'SINCH', notificationId, {
+        account_id: accountId,
+        notification_id: notificationId,
+        message_id: randomUUID(),
+        source_number: seeded.phone,
+        date_received: '2026-11-26T22:58:00Z',
+        content: 'STOP',
+        metadata: { outboundMessageId: outboundId }
+      });
+
+      await expect(processWebhookEvent({ database: client.db, publisher }, {
+        organisationId: seeded.organisationId,
+        webhookEventId: recorded.id,
+        provider: 'SINCH'
+      })).rejects.toThrow('INBOUND_SMS_CORRELATION_MISMATCH');
+      const optedOut = await client.db.select().from(suppressions)
+        .where(eq(suppressions.normalisedDestination, seeded.phone));
+      expect(optedOut).toHaveLength(0);
+    }
+  );
+
+  it('suppresses unsolicited STOP only in the bound Sinch workspace', async () => {
+    const seeded = await seedCustomerChase();
+    const accountId = `Shared_${randomUUID()}`;
+    await client.db.update(organisations).set({
+      edition: 'SOLO',
+      sinchSharedAccountId: accountId,
+      sinchSharedAccountLinkedAt: new Date('2026-11-25T00:00:00Z')
+    }).where(eq(organisations.id, seeded.organisationId));
+    const notificationId = randomUUID();
+    const recorded = await recordEvent(seeded.organisationId, 'SINCH', notificationId, {
+      account_id: accountId,
+      notification_id: notificationId,
+      source_number: seeded.phone,
+      date_received: '2026-11-27T01:02:03Z',
+      content: 'STOP'
+    });
+    await processWebhookEvent({ database: client.db, publisher }, {
+      organisationId: seeded.organisationId,
+      webhookEventId: recorded.id,
+      provider: 'SINCH'
+    });
+    const optedOut = await client.db.select().from(suppressions)
+      .where(eq(suppressions.normalisedDestination, seeded.phone));
+    expect(optedOut).toHaveLength(1);
+    expect(optedOut[0]?.organisationId).toBe(seeded.organisationId);
+    const replies = await client.db.select().from(inboundMessages)
+      .where(eq(inboundMessages.organisationId, seeded.organisationId));
+    expect(replies).toHaveLength(0);
+  });
+
+  it('uses the original outbound contact and refuses a different Sinch account', async () => {
+    const seeded = await seedCustomerChase();
+    const accountId = `Shared_${randomUUID()}`;
+    await client.db.update(organisations).set({
+      edition: 'SOLO',
+      sinchSharedAccountId: accountId,
+      sinchSharedAccountLinkedAt: new Date('2026-11-25T00:00:00Z')
+    }).where(eq(organisations.id, seeded.organisationId));
+    const [outbound] = await client.db.insert(outboundMessages).values({
+      organisationId: seeded.organisationId,
+      contactId: seeded.contactId,
+      channel: 'SMS',
+      recipientKey: seeded.phone,
+      status: 'ACCEPTED',
+      idempotencyKey: randomUUID()
+    }).returning({ id: outboundMessages.id });
+    if (!outbound) throw new Error('Outbound seed failed');
+    const providerMessageId = randomUUID();
+    await client.db.insert(messageAttempts).values({
+      organisationId: seeded.organisationId,
+      outboundMessageId: outbound.id,
+      attemptNumber: 1,
+      provider: 'SINCH',
+      providerMessageId,
+      sinchAccountId: accountId,
+      status: 'ACCEPTED'
+    });
+    const process = async (inputAccount: string, contactNumber: string) => {
+      const replyId = randomUUID();
+      const recorded = await recordEvent(seeded.organisationId, 'SINCH', replyId, {
+        event_type: 'REPLY',
+        account_id: inputAccount,
+        reply_id: replyId,
+        message_id: providerMessageId,
+        source_number: contactNumber,
+        received_date: '2026-11-27T01:02:03Z',
+        content: 'Please call me.',
+        metadata: {
+          organisationId: seeded.organisationId,
+          outboundMessageId: outbound.id
+        }
+      });
+      return processWebhookEvent({ database: client.db, publisher }, {
+        organisationId: seeded.organisationId,
+        webhookEventId: recorded.id,
+        provider: 'SINCH'
+      });
+    };
+    await expect(process(`other_${randomUUID()}`, seeded.phone)).rejects.toThrow();
+    await expect(process(accountId, '+61400000009')).rejects.toThrow();
+    await process(accountId, seeded.phone);
+    const replies = await client.db.select().from(inboundMessages)
+      .where(eq(inboundMessages.organisationId, seeded.organisationId));
+    expect(replies).toHaveLength(1);
+    const [conversation] = await client.db.select().from(conversations)
+      .where(eq(conversations.organisationId, seeded.organisationId));
+    expect(conversation?.contactId).toBe(seeded.contactId);
+  });
+});
+
 const recordEvent = async (
   organisationId: string,
   provider: 'XERO' | 'SINCH',

@@ -174,6 +174,9 @@ export async function executeOperatorReply(
           ...(sendContext.smsSourceNumber === null
             ? {}
             : { sourceNumber: sendContext.smsSourceNumber }),
+          ...(sendContext.sinchAccountId === null
+            ? {}
+            : { accountId: sendContext.sinchAccountId }),
           content: row.reply.content,
           callbackUrl: dependencies.callbackUrl,
           metadata: {
@@ -243,6 +246,7 @@ export async function executeOperatorReply(
       outboundId: claim.outboundId,
       attemptId: claim.attemptId,
       providerMessageId: accepted.messageId,
+      sinchAccountId: sendResult.sinchAccountId,
       providerPayload: { status: accepted.status },
       now
     });

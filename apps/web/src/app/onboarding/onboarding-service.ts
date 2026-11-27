@@ -45,6 +45,7 @@ export interface OnboardingEvidence {
   cancelAt?: Date | null;
   trialEndsAt: Date | null;
   replyNumberStatus: 'READY' | null;
+  sharedSenderLinkedAt: Date | null;
 }
 
 export interface OnboardingStep {
@@ -91,6 +92,7 @@ export const createPostgresOnboardingRepository = (
     const [base] = await database
       .select({
         operationalState: organisations.operationalState,
+        sharedSenderLinkedAt: organisations.sinchSharedAccountLinkedAt,
         lastSuccessfulSyncAt: organisations.lastSuccessfulSyncAt,
         latestReconciledSyncAt: organisations.latestReconciledSyncAt,
         businessDetailsCompletedAt:
@@ -170,7 +172,8 @@ export const createPostgresOnboardingRepository = (
       currentPeriodEnd: base.currentPeriodEnd,
       cancelAt: base.cancelAt,
       trialEndsAt: base.trialEndsAt,
-      replyNumberStatus
+      replyNumberStatus,
+      sharedSenderLinkedAt: base.sharedSenderLinkedAt
     };
   },
   recordAttestation: async (input) => {
@@ -282,6 +285,8 @@ export const deriveOnboardingStatus = (
   completedCount: number;
   complete: boolean;
 } => {
+  const sharedSmsReady = input.sharedSenderLinkedAt !== null &&
+    input.sharedSenderLinkedAt.getTime() <= now.getTime();
   const steps: OnboardingStep[] = [
     {
       key: 'XERO_CONNECTED',
@@ -344,10 +349,14 @@ export const deriveOnboardingStatus = (
     },
     {
       key: 'REPLY_NUMBER_READY',
-      label: 'Provision the reply number',
-      description: 'A dedicated Australian reply number must be verified.',
-      href: '/settings/billing',
-      complete: input.replyNumberStatus === 'READY'
+      label: 'Set up SMS sending',
+      description: sharedSmsReady
+        ? 'AccountPulse uses shared SMS numbers and routes replies to your workspace inbox.'
+        : input.replyNumberStatus === 'READY'
+          ? 'Your AccountPulse reply number is ready.'
+          : 'AccountPulse will enable SMS sending for your workspace. Contact support if setup stays pending.',
+      href: '/settings/sending',
+      complete: sharedSmsReady || input.replyNumberStatus === 'READY'
     }
   ];
   const completedCount = steps.filter((step) => step.complete).length;

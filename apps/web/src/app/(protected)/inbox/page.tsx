@@ -1,14 +1,11 @@
 import { ChatBubbleLeftRightIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
-import { and, eq, inArray } from 'drizzle-orm';
 import { headers } from 'next/headers';
 import Link from 'next/link';
 
-import {
-  PostgresConversationRepository,
-  smsNumberPool
-} from '@bc5000/db/web';
+import { PostgresConversationRepository } from '@bc5000/db/web';
 
 import { CustomerReplyNumber } from '../../../components/customer-reply-number.js';
+import { loadCustomerSmsSender } from '../../../server/customer-sms-sender.js';
 import { getDatabaseClient, requireWebSession } from '../../../server/runtime.js';
 
 export default async function InboxPage() {
@@ -18,21 +15,9 @@ export default async function InboxPage() {
   const organisationId = session.memberships[0]?.organisationId;
   if (!organisationId) throw new Error('No active organisation membership');
   const database = getDatabaseClient().db;
-  const [rows, [replyNumber]] = await Promise.all([
+  const [rows, sender] = await Promise.all([
     new PostgresConversationRepository(database).list(organisationId),
-    database
-      .select({
-        e164Number: smsNumberPool.e164Number,
-        status: smsNumberPool.status
-      })
-      .from(smsNumberPool)
-      .where(
-        and(
-          eq(smsNumberPool.organisationId, organisationId),
-          inArray(smsNumberPool.status, ['RESERVED', 'READY', 'QUARANTINED'])
-        )
-      )
-      .limit(1)
+    loadCustomerSmsSender(database, organisationId)
   ]);
 
   return (
@@ -43,14 +28,14 @@ export default async function InboxPage() {
           <h1>Inbox</h1>
           <p>Replies are shared with the team and automatically pause customer chasing.</p>
         </div>
-        <CustomerReplyNumber number={replyNumber ?? null} />
+        <CustomerReplyNumber number={sender.number} sharedSmsReady={sender.sharedSmsReady} />
       </header>
       <section className="inbox-list">
         {rows.length === 0 ? (
           <div className="empty-state">
             <span><ChatBubbleLeftRightIcon aria-hidden="true" /></span>
             <h2>No conversations yet</h2>
-            <p>Customer replies to your AccountPulse number will appear here.</p>
+            <p>Customer replies to SMS sent from this workspace will appear here.</p>
           </div>
         ) : rows.map(({ conversation, contact }) => (
           <Link href={`/inbox/${conversation.id}`} className="inbox-row" key={conversation.id}>

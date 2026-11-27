@@ -330,6 +330,13 @@
       "when": 1794627400000,
       "tag": "0046_failed_payment_recovery_deadline",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1795755600000,
+      "tag": "0047_sinch_shared_accounts",
+      "breakpoints": true
     }
   ]
 }

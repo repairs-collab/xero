@@ -9,10 +9,14 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
+  contacts,
   createDatabase,
+  messageAttempts,
   migrateDatabase,
   organisations,
+  outboundMessages,
   PostgresWebhookRepository,
+  resolveSharedSinchEvent,
   webhookEvents
 } from '@bc5000/db';
 import { sinchCallbackCanonicalBytes } from '@bc5000/integrations/sinch';
@@ -59,6 +63,91 @@ afterAll(async () => {
 });
 
 describe('public webhook endpoints', () => {
+  it('retries an early shared reply and records it only under its original workspace', async () => {
+    const sharedAccountId = `Account_${randomUUID()}`;
+    const sharedWorkspaceId = randomUUID();
+    const contactId = randomUUID();
+    const outboundId = randomUUID();
+    const providerMessageId = randomUUID();
+    const replyId = randomUUID();
+    const subscriber = '+61401000001';
+    const sharedToken = 'test-webhook-token'.repeat(2);
+    await client.db.insert(organisations).values({
+      id: sharedWorkspaceId,
+      name: 'Shared Sinch workspace',
+      xeroOrganisationId: randomUUID(),
+      edition: 'SOLO',
+      sinchSharedAccountId: sharedAccountId,
+      sinchSharedAccountLinkedAt: new Date('2026-11-25T00:00:00Z'),
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    await client.db.insert(contacts).values({
+      id: contactId,
+      organisationId: sharedWorkspaceId,
+      xeroContactId: randomUUID(),
+      name: 'Shared Sinch customer'
+    });
+    await client.db.insert(outboundMessages).values({
+      id: outboundId,
+      organisationId: sharedWorkspaceId,
+      contactId,
+      channel: 'SMS',
+      recipientKey: subscriber,
+      status: 'SENDING',
+      idempotencyKey: randomUUID()
+    });
+    const handler = createSinchWebhookHandler({
+      publicKeys: new Map(),
+      sharedToken,
+      repository: new PostgresWebhookRepository(client.db),
+      queue,
+      resolveSharedEvent: (event) => resolveSharedSinchEvent(client.db, event),
+      resolveOrganisationId: () => Promise.resolve(organisationId)
+    });
+    const sendReply = (accountId: string | undefined) => handler(
+      new Request('https://accountpulse.example/api/webhooks/sinch', {
+        method: 'POST',
+        headers: { 'x-accountpulse-webhook-token': sharedToken },
+        body: JSON.stringify({
+          account_id: accountId,
+          reply_id: replyId,
+          message_id: providerMessageId,
+          source_number: subscriber,
+          date_received: '2026-11-27T00:00:00Z',
+          content: 'Please call me.',
+          metadata: {
+            organisationId: sharedWorkspaceId,
+            outboundMessageId: outboundId
+          }
+        })
+      })
+    );
+    const recorded = () => client.db.select({ organisationId: webhookEvents.organisationId })
+      .from(webhookEvents).where(eq(webhookEvents.providerEventId, replyId));
+
+    expect((await sendReply(sharedAccountId)).status).toBe(503);
+    expect(await recorded()).toEqual([]);
+
+    await client.db.insert(messageAttempts).values({
+      organisationId: sharedWorkspaceId,
+      outboundMessageId: outboundId,
+      attemptNumber: 1,
+      provider: 'SINCH',
+      providerMessageId,
+      sinchAccountId: sharedAccountId,
+      status: 'ACCEPTED'
+    });
+    expect((await sendReply(undefined)).headers.get(
+      'x-accountpulse-ignored-destination'
+    )).toBe('true');
+    expect(await recorded()).toEqual([]);
+
+    expect((await sendReply(sharedAccountId)).status).toBe(202);
+    expect((await sendReply(sharedAccountId)).status).toBe(202);
+    expect(await recorded()).toEqual([{ organisationId: sharedWorkspaceId }]);
+  });
+
   const retellNow = new Date('2026-10-08T00:00:00.000Z');
   const retellApiKey = 'retell-private-api-key';
   const retellSignature = (
