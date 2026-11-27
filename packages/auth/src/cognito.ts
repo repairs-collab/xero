@@ -110,7 +110,7 @@ export function createCognitoAuthorizationRequest(
   options: {
     now?: Date;
     returnTo?: string;
-    screenHint?: 'signup';
+    mode?: 'signup';
   } = {}
 ): CognitoAuthorizationRequest {
   const now = options.now ?? new Date();
@@ -121,6 +121,7 @@ export function createCognitoAuthorizationRequest(
     .update(codeVerifier)
     .digest('base64url');
   const url = new URL(configuration.authorizationEndpoint);
+  if (options.mode === 'signup') url.pathname = '/signup';
   url.searchParams.set('client_id', configuration.clientId);
   url.searchParams.set('redirect_uri', configuration.redirectUri);
   url.searchParams.set('response_type', 'code');
@@ -129,9 +130,6 @@ export function createCognitoAuthorizationRequest(
   url.searchParams.set('nonce', nonce);
   url.searchParams.set('code_challenge', codeChallenge);
   url.searchParams.set('code_challenge_method', 'S256');
-  if (options.screenHint !== undefined) {
-    url.searchParams.set('screen_hint', options.screenHint);
-  }
   return {
     url: url.toString(),
     transaction: {

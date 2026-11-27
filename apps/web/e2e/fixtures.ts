@@ -10,8 +10,10 @@ import {
   createDatabase,
   invoiceChases,
   invoices,
+  organisationOnboarding,
   organisations,
   organisationVoiceSettings,
+  outboundMessages,
   pauses,
   suppressions,
   smsAllowanceSettings,
@@ -40,6 +42,64 @@ export const resetLaunchScenario = (
 ): Promise<void> => seedLaunchScenario(databaseUrl, scenario);
 
 export const seedSmsOptOut = (): Promise<void> => applySmsOptOut(databaseUrl);
+
+export async function prepareSoloCustomerSendingScenario(): Promise<void> {
+  await resetLaunchScenario('reconciledReady');
+  const client = createDatabase(databaseUrl);
+  const organisationId = launchScenario.organisationId;
+  const now = new Date();
+  try {
+    await client.db.transaction(async (transaction) => {
+      const [xeroConnection] = await transaction.insert(xeroConnections).values({
+        organisationId,
+        connectionId: 'connection-e2e-solo-sending',
+        tenantId: 'tenant-e2e-solo-sending',
+        status: 'CONNECTED',
+        encryptedRefreshToken: {
+          version: 1,
+          keyId: 'e2e',
+          iv: Buffer.alloc(12).toString('base64'),
+          ciphertext: Buffer.from('encrypted').toString('base64'),
+          tag: Buffer.alloc(16).toString('base64')
+        },
+        grantedScopes: ['offline_access', 'accounting.invoices'],
+        connectedAt: now
+      }).returning({ id: xeroConnections.id });
+      if (!xeroConnection) throw new Error('Solo browser Xero connection was not created');
+
+      await transaction.update(organisations).set({
+        edition: 'SOLO',
+        sendMode: 'dry-run',
+        rolloutScope: 'CONTROLLED',
+        liveSendAcknowledged: false,
+        lastSuccessfulXeroConnectionId: xeroConnection.id,
+        sinchSharedAccountId: 'e2e-solo-sending',
+        sinchSharedAccountLinkedAt: now
+      }).where(eq(organisations.id, organisationId));
+      await transaction.insert(subscriptions).values({
+        organisationId,
+        planCode: 'SOLO_AU_2000',
+        billingCadence: 'MONTHLY',
+        status: 'ACTIVE',
+        stripeProviderStatus: 'active',
+        trustedStripeProviderStatus: 'active',
+        currentPeriodStart: now,
+        currentPeriodEnd: new Date(now.getTime() + 86_400_000)
+      });
+      await transaction.insert(organisationOnboarding).values({
+        organisationId,
+        businessDetailsCompletedAt: now,
+        sequenceReviewedAt: now
+      });
+      await transaction.delete(outboundMessages).where(and(
+        eq(outboundMessages.organisationId, organisationId),
+        eq(outboundMessages.source, 'TEST_SMS')
+      ));
+    });
+  } finally {
+    await client.pool.end();
+  }
+}
 
 const futureInvoiceId = '10000000-0000-4000-8000-000000000014';
 const voiceCallFlowHash = `sha256:${createHash('sha256')

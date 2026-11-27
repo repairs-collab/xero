@@ -38,6 +38,19 @@ describe('Cognito authorisation-code flow', () => {
     expect(request.transaction.expiresAt).toBe('2026-09-18T00:10:00.000Z');
   });
 
+  it('opens Cognito signup with the same callback, state and PKCE protections', () => {
+    const request = createCognitoAuthorizationRequest(config, { mode: 'signup', returnTo: '/onboarding' });
+    const url = new URL(request.url);
+
+    expect(url.pathname).toBe('/signup');
+    expect(url.searchParams.get('redirect_uri')).toBe(config.redirectUri);
+    expect(url.searchParams.get('code_challenge_method')).toBe('S256');
+    expect(url.searchParams.get('state')).toBe(request.transaction.state);
+    expect(url.searchParams.get('nonce')).toBe(request.transaction.nonce);
+    expect(url.searchParams.has('screen_hint')).toBe(false);
+    expect(request.transaction.returnTo).toBe('/onboarding');
+  });
+
   it('exchanges the code server-side and verifies issuer, audience and nonce', async () => {
     const request = createCognitoAuthorizationRequest(config);
     const { privateKey, publicKey } = await generateKeyPair('RS256');

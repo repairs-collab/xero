@@ -4,10 +4,13 @@ import { revalidatePath } from 'next/cache';
 import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 
+import { authorise, AuthorizationFailure, type AppSession } from '@bc5000/auth';
+
 import {
   getDatabaseClient,
   requireWebAcceptedSession
 } from '../../../../server/runtime.js';
+import { loadSettingsWorkspaceEdition } from '../settings-workspace.js';
 import {
   createSendingSettings,
   liveActivationStatusForError,
@@ -20,6 +23,11 @@ const text = (formData: FormData, name: string): string => {
     throw new Error(`${name} is required`);
   }
   return value;
+};
+
+const readAcknowledgement = (formData: FormData): string => {
+  const value = formData.get('acknowledgement');
+  return typeof value === 'string' ? value : '';
 };
 
 const nonnegativeInteger = (formData: FormData, name: string): number => {
@@ -123,16 +131,24 @@ const finish = (status: string): never => {
   redirect(`/settings/sending?rollout=${encodeURIComponent(status)}`);
 };
 
+async function requireLegacySendingControls(session: AppSession, organisationId: string) {
+  authorise(session, 'provider.configure', organisationId);
+  const edition = await loadSettingsWorkspaceEdition(getDatabaseClient().db, organisationId);
+  if (edition !== 'INTERNAL_LEGACY') throw new AuthorizationFailure();
+}
+
 export async function updateAllowlist(formData: FormData): Promise<void> {
   let status = 'allowlist-updated';
   try {
     const { session, settings } = await context();
+    const organisationId = text(formData, 'organisationId');
+    await requireLegacySendingControls(session, organisationId);
     const rawRecipients = formData.get('recipients');
     if (typeof rawRecipients !== 'string') {
       throw new Error('recipients is required');
     }
     await settings.updateAllowlist(session, {
-      organisationId: text(formData, 'organisationId'),
+      organisationId,
       recipients: rawRecipients.split(/[\n,]/)
     });
   } catch (error) {
@@ -145,8 +161,10 @@ export async function activateLive(formData: FormData): Promise<void> {
   let status = 'controlled-enabled';
   try {
     const { session, settings } = await context();
+    const organisationId = text(formData, 'organisationId');
+    await requireLegacySendingControls(session, organisationId);
     await settings.activateLive(session, {
-      organisationId: text(formData, 'organisationId'),
+      organisationId,
       acknowledgement: text(formData, 'acknowledgement'),
       expectedVersion: nonnegativeInteger(formData, 'expectedVersion')
     });
@@ -164,7 +182,7 @@ export async function acknowledgeReconciliation(
     const { session, settings } = await context();
     await settings.acknowledgeReconciliation(session, {
       organisationId: text(formData, 'organisationId'),
-      acknowledgement: text(formData, 'acknowledgement'),
+      acknowledgement: readAcknowledgement(formData),
       expectedVersion: nonnegativeInteger(formData, 'expectedVersion'),
       expected: {
         syncId: text(formData, 'syncId'),
@@ -186,7 +204,7 @@ export async function activateCustomerRollout(
     const { session, settings } = await context();
     await settings.activateCustomerRollout(session, {
       organisationId: text(formData, 'organisationId'),
-      acknowledgement: text(formData, 'acknowledgement'),
+      acknowledgement: readAcknowledgement(formData),
       expectedVersion: nonnegativeInteger(formData, 'expectedVersion')
     });
   } catch (error) {
@@ -219,8 +237,10 @@ export async function returnToControlledLive(
   let status = 'controlled-restored';
   try {
     const { session, settings } = await context();
+    const organisationId = text(formData, 'organisationId');
+    await requireLegacySendingControls(session, organisationId);
     await settings.returnToControlledLive(session, {
-      organisationId: text(formData, 'organisationId'),
+      organisationId,
       reason: text(formData, 'reason'),
       expectedVersion: nonnegativeInteger(formData, 'expectedVersion')
     });

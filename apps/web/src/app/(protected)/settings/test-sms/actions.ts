@@ -4,8 +4,11 @@ import { revalidatePath } from 'next/cache';
 import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 
+import { authorise, AuthorizationFailure } from '@bc5000/auth';
+
 import { getJobQueue } from '../../../../server/job-runtime.js';
 import { getDatabaseClient, requireWebAcceptedSession } from '../../../../server/runtime.js';
+import { loadSettingsWorkspaceEdition } from '../settings-workspace.js';
 import { createTestSmsService } from './test-sms-service.js';
 
 const requiredValue = (formData: FormData, name: string): string => {
@@ -20,13 +23,19 @@ export async function queueTestSms(formData: FormData): Promise<void> {
   const session = await requireWebAcceptedSession(
     new Request('http://localhost/', { headers: await headers() })
   );
+  const organisationId = requiredValue(formData, 'organisationId').trim();
+  authorise(session, 'message.test-sms', organisationId);
+  const database = getDatabaseClient().db;
+  if (await loadSettingsWorkspaceEdition(database, organisationId) !== 'INTERNAL_LEGACY') {
+    throw new AuthorizationFailure();
+  }
   const service = createTestSmsService({
-    database: getDatabaseClient().db,
+    database,
     publisher: await getJobQueue(),
     clock: { now: () => new Date() }
   });
   await service.queue(session, {
-    organisationId: requiredValue(formData, 'organisationId').trim(),
+    organisationId,
     destination: requiredValue(formData, 'destination'),
     content: requiredValue(formData, 'content'),
     confirmed: formData.get('confirmed') === 'yes',

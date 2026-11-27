@@ -31,7 +31,8 @@ describe('self-service onboarding entry', () => {
 
     expect(markup).toContain('Connect your Xero organisation');
     expect(markup).toContain('href="/xero/connect?purpose=solo"');
-    expect(markup).toContain('dry-run review mode');
+    expect(markup).toContain('Review and approve reminders before they are sent');
+    expect(markup).not.toContain('dry-run');
   });
 
   it('shows the existing Solo workspace and Enterprise waitlist instead of another connection', async () => {
@@ -62,7 +63,14 @@ describe('self-service onboarding entry', () => {
           href: '/settings/sending',
           complete: true
         },
-        ...Array.from({ length: 6 }, (_, index) => ({
+        {
+          key: 'SEQUENCE_REVIEWED',
+          label: 'Review reminder sequences',
+          description: 'Keep each sequence in Review mode.',
+          href: '/sequences',
+          complete: false
+        },
+        ...Array.from({ length: 3 }, (_, index) => ({
           key: `INCOMPLETE_${index}`,
           label: `Incomplete step ${index + 1}`,
           description: 'Action required',
@@ -89,8 +97,14 @@ describe('self-service onboarding entry', () => {
 
     expect(markup).toContain('Your Xero organisation is connected');
     expect(markup).toContain('Onboarding progress');
-    expect(markup).toContain('2 of 8 complete');
+    expect(markup).toContain('2 of 6 complete');
     expect(markup).toContain('Enterprise waitlist');
+    expect(markup).toContain('href="/sequences"');
+    expect(markup).toContain('Confirm Review mode');
+    expect(markup).not.toContain('Send verification code');
+    expect(markup).not.toContain('eligible test messages');
+    expect(markup).not.toContain('Initial sync queued');
+    expect(markup).not.toContain('/settings/test-sms');
     expect(markup).not.toContain('href="/xero/connect?purpose=solo"');
   });
 

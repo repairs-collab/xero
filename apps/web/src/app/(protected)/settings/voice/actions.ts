@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache';
 import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 
+import { authorise, AuthorizationFailure } from '@bc5000/auth';
 import { PostgresVoiceCallRepository } from '@bc5000/db/web';
 
 import { getJobQueue } from '../../../../server/job-runtime.js';
@@ -14,6 +15,7 @@ import {
   requireWebAcceptedSession,
   verifyVoicePreviewSession
 } from '../../../../server/runtime.js';
+import { loadSettingsWorkspaceEdition } from '../settings-workspace.js';
 import { createVoiceSettingsService } from './voice-settings.js';
 import {
   runSetAutomaticVoiceCallsAction,
@@ -43,15 +45,19 @@ const integer = (formData: FormData, name: string): number => {
   return value;
 };
 
-async function context() {
+async function context(formData: FormData) {
   const session = await requireWebAcceptedSession(
     new Request('http://localhost/', { headers: await headers() })
   );
+  const organisationId = requiredText(formData, 'organisationId');
+  authorise(session, 'voice-settings.manage', organisationId);
   const database = getDatabaseClient().db;
+  if (await loadSettingsWorkspaceEdition(database, organisationId) !== 'INTERNAL_LEGACY') {
+    throw new AuthorizationFailure();
+  }
   const clock = createServerClock();
   return {
-    database,
-    session,
+    organisationId,
     settings: createVoiceSettingsService({
       database,
       session,
@@ -71,8 +77,7 @@ async function context() {
 }
 
 export async function saveVoiceSettings(formData: FormData): Promise<void> {
-  const { settings } = await context();
-  const organisationId = requiredText(formData, 'organisationId');
+  const { settings, organisationId } = await context(formData);
   await settings.save({
     organisationId,
     provider: 'VOIPCLOUD',
@@ -94,19 +99,17 @@ export async function saveVoiceSettings(formData: FormData): Promise<void> {
 }
 
 export async function testVoiceConnection(formData: FormData): Promise<void> {
-  const { settings } = await context();
-  await settings.testConnection({
-    organisationId: requiredText(formData, 'organisationId')
-  });
+  const { settings, organisationId } = await context(formData);
+  await settings.testConnection({ organisationId });
   revalidatePath('/settings/voice');
 }
 
 export async function recordGenericFlowTest(
   formData: FormData
 ): Promise<void> {
-  const { settings } = await context();
+  const { settings, organisationId } = await context(formData);
   await settings.recordGenericFlowTest({
-    organisationId: requiredText(formData, 'organisationId'),
+    organisationId,
     previewSessionToken: requiredText(formData, 'previewSessionToken')
   });
   revalidatePath('/settings/voice');
@@ -116,7 +119,7 @@ export async function setVoiceEnabled(
   _previousState: VoiceSettingsActionState,
   formData: FormData
 ): Promise<VoiceSettingsActionState> {
-  const { settings } = await context();
+  const { settings, organisationId } = await context(formData);
   const confirmation = optionalText(formData, 'confirmation');
   return runSetVoiceEnabledAction(
     {
@@ -124,7 +127,7 @@ export async function setVoiceEnabled(
       revalidate: () => revalidatePath('/settings/voice')
     },
     {
-      organisationId: requiredText(formData, 'organisationId'),
+      organisationId,
       enabled: requiredText(formData, 'enabled') === 'true',
       ...(confirmation === null ? {} : { confirmation })
     }
@@ -135,7 +138,7 @@ export async function setAutomaticVoiceCalls(
   _previousState: VoiceSettingsActionState,
   formData: FormData
 ): Promise<VoiceSettingsActionState> {
-  const { settings } = await context();
+  const { settings, organisationId } = await context(formData);
   const confirmation = optionalText(formData, 'confirmation');
   return runSetAutomaticVoiceCallsAction(
     {
@@ -147,7 +150,7 @@ export async function setAutomaticVoiceCalls(
       }
     },
     {
-      organisationId: requiredText(formData, 'organisationId'),
+      organisationId,
       enabled: requiredText(formData, 'enabled') === 'true',
       ...(confirmation === null ? {} : { confirmation })
     }
@@ -155,9 +158,9 @@ export async function setAutomaticVoiceCalls(
 }
 
 export async function prepareVoiceTestCall(formData: FormData): Promise<void> {
-  const { testCalls } = await context();
+  const { testCalls, organisationId } = await context(formData);
   const result = await testCalls.prepare({
-    organisationId: requiredText(formData, 'organisationId'),
+    organisationId,
     invoiceNumber: requiredText(formData, 'invoiceNumber'),
     testNumber: requiredText(formData, 'testNumber'),
     idempotencyKey: requiredText(formData, 'idempotencyKey')
@@ -168,9 +171,9 @@ export async function prepareVoiceTestCall(formData: FormData): Promise<void> {
 }
 
 export async function approveVoiceTestCall(formData: FormData): Promise<void> {
-  const { testCalls } = await context();
+  const { testCalls, organisationId } = await context(formData);
   await testCalls.approveAndQueue({
-    organisationId: requiredText(formData, 'organisationId'),
+    organisationId,
     voiceCallId: requiredText(formData, 'voiceCallId'),
     idempotencyKey: requiredText(formData, 'idempotencyKey'),
     confirmed: formData.get('confirmed') === 'yes'

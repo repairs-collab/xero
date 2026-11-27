@@ -1,13 +1,15 @@
 import { NextRequest } from 'next/server';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const acceptPendingInvitations = vi.hoisted(() =>
   vi.fn(() => Promise.resolve())
 );
 const identity = vi.hoisted(() => {
   class SelfServiceIdentityConflict extends Error {}
+  class SelfServiceSignupClosed extends Error {}
   return {
     SelfServiceIdentityConflict,
+    SelfServiceSignupClosed,
     ensureSelfServiceIdentity: vi.fn(() =>
       Promise.resolve({ userId: 'user-1', created: true })
     )
@@ -62,13 +64,15 @@ import { GET } from './route.js';
 
 describe('Cognito callback', () => {
   beforeEach(() => {
+    vi.stubEnv('ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED', 'false');
     vi.clearAllMocks();
     identity.ensureSelfServiceIdentity.mockResolvedValue({
       userId: 'user-1',
-      created: true
+      created: false
     });
     hasCurrentLegalAcceptance.mockResolvedValue(true);
   });
+  afterEach(() => vi.unstubAllEnvs());
 
   it('requires current legal acceptance before entering the application', async () => {
     hasCurrentLegalAcceptance.mockResolvedValueOnce(false);
@@ -108,8 +112,38 @@ describe('Cognito callback', () => {
         subject: 'cognito-subject-1',
         email: 'owner@example.com',
         name: 'AccountPulse Owner'
-      }
+      },
+      { allowCreate: false }
     );
+  });
+
+  it('does not issue a session or accept invitations for a new subject while closed', async () => {
+    identity.ensureSelfServiceIdentity.mockRejectedValueOnce(
+      new identity.SelfServiceSignupClosed()
+    );
+    const response = await GET(new NextRequest(
+      'https://ap.motts.com.au/auth/callback?code=code-1&state=state-1'
+    ));
+
+    expect(response.headers.get('location')).toBe('https://billchaser.motts.com.au/start');
+    expect(response.headers.get('set-cookie')).toContain('bc5000_login=;');
+    expect(response.headers.get('set-cookie')).not.toContain('bc5000_session');
+    expect(acceptPendingInvitations).not.toHaveBeenCalled();
+    expect(hasCurrentLegalAcceptance).not.toHaveBeenCalled();
+  });
+
+  it('allows creation with the switch open and keeps the legal acceptance check', async () => {
+    vi.stubEnv('ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED', 'true');
+    identity.ensureSelfServiceIdentity.mockResolvedValueOnce({ userId: 'user-1', created: true });
+    hasCurrentLegalAcceptance.mockResolvedValueOnce(false);
+    const response = await GET(new NextRequest(
+      'https://ap.motts.com.au/auth/callback?code=code-1&state=state-1'
+    ));
+
+    expect(identity.ensureSelfServiceIdentity).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(), { allowCreate: true }
+    );
+    expect(response.headers.get('location')).toContain('/account/accept-terms?');
   });
 
   it('sends a different Cognito subject with an existing email to recovery', async () => {

@@ -22,6 +22,13 @@ export class SelfServiceIdentityConflict extends Error {
   }
 }
 
+export class SelfServiceSignupClosed extends Error {
+  constructor() {
+    super('SELF_SERVICE_SIGNUP_CLOSED');
+    this.name = 'SelfServiceSignupClosed';
+  }
+}
+
 const normaliseEmail = (email: string): string => email.trim().toLowerCase();
 
 const displayNameFor = (identity: SelfServiceIdentityInput): string => {
@@ -31,7 +38,8 @@ const displayNameFor = (identity: SelfServiceIdentityInput): string => {
 
 export async function ensureSelfServiceIdentity(
   database: Database,
-  identity: SelfServiceIdentityInput
+  identity: SelfServiceIdentityInput,
+  options: { allowCreate: boolean }
 ): Promise<SelfServiceIdentityResult> {
   const email = normaliseEmail(identity.email);
   const displayName = displayNameFor(identity);
@@ -65,6 +73,7 @@ export async function ensureSelfServiceIdentity(
     if (subjectOwner !== undefined || emailOwner !== undefined) {
       throw new SelfServiceIdentityConflict();
     }
+    if (!options.allowCreate) throw new SelfServiceSignupClosed();
 
     const [created] = await transaction
       .insert(users)

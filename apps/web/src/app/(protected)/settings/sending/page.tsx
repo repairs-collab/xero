@@ -33,7 +33,8 @@ import {
   getCustomerRolloutReadiness,
   liveActivationFeedback,
   LIVE_ACKNOWLEDGEMENT,
-  RECONCILIATION_ACKNOWLEDGEMENT
+  RECONCILIATION_ACKNOWLEDGEMENT,
+  type ReconciliationMetrics
 } from './sending-settings.js';
 
 type SearchParameters = Promise<
@@ -56,6 +57,50 @@ const HiddenOrganisationState = ({
     <input type="hidden" name="expectedVersion" value={version} />
   </>
 );
+
+function ReconcileXeroForm({
+  organisationId,
+  version,
+  syncId,
+  syncCompletedAt,
+  metrics,
+  legacy = false
+}: {
+  organisationId: string;
+  version: number;
+  syncId: string | null;
+  syncCompletedAt: Date | null;
+  metrics: ReconciliationMetrics;
+  legacy?: boolean;
+}) {
+  return (
+    <form className="settings-form" action={acknowledgeReconciliation}>
+      <HiddenOrganisationState organisationId={organisationId} version={version} />
+      {Object.entries({
+        syncId: syncId ?? '',
+        syncCompletedAt: syncCompletedAt?.toISOString() ?? '',
+        activeContactCount: metrics.activeContactCount,
+        outstandingInvoiceCount: metrics.outstandingInvoiceCount,
+        outstandingTotals: JSON.stringify(metrics.outstandingTotals),
+        generatedApprovalCount: metrics.generatedApprovalCount,
+        enabledSequenceCount: metrics.enabledSequenceCount,
+        allEnabledSequencesReview: String(metrics.allEnabledSequencesReview)
+      }).map(([name, value]) => (
+        <input key={name} type="hidden" name={name} value={value} />
+      ))}
+      {legacy && (
+        <label>
+          Type the exact reconciliation acknowledgement
+          <input name="acknowledgement" autoComplete="off"
+            placeholder={RECONCILIATION_ACKNOWLEDGEMENT} required />
+        </label>
+      )}
+      <button className="button button--primary">
+        {legacy ? 'Record reconciliation' : 'Figures match Xero'}
+      </button>
+    </form>
+  );
+}
 
 export default async function SendingSettingsPage({
   searchParams
@@ -85,6 +130,89 @@ export default async function SendingSettingsPage({
     organisationId,
     now
   });
+  const parameters = await searchParams;
+  const reconcile = organisation.operationalState === 'RECONCILIATION_REQUIRED' &&
+    organisation.lastSuccessfulSyncAt !== null && organisation.lastSuccessfulSyncId !== null;
+  const renderReconciliationForm = (legacy = false) => (
+    <ReconcileXeroForm
+      organisationId={organisationId}
+      version={organisation.operationalStateVersion}
+      syncId={organisation.lastSuccessfulSyncId}
+      syncCompletedAt={organisation.lastSuccessfulSyncAt}
+      metrics={readiness.metrics}
+      legacy={legacy}
+    />
+  );
+  if (onboarding !== null) {
+    const active = organisation.sendMode === 'live' && organisation.rolloutScope === 'CUSTOMER';
+    const canEnable = !active && onboarding.complete && readiness.readyForCustomerAcknowledgement;
+    const feedback = rolloutFeedback(firstParameter(parameters.rollout), {
+      sendMode: organisation.sendMode,
+      rolloutScope: organisation.rolloutScope,
+      operationalState: organisation.operationalState,
+      reconciliationCurrent: readiness.gates.reconciliationCurrent.passed
+    });
+    const showReconciliation = reconcile && readiness.gates.syncFresh.passed &&
+      readiness.gates.resetIdle.passed;
+    const needsSync = !readiness.gates.syncFresh.passed ||
+      (!showReconciliation && !readiness.gates.reconciliationCurrent.passed);
+    return (
+      <div className="page-stack sending-controls-page">
+        <a className="back-link" href="/settings">← Settings</a>
+        <header className="page-heading">
+          <h1>Customer sending</h1>
+          <p>Manage whether AccountPulse can send your reminders.</p>
+        </header>
+        {feedback?.tone === 'error' && (
+          <div className="callout callout--warning" role="alert">
+            <strong>{feedback.title}</strong>
+            <p>Review your setup and try again.</p>
+          </div>
+        )}
+        <section className="panel rollout-action-panel">
+          <h2>{active ? 'Customer sending is enabled' : 'Customer sending is off'}</h2>
+          <p>{active
+            ? 'Reminders follow the approval and delivery rules in your sequences.'
+            : 'AccountPulse skips delivery for reminders processed while sending is off.'}</p>
+          {active ? (
+            <form className="settings-form" action={disableAllProviderSending}>
+              <HiddenOrganisationState organisationId={organisationId}
+                version={organisation.operationalStateVersion} />
+              <input type="hidden" name="reason" value="Paused from Customer sending" />
+              <button className="button button--secondary">Pause sending</button>
+            </form>
+          ) : canEnable ? (
+            <form className="settings-form" action={activateCustomerRollout}>
+              <HiddenOrganisationState organisationId={organisationId}
+                version={organisation.operationalStateVersion} />
+              <button className="button button--primary">Enable customer sending</button>
+            </form>
+          ) : !showReconciliation && (
+            <div className="button-row">
+              {needsSync && (
+                <a className="button" href="/settings/integrations">Check Xero and sync</a>
+              )}
+              <a className="button" href="/onboarding">Review setup</a>
+            </div>
+          )}
+          {active && needsSync && (
+            <a className="button" href="/settings/integrations">Check Xero and sync</a>
+          )}
+        </section>
+        {showReconciliation && (
+          <>
+            <ReconciliationSummary metrics={readiness.metrics}
+              syncCompletedAt={organisation.lastSuccessfulSyncAt} reconciliationCurrent={false} />
+            <section className="panel rollout-action-panel">
+              <h2>Confirm the invoice totals</h2>
+              <p>Compare these figures with your latest receivables in Xero.</p>
+              {renderReconciliationForm()}
+            </section>
+          </>
+        )}
+      </div>
+    );
+  }
   const [latestResetRun] = await database
     .select({
       id: operationalResetRuns.id,
@@ -97,7 +225,6 @@ export default async function SendingSettingsPage({
     .where(eq(operationalResetRuns.organisationId, organisationId))
     .orderBy(desc(operationalResetRuns.requestedAt))
     .limit(1);
-  const parameters = await searchParams;
   const feedback =
     rolloutFeedback(firstParameter(parameters.rollout), {
       sendMode: organisation.sendMode,
@@ -115,15 +242,10 @@ export default async function SendingSettingsPage({
   );
   const reconciliationCurrent =
     readiness.gates.reconciliationCurrent.passed;
-  const canAcknowledgeReconciliation =
-    organisation.operationalState === 'RECONCILIATION_REQUIRED' &&
-    organisation.lastSuccessfulSyncAt !== null &&
-    organisation.lastSuccessfulSyncId !== null;
   const canRequestCustomerRollout =
     organisation.sendMode === 'live' &&
     organisation.rolloutScope === 'CONTROLLED' &&
-    organisation.operationalState === 'RECONCILED' &&
-    (onboarding === null || onboarding.complete);
+    organisation.operationalState === 'RECONCILED';
   const canOverrideCustomerRollout =
     organisation.edition === 'INTERNAL_LEGACY' &&
     organisation.rolloutScope === 'CONTROLLED' &&
@@ -156,18 +278,6 @@ export default async function SendingSettingsPage({
           )}
         </div>
       </header>
-      {onboarding !== null && !onboarding.complete && (
-        <section className="callout callout--warning">
-          <strong>Finish Solo onboarding before Customer live</strong>
-          <p>
-            Activate your subscription and complete SMS setup and the remaining
-            onboarding steps before you enable Customer live.
-          </p>
-          <a className="button" href="/onboarding">
-            Open onboarding
-          </a>
-        </section>
-      )}
       {feedback !== null && (
         <div
           className={`sending-feedback sending-feedback--${feedback.tone}`}
@@ -210,7 +320,7 @@ export default async function SendingSettingsPage({
         reconciliationCurrent={reconciliationCurrent}
       />
 
-      {canAcknowledgeReconciliation && (
+      {reconcile && (
         <section className="panel rollout-action-panel">
           <span className="eyebrow">Reconciliation approval</span>
           <h2>Confirm these figures match Xero</h2>
@@ -218,64 +328,7 @@ export default async function SendingSettingsPage({
             This acknowledgement is tied to the successful sync shown above.
             Another sync will invalidate it.
           </p>
-          <form className="settings-form" action={acknowledgeReconciliation}>
-            <HiddenOrganisationState
-              organisationId={organisationId}
-              version={organisation.operationalStateVersion}
-            />
-            <input
-              type="hidden"
-              name="syncId"
-              value={organisation.lastSuccessfulSyncId ?? undefined}
-            />
-            <input
-              type="hidden"
-              name="syncCompletedAt"
-              value={organisation.lastSuccessfulSyncAt?.toISOString()}
-            />
-            <input
-              type="hidden"
-              name="activeContactCount"
-              value={readiness.metrics.activeContactCount}
-            />
-            <input
-              type="hidden"
-              name="outstandingInvoiceCount"
-              value={readiness.metrics.outstandingInvoiceCount}
-            />
-            <input
-              type="hidden"
-              name="outstandingTotals"
-              value={JSON.stringify(readiness.metrics.outstandingTotals)}
-            />
-            <input
-              type="hidden"
-              name="generatedApprovalCount"
-              value={readiness.metrics.generatedApprovalCount}
-            />
-            <input
-              type="hidden"
-              name="enabledSequenceCount"
-              value={readiness.metrics.enabledSequenceCount}
-            />
-            <input
-              type="hidden"
-              name="allEnabledSequencesReview"
-              value={String(readiness.metrics.allEnabledSequencesReview)}
-            />
-            <label>
-              Type the exact reconciliation acknowledgement
-              <input
-                name="acknowledgement"
-                autoComplete="off"
-                placeholder={RECONCILIATION_ACKNOWLEDGEMENT}
-                required
-              />
-            </label>
-            <button className="button button--primary">
-              Record reconciliation
-            </button>
-          </form>
+          {renderReconciliationForm(true)}
         </section>
       )}
 

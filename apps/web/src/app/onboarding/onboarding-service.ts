@@ -1,4 +1,4 @@
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 
 import { authorise, type AppSession } from '@bc5000/auth';
 import { hasPaidSubscriptionAccess } from '@bc5000/domain';
@@ -8,7 +8,6 @@ import {
   organisationOnboarding,
   type OperationalState,
   organisations,
-  outboundMessages,
   reminderSequences,
   smsNumberPool,
   subscriptions,
@@ -21,8 +20,6 @@ export type OnboardingStepKey =
   | 'XERO_CONNECTED'
   | 'SYNC_RECONCILED'
   | 'BUSINESS_DETAILS'
-  | 'ADMIN_MOBILE_VERIFIED'
-  | 'TEST_SMS_COMPLETED'
   | 'SEQUENCE_REVIEWED'
   | 'SUBSCRIPTION_ACTIVE'
   | 'REPLY_NUMBER_READY';
@@ -35,7 +32,6 @@ export interface OnboardingEvidence {
   businessDetailsCompletedAt: Date | null;
   adminMobile: string | null;
   adminMobileVerifiedAt: Date | null;
-  acceptedTestSmsParts: number;
   sequenceCount: number;
   allSequencesInReview: boolean;
   sequenceReviewedAt: Date | null;
@@ -124,16 +120,6 @@ export const createPostgresOnboardingRepository = (
       .from(xeroConnections)
       .where(eq(xeroConnections.organisationId, organisationId))
       .limit(1);
-    const acceptedTests = await database
-      .select({ id: outboundMessages.id })
-      .from(outboundMessages)
-      .where(
-        and(
-          eq(outboundMessages.organisationId, organisationId),
-          eq(outboundMessages.source, 'TEST_SMS'),
-          inArray(outboundMessages.status, ['ACCEPTED', 'DELIVERED'])
-        )
-      );
     const sequences = await database
       .select({ mode: reminderSequences.mode })
       .from(reminderSequences)
@@ -162,7 +148,6 @@ export const createPostgresOnboardingRepository = (
       adminMobile: verifiedMobile?.number ?? base.adminMobile,
       adminMobileVerifiedAt:
         verifiedMobile?.verifiedAt ?? base.adminMobileVerifiedAt,
-      acceptedTestSmsParts: acceptedTests.length,
       sequenceCount: sequences.length,
       allSequencesInReview:
         sequences.length > 0 && sequences.every((row) => row.mode === 'REVIEW'),
@@ -315,24 +300,9 @@ export const deriveOnboardingStatus = (
       complete: input.businessDetailsCompletedAt !== null
     },
     {
-      key: 'ADMIN_MOBILE_VERIFIED',
-      label: 'Verify the Administrator mobile',
-      description: 'Verify an Australian mobile for test messages.',
-      href: '/settings/test-sms',
-      complete: verifiedAustralianMobile(input)
-    },
-    {
-      key: 'TEST_SMS_COMPLETED',
-      label: 'Complete a test SMS',
-      description: 'Send at least one accepted test to the verified mobile.',
-      href: '/settings/test-sms',
-      complete:
-        verifiedAustralianMobile(input) && input.acceptedTestSmsParts > 0
-    },
-    {
       key: 'SEQUENCE_REVIEWED',
       label: 'Review reminder sequences',
-      description: 'Keep every sequence in Review mode for first use.',
+      description: 'Set up at least one sequence and keep each one in Review mode for first use.',
       href: '/sequences',
       complete:
         input.sequenceReviewedAt !== null &&
@@ -350,11 +320,9 @@ export const deriveOnboardingStatus = (
     {
       key: 'REPLY_NUMBER_READY',
       label: 'Set up SMS sending',
-      description: sharedSmsReady
-        ? 'AccountPulse uses shared SMS numbers and routes replies to your workspace inbox.'
-        : input.replyNumberStatus === 'READY'
-          ? 'Your AccountPulse reply number is ready.'
-          : 'AccountPulse will enable SMS sending for your workspace. Contact support if setup stays pending.',
+      description: sharedSmsReady || input.replyNumberStatus === 'READY'
+        ? 'SMS replies will appear in your Inbox.'
+        : 'The AccountPulse team will set up SMS sending for your workspace.',
       href: '/settings/sending',
       complete: sharedSmsReady || input.replyNumberStatus === 'READY'
     }

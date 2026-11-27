@@ -20,7 +20,6 @@ const evidence = (
   businessDetailsCompletedAt: now,
   adminMobile: '+61412345678',
   adminMobileVerifiedAt: now,
-  acceptedTestSmsParts: 1,
   sequenceCount: 1,
   allSequencesInReview: true,
   sequenceReviewedAt: now,
@@ -34,29 +33,26 @@ const evidence = (
   ...overrides
 });
 describe('AccountPulse Solo onboarding evidence', () => {
-  it('returns the ordered eight-step checklist', () => {
-    const status = deriveOnboardingStatus(evidence());
+  it('completes the customer checklist without a test SMS or a separate mobile verification', () => {
+    const status = deriveOnboardingStatus(evidence({
+      adminMobile: null,
+      adminMobileVerifiedAt: null
+    }), now);
 
     expect(status.steps.map((step) => step.key)).toEqual([
       'XERO_CONNECTED',
       'SYNC_RECONCILED',
       'BUSINESS_DETAILS',
-      'ADMIN_MOBILE_VERIFIED',
-      'TEST_SMS_COMPLETED',
       'SEQUENCE_REVIEWED',
       'SUBSCRIPTION_ACTIVE',
       'REPLY_NUMBER_READY'
     ]);
     expect(status.steps.every((step) => step.complete)).toBe(true);
     expect(
-      status.steps.find((step) => step.key === 'ADMIN_MOBILE_VERIFIED')
-        ?.description
-    ).toBe('Verify an Australian mobile for test messages.');
-    expect(
       status.steps.find((step) => step.key === 'SUBSCRIPTION_ACTIVE')
         ?.description
     ).toBe('Pay securely through Stripe to activate AccountPulse.');
-    expect(status).toMatchObject({ completedCount: 8, complete: true });
+    expect(status).toMatchObject({ completedCount: 6, complete: true });
   });
 
   it('derives protected steps from operational evidence instead of timestamps alone', () => {
@@ -64,8 +60,6 @@ describe('AccountPulse Solo onboarding evidence', () => {
       xeroConnectionStatus: 'DISCONNECTED',
       operationalState: 'READY',
       latestReconciledSyncAt: null,
-      adminMobile: '+61350324518',
-      acceptedTestSmsParts: 0,
       subscriptionStatus: 'TRIALING',
       trialEndsAt: new Date('2026-11-24T00:00:00.000Z'),
       replyNumberStatus: null
@@ -79,12 +73,17 @@ describe('AccountPulse Solo onboarding evidence', () => {
     expect(byKey).toMatchObject({
       XERO_CONNECTED: false,
       SYNC_RECONCILED: false,
-      ADMIN_MOBILE_VERIFIED: false,
-      TEST_SMS_COMPLETED: false,
       SUBSCRIPTION_ACTIVE: false,
       REPLY_NUMBER_READY: false
     });
     expect(status.complete).toBe(false);
+  });
+
+  it('still requires a ready SMS sender and accepts an existing shared sender link', () => {
+    const noSender = evidence({ replyNumberStatus: null });
+    expect(deriveOnboardingStatus(noSender, now).complete).toBe(false);
+    expect(deriveOnboardingStatus({ ...noSender, sharedSenderLinkedAt: now }, now).complete)
+      .toBe(true);
   });
 
   it.each([

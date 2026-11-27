@@ -62,11 +62,11 @@ const createPublisher = () =>
   ({ publish: vi.fn(() => Promise.resolve(randomUUID())) }) satisfies JobPublisher;
 
 describe('test SMS queue service', () => {
-  it('shows the Test SMS settings card only to Administrators', () => {
-    expect(settingsCardsForRole('ADMIN').map((card) => card.href)).toContain(
+  it('shows the Test SMS settings card only to legacy Administrators', () => {
+    expect(settingsCardsForRole('ADMIN', 'INTERNAL_LEGACY').map((card) => card.href)).toContain(
       '/settings/test-sms'
     );
-    expect(settingsCardsForRole('OPERATOR').map((card) => card.href)).not.toContain(
+    expect(settingsCardsForRole('OPERATOR', 'INTERNAL_LEGACY').map((card) => card.href)).not.toContain(
       '/settings/test-sms'
     );
   });

@@ -2,7 +2,9 @@ import { randomUUID } from 'node:crypto';
 
 import { headers } from 'next/headers';
 import Link from 'next/link';
+import { redirect } from 'next/navigation';
 
+import { authorise } from '@bc5000/auth';
 import { PostgresVoiceCallRepository } from '@bc5000/db/web';
 
 import { getJobQueue } from '../../../../server/job-runtime.js';
@@ -14,6 +16,7 @@ import {
   requireWebSession,
   verifyVoicePreviewSession
 } from '../../../../server/runtime.js';
+import { loadSettingsWorkspaceEdition } from '../settings-workspace.js';
 import {
   approveVoiceTestCall,
   prepareVoiceTestCall
@@ -29,7 +32,6 @@ export default async function VoiceSettingsPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const query = await searchParams;
   const session = await requireWebSession(
     new Request('http://localhost/', { headers: await headers() })
   );
@@ -37,7 +39,12 @@ export default async function VoiceSettingsPage({
   if (organisationId === undefined) {
     throw new Error('No active organisation membership');
   }
+  authorise(session, 'voice-settings.manage', organisationId);
   const database = getDatabaseClient().db;
+  if (await loadSettingsWorkspaceEdition(database, organisationId) !== 'INTERNAL_LEGACY') {
+    redirect('/settings');
+  }
+  const query = await searchParams;
   const clock = createServerClock();
   const settingsService = createVoiceSettingsService({
     database,

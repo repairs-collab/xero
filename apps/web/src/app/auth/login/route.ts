@@ -5,6 +5,7 @@ import {
   createCognitoTransactionCookie
 } from '@bc5000/auth';
 
+import { isPublicSignupEnabled } from '../../../server/public-signup.js';
 import {
   getCognitoConfiguration,
   getSessionSecret
@@ -17,13 +18,17 @@ const safeReturnTo = (value: string | null): string =>
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const signUp = request.nextUrl.searchParams.get('mode') === 'signup';
+  const configuration = getCognitoConfiguration();
+  if (signUp && !isPublicSignupEnabled()) {
+    return NextResponse.redirect(new URL('/start', configuration.redirectUri), 303);
+  }
   const login = createCognitoAuthorizationRequest(
-    getCognitoConfiguration(),
+    configuration,
     {
       returnTo: signUp
         ? '/onboarding'
         : safeReturnTo(request.nextUrl.searchParams.get('returnTo')),
-      ...(signUp ? { screenHint: 'signup' as const } : {})
+      ...(signUp ? { mode: 'signup' as const } : {})
     }
   );
   const response = NextResponse.redirect(login.url);

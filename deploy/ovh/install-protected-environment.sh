@@ -185,6 +185,7 @@ fi
 
 declare -A commercial_names=(
   [ACCOUNT_PULSE_LEGAL_ENTITY]=true
+  [ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED]=true
   [ACCOUNT_PULSE_SUPPORT_EMAIL]=true
   [DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION]=true
   [DEBT_CONTACT_HOLIDAY_COVERAGE_END]=true
@@ -199,7 +200,8 @@ declare -A commercial_names=(
   [STRIPE_SMS_OVERAGE_PRICE_ID]=true
   [STRIPE_PORTAL_CONFIGURATION_ID]=true
 )
-declare -A commercial_seen=()
+configuration[ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED]=false
+declare -A commercial_seen=([ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED]=true)
 while IFS= read -r line || [[ -n "$line" ]]; do
   [[ -z "$line" ]] && continue
   [[ "$line" == *=* ]] || {
@@ -219,6 +221,11 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   configuration["$name"]=$value
   commercial_seen["$name"]=true
 done < "$COMMERCIAL_ENV"
+
+case "${configuration[ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED]}" in
+  true|false) ;;
+  *) echo 'ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED must be true or false.' >&2; exit 65 ;;
+esac
 
 for name in "${!commercial_names[@]}"; do
   [[ ${commercial_seen[$name]+present} ]] || {
