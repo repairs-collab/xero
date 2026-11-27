@@ -99,7 +99,11 @@ describe('inbound reply recovery', () => {
         organisationId: 'workspace',
         accountId,
         resetCompletedAt: new Date('2026-10-05T01:02:03Z'),
-        resolveSharedEvent: () => Promise.resolve({ kind: 'pending' }),
+        resolveSharedEvent: (event) => Promise.resolve(
+          event.replyId === 'invalid-date'
+            ? { kind: 'shared', organisationId: 'workspace', contactId: 'contact' }
+            : { kind: 'pending' }
+        ),
         importReply
       })
     });

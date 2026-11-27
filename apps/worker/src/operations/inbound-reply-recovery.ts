@@ -14,8 +14,8 @@ interface InboundReplyRecoveryProcessorDependencies {
   organisationId: string;
   accountId: string | undefined;
   resetCompletedAt: Date | null | undefined;
-  resolveSharedEvent(event: SinchReplyEvent): Promise<SinchSharedRoute>;
-  importReply(event: SinchReplyEvent): Promise<void>;
+  resolveSharedEvent: (event: SinchReplyEvent) => Promise<SinchSharedRoute>;
+  importReply: (event: SinchReplyEvent) => Promise<void>;
 }
 
 export function createInboundReplyRecoveryProcessor({
