@@ -1,0 +1,75 @@
+name: Stage AccountPulse operations mail setup helper
+
+on:
+  push:
+    branches: [codex/accountpulse-mail-setup]
+    paths:
+      - .github/workflows/stage-operations-mail-setup.yml
+      - deploy/ovh/setup-operations-mail.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: accountpulse-ovh-release
+  cancel-in-progress: false
+
+jobs:
+  stage-helper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    environment: production
+    env:
+      OVH_HOST: ${{ vars.OVH_HOST }}
+      OVH_PORT: ${{ vars.OVH_PORT }}
+      OVH_USER: ${{ vars.OVH_USER }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Check interactive helper syntax
+        run: python3 -m py_compile deploy/ovh/setup-operations-mail.py
+      - name: Install existing pinned SSH access
+        env:
+          OVH_SSH_PRIVATE_KEY: ${{ secrets.OVH_SSH_PRIVATE_KEY }}
+          OVH_SSH_HOST_KEY: ${{ secrets.OVH_SSH_HOST_KEY }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$OVH_SSH_PRIVATE_KEY" > ~/.ssh/id_accountpulse
+          printf '%s\n' "$OVH_SSH_HOST_KEY" > ~/.ssh/known_hosts
+      - name: Stage one root-only helper without activating mail
+        run: |
+          set -Eeuo pipefail
+          stage=$(cat <<'REMOTE'
+          sudo -n -- /usr/bin/python3 -c '
+          import os
+          import sys
+          import tempfile
+
+          if os.geteuid() != 0:
+              raise SystemExit("MAIL_SETUP_STAGING_ROOT_REQUIRED")
+          payload = sys.stdin.buffer.read(32769)
+          if len(payload) > 32768 or not payload.startswith(b"#!/usr/bin/python3\n"):
+              raise SystemExit("MAIL_SETUP_STAGING_INVALID_HELPER")
+          try:
+              with tempfile.NamedTemporaryFile(dir="/run", prefix=".ap-mail-setup-") as draft:
+                  draft.write(payload)
+                  draft.flush()
+                  os.fchown(draft.fileno(), 0, 0)
+                  os.fchmod(draft.fileno(), 0o700)
+                  os.fsync(draft.fileno())
+                  os.link(draft.name, "/run/ap-mail-setup")
+          except FileExistsError:
+              raise SystemExit("MAIL_SETUP_HELPER_ALREADY_STAGED")
+          except OSError:
+              raise SystemExit("MAIL_SETUP_STAGING_FAILED")
+          print("MAIL_SETUP_HELPER_STAGED")
+          '
+          REMOTE
+          )
+          ssh -T -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -o GlobalKnownHostsFile=/dev/null \
+            -o ConnectTimeout=8 -i ~/.ssh/id_accountpulse -p "$OVH_PORT" "$OVH_USER@$OVH_HOST" \
+            "$stage" < deploy/ovh/setup-operations-mail.py
