@@ -5,7 +5,9 @@ umask 077
 DEPLOY_ROOT=${ACCOUNT_PULSE_REPAIR_DEPLOY_ROOT:-/opt/bc5000}
 WORKER=bc5000-worker
 HEALTHCHECK='["CMD","node","/app/worker-healthcheck.mjs"]'
-INSPECT_FORMAT='{{.Id}}|{{.Image}}|{{.Config.Image}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Running}}|{{.State.Restarting}}|{{.RestartCount}}|{{.State.StartedAt}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{else}}none{{end}}'
+ENTRYPOINT='["node","/app/container-entrypoint.mjs"]'
+COMMAND='["node","/app/worker.mjs"]'
+INSPECT_FORMAT='{{.Id}}|{{.Image}}|{{.Config.Image}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Running}}|{{.State.Restarting}}|{{.RestartCount}}|{{.State.StartedAt}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{else}}none{{end}}|{{json .Config.Entrypoint}}|{{json .Config.Cmd}}'
 
 # The existing local file is also held by the protected release and rollback.
 exec 9<"$DEPLOY_ROOT/.release.lock"
@@ -153,18 +155,20 @@ SQL
 }
 
 inspect_worker() {
-  local details test compose_project compose_service state restarting
+  local details test compose_project compose_service state restarting entrypoint command
   health=UNVERIFIED
+  restarts=''
   details=$(timeout 5s docker container inspect --format "$INSPECT_FORMAT" "$WORKER" 2>/dev/null) || {
     health=DOWN
     return 1
   }
   [[ "$details" != *$'\n'* ]] || return 1
-  IFS='|' read -r worker_id image_id image compose_project compose_service state restarting restarts started_at health_status test <<< "$details"
+  IFS='|' read -r worker_id image_id image compose_project compose_service state restarting restarts started_at health_status test entrypoint command <<< "$details"
   [[ "$worker_id" =~ ^[0-9a-f]{64}$ &&
      "$image_id" =~ ^sha256:[0-9a-f]{64}$ &&
      "$image" == "$expected_tag" && "$compose_project" == bc5000 &&
      "$compose_service" == worker && "$test" == "$HEALTHCHECK" &&
+     "$entrypoint" == "$ENTRYPOINT" && "$command" == "$COMMAND" &&
      "$image_id" == "$expected_image_id" && "$restarts" =~ ^[0-9]+$ ]] || return 1
   if [[ "$state" != true || "$restarting" != false ]]; then
     health=DOWN
@@ -238,11 +242,13 @@ deadline=$((SECONDS + 45))
 while (( SECONDS < deadline )); do
   if inspect_worker; then
     if [[ "$worker_id" != "$previous_worker_id" || "$restarts" != 0 ]]; then
-      finish SKIPPED CORRECTED_RELEASE_REQUIRED
+      finish FAILED CORRECTED_RELEASE_REQUIRED
     fi
     if [[ "$health" == HEALTHY && "$started_at" != "$previous_worker_start" ]]; then
       finish SUCCEEDED RESTARTED_HEALTHY
     fi
+  elif [[ "$health" == UNVERIFIED || "$restarts" =~ ^[1-9][0-9]*$ ]]; then
+    finish FAILED CORRECTED_RELEASE_REQUIRED
   fi
   sleep 2
 done

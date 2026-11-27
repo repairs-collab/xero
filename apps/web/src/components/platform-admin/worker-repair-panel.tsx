@@ -16,7 +16,7 @@ const statusLabels: Record<WorkerRepairRequestView['status'], string> = {
 };
 
 const resultLabels: Record<NonNullable<WorkerRepairRequestView['resultCode']>, string> = {
-  ALREADY_HEALTHY: 'The worker already passed the readiness check.',
+  ALREADY_HEALTHY: 'The worker passed its readiness check. If SMS is delayed, check the sequence time and its permitted contact window.',
   STARTUP_IN_PROGRESS: 'The worker is starting. Refresh repair status after startup.',
   RESTARTED_HEALTHY: 'Worker restarted and passed the readiness check.',
   CORRECTED_RELEASE_REQUIRED: 'The worker image needs a corrected release.',

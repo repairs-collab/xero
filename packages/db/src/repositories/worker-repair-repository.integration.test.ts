@@ -21,14 +21,16 @@ const operator = randomUUID();
 
 beforeAll(async () => {
   await migrateDatabase(client.db);
-  await client.db.insert(users).values([owner, anotherOwner, disabledOwner, operator].map((id) => ({
-    id,
-    email: `${id}@example.invalid`,
-    cognitoSubject: id,
-    displayName: 'Worker repair test user',
-    platformRole: id === operator ? null : 'OWNER',
-    disabledAt: id === disabledOwner ? new Date() : null
-  })));
+  const testUsers = [owner, anotherOwner, disabledOwner, operator]
+    .map<typeof users.$inferInsert>((id) => ({
+      id,
+      email: `${id}@example.invalid`,
+      cognitoSubject: id,
+      displayName: 'Worker repair test user',
+      platformRole: id === operator ? null : 'OWNER',
+      disabledAt: id === disabledOwner ? new Date() : null
+    }));
+  await client.db.insert(users).values(testUsers);
 });
 
 afterAll(async () => {
@@ -70,8 +72,14 @@ describe('owner worker repair requests', () => {
     expect(await loadLatestWorkerRepair(client.db)).toMatchObject({ status: 'PENDING', resultCode: null });
 
     await client.db.update(workerRepairRequests)
-      .set({ status: 'SKIPPED', resultCode: 'ALREADY_HEALTHY', completedAt: sql`now()` })
+      .set({
+        status: 'FAILED', resultCode: 'CORRECTED_RELEASE_REQUIRED',
+        claimedAt: sql`now()`, claimExpiresAt: sql`now() + interval '2 minutes'`, completedAt: sql`now()`,
+        beforeHealth: 'UNHEALTHY', afterHealth: 'DOWN'
+      })
       .where(eq(workerRepairRequests.id, requestId));
+    expect(await loadLatestWorkerRepair(client.db))
+      .toMatchObject({ status: 'FAILED', resultCode: 'CORRECTED_RELEASE_REQUIRED', afterHealth: 'DOWN' });
     expect(await requestWorkerRepair(client.db, owner, randomUUID())).toBe('COOLDOWN');
     await client.db.update(workerRepairRunner).set({ lastSeenAt: sql`now() - interval '3 minutes'` });
     expect(await requestWorkerRepair(client.db, owner, requestId)).toBe('ALREADY_REQUESTED');

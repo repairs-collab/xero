@@ -50,7 +50,7 @@ export const workerRepairRequests = pgTable('worker_repair_requests', {
     or (${table.status} = 'RUNNING' and ${table.claimedAt} is not null and ${table.completedAt} is null and ${table.resultCode} is null)
     or (${table.status} = 'SUCCEEDED' and ${table.claimedAt} is not null and ${table.completedAt} is not null and ${table.resultCode} = 'RESTARTED_HEALTHY' and ${table.resultCode} is not null)
     or (${table.status} = 'SKIPPED' and ${table.completedAt} is not null and ${table.resultCode} in ('ALREADY_HEALTHY', 'STARTUP_IN_PROGRESS', 'CORRECTED_RELEASE_REQUIRED', 'SEND_BACKLOG_REVIEW_REQUIRED', 'OWNER_REVOKED') and ${table.resultCode} is not null)
-    or (${table.status} = 'FAILED' and ${table.claimedAt} is not null and ${table.completedAt} is not null and ${table.resultCode} in ('RESTART_FAILED', 'HEALTH_TIMEOUT', 'SERVICE_UNAVAILABLE') and ${table.resultCode} is not null)
+    or (${table.status} = 'FAILED' and ${table.claimedAt} is not null and ${table.completedAt} is not null and ${table.resultCode} in ('CORRECTED_RELEASE_REQUIRED', 'RESTART_FAILED', 'HEALTH_TIMEOUT', 'SERVICE_UNAVAILABLE') and ${table.resultCode} is not null)
     or (${table.status} = 'EXPIRED' and ${table.completedAt} is not null and ${table.resultCode} in ('EXPIRED_BEFORE_START', 'EXPIRED_AFTER_CLAIM') and ${table.resultCode} is not null)
   `),
   check('worker_repair_requests_claim_ck', sql`

@@ -39,6 +39,9 @@ case "$1" in
         printf '%s\n' CLEAR
       fi
     elif [[ "$statement" == *"RETURNING 'RECORDED'"* ]]; then
+      if [[ "$CASE" == post_restart_crash ]]; then
+        [[ " $* " == *' status=FAILED '* ]]
+      fi
       [[ "$CASE" == expired_completion ]] || printf '%s\n' RECORDED
     else
       exit 77
@@ -53,24 +56,34 @@ case "$1" in
     esac
     expected_healthcheck='["CMD","node","/app/worker-healthcheck.mjs"]'
     [[ "$CASE" != old_image ]] || expected_healthcheck=none
+    command='["node","/app/worker.mjs"]'
+    [[ "$CASE" != overridden_command ]] || command='["sh","-c","other-command"]'
     case "$CASE" in
       healthy|expired_completion) health=healthy ;;
       *) health=unhealthy ;;
     esac
     started=2026-11-27T03:00:00Z
+    restarting=false
+    restarts=0
     if [[ -e "$STARTED_FILE" ]]; then
       started=2026-11-27T03:15:00Z
       health=healthy
+      if [[ "$CASE" == post_restart_crash ]]; then
+        restarting=true
+        restarts=1
+      fi
     fi
-    printf '%s|%s|accountpulse-worker:%s|%s|worker|true|false|0|%s|%s|%s\n' \
-      "$CONTAINER_ID" "$IMAGE_ID" "$SHA" "$project" "$started" "$health" "$expected_healthcheck"
+    printf '%s|%s|accountpulse-worker:%s|%s|worker|true|%s|%s|%s|%s|%s|%s|%s\n' \
+      "$CONTAINER_ID" "$IMAGE_ID" "$SHA" "$project" "$restarting" "$restarts" "$started" "$health" "$expected_healthcheck" \
+      '["node","/app/container-entrypoint.mjs"]' "$command"
     ;;
   logs)
     [[ "${*: -1}" == bc5000-worker ]]
     [[ "$CASE" != missing_dependency ]] || printf 'Error: Cannot find module stripe\n'
     ;;
   restart)
-    [[ "$CASE" == safe_restart && "${*: -1}" == "$CONTAINER_ID" && ! -e "$STARTED_FILE" ]]
+    [[ "$CASE" == safe_restart || "$CASE" == post_restart_crash ]]
+    [[ "${*: -1}" == "$CONTAINER_ID" && ! -e "$STARTED_FILE" ]]
     touch "$STARTED_FILE"
     ;;
   *) exit 77 ;;
@@ -87,6 +100,7 @@ test_result() {
 test_result healthy ALREADY_HEALTHY
 test_result old_image CORRECTED_RELEASE_REQUIRED
 test_result wrong_container CORRECTED_RELEASE_REQUIRED
+test_result overridden_command CORRECTED_RELEASE_REQUIRED
 test_result missing_dependency CORRECTED_RELEASE_REQUIRED
 test_result revoked OWNER_REVOKED
 test_result old_calculation SEND_BACKLOG_REVIEW_REQUIRED
@@ -104,4 +118,7 @@ grep -Fx WORKER_REPAIR_RESULT_WRITE_FAILED "$fixture/expired"
 ) 8<"$ACCOUNT_PULSE_REPAIR_DEPLOY_ROOT/.release.lock"
 
 CASE=safe_restart bash "$SCRIPT_DIR/run-worker-repair.sh" | grep -Fx WORKER_REPAIR_RESTARTED_HEALTHY
+[[ -e "$STARTED_FILE" ]]
+rm -- "$STARTED_FILE"
+CASE=post_restart_crash bash "$SCRIPT_DIR/run-worker-repair.sh" | grep -Fx WORKER_REPAIR_CORRECTED_RELEASE_REQUIRED
 [[ -e "$STARTED_FILE" ]]
