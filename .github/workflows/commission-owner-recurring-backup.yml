@@ -1,0 +1,114 @@
+name: Commission AccountPulse encrypted backups
+
+on:
+  push:
+    branches: [codex/accountpulse-recurring-backup]
+    paths: [.github/owner-recurring-backup.request]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: accountpulse-ovh-release
+  cancel-in-progress: false
+
+jobs:
+  commission:
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    environment: production
+    env:
+      OVH_HOST: ${{ vars.OVH_HOST }}
+      OVH_PORT: ${{ vars.OVH_PORT }}
+      OVH_USER: ${{ vars.OVH_USER }}
+      OVH_DEPLOY_PATH: ${{ vars.OVH_DEPLOY_PATH }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Verify the reviewed backup code locally
+        run: |
+          set -Eeuo pipefail
+          bash -n deploy/ovh/install-owner-recurring-backup.sh
+          python3 -B deploy/ovh/owner-recurring-backup.test.py
+          python3 -B deploy/ovh/commission-owner-recurring-backup.test.py
+      - name: Commission the backup or enable its verified timer
+        env:
+          OVH_SSH_PRIVATE_KEY: ${{ secrets.OVH_SSH_PRIVATE_KEY }}
+          OVH_SSH_HOST_KEY: ${{ secrets.OVH_SSH_HOST_KEY }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          work=$(mktemp -d)
+          trap 'rm -f -- "$work/age.tar.gz" "$work/age" "$work/age-recipient" "$work/reader.pub" "$work/root.py" "$work/ssh-key" "$work/known_hosts"; rmdir -- "$work"' EXIT
+          [[ "$OVH_DEPLOY_PATH" == /opt/bc5000 &&
+             "$OVH_HOST" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ &&
+             "$OVH_USER" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]*$ &&
+             "$OVH_PORT" =~ ^[1-9][0-9]{0,4}$ ]] && (( OVH_PORT <= 65535 )) ||
+            { echo 'Invalid protected production SSH settings.' >&2; exit 65; }
+
+          mapfile -t request < <(tr -d '\r' < .github/owner-recurring-backup.request)
+          if [[ ${#request[@]} == 1 && "${request[0]}" == enable ]]; then
+            operation=enable
+          elif [[ ${#request[@]} == 2 &&
+                  "${request[0]}" =~ ^age1[0-9a-z]{58}$ &&
+                  "${request[1]}" =~ ^ssh-ed25519\ AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}$ ]]; then
+            operation=install
+            printf '%s\n' "${request[0]}" > "$work/age-recipient"
+            printf '%s\n' "${request[1]}" > "$work/reader.pub"
+            curl --fail --silent --show-error --location --max-time 45 \
+              https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz \
+              --output "$work/age.tar.gz"
+            printf '%s  %s\n' cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10 "$work/age.tar.gz" |
+              sha256sum --check --status
+            tar -xOzf "$work/age.tar.gz" age/age > "$work/age"
+          else
+            echo 'Invalid backup commissioning request.' >&2
+            exit 65
+          fi
+
+          python3 - "$operation" "$work" > "$work/root.py" <<'PY'
+          import base64
+          from pathlib import Path
+          import sys
+
+          operation, work = sys.argv[1], Path(sys.argv[2])
+          source = Path("deploy/ovh")
+          names = ("accountpulse-daily-backup.service", "accountpulse-daily-backup.timer", "owner-recurring-backup.py")
+          files = {name: (source / name).read_bytes() for name in names}
+          if operation == "install":
+              name = "install-owner-recurring-backup.sh"
+              files[name] = (source / name).read_bytes()
+              for name in ("age", "age-recipient", "reader.pub"):
+                  files[name] = (work / name).read_bytes()
+          print(f"COMMISSION_OPERATION = {operation!r}")
+          print('COMMISSION_DEPLOY_ROOT = "/opt/bc5000"')
+          print("COMMISSION_PAYLOAD = " + repr({name: base64.b64encode(data).decode("ascii") for name, data in files.items()}))
+          print((source / "commission-owner-recurring-backup.py").read_text(encoding="utf-8"))
+          PY
+
+          printf '%s\n' "$OVH_SSH_PRIVATE_KEY" > "$work/ssh-key"
+          printf '%s\n' "$OVH_SSH_HOST_KEY" > "$work/known_hosts"
+          status=0
+          response=$(ssh -T -F /dev/null -i "$work/ssh-key" -p "$OVH_PORT" \
+            -o "UserKnownHostsFile=$work/known_hosts" -o GlobalKnownHostsFile=/dev/null \
+            -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o BatchMode=yes \
+            -o IdentitiesOnly=yes -o IdentityAgent=none -o ConnectTimeout=10 \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+            "$OVH_USER@$OVH_HOST" 'sudo -n /usr/bin/python3 -' \
+            < "$work/root.py" 2>/dev/null) || status=$?
+          case "$status:$response" in
+            0:backup_commissioned_timer_disabled|0:backup_timer_enabled_active)
+              printf '%s\n' "$response"
+              ;;
+            1:backup_commissioning_failed=validate|1:backup_commissioning_failed=install|1:backup_commissioning_failed=check_timer|\
+            1:backup_commissioning_failed=start|1:backup_commissioning_failed=verify_backup|1:backup_commissioning_failed=check_ready|\
+            1:backup_commissioning_failed=enable|1:backup_commissioning_failed=verify_timer)
+              printf '%s\n' "$response" >&2
+              exit 1
+              ;;
+            *)
+              echo 'Protected backup connection failed or returned an unexpected status.' >&2
+              exit 1
+              ;;
+          esac

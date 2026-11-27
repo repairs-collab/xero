@@ -101,6 +101,38 @@ If a database restore is genuinely required, stop and use the separate restore p
 
 Pre-release backups are stored in `${OVH_DEPLOY_PATH}/backups` and named with the candidate SHA and UTC timestamp. Release and rollback metadata live under `${OVH_DEPLOY_PATH}/releases/FULL_SHA`. Apply the organisation's retention and encrypted off-host backup policy to both directories.
 
+### Daily encrypted recovery copies
+
+The OVH Standard backup captures the system disk. AccountPulse PostgreSQL
+data lives on the separate `/srv/data` disk. The AccountPulse daily backup
+streams a PostgreSQL dump through age encryption at 02:30 UTC, ahead of the
+recorded 04:38 UTC OVH backup. It publishes the archive and its checksum to
+`/var/lib/accountpulse/backup-export` on the system filesystem. The job keeps
+three local archives and preserves the last successful export if a new dump
+fails. An archive is capped at 128 MiB and the job leaves at least 1 GiB
+free on the system filesystem. Review those limits if database size grows.
+
+Commission the job with `deploy/ovh/install-owner-recurring-backup.sh`, using
+the protected deployment path, the verified age v1.3.2 Linux amd64 binary, a
+native age public recipient and the dedicated owner PC Ed25519 public key.
+The installer adds a separate reader account and registers the systemd
+units. It checks the root filesystem and effective SSH configuration before
+granting access. Keep the age recovery identity off OVH and escrow it
+separately from the PC's archive directory.
+
+Start `accountpulse-daily-backup.service` once and verify its journal and
+published metadata. From the PC, confirm the production host key and
+retrieve a ciphertext copy as `accountpulse-backup`. The only operations for
+that SSH key are `metadata` and `fetch SHA256`. Hash and atomically store the
+copy, then restore and check it in isolated PostgreSQL before enabling
+`accountpulse-daily-backup.timer`. Confirm the next scheduled backup and
+download completed, including catch-up after the PC has been offline.
+
+The local export and PC copy protect against a VPS loss. The PC must be
+online to receive a fresh copy. Confirm independent retention, recovery
+identity access and a stale-backup alert before relying on this procedure
+as the sole recovery path.
+
 ## Owner-only server health snapshot
 
 The AccountPulse Owner console reads a sanitized host snapshot from a read-only
