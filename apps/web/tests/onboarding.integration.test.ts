@@ -10,7 +10,6 @@ import {
   migrateDatabase,
   organisationOnboarding,
   organisations,
-  outboundMessages,
   reminderSequences,
   subscriptions,
   users,
@@ -75,7 +74,6 @@ const seedReadySolo = async (): Promise<{
     version: 1,
     xeroConnectedAt: now,
     businessDetailsCompletedAt: now,
-    adminMobileVerifiedAt: now,
     sequenceReviewedAt: now
   });
   await client.db.insert(xeroConnections).values({
@@ -97,16 +95,6 @@ const seedReadySolo = async (): Promise<{
     name: 'Reviewed sequence',
     mode: 'REVIEW'
   });
-  await client.db.insert(outboundMessages).values({
-    organisationId,
-    actorUserId: userId,
-    channel: 'SMS',
-    source: 'TEST_SMS',
-    recipientKey: '+61412345678',
-    content: 'Test',
-    status: 'ACCEPTED',
-    idempotencyKey: randomUUID()
-  });
   return {
     organisationId,
     session: {
@@ -120,12 +108,10 @@ const seedReadySolo = async (): Promise<{
 };
 
 describe('guided Solo onboarding persistence', () => {
-  it('completes only from evidence and records versioned completion idempotently', async () => {
+  it('completes without test sending or a separate mobile code and records completion idempotently', async () => {
     const seeded = await seedReadySolo();
     const service = createOnboardingService({
       repository: createPostgresOnboardingRepository(client.db, {
-        verifiedAdminMobile: () =>
-          Promise.resolve({ number: '+61412345678', verifiedAt: now }),
         replyNumberStatus: () => Promise.resolve('READY')
       }),
       clock: { now: () => now }
@@ -133,7 +119,7 @@ describe('guided Solo onboarding persistence', () => {
 
     await expect(
       service.getStatus(seeded.session, seeded.organisationId)
-    ).resolves.toMatchObject({ completedCount: 8, complete: true });
+    ).resolves.toMatchObject({ completedCount: 6, complete: true });
     await expect(
       service.getStatus(seeded.session, seeded.organisationId)
     ).resolves.toMatchObject({ complete: true });
@@ -159,16 +145,13 @@ describe('guided Solo onboarding persistence', () => {
       })
       .where(eq(organisations.id, seeded.organisationId));
     const service = createOnboardingService({
-      repository: createPostgresOnboardingRepository(client.db, {
-        verifiedAdminMobile: () =>
-          Promise.resolve({ number: '+61412345678', verifiedAt: now })
-      }),
+      repository: createPostgresOnboardingRepository(client.db),
       clock: { now: () => now }
     });
 
     await expect(
       service.getStatus(seeded.session, seeded.organisationId)
-    ).resolves.toMatchObject({ completedCount: 8, complete: true });
+    ).resolves.toMatchObject({ completedCount: 6, complete: true });
   });
 
   it('does not accept another tenant membership as access', async () => {
