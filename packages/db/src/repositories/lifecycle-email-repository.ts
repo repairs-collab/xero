@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { and, asc, eq, gt, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, eq, exists, gt, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import type { Database, DbTransaction } from '../connection.js';
 import {
   lifecycleEmailOutbox as outbox, memberships, users,
@@ -24,11 +24,17 @@ export type ClaimedLifecycleEmail = typeof outbox.$inferSelect & {
   claimToken: string;
 };
 
-interface ClaimResultInput {
+interface ClaimIdentity {
   id: string;
   claimToken: string;
+}
+
+interface ClaimResultInput extends ClaimIdentity {
   now: Date;
 }
+
+type DeliverySuppression = 'RECIPIENT_ACCESS_REVOKED' | 'NOTICE_CANCELLED_BEFORE_SUBMISSION';
+type RecipientDeliveryStatus = 'READY' | 'CLAIM_LOST' | DeliverySuppression;
 
 type FailureInput = ClaimResultInput & { failureCode: string };
 type EmailDatabase = Database | DbTransaction;
@@ -81,22 +87,26 @@ export function lifecycleEmailRecipientKey(email: string): string {
   return createHash('sha256').update(recipient).digest('hex');
 }
 
+function activeAdministrators(organisationId: string | typeof outbox.organisationId) {
+  return and(
+    eq(memberships.organisationId, organisationId), eq(memberships.role, 'ADMIN'),
+    isNull(memberships.disabledAt), isNull(users.disabledAt)
+  );
+}
+
 export async function listLifecycleEmailAdminRecipients(
   database: EmailDatabase, organisationId: string
 ): Promise<string[]> {
   const administrators = await database.select({ email: users.email })
     .from(memberships).innerJoin(users, eq(users.id, memberships.userId))
-    .where(and(
-      eq(memberships.organisationId, organisationId), eq(memberships.role, 'ADMIN'),
-      isNull(memberships.disabledAt), isNull(users.disabledAt)
-    ));
+    .where(activeAdministrators(organisationId));
   const addresses = administrators.map(({ email }) => normaliseRecipient(email))
     .filter((address) => address !== null);
   return [...new Set(addresses)].sort();
 }
 
 const unsent = () => inArray(outbox.status, ['PENDING', 'RETRY']);
-const activeClaim = ({ id, claimToken }: ClaimResultInput) =>
+const activeClaim = ({ id, claimToken }: ClaimIdentity) =>
   and(eq(outbox.id, id), eq(outbox.status, 'SENDING'), eq(outbox.claimToken, claimToken));
 
 function validEvidenceId(value: unknown): value is string {
@@ -175,6 +185,36 @@ export class PostgresLifecycleEmailRepository {
       if (!claimed) throw new Error('LIFECYCLE_EMAIL_CLAIM_LOST');
       return { ...claimed, status: 'SENDING', claimToken };
     });
+  }
+
+  async checkRecipientForDelivery(input: ClaimIdentity): Promise<RecipientDeliveryStatus> {
+    const matchingAdmin = this.database.select({ userId: users.id })
+      .from(memberships).innerJoin(users, eq(users.id, memberships.userId))
+      .where(and(
+        activeAdministrators(outbox.organisationId),
+        sql`lower(btrim(${users.email})) = ${outbox.recipient}`
+      ));
+    const [claim] = await this.database.select({
+      cancellationRequestedAt: outbox.cancellationRequestedAt,
+      hasActiveAdmin: exists(matchingAdmin),
+      sourceType: outbox.sourceType,
+      template: outbox.template
+    }).from(outbox).where(activeClaim(input)).limit(1);
+    if (!claim) return 'CLAIM_LOST';
+    if (claim.cancellationRequestedAt !== null) return 'NOTICE_CANCELLED_BEFORE_SUBMISSION';
+    // Privacy notices use the requester mailbox verified by the owner workflow.
+    if (claim.sourceType === 'DATA_REQUEST'
+        && (claim.template === 'PRIVACY_REQUEST_RECEIVED' || claim.template === 'EXPORT_DELIVERED')) {
+      return 'READY';
+    }
+    return claim.hasActiveAdmin ? 'READY' : 'RECIPIENT_ACCESS_REVOKED';
+  }
+
+  async recordSuppressed(input: ClaimResultInput & { failureCode: DeliverySuppression }): Promise<boolean> {
+    const result = await this.database.update(outbox).set({
+      status: 'CANCELLED', claimToken: null, lastFailureCode: input.failureCode, updatedAt: input.now
+    }).where(activeClaim(input));
+    return result.rowCount === 1;
   }
 
   async recordSent(input: ClaimResultInput & { messageId: string; providerMessageId?: string | null }): Promise<boolean> {

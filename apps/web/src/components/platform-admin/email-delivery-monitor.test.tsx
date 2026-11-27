@@ -37,7 +37,10 @@ describe('owner email delivery monitor', () => {
     expect(html).not.toMatch(/<button|resend|download/i);
   });
 
-  it('uses a safe activation-cancellation label', () => {
+  it.each([
+    ['PRE_ACTIVATION', 'Cancelled before email activation'],
+    ['RECIPIENT_ACCESS', 'Recipient no longer has administrator access']
+  ] as const)('uses a safe label for %s', (failureCategory, label) => {
     const snapshot = {
       metrics: { pendingOrRetry: 0, unknown: 0, failedLast24Hours: 0, sentLast24Hours: 0 },
       rows: [{
@@ -46,10 +49,10 @@ describe('owner email delivery monitor', () => {
         availableAt: new Date('2026-11-22T00:00:00.000Z'),
         expiresAt: new Date('2026-12-22T00:00:00.000Z'), nextAttemptAt: null,
         lastAttemptedAt: null, sentAt: null, createdAt: new Date('2026-11-22T00:00:00.000Z'),
-        updatedAt: new Date('2026-11-22T00:01:00.000Z'), failureCategory: 'PRE_ACTIVATION'
+        updatedAt: new Date('2026-11-22T00:01:00.000Z'), failureCategory
       }]
     } as const;
     expect(renderToStaticMarkup(<EmailDeliveryMonitor snapshot={snapshot} />))
-      .toContain('Cancelled before email activation');
+      .toContain(label);
   });
 });

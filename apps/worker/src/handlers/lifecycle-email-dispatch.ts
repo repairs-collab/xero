@@ -7,7 +7,8 @@ import type {
 } from '@bc5000/integrations/email';
 
 type DispatchRepository = Pick<PostgresLifecycleEmailRepository,
-  'expireDue' | 'quarantineStaleSending' | 'claimNext' | 'recordSent' | 'recordRetry' | 'recordFailed' | 'recordUnknown'>;
+  'expireDue' | 'quarantineStaleSending' | 'claimNext' | 'checkRecipientForDelivery' | 'recordSuppressed' |
+  'recordSent' | 'recordRetry' | 'recordFailed' | 'recordUnknown'>;
 interface EmailClient {
   send(notice: LifecycleEmailNotice): Promise<LifecycleEmailOutcome>;
 }
@@ -21,6 +22,20 @@ async function confirmWrite(result: Promise<boolean>): Promise<void> {
     throw new Error('LIFECYCLE_EMAIL_OUTCOME_WRITE_FAILED');
   });
   if (!recorded) throw new Error('LIFECYCLE_EMAIL_CLAIM_LOST');
+}
+
+function recordRetryOrFailure(
+  repository: DispatchRepository,
+  claim: ClaimedLifecycleEmail,
+  now: Date,
+  failureCode: string
+): Promise<boolean> {
+  const token = { id: claim.id, claimToken: claim.claimToken, now };
+  const delay = retryDelayMinutes[claim.attempts - 1];
+  if (delay === undefined) return repository.recordFailed({ ...token, failureCode });
+  return repository.recordRetry({
+    ...token, failureCode, nextAttemptAt: new Date(now.getTime() + delay * 60_000)
+  });
 }
 
 function recordOutcome(
@@ -41,12 +56,8 @@ function recordOutcome(
       return repository.recordUnknown({ ...token, failureCode: outcome.failureCode });
     case 'FAILED':
       return repository.recordFailed({ ...token, failureCode: outcome.failureCode });
-    case 'RETRY': {
-      const delay = retryDelayMinutes[claim.attempts - 1];
-      if (delay === undefined) return repository.recordFailed({ ...token, failureCode: outcome.failureCode });
-      return repository.recordRetry({ ...token, failureCode: outcome.failureCode,
-        nextAttemptAt: new Date(now.getTime() + delay * 60_000) });
-    }
+    case 'RETRY':
+      return recordRetryOrFailure(repository, claim, now, outcome.failureCode);
   }
 }
 
@@ -79,14 +90,27 @@ export function createLifecycleEmailDispatchHandler({ repository, config, create
       });
       if (!claim) return;
 
-      const claimedAt = clock.now();
-      if (mustStop(claimedAt) || claim.expiresAt <= claimedAt) {
+      const claimIdentity = { id: claim.id, claimToken: claim.claimToken };
+      const readiness = await repository.checkRecipientForDelivery(claimIdentity)
+        .catch(() => 'CHECK_UNAVAILABLE' as const);
+      if (readiness === 'CLAIM_LOST') throw new Error('LIFECYCLE_EMAIL_CLAIM_LOST');
+      const checkedAt = clock.now();
+      if (mustStop(checkedAt) || claim.expiresAt <= checkedAt) {
         await confirmWrite(repository.recordRetry({
-          id: claim.id, claimToken: claim.claimToken, now: claimedAt,
-          failureCode: 'JOB_CANCELLED_BEFORE_SUBMISSION',
-          nextAttemptAt: new Date(claimedAt.getTime() + 1_000)
+          ...claimIdentity, now: checkedAt, failureCode: 'JOB_CANCELLED_BEFORE_SUBMISSION',
+          nextAttemptAt: new Date(checkedAt.getTime() + 1_000)
         }));
         return;
+      }
+      if (readiness === 'CHECK_UNAVAILABLE') {
+        await confirmWrite(recordRetryOrFailure(repository, claim, checkedAt, 'RECIPIENT_CHECK_UNAVAILABLE'));
+        return;
+      }
+      if (readiness !== 'READY') {
+        await confirmWrite(repository.recordSuppressed({
+          ...claimIdentity, now: checkedAt, failureCode: readiness
+        }));
+        continue;
       }
 
       const { recipient, template, templateVersion, renderData } = claim;
