@@ -75,6 +75,7 @@ def create_config():
     quoted_password = password.replace("\\", "\\\\").replace('"', '\\"')
     return (
         f'url = "{RELAY}"\n'
+        'login-options = "AUTH=LOGIN"\n'
         f'user = "{MAILBOX}:{quoted_password}"\n'
         f'mail-from = "{MAILBOX}"\n'
         f'mail-rcpt = "{MAILBOX}"\n'

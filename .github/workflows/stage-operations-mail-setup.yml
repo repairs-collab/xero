@@ -44,27 +44,63 @@ jobs:
           set -Eeuo pipefail
           stage=$(cat <<'REMOTE'
           sudo -n -- /usr/bin/python3 -c '
+          import fcntl
+          import hashlib
           import os
+          import stat
           import sys
           import tempfile
+
+          target = "/run/ap-mail-setup"
+          previous_sha256 = "4983edb0646613f7e4aa5383807aa34cdcd7a5e0407f25de89492a3b139e034e"
+
+          def replace_previous(draft):
+              flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+              try:
+                  existing = os.open(target, flags)
+              except OSError:
+                  raise SystemExit("MAIL_SETUP_EXISTING_HELPER_NOT_REPLACEABLE") from None
+              with os.fdopen(existing, "rb") as source:
+                  try:
+                      fcntl.flock(source, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                  except BlockingIOError:
+                      raise SystemExit("MAIL_SETUP_HELPER_ALREADY_IN_USE") from None
+                  metadata = os.fstat(source.fileno())
+                  if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+                          or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o700
+                          or hashlib.sha256(source.read(32769)).hexdigest() != previous_sha256):
+                      raise SystemExit("MAIL_SETUP_EXISTING_HELPER_NOT_REPLACEABLE")
+                  current = os.lstat(target)
+                  if (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino):
+                      raise SystemExit("MAIL_SETUP_EXISTING_HELPER_NOT_REPLACEABLE")
+                  os.replace(draft, target)
 
           if os.geteuid() != 0:
               raise SystemExit("MAIL_SETUP_STAGING_ROOT_REQUIRED")
           payload = sys.stdin.buffer.read(32769)
           if len(payload) > 32768 or not payload.startswith(b"#!/usr/bin/python3\n"):
               raise SystemExit("MAIL_SETUP_STAGING_INVALID_HELPER")
+          draft_path = None
           try:
-              with tempfile.NamedTemporaryFile(dir="/run", prefix=".ap-mail-setup-") as draft:
+              with tempfile.NamedTemporaryFile(dir="/run", prefix=".ap-mail-setup-", delete=False) as draft:
+                  draft_path = draft.name
                   draft.write(payload)
                   draft.flush()
                   os.fchown(draft.fileno(), 0, 0)
                   os.fchmod(draft.fileno(), 0o700)
                   os.fsync(draft.fileno())
-                  os.link(draft.name, "/run/ap-mail-setup")
-          except FileExistsError:
-              raise SystemExit("MAIL_SETUP_HELPER_ALREADY_STAGED")
+              try:
+                  os.link(draft_path, target)
+              except FileExistsError:
+                  replace_previous(draft_path)
           except OSError:
               raise SystemExit("MAIL_SETUP_STAGING_FAILED")
+          finally:
+              if draft_path is not None:
+                  try:
+                      os.unlink(draft_path)
+                  except FileNotFoundError:
+                      pass
           print("MAIL_SETUP_HELPER_STAGED")
           '
           REMOTE
