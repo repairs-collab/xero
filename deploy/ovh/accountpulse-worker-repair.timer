@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for authorised AccountPulse worker repair requests
+
+[Timer]
+OnBootSec=45s
+OnUnitInactiveSec=30s
+AccuracySec=5s
+Unit=accountpulse-worker-repair.service
+
+[Install]
+WantedBy=timers.target

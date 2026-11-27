@@ -12,4 +12,5 @@ export * from './reminder-whitelist.js';
 export * from './reminders.js';
 export * from './rollout.js';
 export * from './voice.js';
+export * from './worker-repair.js';
 export * from './xero.js';

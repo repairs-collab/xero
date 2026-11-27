@@ -150,6 +150,28 @@ lines, customer data or provider secrets. If the collector is absent, fails, or
 has not refreshed for more than 15 minutes, the Owner console must show
 **Unavailable** rather than reusing old values.
 
+### Owner worker repair
+
+The protected production workflow installs the repair runner after the
+application passes its release health checks and confirms the timer is active.
+If the workflow reports that host installation is required, use the existing
+deployment directory and an OVH account with host administration access.
+
+```bash
+cd /the/protected/OVH_DEPLOY_PATH
+sudo bash ./install-worker-repair.sh
+systemctl status accountpulse-worker-repair.timer --no-pager
+journalctl -u accountpulse-worker-repair.service -n 20 --no-pager
+```
+
+Once the runner reports in, the Owner can request a repair from
+**Owner → System**. Each request permits one verified worker restart. The
+runner waits while a deployment holds the host lock and declines a restart
+when the worker is healthy or starting, the image needs a corrected release,
+or queued work requires review. Sending settings and queued records stay
+intact. New scheduler work and authorised operator actions follow the
+existing rules. Review the worker state and logs if a started repair expires.
+
 ## Secret rotation
 
 Edit the protected `accountpulse.env` on staging first, run a staging release of the currently approved SHA, and verify integration health. Then repeat through the protected production environment. Keep the previous Xero encryption key in `XERO_TOKEN_ENCRYPTION_KEYS_JSON` during key rotation until every stored envelope has been re-encrypted with the active key.

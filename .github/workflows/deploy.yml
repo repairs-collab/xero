@@ -97,6 +97,7 @@ jobs:
           SCP=(scp -i ~/.ssh/id_accountpulse -P "$OVH_PORT")
           "${SSH[@]}" "mkdir -p '$OVH_DEPLOY_PATH/artifacts/$IMAGE_TAG'"
           "${SCP[@]}" deploy/ovh/docker-compose.yml deploy/ovh/release.sh deploy/ovh/rollback.sh deploy/ovh/rollback-safety.sh deploy/ovh/install-protected-environment.sh deploy/ovh/install-public-hostname.sh deploy/ovh/accountpulse-site.caddy deploy/ovh/collect-server-health.sh deploy/ovh/server-health-operations.sql deploy/ovh/install-server-health-monitor.sh deploy/ovh/accountpulse-server-health.service deploy/ovh/accountpulse-server-health.timer "$OVH_USER@$OVH_HOST:$OVH_DEPLOY_PATH/"
+          "${SCP[@]}" deploy/ovh/run-worker-repair.sh deploy/ovh/install-worker-repair.sh deploy/ovh/accountpulse-worker-repair.service deploy/ovh/accountpulse-worker-repair.timer "$OVH_USER@$OVH_HOST:$OVH_DEPLOY_PATH/"
           "${SCP[@]}" accountpulse-web.tar.zst accountpulse-worker.tar.zst "$OVH_USER@$OVH_HOST:$OVH_DEPLOY_PATH/artifacts/$IMAGE_TAG/"
       - name: Install protected production environment
         env:
@@ -154,6 +155,13 @@ jobs:
           ssh -i ~/.ssh/id_accountpulse -p "$OVH_PORT" "$OVH_USER@$OVH_HOST" \
             "cd '$OVH_DEPLOY_PATH' && sudo -n -- ./install-server-health-monitor.sh && systemctl is-active accountpulse-server-health.timer" ||
             { echo "::warning::The application released, but the OVH operations monitor needs host installation."; exit 1; }
+      - name: Enable the OVH Owner repair runner
+        continue-on-error: true
+        run: |
+          set -Eeuo pipefail
+          ssh -i ~/.ssh/id_accountpulse -p "$OVH_PORT" "$OVH_USER@$OVH_HOST" \
+            "cd '$OVH_DEPLOY_PATH' && sudo -n -- bash ./install-worker-repair.sh && systemctl is-active accountpulse-worker-repair.timer" ||
+            { echo "::warning::The application released, but the OVH Owner repair runner needs host installation."; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: accountpulse-release-production-${{ github.sha }}
