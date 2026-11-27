@@ -37,6 +37,10 @@ def emit(label, value):
     print(label + ': ' + clean(json.dumps(value, default=str)), flush=True)
 
 emit('checked_at_utc', datetime.datetime.now(datetime.timezone.utc).isoformat())
+emit('ssh_identity', run(['id', '-un']).strip())
+emit('ssh_uid', run(['id', '-u']).strip())
+timer = subprocess.run(['systemctl', 'is-active', 'accountpulse-server-health.timer'], capture_output=True, text=True, timeout=15)
+emit('server_health_timer', {'status': timer.stdout.strip(), 'exitCode': timer.returncode})
 for container in containers:
     state = container['State']
     emit('container', {'name': container['Name'], 'image': container['Config']['Image'], 'imageId': container['Image'], 'status': state['Status'], 'running': state['Running'], 'restarting': state['Restarting'], 'exitCode': state['ExitCode'], 'oomKilled': state['OOMKilled'], 'startedAt': state['StartedAt'], 'finishedAt': state['FinishedAt'], 'restartCount': container['RestartCount']})
@@ -73,6 +77,8 @@ queries={
  'sequence_versions':f"SELECT id,sequence_id,version_number,status,send_time,daily_basis,sms_aggregation,social_window_start,social_window_end FROM reminder_sequence_versions WHERE organisation_id='{org}' AND status='ACTIVE'",
  'stages_configuration':f"SELECT s.channel,s.stage_key,s.enabled,s.offset_days FROM sequence_stages s JOIN reminder_sequence_versions v ON v.id=s.sequence_version_id WHERE s.organisation_id='{org}' AND v.status='ACTIVE'",
  'pending_outbound':f"SELECT id,source,status,queued_at,created_at FROM outbound_messages WHERE organisation_id='{org}' AND status IN ('PENDING','QUEUED','SENDING','UNKNOWN') ORDER BY created_at",
+ 'pending_test_safety':f"SELECT o.id,o.status,o.source,o.recipient_key=ANY(g.recipient_allowlist) destination_allowlisted,(SELECT count(*) FROM message_attempts a WHERE a.outbound_message_id=o.id) attempts FROM outbound_messages o JOIN organisations g ON g.id=o.organisation_id WHERE o.organisation_id='{org}' AND o.source='TEST_SMS' AND o.status='QUEUED'",
+ 'active_stage_dates':f"SELECT (s.scheduled_at AT TIME ZONE 'Australia/Sydney')::date local_date,(s.scheduled_at AT TIME ZONE 'Australia/Sydney')::time local_time,s.channel,s.status,count(*) n FROM stage_instances s JOIN reminder_sequence_versions v ON v.id=s.sequence_version_id WHERE s.organisation_id='{org}' AND v.status='ACTIVE' GROUP BY 1,2,3,4 ORDER BY 1,2,3,4",
  'queued_by_version':f"SELECT v.version_number,v.status version_status,s.status,count(*) n FROM stage_instances s JOIN reminder_sequence_versions v ON v.id=s.sequence_version_id WHERE s.organisation_id='{org}' AND s.status IN ('QUEUED','SCHEDULED','SENDING','UNKNOWN') GROUP BY 1,2,3 ORDER BY 1,2,3",
  'queue_columns':"SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='pgboss' AND table_name IN ('job','schedule') ORDER BY table_name,ordinal_position",
  'queues':f"SELECT name,state,count(*) n,min(created_on) earliest,max(created_on) latest FROM pgboss.job WHERE data->>'organisationId'='{org}' GROUP BY 1,2 ORDER BY 1,2",
