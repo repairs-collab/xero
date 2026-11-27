@@ -15,5 +15,6 @@ export * from './repositories/organisation-safety-repository.js';
 export * from './repositories/reply-number-provisioning-repository.js';
 export * from './repositories/voice-call-repository.js';
 export * from './repositories/xero-connection-repository.js';
+export * from './repositories/worker-repair-repository.js';
 export * from './services/voice-call-preparation.js';
 export * from './schema/index.js';

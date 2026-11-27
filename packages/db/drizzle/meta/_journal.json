@@ -337,6 +337,13 @@
       "when": 1795755600000,
       "tag": "0047_sinch_shared_accounts",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1795755600001,
+      "tag": "0048_worker_repair",
+      "breakpoints": true
     }
   ]
 }

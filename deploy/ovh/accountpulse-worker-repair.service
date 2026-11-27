@@ -1,0 +1,23 @@
+[Unit]
+Description=Process one authorised AccountPulse worker repair request
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=115s
+EnvironmentFile=/etc/accountpulse/worker-repair.env
+ExecStart=/usr/local/sbin/accountpulse-run-worker-repair
+UMask=0077
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true

@@ -128,6 +128,19 @@ systemctl status accountpulse-server-health.service --no-pager
 test -r /var/lib/accountpulse/server-health/server-health.json
 ```
 
+### Owner worker repair
+
+Install the protected runner after the first release with the worker heartbeat and repair database migration. Use the existing deployment directory and an OVH operator with host administration access.
+
+```bash
+cd /the/protected/OVH_DEPLOY_PATH
+sudo bash ./install-worker-repair.sh
+systemctl status accountpulse-worker-repair.timer --no-pager
+journalctl -u accountpulse-worker-repair.service -n 20 --no-pager
+```
+
+The owner can request a worker repair from **Owner → System** once the runner reports in. The runner can restart the verified AccountPulse worker once per request. It waits while deployment holds the host lock and declines if the worker is already healthy or starting, the image cannot be verified, or queued sends and overdue automatic reminders require review. It leaves sending settings and queued records untouched. Fresh work added through the normal scheduler or authorised operator actions follows its existing rules after recovery. An unverified build or dependency failure requires a corrected protected release. If a request expires after it started, review the worker state and logs before requesting another repair.
+
 Do not add the Docker socket to the web container. Do not extend the snapshot
 with hostnames, IP addresses, environment values, credentials, process command
 lines, customer data or provider secrets. If the collector is absent, fails, or
