@@ -27,6 +27,8 @@ function setup(rows: ClaimedLifecycleEmail[] = [claim], enabled = true, cutoff =
     expireDue: vi.fn().mockResolvedValue(1),
     quarantineStaleSending: vi.fn().mockResolvedValue(1),
     claimNext: vi.fn(() => Promise.resolve(rows.shift() ?? null)),
+    checkRecipientForDelivery: vi.fn().mockResolvedValue('READY'),
+    recordSuppressed: vi.fn().mockResolvedValue(true),
     recordSent: vi.fn().mockResolvedValue(true),
     recordRetry: vi.fn().mockResolvedValue(true),
     recordFailed: vi.fn().mockResolvedValue(true),
@@ -71,6 +73,40 @@ it.each([null, 'queue-1'])('records acceptance with provider message ID %s', asy
   });
   expect(send).toHaveBeenCalledWith(notice);
   expect(repository.recordSent).toHaveBeenCalledWith({ ...token, now: completedAt, messageId: '<msg@motts.com.au>', providerMessageId });
+});
+
+it('suppresses a revoked administrator before SMTP and continues with the next notice', async () => {
+  const next = { ...claim, id: 'next', claimToken: 'next-token' };
+  const { run, repository, send } = setup([claim, next]);
+  repository.checkRecipientForDelivery.mockResolvedValueOnce('RECIPIENT_ACCESS_REVOKED');
+  await run();
+  expect(repository.checkRecipientForDelivery).toHaveBeenNthCalledWith(1, {
+    id: claim.id, claimToken: claim.claimToken
+  });
+  expect(repository.recordSuppressed).toHaveBeenCalledWith({
+    ...token, failureCode: 'RECIPIENT_ACCESS_REVOKED'
+  });
+  expect(repository.recordSuppressed).toHaveBeenCalledBefore(send);
+  expect(send).toHaveBeenCalledOnce();
+  expect(repository.recordSent).toHaveBeenCalledWith(expect.objectContaining({ id: next.id }));
+});
+
+it('holds an email when the access check fails and records only a safe reason', async () => {
+  const { run, repository, send } = setup();
+  repository.checkRecipientForDelivery.mockRejectedValueOnce(new Error('private query details'));
+  await run();
+  expect(send).not.toHaveBeenCalled();
+  expect(repository.recordRetry).toHaveBeenCalledWith({
+    ...token, failureCode: 'RECIPIENT_CHECK_UNAVAILABLE', nextAttemptAt: new Date('2026-11-22T01:11:00Z')
+  });
+});
+
+it('does not send while a claim no longer belongs to the worker', async () => {
+  const { run, repository, send } = setup();
+  repository.checkRecipientForDelivery.mockResolvedValueOnce('CLAIM_LOST');
+  await expect(run()).rejects.toThrow(/^LIFECYCLE_EMAIL_CLAIM_LOST$/);
+  expect(send).not.toHaveBeenCalled();
+  expect(repository.recordSuppressed).not.toHaveBeenCalled();
 });
 
 it.each([[1, '01:11'], [2, '01:15'], [3, '01:25'], [4, '02:10']] as const)(

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, expect, it } from 'vitest';
 import * as api from '../index.js';
 import { billingCases, lifecycleEmailOutbox, memberships, organisations, transactionalEmailOutbox, users } from '../schema/index.js';
@@ -102,6 +102,56 @@ it('filters disabled users, disabled memberships, other tenants, invalid address
     });
   }
   expect(await api.listLifecycleEmailAdminRecipients(client.db, organisationId)).toEqual([address]);
+});
+
+it.each(['disabled membership', 'disabled account', 'changed email', 'changed role'] as const)(
+  'suppresses an already claimed administrator notice after a %s',
+  async (change) => {
+    const userId = randomUUID();
+    const address = 'admin-' + userId + '@example.com';
+    await client.db.insert(users).values({
+      id: userId, email: ' ' + address.toUpperCase() + ' ', cognitoSubject: userId, displayName: 'Mail test'
+    });
+    userIds.push(userId);
+    await client.db.insert(memberships).values({
+      organisationId, userId, role: 'ADMIN'
+    });
+    await repository.enqueue(notice({ recipient: address }));
+    const sending = (await claim())!;
+    const input = { id: sending.id, claimToken: sending.claimToken, now };
+    expect(await repository.checkRecipientForDelivery(input)).toBe('READY');
+
+    if (change === 'disabled account' || change === 'changed email') {
+      await client.db.update(users).set(change === 'disabled account'
+        ? { disabledAt: now }
+        : { email: 'other-' + address }
+      ).where(eq(users.id, userId));
+    } else {
+      await client.db.insert(memberships).values({ organisationId: await tenant(), userId, role: 'ADMIN' });
+      await client.db.update(memberships).set(change === 'disabled membership'
+        ? { disabledAt: now }
+        : { role: 'OPERATOR' }
+      ).where(and(eq(memberships.organisationId, organisationId), eq(memberships.userId, userId)));
+    }
+
+    expect(await repository.checkRecipientForDelivery(input)).toBe('RECIPIENT_ACCESS_REVOKED');
+    expect(await repository.recordSuppressed({ ...input, failureCode: 'RECIPIENT_ACCESS_REVOKED' })).toBe(true);
+    expect(await row(sending.id)).toMatchObject({
+      status: 'CANCELLED', claimToken: null, lastFailureCode: 'RECIPIENT_ACCESS_REVOKED', sentAt: null
+    });
+    expect(await repository.checkRecipientForDelivery(input)).toBe('CLAIM_LOST');
+  }
+);
+
+it.each([
+  ['EXPORT_DELIVERED', { organisationName: 'Mail test', requestId: 'request', completedAt: '2026-11-22' }],
+  ['PRIVACY_REQUEST_RECEIVED', { organisationName: 'Mail test', requestId: 'request', requestType: 'EXPORT', targetResponseAt: '2026-11-22' }]
+] as const)('allows a verified %s requester without organisation membership', async (template, renderData) => {
+  await repository.enqueue(notice({ recipient: 'requester@example.com', template, renderData, sourceType: 'DATA_REQUEST' }));
+  const sending = (await claim())!;
+  expect(await repository.checkRecipientForDelivery({
+    id: sending.id, claimToken: sending.claimToken
+  })).toBe('READY');
 });
 
 it('creates a stable recipient key without exposing the mailbox', () => {
@@ -269,7 +319,7 @@ it('indexes tenant delivery statuses by creation time for owner monitoring', asy
 });
 
 it.each([
-  ['retry', 'CANCELLED'], ['failed', 'CANCELLED'], ['sent', 'SENT'], ['unknown', 'UNKNOWN'], ['stale', 'UNKNOWN']
+  ['suppressed', 'CANCELLED'], ['retry', 'CANCELLED'], ['failed', 'CANCELLED'], ['sent', 'SENT'], ['unknown', 'UNKNOWN'], ['stale', 'UNKNOWN']
 ] as const)('honours recovery during an active send when its outcome is %s', async (result, status) => {
   const failure = notice({ sourceType: 'BILLING_EPISODE', sourceId: randomUUID(), template: 'PAYMENT_FAILED' });
   await repository.enqueue(failure);
@@ -279,6 +329,12 @@ it.each([
   expect(await repository.cancelUnsentForSource({ ...cancellation, now: later(2) })).toBe(0);
   expect(await row(sending.id)).toMatchObject({ status: 'SENDING', cancellationRequestedAt: later(1), claimToken: sending.claimToken });
   const outcome = { id: sending.id, claimToken: sending.claimToken, now: later(3), failureCode: 'SMTP_REJECTION' };
+  if (result === 'suppressed') {
+    expect(await repository.checkRecipientForDelivery(outcome)).toBe('NOTICE_CANCELLED_BEFORE_SUBMISSION');
+    expect(await repository.recordSuppressed({
+      ...outcome, failureCode: 'NOTICE_CANCELLED_BEFORE_SUBMISSION'
+    })).toBe(true);
+  }
   if (result === 'retry') expect(await repository.recordRetry({ ...outcome, nextAttemptAt: later(10) })).toBe(true);
   if (result === 'failed') expect(await repository.recordFailed(outcome)).toBe(true);
   if (result === 'sent') expect(await repository.recordSent({ ...outcome, messageId: '<id@example.com>' })).toBe(true);

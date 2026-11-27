@@ -34,6 +34,7 @@ const failureLabels: Record<LifecycleEmailFailureCategory, string> = {
   DELIVERY_REJECTED: 'Delivery rejected',
   DELIVERY_UNCERTAIN: 'Delivery outcome uncertain',
   PRE_ACTIVATION: 'Cancelled before email activation',
+  RECIPIENT_ACCESS: 'Recipient no longer has administrator access',
   OTHER: 'Other safe failure category'
 };
 

@@ -14,6 +14,7 @@ export const lifecycleEmailFailureCategories = [
   'DELIVERY_REJECTED',
   'DELIVERY_UNCERTAIN',
   'PRE_ACTIVATION',
+  'RECIPIENT_ACCESS',
   'OTHER'
 ] as const;
 
@@ -66,11 +67,13 @@ type EmailDatabase = Database | DbTransaction;
 const failureCategory = sql<LifecycleEmailFailureCategory>`case
   when ${lifecycleEmailOutbox.lastFailureCode} is null then 'NONE'
   when ${lifecycleEmailOutbox.lastFailureCode} = 'PRE_ACTIVATION_NOTICE' then 'PRE_ACTIVATION'
+  when ${lifecycleEmailOutbox.lastFailureCode} = 'RECIPIENT_ACCESS_REVOKED' then 'RECIPIENT_ACCESS'
   when ${lifecycleEmailOutbox.lastFailureCode} in (
     'SMTP_CONNECTION_FAILURE',
     'SMTP_AUTH_FAILURE',
     'SMTP_TEMPORARY_REJECTION',
-    'JOB_CANCELLED_BEFORE_SUBMISSION'
+    'JOB_CANCELLED_BEFORE_SUBMISSION',
+    'RECIPIENT_CHECK_UNAVAILABLE'
   ) then 'DELIVERY_RETRY'
   when ${lifecycleEmailOutbox.lastFailureCode} in (
     'INVALID_RECIPIENT',
