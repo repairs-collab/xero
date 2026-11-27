@@ -26,6 +26,43 @@ export const debtContactTimeZone = 'Australia/Sydney';
 export const debtContactWindowStartLocal = '08:30';
 export const debtContactWindowEndLocal = '17:00';
 
+export interface DebtContactScheduleWindow {
+  start: string;
+  end: string;
+}
+
+export function debtContactScheduleWindow(
+  timeZone: string,
+  now: Date
+): DebtContactScheduleWindow | null {
+  const { year } = DateTime.fromJSDate(now, { zone: debtContactTimeZone });
+  // January and July cover both seasonal offsets of Australian workspace zones.
+  const windows = [1, 7].map((month) => {
+    const day = DateTime.fromObject(
+      { year, month, day: 15 },
+      { zone: debtContactTimeZone }
+    ).toISODate();
+    const start = DateTime.fromISO(`${day}T${debtContactWindowStartLocal}`, {
+      zone: debtContactTimeZone
+    }).setZone(timeZone);
+    const end = DateTime.fromISO(`${day}T${debtContactWindowEndLocal}`, {
+      zone: debtContactTimeZone
+    }).setZone(timeZone);
+    if (!start.isValid || !end.isValid || start.toISODate() !== end.toISODate()) {
+      return null;
+    }
+    return {
+      start: start.toFormat('HH:mm', { locale: 'en-AU' }),
+      end: end.toFormat('HH:mm', { locale: 'en-AU' })
+    };
+  });
+  const [summer, winter] = windows;
+  if (!summer || !winter) return null;
+  const start = summer.start > winter.start ? summer.start : winter.start;
+  const end = summer.end < winter.end ? summer.end : winter.end;
+  return start < end ? { start, end } : null;
+}
+
 const parseLocalDate = (localDate: string, zone: string): DateTime => {
   const parsed = DateTime.fromISO(localDate, { zone });
   if (!parsed.isValid || parsed.toISODate() !== localDate) {

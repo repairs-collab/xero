@@ -1,18 +1,22 @@
 'use client';
 
 import { PlusIcon, TrashIcon } from '@heroicons/react/24/outline';
-import { useState } from 'react';
+import { useActionState, useState } from 'react';
 
 import type { SequenceKind } from '@bc5000/db/web';
-import type { ReminderStageChannel } from '@bc5000/domain';
+import type { DebtContactScheduleWindow, ReminderStageChannel } from '@bc5000/domain';
 
 import {
-  activateSequenceVersion,
-  saveSequenceDraft,
+  saveSequenceVersion,
   setSequenceEnabled,
   setSequenceMode
 } from '../app/(protected)/sequences/actions.js';
 import type { SequenceDraftStage } from '../app/(protected)/sequences/sequence-service.js';
+import {
+  schedulesSms,
+  type SequenceScheduleIssue,
+  type SmsScheduleIssue
+} from '../app/(protected)/sequences/sms-schedule.js';
 
 const messagingChannelOptions: {
   value: ReminderStageChannel;
@@ -51,8 +55,20 @@ interface SequenceEditorProps {
   mode: 'REVIEW' | 'AUTOMATIC';
   enabled: boolean;
   role: 'ADMIN' | 'OPERATOR';
+  timeZone: string;
+  smsContactWindow: DebtContactScheduleWindow | null;
+  publishedSmsWarning: { issue: SmsScheduleIssue; sendTime: string } | null;
   initial: SequenceEditorInitial;
 }
+
+const scheduleIssueMessage: Record<SequenceScheduleIssue, string> = {
+  INVALID_TIME: 'Enter a valid time for the schedule and both window limits.',
+  INVALID_SOCIAL_WINDOW: 'Set the end of the window later than its start.',
+  SEND_TIME_OUTSIDE_SOCIAL_WINDOW: 'Set a time at or after the start of your window and before it ends.',
+  SMS_SCHEDULE_TIME_ZONE: 'The SMS contact window could not be verified for this workspace time zone.',
+  SMS_SCHEDULE_SOCIAL_WINDOW: 'Choose a social window that overlaps the automatic SMS contact hours.',
+  SMS_SCHEDULE_SEND_TIME: 'Choose a send time within both the automatic SMS contact hours and your social window.'
+};
 
 export function SequenceEditor({
   organisationId,
@@ -61,10 +77,22 @@ export function SequenceEditor({
   mode,
   enabled,
   role,
+  timeZone,
+  smsContactWindow,
+  publishedSmsWarning,
   initial
 }: SequenceEditorProps) {
   const [stages, setStages] = useState(initial.stages);
+  const [sendTime, setSendTime] = useState(initial.sendTime);
+  const [socialWindowStart, setSocialWindowStart] = useState(initial.socialWindowStart);
+  const [socialWindowEnd, setSocialWindowEnd] = useState(initial.socialWindowEnd);
+  const [versionIssue, saveVersion] = useActionState(saveSequenceVersion, null);
+  const [modeIssue, changeMode] = useActionState(setSequenceMode, null);
+  const [enabledIssue, changeEnabled] = useActionState(setSequenceEnabled, null);
   const isVoice = kind === 'VOICE';
+  const showSmsHours = !isVoice && (
+    publishedSmsWarning !== null || stages.some((stage) => schedulesSms(stage.channels))
+  );
   const tab = isVoice ? 'voice' : 'messaging';
   const channelOptions = isVoice
     ? voiceChannelOptions
@@ -105,7 +133,7 @@ export function SequenceEditor({
   return (
     <div className="sequence-layout">
       <div>
-        <form className="mode-panel" action={setSequenceMode}>
+        <form className="mode-panel" action={changeMode}>
           <input
             type="hidden"
             name="organisationId"
@@ -122,6 +150,9 @@ export function SequenceEditor({
                 ? `Every ${isVoice ? 'call' : 'reminder'} waits for a person before sending.`
                 : `Eligible ${isVoice ? 'calls' : 'reminders'} run without manual approval.`}
             </p>
+            {modeIssue !== null && (
+              <p role="alert">{scheduleIssueMessage[modeIssue]} Activate the corrected schedule before switching to automatic.</p>
+            )}
           </div>
           <div className="segmented-control">
             <button
@@ -147,7 +178,7 @@ export function SequenceEditor({
           </div>
         </form>
 
-        <form className="mode-panel" action={setSequenceEnabled}>
+        <form className="mode-panel" action={changeEnabled}>
           <input
             type="hidden"
             name="organisationId"
@@ -163,6 +194,9 @@ export function SequenceEditor({
                 ? `This ${isVoice ? 'voice' : 'messaging'} schedule is active.`
                 : `This ${isVoice ? 'voice' : 'messaging'} schedule is paused.`}
             </p>
+            {enabledIssue !== null && (
+              <p role="alert">{scheduleIssueMessage[enabledIssue]} Activate the corrected schedule before enabling this sequence.</p>
+            )}
           </div>
           <button
             className={enabled ? 'button' : 'button button--primary'}
@@ -172,7 +206,7 @@ export function SequenceEditor({
           </button>
         </form>
 
-        <form className="editor-form">
+        <form className="editor-form" action={saveVersion}>
           <input
             type="hidden"
             name="organisationId"
@@ -189,6 +223,17 @@ export function SequenceEditor({
                 <h2>{isVoice ? 'When calls run' : 'When reminders run'}</h2>
               </div>
             </div>
+            {showSmsHours && smsContactWindow !== null && (
+              <p id="automatic-sms-hours" className="muted-copy">
+                Automatic SMS can start at {smsContactWindow.start} and must start before {smsContactWindow.end} in {timeZone} on eligible business days. Your social window can narrow those hours.
+              </p>
+            )}
+            {publishedSmsWarning !== null && (
+              <p role="status">
+                The published automatic SMS schedule is set to {publishedSmsWarning.sendTime}. {scheduleIssueMessage[publishedSmsWarning.issue]} Activate a corrected schedule to send at the chosen time.
+              </p>
+            )}
+            {versionIssue !== null && <p role="alert">{scheduleIssueMessage[versionIssue]}</p>}
             <div className="field-grid">
               <label>
                 Day counting
@@ -202,7 +247,9 @@ export function SequenceEditor({
                 <input
                   type="time"
                   name="sendTime"
-                  defaultValue={initial.sendTime}
+                  aria-describedby={showSmsHours && smsContactWindow !== null ? 'automatic-sms-hours' : undefined}
+                  value={sendTime}
+                  onChange={(event) => setSendTime(event.target.value)}
                 />
               </label>
               <label>
@@ -210,7 +257,8 @@ export function SequenceEditor({
                 <input
                   type="time"
                   name="socialWindowStart"
-                  defaultValue={initial.socialWindowStart}
+                  value={socialWindowStart}
+                  onChange={(event) => setSocialWindowStart(event.target.value)}
                 />
               </label>
               <label>
@@ -218,7 +266,8 @@ export function SequenceEditor({
                 <input
                   type="time"
                   name="socialWindowEnd"
-                  defaultValue={initial.socialWindowEnd}
+                  value={socialWindowEnd}
+                  onChange={(event) => setSocialWindowEnd(event.target.value)}
                 />
               </label>
             </div>
@@ -423,12 +472,13 @@ export function SequenceEditor({
               days.
             </span>
             <div>
-              <button className="button" formAction={saveSequenceDraft}>
+              <button className="button" name="versionAction" value="draft">
                 Save draft
               </button>
               <button
                 className="button button--primary"
-                formAction={activateSequenceVersion}
+                name="versionAction"
+                value="activate"
               >
                 Activate new version
               </button>

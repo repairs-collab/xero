@@ -4,17 +4,23 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const database = vi.hoisted(() => {
   let selectCall = 0;
   let sequenceKind: 'MESSAGING' | 'VOICE' = 'MESSAGING';
+  let publishedSendTime: string | undefined;
 
   return {
     reset: () => {
       selectCall = 0;
+      publishedSendTime = undefined;
     },
     setSequenceKind: (kind: 'MESSAGING' | 'VOICE') => {
       sequenceKind = kind;
     },
+    setPublishedSendTime: (time: string) => {
+      publishedSendTime = time;
+    },
     select: () => {
+      const call = selectCall++;
       const rows =
-        selectCall++ === 0
+        call === 0
           ? [
               {
                 id: sequenceKind === 'VOICE' ? 'voice-1' : 'messaging-1',
@@ -25,12 +31,20 @@ const database = vi.hoisted(() => {
                     : 'Standard bill chasing',
                 kind: sequenceKind,
                 mode: 'AUTOMATIC' as const,
-                enabled: true
+                enabled: true,
+                timeZone: 'Australia/Sydney'
               }
             ]
-          : [];
+          : call === 1 && publishedSendTime !== undefined
+            ? [{
+                sendTime: publishedSendTime,
+                socialWindowStart: '08:00:00',
+                socialWindowEnd: '18:00:00'
+              }]
+            : [];
       const query = {
         from: () => query,
+        innerJoin: () => query,
         where: () => query,
         orderBy: () => query,
         limit: () => Promise.resolve(rows)
@@ -96,4 +110,17 @@ describe('SequenceDetailPage', () => {
       expect(html).toContain(`class="" href="${oppositeHref}"`);
     }
   );
+
+  it('explains the exclusive SMS cutoff and warns about an existing published schedule', async () => {
+    database.setSequenceKind('MESSAGING');
+    database.setPublishedSendTime('17:00:00');
+    const page = await SequenceDetailPage({
+      params: Promise.resolve({ sequenceId: 'messaging-1' })
+    });
+    const html = renderToStaticMarkup(page);
+
+    expect(html).toContain('Automatic SMS can start at 08:30 and must start before 17:00');
+    expect(html).toContain('The published automatic SMS schedule is set to 17:00.');
+    expect(html).toContain('aria-describedby="automatic-sms-hours"');
+  });
 });

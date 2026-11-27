@@ -116,6 +116,82 @@ describe('sequence administration', () => {
     await expect(service.setSequenceMode(seeded.session('OPERATOR'), { organisationId: seeded.organisationId, sequenceId: seeded.sequenceId, mode: 'AUTOMATIC' })).rejects.toThrow('FORBIDDEN');
   });
 
+  it('rejects an automatic SMS time at the exclusive cutoff and a non-overlapping social window', async () => {
+    const seeded = await seedSequence();
+    const service = createSequenceService({ database: client.db, clock: { now: () => now } });
+    const admin = seeded.session('ADMIN');
+    const value = draft(seeded.organisationId, seeded.sequenceId);
+    await service.activateSequenceVersion(admin, value);
+    await service.setSequenceMode(admin, { ...seeded, mode: 'AUTOMATIC' });
+
+    await expect(service.saveSequenceDraft(admin, { ...value, sendTime: '17:00' }))
+      .rejects.toThrow('SMS_SCHEDULE_SEND_TIME');
+    await expect(service.activateSequenceVersion(admin, { ...value, sendTime: '17:00', socialWindowStart: '17:00' }))
+      .rejects.toThrow('SMS_SCHEDULE_SOCIAL_WINDOW');
+
+    await expect(service.activateSequenceVersion(admin, { ...value, sendTime: '16:45', socialWindowStart: '16:45', socialWindowEnd: '17:00' }))
+      .resolves.toMatchObject({ versionNumber: 3 });
+  });
+
+  it('preserves published legacy timing for unrelated edits but validates a change to it', async () => {
+    const seeded = await seedSequence();
+    const service = createSequenceService({ database: client.db, clock: { now: () => now } });
+    const admin = seeded.session('ADMIN');
+    const value = draft(seeded.organisationId, seeded.sequenceId);
+    await service.activateSequenceVersion(admin, value);
+    await service.setSequenceMode(admin, { ...seeded, mode: 'AUTOMATIC' });
+    await client.db.update(reminderSequenceVersions).set({ sendTime: '17:00:00' })
+      .where(and(eq(reminderSequenceVersions.sequenceId, seeded.sequenceId), eq(reminderSequenceVersions.status, 'ACTIVE')));
+
+    await expect(service.activateSequenceVersion(admin, { ...value, sendTime: '17:00', minimumBalance: '25' }))
+      .resolves.toMatchObject({ versionNumber: 3 });
+    await expect(service.saveSequenceDraft(admin, { ...value, sendTime: '17:01' }))
+      .rejects.toThrow('SMS_SCHEDULE_SEND_TIME');
+  });
+
+  it('checks the active SMS version before switching delivery mode to automatic', async () => {
+    const seeded = await seedSequence();
+    const service = createSequenceService({ database: client.db, clock: { now: () => now } });
+    const admin = seeded.session('ADMIN');
+    const value = draft(seeded.organisationId, seeded.sequenceId);
+    await service.activateSequenceVersion(admin, { ...value, sendTime: '17:00' });
+    await service.saveSequenceDraft(admin, { ...value, sendTime: '16:45' });
+
+    await expect(service.setSequenceMode(admin, { ...seeded, mode: 'AUTOMATIC' }))
+      .rejects.toThrow('SMS_SCHEDULE_SEND_TIME');
+    const [stored] = await client.db.select().from(reminderSequences).where(eq(reminderSequences.id, seeded.sequenceId));
+    expect(stored?.mode).toBe('REVIEW');
+  });
+
+  it('leaves an email-only automatic sequence on its own schedule', async () => {
+    const seeded = await seedSequence();
+    const service = createSequenceService({ database: client.db, clock: { now: () => now } });
+    const admin = seeded.session('ADMIN');
+    const value = { ...draft(seeded.organisationId, seeded.sequenceId), sendTime: '17:00' };
+    value.stages = [{ key: 'email', offsetDays: 7, channels: ['XERO_EMAIL'] }];
+    await service.activateSequenceVersion(admin, value);
+    await expect(service.setSequenceMode(admin, { ...seeded, mode: 'AUTOMATIC' })).resolves.toBeUndefined();
+  });
+
+  it('uses the workspace time zone and rechecks an automatic SMS schedule when re-enabled', async () => {
+    const seeded = await seedSequence();
+    await client.db.update(organisations).set({ timeZone: 'Australia/Brisbane' })
+      .where(eq(organisations.id, seeded.organisationId));
+    const service = createSequenceService({ database: client.db, clock: { now: () => now } });
+    const admin = seeded.session('ADMIN');
+    const value = draft(seeded.organisationId, seeded.sequenceId);
+    const published = await service.activateSequenceVersion(admin, { ...value, sendTime: '15:59' });
+    await service.setSequenceMode(admin, { ...seeded, mode: 'AUTOMATIC' });
+
+    await expect(service.saveSequenceDraft(admin, { ...value, sendTime: '16:00' }))
+      .rejects.toThrow('SMS_SCHEDULE_SEND_TIME');
+    await client.db.update(reminderSequenceVersions).set({ sendTime: '16:00:00' })
+      .where(eq(reminderSequenceVersions.id, published.versionId));
+    await service.setSequenceEnabled(admin, { ...seeded, enabled: false });
+    await expect(service.setSequenceEnabled(admin, { ...seeded, enabled: true }))
+      .rejects.toThrow('SMS_SCHEDULE_SEND_TIME');
+  });
+
   it('creates an immutable active version and a 30-day preview', async () => {
     const seeded = await seedSequence();
     const service = createSequenceService({ database: client.db, clock: { now: () => now } });
