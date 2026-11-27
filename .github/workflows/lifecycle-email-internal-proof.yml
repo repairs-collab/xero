@@ -76,6 +76,23 @@ jobs:
           case "$outcome:$status" in
             LIFECYCLE_EMAIL_PROOF_ACCEPTED:0)
               echo 'LIFECYCLE_EMAIL_PROOF_ACCEPTED'
+              {
+                printf 'PROOF_SOURCE = "'
+                base64 -w 0 "$RUNNER_TEMP/ap-lifecycle-proof.py"
+                printf '"\n'
+                cat deploy/ovh/verify-lifecycle-proof-inbox.py
+              } > "$RUNNER_TEMP/ap-lifecycle-proof-inbox.py"
+              receipt=$(timeout --kill-after=5s 60s ssh -F /dev/null -T \
+                -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+                -o UserKnownHostsFile="$ssh_dir/known_hosts" -o GlobalKnownHostsFile=/dev/null \
+                -o ConnectTimeout=8 -i "$ssh_dir/key" -p "$OVH_PORT" -- "$OVH_USER@$OVH_HOST" \
+                'sudo -n -- /usr/bin/python3 -' \
+                < "$RUNNER_TEMP/ap-lifecycle-proof-inbox.py" 2>/dev/null) || receipt=
+              if [[ "$receipt" == LIFECYCLE_EMAIL_INBOX_VERIFIED ]]; then
+                echo 'LIFECYCLE_EMAIL_INBOX_VERIFIED'
+              else
+                echo 'LIFECYCLE_EMAIL_INBOX_UNVERIFIED'
+              fi
               ;;
             LIFECYCLE_EMAIL_PROOF_REFUSED:1|LIFECYCLE_EMAIL_PROOF_NOT_CONFIRMED:1)
               echo "$outcome"
