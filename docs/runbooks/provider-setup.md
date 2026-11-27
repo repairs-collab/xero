@@ -51,6 +51,14 @@ For Sinch, use JSON keys `apiKey` and `apiSecret` and secret ID `production/bill
 9. Send one approved SMS, verify its delivery callback, reply to it, and send `STOP`. The reply must appear in Inbox and pause the whole customer; the opt-out must also suppress future SMS. Do not mark provider setup complete until all three checks pass.
 10. If replies existed before the webhooks were installed, run the one-off `recover-inbound-replies` worker command. It confirms only replies stored successfully (or deliberately excluded by the latest completed reset), reports safe reply IDs for failures, and exits non-zero unless the provider queue is fully drained.
 
+### Shared pool for AccountPulse Solo
+
+1. Use one Australian Sinch Engage sub-account per AccountPulse company and confirm the parent credentials can act on its behalf. Confirm any Sinch sub-account fees before adding new ones. Set the sub-account's default sender to **Shared Numbers Pool**. Leave the parent account's sender as configured for existing traffic. [Sinch sub-account setup](https://support.app.sinch.com/hc/en-us/articles/10540831428751-Sub-accounts)
+2. Configure the three callback types above for each sub-account. Include `account_id=$accountId` in all three. Include the original `message_id=$messageId` and echoed `metadata` when available. In the opt-out template, use a conditional such as `#if($messageId)"message_id":"$messageId",#end` before another field so an unsolicited STOP omits the field. Sinch may omit `destination_number` for shared sends. [Sinch Engage API reference](https://developers.app.sinch.com/)
+3. In **Owner panel → SMS → Shared SMS and company inboxes**, select the company and enter its Sinch sub-account ID after confirming the default sender and callbacks. AccountPulse sends via that account and maintains the company’s own 1,000-part monthly allowance and A$0.11 ex GST per additional part.
+4. For the beta, use two controlled companies to send an invoice reminder for a test contact using the same approved handset. Reply separately to both threads. Verify the replies, delivery reports and a STOP reach only the company that sent the corresponding message. Also verify that a reply with missing or conflicting linkage never appears in a customer inbox. Confirm this at the handset and in both AccountPulse inboxes before enabling shared SMS for customers.
+5. For a missing reply, inspect it in the relevant Sinch sub-account. Keep its original message ID and reply ID for investigation. Run `recover-inbound-replies` scoped to the affected AccountPulse organisation when appropriate.
+
 ## Rotation
 
 - Xero/Sinch API credentials: add a new secret version, test, force worker deployment, then revoke the old credential.

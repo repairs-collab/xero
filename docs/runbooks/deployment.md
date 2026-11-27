@@ -108,11 +108,16 @@ mount. It never receives the Docker socket, a shell, host credentials or a host
 filesystem path. The snapshot contains uptime, CPU load, memory and root disk
 capacity, the live capacity and ID of OVH disk 698708443 (nominal 200 GB), a UTC
 check time, and the health of the fixed `web`, `worker`, `postgres` and `caddy`
-containers. The HUD shows Unavailable until it receives a current snapshot with
-valid metrics for both disks.
+containers. The worker health check requires a fresh heartbeat written after
+queue and handler registration. The collector also reports aggregate counts
+for Customer Live workspaces with no completed reminder calculation in
+25 minutes or no successful Xero sync in 90 minutes. The query uses a
+bounded, read-only transaction and outputs only counts.
 
-After the reviewed monitor files have been transferred to the OVH deploy path,
-install the collector through a separately approved host change:
+The protected release installs the collector if the OVH deployment account
+already has noninteractive permission to run the installer. If the release
+reports that host installation is needed, install from the reviewed release
+directory:
 
 ```bash
 cd /the/protected/OVH_DEPLOY_PATH
@@ -126,7 +131,18 @@ Verify it without changing application state:
 systemctl status accountpulse-server-health.timer --no-pager
 systemctl status accountpulse-server-health.service --no-pager
 test -r /var/lib/accountpulse/server-health/server-health.json
+journalctl -u accountpulse-server-health.service -p warning --since today
 ```
+
+The collector logs an alert when it detects a worker failure, overdue
+reminder checks or stale Xero sync. Owner → Server health shows the same
+checks. To deliver alerts by email, configure the existing mail relay in
+root-owned `/etc/accountpulse/server-health-mail.curl` with mode `0600`.
+Set `url` to its TLS-only `smtps://` endpoint and supply `user`,
+`mail-from` and `mail-rcpt` for `ap@motts.com.au`. The collector accepts
+only SMTPS and emails the same alert at most once per hour while it persists.
+Keep credentials off GitHub and out of the snapshot. This runs on the OVH
+host and cannot alert during a complete host outage.
 
 Do not add the Docker socket to the web container. Do not extend the snapshot
 with hostnames, IP addresses, environment values, credentials, process command
@@ -140,39 +156,25 @@ Edit the protected `accountpulse.env` on staging first, run a staging release of
 
 For Sinch callback key rotation, retain both public key IDs during the overlap. Removing an old credential is a separate, audited operation after traffic confirms it is no longer used.
 
-## Solo SMS number pool and allowance
+## Solo shared SMS and allowance
 
-Migration `0018_keen_shadow_king.sql` adds the dedicated Australian number
-pool, per-organisation allowance settings and append-only usage ledger. Before
-enabling paid Solo onboarding in an environment:
+Follow the [Sinch provider setup](provider-setup.md#shared-pool-for-accountpulse-solo)
+to link an existing Australian Sinch sub-account to each Solo workspace and
+use its shared sender pool. The subscription reserves no number at signup.
+Before enabling Customer Live for a new workspace, verify payment, complete
+onboarding and verify a controlled test through the linked account.
 
-1. Acquire and register numeric Australian two-way numbers in the AccountPulse
-   Sinch account. Confirm each number is permitted as the REST API
-   `source_number` and can receive replies.
-2. Insert only those provider-owned numbers into `sms_number_pool` with a unique
-   provider reference and `AVAILABLE` status. Do not add a sender ID or a number
-   that has not passed a real reply test.
-3. Set `SMS_NUMBER_QUARANTINE_DAYS` to the period approved in the provider
-   contract and legal/privacy review. There is intentionally no application
-   default. A cancelled account job fails closed rather than releasing a number
-   under an invented period.
-4. Reconcile a test Stripe subscription. The signed ACTIVE webhook publishes
-   `sms-number.provision`; the worker reserves one number and records READY
-   evidence. Payment does not itself enable Customer Live.
-5. Complete the eight-step onboarding checklist. The final step reads the READY
-   pool record; it is not a manually editable checkbox.
-6. Send a multi-part test and verify Billing shows committed and reserved parts.
-   Verify Billing also shows the configured included, used, remaining and
-   overage parts, with A$0.11 excluding GST per additional outbound part. Send
-   one message that crosses the 1,000-part boundary and verify it reaches the
-   provider only when the subscription has verified metered overage enabled.
-   Confirm the incremental committed overage is recorded once in the durable
-   billing outbox and acknowledged once by Stripe. A missing metered billing
-   attachment, wrong rate or stale reporting backlog must fail closed before
-   further overage is sent.
-7. Reply to the assigned number. The webhook must resolve the organisation by
-   `destination_number` before debtor/contact matching. An unknown destination
-   is acknowledged but not persisted into any tenant.
+Exercise inbound isolation by sending from two configured workspaces to the
+same approved test handset. Check that replies and STOP messages go only to
+the correct workspace. The callback resolver requires verified account and
+outbound-message evidence. Missing or conflicting evidence stays out of
+customer inboxes.
+
+Verify that each workspace has 1,000 included outbound parts and an A$0.11
+ex GST charge per additional committed part. Exercise the threshold with
+controlled billing data and verify the overage is recorded and reported once.
+Further overage is blocked if the verified metered setup, rate or reporting
+backlog fails its checks.
 
 During the Motts compatibility period, set `WEBHOOK_ORGANISATION_ID` only to
 the existing `INTERNAL_LEGACY` organisation UUID. A reply that has no dedicated
@@ -183,17 +185,11 @@ blanket fixed-tenant callback fallback in multi-tenant mode, and Solo replies
 never use legacy metadata. Remove the value only after the legacy Sinch sender
 path has been deliberately retired.
 
-Provider submission uses the provider-neutral SMS boundary. The Sinch adapter
-sets the assigned numeric number as `source_number`; legacy internal tenants
-retain the account-default sender path. Verification OTPs remain
-platform-funded and are excluded from the customer allowance. An unknown
-submission outcome remains reserved until reconciliation; a definite provider
-rejection releases the reservation.
-
-The number-pool import and quarantine release are protected operational
-activities. Public beta is blocked until the pool inventory, live reply routing,
-provider billing reconciliation and approved quarantine period have release
-evidence.
+Existing dedicated-number assignments keep their current sender and
+lifecycle. The legacy internal workspace continues to use the account default.
+Verification OTPs remain platform-funded. An unknown submission outcome
+remains reserved until reconciliation. A definite provider rejection
+releases the reservation.
 
 ## Legacy AWS application resources
 

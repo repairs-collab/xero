@@ -5,7 +5,8 @@ const mocks = vi.hoisted(() => ({
   requirePlatformOwnerPage: vi.fn(),
   listNumbers: vi.fn(),
   listOrganisations: vi.fn(),
-  listReplyNumberProvisioningRequests: vi.fn()
+  listReplyNumberProvisioningRequests: vi.fn(),
+  listSharedAccounts: vi.fn()
 }));
 
 vi.mock('../../../server/platform-page-authorization.js', () => ({
@@ -38,6 +39,13 @@ vi.mock('./actions.js', () => ({
   verifySmsNumberForPoolAction: vi.fn()
 }));
 
+vi.mock('./shared-account-action.js', () => ({ linkSharedSinchAccount: vi.fn() }));
+vi.mock('../../../server/runtime.js', () => ({
+  getDatabaseClient: () => ({
+    db: { select: () => ({ from: () => ({ where: () => ({ orderBy: mocks.listSharedAccounts }) }) }) }
+  })
+}));
+
 import PlatformSmsPage from './page.js';
 
 describe('platform SMS owner page', () => {
@@ -66,6 +74,10 @@ describe('platform SMS owner page', () => {
     mocks.listReplyNumberProvisioningRequests.mockResolvedValue({
       items: [], total: 0, page: 1, pageSize: 25
     });
+    mocks.listSharedAccounts.mockResolvedValue([
+      { id: '22222222-2222-4222-8222-222222222222', accountId: null, name: 'Alpha Repairs' },
+      { id: '33333333-3333-4333-8333-333333333333', accountId: 'sub_beta', name: 'Beta Repairs' }
+    ]);
   });
 
   it('authorizes the page and keeps provisioning filters separate from legacy inventory filters', async () => {
@@ -100,6 +112,16 @@ describe('platform SMS owner page', () => {
       { search: ' +614 ', status: 'READY', page: 3, pageSize: 25 }
     );
     expect(html).toContain('Manual reply-number provisioning');
+    expect(html).toContain('Shared SMS and company inboxes');
+    expect(html).toContain('Link Sinch sub-account');
+    expect(html).toContain('Beta Repairs · sub_beta');
+    expect(html).not.toContain('value="33333333-3333-4333-8333-333333333333"');
+  });
+
+  it('does not load sub-account data when the owner guard rejects access', async () => {
+    mocks.requirePlatformOwnerPage.mockRejectedValue(new Error('Forbidden'));
+    await expect(PlatformSmsPage({ searchParams: Promise.resolve({}) })).rejects.toThrow('Forbidden');
+    expect(mocks.listSharedAccounts).not.toHaveBeenCalled();
   });
 
   it('does not broaden an invalid provisioning status into an unfiltered owner query', async () => {

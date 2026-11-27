@@ -1,4 +1,6 @@
+import { sql } from 'drizzle-orm';
 import {
+  check,
   index,
   integer,
   jsonb,
@@ -121,6 +123,7 @@ export const messageAttempts = pgTable(
       .$type<'XERO' | 'SINCH'>()
       .notNull(),
     providerMessageId: text('provider_message_id'),
+    sinchAccountId: varchar('sinch_account_id', { length: 128 }),
     status: varchar('status', { length: 24 }).notNull(),
     requestDispatchedAt: timestamp('request_dispatched_at', {
       withTimezone: true
@@ -144,6 +147,12 @@ export const messageAttempts = pgTable(
       table.organisationId,
       table.provider,
       table.providerMessageId
+    ),
+    index('message_attempts_provider_message_idx').on(table.provider, table.providerMessageId),
+    check(
+      'message_attempts_sinch_account_ck',
+      sql`${table.sinchAccountId} is null or (${table.provider} = 'SINCH'
+        and ${table.sinchAccountId} ~ '^[A-Za-z0-9_-]{1,128}$')`
     )
   ]
 );

@@ -5,6 +5,7 @@ import {
   SinchPermanentSubmissionFailure,
   SinchRateLimited,
   SinchTransientFailure,
+  SinchUnknownSubmissionOutcome,
   SinchValidationFailure,
   type SinchClock,
   type SinchCredentials,
@@ -13,6 +14,7 @@ import {
   type SinchSendSmsInput,
   type SinchSubmitResult
 } from './types.js';
+import { parseSinchReply } from './webhook.js';
 
 export interface SinchClientOptions {
   http: HttpClient;
@@ -22,6 +24,7 @@ export interface SinchClientOptions {
 }
 
 const e164Pattern = /^\+[1-9]\d{7,14}$/;
+const accountIdPattern = /^[A-Za-z0-9_-]{1,128}$/u;
 
 const headerNumber = (
   headers: Record<string, string>,
@@ -39,27 +42,6 @@ const errorMessage = (response: HttpResponse): string =>
   response.body === ''
     ? `Sinch returned status ${response.status}`
     : response.body;
-
-const replyString = (
-  reply: Record<string, unknown>,
-  name: string
-): string => {
-  const value = reply[name];
-  if (typeof value !== 'string' || value === '') {
-    throw new Error(`Missing Sinch reply field: ${name}`);
-  }
-  return value;
-};
-
-const replyMetadata = (value: unknown): Record<string, string> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? Object.fromEntries(
-        Object.entries(value).filter(
-          (entry): entry is [string, string] =>
-            typeof entry[1] === 'string'
-        )
-      )
-    : {};
 
 export class SinchClient {
   private readonly baseUrl: string;
@@ -82,6 +64,9 @@ export class SinchClient {
     ) {
       throw new SinchValidationFailure('Sinch source number must be E.164');
     }
+    if (input.accountId !== undefined && !accountIdPattern.test(input.accountId)) {
+      throw new SinchValidationFailure('Sinch sub-account ID is invalid');
+    }
 
     const path = '/v1/messages';
     const body = JSON.stringify({
@@ -99,22 +84,26 @@ export class SinchClient {
         }
       ]
     });
-    const response = await this.request('POST', path, body);
+    const response = await this.request('POST', path, body, input.accountId);
 
     if (response.status === 202) {
-      const payload = JSON.parse(response.body) as {
-        messages?: Array<{
-          message_id?: unknown;
-          status?: unknown;
-        }>;
-      };
-      const message = payload.messages?.[0];
+      let message: { message_id?: unknown; status?: unknown } | undefined;
+      try {
+        const payload = JSON.parse(response.body) as {
+          messages?: Array<{ message_id?: unknown; status?: unknown }>;
+        } | null;
+        message = payload?.messages?.[0];
+      } catch {
+        throw new SinchUnknownSubmissionOutcome(
+          'Sinch accepted the request but returned an invalid response'
+        );
+      }
       if (
         typeof message?.message_id !== 'string' ||
+        message.message_id.trim() === '' ||
         typeof message.status !== 'string'
       ) {
-        throw new SinchTransientFailure(
-          response.status,
+        throw new SinchUnknownSubmissionOutcome(
           'Sinch accepted the request but returned no message identifier'
         );
       }
@@ -167,8 +156,8 @@ export class SinchClient {
     return { kind: 'healthy' };
   }
 
-  async checkReplies(): Promise<SinchReplyEvent[]> {
-    const response = await this.request('GET', '/v1/replies', '');
+  async checkReplies(accountId?: string): Promise<SinchReplyEvent[]> {
+    const response = await this.request('GET', '/v1/replies', '', accountId);
     if (response.status !== 200) this.throwForResponse(response);
     try {
       const payload = JSON.parse(response.body) as unknown;
@@ -184,27 +173,7 @@ export class SinchClient {
         if (typeof value !== 'object' || value === null || Array.isArray(value)) {
           throw new Error('Malformed reply');
         }
-        const reply = value as Record<string, unknown>;
-        const event: SinchReplyEvent = {
-          kind: 'reply',
-          replyId: replyString(reply, 'reply_id'),
-          from: replyString(reply, 'source_number'),
-          receivedAt: replyString(reply, 'date_received'),
-          content: replyString(reply, 'content'),
-          metadata: replyMetadata(reply.metadata)
-        };
-        const destinationNumber = reply.destination_number;
-        if (
-          typeof destinationNumber === 'string' &&
-          destinationNumber !== ''
-        ) {
-          event.to = destinationNumber;
-        }
-        const messageId = reply.message_id;
-        if (typeof messageId === 'string' && messageId !== '') {
-          event.messageId = messageId;
-        }
-        return event;
+        return parseSinchReply(value as Record<string, unknown>);
       });
     } catch (error) {
       throw new SinchTransientFailure(
@@ -216,12 +185,13 @@ export class SinchClient {
     }
   }
 
-  async confirmReplies(replyIds: string[]): Promise<void> {
+  async confirmReplies(replyIds: string[], accountId?: string): Promise<void> {
     if (replyIds.length === 0) return;
     const response = await this.request(
       'POST',
       '/v1/replies/confirmed',
-      JSON.stringify({ reply_ids: replyIds })
+      JSON.stringify({ reply_ids: replyIds }),
+      accountId
     );
     if (![200, 202, 204].includes(response.status)) {
       this.throwForResponse(response);
@@ -231,7 +201,8 @@ export class SinchClient {
   private async request(
     method: 'GET' | 'POST',
     path: string,
-    body: string
+    body: string,
+    accountId?: string
   ): Promise<HttpResponse> {
     const date = this.options.clock.now().toUTCString();
     const signature = signSinchRequest({
@@ -248,6 +219,7 @@ export class SinchClient {
       headers: {
         Authorization: signature.authorization,
         Date: date,
+        ...(accountId === undefined ? {} : { Account: accountId }),
         ...(signature.contentMd5 === undefined
           ? {}
           : {

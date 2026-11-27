@@ -12,6 +12,7 @@ export * from './repositories/payment-recovery-repository.js';
 export * from './repositories/platform-admin-repository.js';
 export * from './repositories/reply-number-provisioning-repository.js';
 export * from './repositories/sms-commerce-repository.js';
+export * from './repositories/sinch-correlation.js';
 export * from './repositories/reminder-whitelist-repository.js';
 export * from './repositories/organisation-safety-repository.js';
 export * from './repositories/webhook-repository.js';

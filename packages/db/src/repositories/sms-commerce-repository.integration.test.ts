@@ -33,6 +33,7 @@ afterAll(() => client.pool.end());
 const seedPaidOrganisation = async (options: {
   currentPeriodStart?: Date;
   currentPeriodEnd?: Date;
+  sinchSharedAccountId?: string;
 } = {}) => {
   const organisationId = randomUUID();
   await client.db.insert(organisations).values({
@@ -41,7 +42,9 @@ const seedPaidOrganisation = async (options: {
     name: `SMS commerce ${organisationId}`,
     timeZone: 'Australia/Sydney',
     baseCurrency: 'AUD',
-    edition: 'SOLO'
+    edition: 'SOLO',
+    sinchSharedAccountId: options.sinchSharedAccountId ?? null,
+    sinchSharedAccountLinkedAt: options.sinchSharedAccountId === undefined ? null : now
   });
   await client.db.insert(subscriptions).values({
     organisationId,
@@ -100,6 +103,83 @@ const seedOutbound = async (organisationId: string) => {
 };
 
 describe('PostgresSmsCommerceRepository', () => {
+  it('bills only committed pooled segments above the workspace allowance', async () => {
+    const pooledPeriodStart = new Date('2027-01-01T00:00:00.000Z');
+    const pooledPeriodEnd = new Date('2027-02-01T00:00:00.000Z');
+    const pooledNow = new Date('2027-01-10T00:00:00.000Z');
+    const pooledRepository = new PostgresSmsCommerceRepository(
+      client.db,
+      { now: () => pooledNow }
+    );
+    const sinchAccountId = `AP_${randomUUID()}`;
+    const organisationId = await seedPaidOrganisation({
+      sinchSharedAccountId: sinchAccountId,
+      currentPeriodStart: pooledPeriodStart,
+      currentPeriodEnd: pooledPeriodEnd
+    });
+    const otherOrganisationId = await seedPaidOrganisation({
+      sinchSharedAccountId: `AP_${randomUUID()}`,
+      currentPeriodStart: pooledPeriodStart,
+      currentPeriodEnd: pooledPeriodEnd
+    });
+    await client.db.insert(smsUsageLedger).values({
+      organisationId,
+      billingPeriodStart: pooledPeriodStart,
+      billingPeriodEnd: pooledPeriodEnd,
+      source: 'MANUAL_REMINDER',
+      entryType: 'ADJUST',
+      partDelta: 999,
+      idempotencyKey: 'previous-usage',
+      occurredAt: pooledNow
+    });
+    const outboundMessageId = await seedOutbound(organisationId);
+    const reservation = {
+      organisationId,
+      outboundMessageId,
+      source: 'MANUAL_REMINDER' as const,
+      partCount: 2,
+      now: pooledNow
+    };
+    await expect(pooledRepository.reserveUsage(reservation)).resolves.toMatchObject({
+      kind: 'reserved',
+      sourceNumber: null,
+      sinchAccountId,
+      alreadyReserved: false
+    });
+    await expect(pooledRepository.reserveUsage(reservation)).resolves.toMatchObject({
+      kind: 'reserved',
+      sourceNumber: null,
+      sinchAccountId,
+      alreadyReserved: true
+    });
+    const statementQuery = () => client.db.query.smsOverageStatements.findFirst({
+      where: (table, { eq }) => eq(table.organisationId, organisationId)
+    });
+    await expect(statementQuery()).resolves.toBeUndefined();
+    await pooledRepository.commitUsage(organisationId, outboundMessageId, pooledNow);
+    await pooledRepository.commitUsage(organisationId, outboundMessageId, pooledNow);
+
+    await expect(pooledRepository.loadUsage(organisationId)).resolves.toMatchObject({
+      includedParts: 1_000,
+      committedParts: 1_001,
+      reservedParts: 0,
+      overageParts: 1,
+      estimatedOverageCents: 11
+    });
+    await expect(pooledRepository.loadUsage(otherOrganisationId)).resolves.toMatchObject({
+      includedParts: 1_000,
+      committedParts: 0,
+      overageParts: 0
+    });
+    await expect(statementQuery()).resolves.toMatchObject({
+      organisationId,
+      billableParts: 1,
+      unitCents: 11,
+      subtotalCents: 11,
+      stripeCustomerId: `cus_${organisationId}`
+    });
+  });
+
   it('enforces the cancellation boundary and clears trust on old status-only writes', async () => {
     const organisationId = await seedPaidOrganisation();
     await client.db.update(subscriptions).set({ status: 'CANCEL_AT_PERIOD_END', stripeProviderStatus: 'active', currentPeriodEnd: now }).where(eq(subscriptions.organisationId, organisationId));

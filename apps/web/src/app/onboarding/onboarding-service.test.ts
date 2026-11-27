@@ -30,6 +30,7 @@ const evidence = (
   cancelAt: null,
   trialEndsAt: null,
   replyNumberStatus: 'READY',
+  sharedSenderLinkedAt: null,
   ...overrides
 });
 describe('AccountPulse Solo onboarding evidence', () => {

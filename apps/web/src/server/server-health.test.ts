@@ -36,6 +36,7 @@ const healthySnapshot = (): ServerHealthSnapshot => ({
     freeBytes: 50_000
   },
   additionalDisk,
+  operations: { overdueReminderWorkspaces: 0, staleXeroWorkspaces: 0 },
   services: [
     { name: 'web', status: 'HEALTHY' },
     { name: 'worker', status: 'HEALTHY' },
@@ -128,6 +129,28 @@ describe('server health snapshot', () => {
       label: 'Worker',
       status: 'DOWN'
     });
+  });
+
+  it.each([
+    [{ overdueReminderWorkspaces: 1, staleXeroWorkspaces: 0 }, 'CRITICAL'],
+    [{ overdueReminderWorkspaces: 0, staleXeroWorkspaces: 1 }, 'WARNING'],
+    [{ overdueReminderWorkspaces: 0, staleXeroWorkspaces: 0 }, 'HEALTHY'],
+    [null, 'WARNING']
+  ] as const)('grades operational checks %j as %s', async (operations, status) => {
+    const health = await loadServerHealthSnapshot({
+      now,
+      readText: () => Promise.resolve(JSON.stringify({ ...healthySnapshot(), operations }))
+    });
+
+    expect(health).toMatchObject({ status, operations });
+  });
+
+  it('warns that operational checks are unavailable with an older host snapshot', async () => {
+    const health = await loadServerHealthSnapshot({
+      now,
+      readText: () => Promise.resolve(JSON.stringify({ ...healthySnapshot(), operations: undefined }))
+    });
+    expect(health).toMatchObject({ status: 'WARNING', operations: null });
   });
 
   it('fails closed when the snapshot is stale', () => {
@@ -258,6 +281,7 @@ describe('server health snapshot', () => {
       memory: null,
       disk: null,
       additionalDisk: null,
+      operations: null,
       services: []
     });
   });

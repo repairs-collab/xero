@@ -313,6 +313,7 @@ export class PostgresMessageRepository {
     outboundId: string;
     attemptId: string;
     providerMessageId?: string;
+    sinchAccountId?: string | null;
     providerPayload?: Record<string, unknown>;
     now: Date;
   }): Promise<void> {
@@ -322,6 +323,7 @@ export class PostgresMessageRepository {
         .set({
           status: 'ACCEPTED',
           providerMessageId: input.providerMessageId,
+          sinchAccountId: input.sinchAccountId,
           providerPayload: input.providerPayload,
           responseReceivedAt: input.now
         })

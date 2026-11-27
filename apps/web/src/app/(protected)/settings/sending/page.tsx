@@ -160,9 +160,8 @@ export default async function SendingSettingsPage({
         <section className="callout callout--warning">
           <strong>Finish Solo onboarding before Customer live</strong>
           <p>
-            Subscription, verified reply number and every evidence-backed
-            setup step must be complete. The internal legacy override is not
-            available to customer subscriptions.
+            Activate your subscription and complete SMS setup and the remaining
+            onboarding steps before you enable Customer live.
           </p>
           <a className="button" href="/onboarding">
             Open onboarding

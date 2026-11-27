@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 
 import { hasPaidSubscriptionAccess } from '@bc5000/domain';
 
@@ -195,7 +195,8 @@ const lockOrganisation = async (
     .select({
       id: organisations.id,
       edition: organisations.edition,
-      platformStatus: organisations.platformStatus
+      platformStatus: organisations.platformStatus,
+      sinchSharedAccountId: organisations.sinchSharedAccountId
     })
     .from(organisations)
     .where(eq(organisations.id, organisationId))
@@ -284,6 +285,7 @@ export class PostgresReplyNumberProvisioningRepository {
       .where(
         and(
           eq(organisations.edition, 'SOLO'),
+          isNull(organisations.sinchSharedAccountId),
           eq(organisations.platformStatus, 'ACTIVE')
         )
       );
@@ -400,6 +402,7 @@ export class PostgresReplyNumberProvisioningRepository {
         if (
           !organisation ||
           organisation.edition !== 'SOLO' ||
+          organisation.sinchSharedAccountId !== null ||
           organisation.platformStatus !== 'ACTIVE'
         ) {
           return { ok: false, code: 'NOT_ELIGIBLE' } as const;
@@ -721,6 +724,7 @@ export class PostgresReplyNumberProvisioningRepository {
       }
       if (
         organisation.edition !== 'SOLO' ||
+        organisation.sinchSharedAccountId !== null ||
         organisation.platformStatus !== 'ACTIVE' ||
         !subscription ||
         subscription.status !== 'ACTIVE' ||

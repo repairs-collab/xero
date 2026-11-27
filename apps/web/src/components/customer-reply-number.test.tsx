@@ -20,10 +20,22 @@ describe('customer reply number', () => {
     expect(markup).not.toContain('<button');
   });
 
+  it('shows shared SMS routing for a linked workspace', () => {
+    const markup = renderToStaticMarkup(
+      <CustomerReplyNumber number={null} sharedSmsReady />
+    );
+
+    expect(markup).toContain('Shared SMS numbers');
+    expect(markup).toContain('Replies to your messages appear in your workspace inbox.');
+    expect(markup).not.toContain('being prepared');
+    expect(markup).not.toContain('Sinch');
+    expect(markup).not.toContain('+61');
+  });
+
   it('explains provisioning without inventing a number', () => {
     const markup = renderToStaticMarkup(<CustomerReplyNumber number={null} />);
 
-    expect(markup).toContain('Your reply number is being prepared');
+    expect(markup).toContain('SMS setup is pending');
     expect(markup).not.toContain('+61');
     expect(markup).not.toContain('<form');
     expect(markup).not.toContain('<button');

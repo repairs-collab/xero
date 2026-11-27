@@ -176,6 +176,9 @@ export async function executeTestSms(
           ...(sendContext.smsSourceNumber === null
             ? {}
             : { sourceNumber: sendContext.smsSourceNumber }),
+          ...(sendContext.sinchAccountId === null
+            ? {}
+            : { accountId: sendContext.sinchAccountId }),
           content,
           callbackUrl: dependencies.callbackUrl,
           metadata: {
@@ -221,6 +224,7 @@ export async function executeTestSms(
       outboundId: claim.outboundId,
       attemptId: claim.attemptId,
       providerMessageId: accepted.messageId,
+      sinchAccountId: sendResult.sinchAccountId,
       providerPayload: { status: accepted.status },
       now
     });

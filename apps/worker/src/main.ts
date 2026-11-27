@@ -21,6 +21,7 @@ export interface WorkerRuntimeOptions {
   handlers: JobHandlers;
   organisationIds: string[];
   bootstrap?: () => Promise<void>;
+  startHeartbeat?: () => () => void;
   logger?: ShutdownLogger;
 }
 
@@ -32,6 +33,7 @@ export async function startWorker(
   options: WorkerRuntimeOptions
 ): Promise<RunningWorker> {
   const inFlight = new InFlightJobs();
+  let stopHeartbeat: (() => void) | undefined;
   try {
     await options.queue.start();
     await options.bootstrap?.();
@@ -42,6 +44,7 @@ export async function startWorker(
       inFlight,
       options.logger
     );
+    stopHeartbeat = options.startHeartbeat?.();
   } catch (error) {
     await Promise.allSettled([
       options.queue.stop(),
@@ -52,12 +55,17 @@ export async function startWorker(
 
   let shutdownPromise: Promise<ShutdownResult> | undefined;
   const shutdown = (): Promise<ShutdownResult> => {
-    shutdownPromise ??= shutdownWorker({
-      queue: options.queue,
-      database: options.database,
-      inFlight,
-      ...(options.logger === undefined ? {} : { logger: options.logger })
-    });
+    if (shutdownPromise === undefined) {
+      stopHeartbeat?.();
+      process.off('SIGTERM', handleSignal);
+      process.off('SIGINT', handleSignal);
+      shutdownPromise = shutdownWorker({
+        queue: options.queue,
+        database: options.database,
+        inFlight,
+        ...(options.logger === undefined ? {} : { logger: options.logger })
+      });
+    }
     return shutdownPromise;
   };
 

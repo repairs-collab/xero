@@ -65,7 +65,8 @@ export type SmsUsageReservation =
   | { kind: 'blocked'; reason: 'REPLY_NUMBER_NOT_READY' }
   | {
       kind: 'reserved';
-      sourceNumber: string;
+      sourceNumber: string | null;
+      sinchAccountId?: string;
       warningThresholdReached: boolean;
       alreadyReserved: boolean;
     };
@@ -161,7 +162,10 @@ export class PostgresSmsCommerceRepository {
       throw new Error('SMS_PART_COUNT_INVALID');
     }
     const [organisation] = await executor
-      .select({ edition: organisations.edition })
+      .select({
+        edition: organisations.edition,
+        sinchSharedAccountId: organisations.sinchSharedAccountId
+      })
       .from(organisations)
       .where(eq(organisations.id, input.organisationId))
       .limit(1);
@@ -192,19 +196,28 @@ export class PostgresSmsCommerceRepository {
       at: input.now
     });
 
-    const [number] = await executor
-      .select({ e164Number: smsNumberPool.e164Number })
-      .from(smsNumberPool)
-      .where(
-        and(
-          eq(smsNumberPool.organisationId, input.organisationId),
-          eq(smsNumberPool.status, 'READY')
+    const sinchAccountId = organisation.sinchSharedAccountId;
+    let sourceNumber: string | null = null;
+    if (sinchAccountId === null) {
+      const [number] = await executor
+        .select({ e164Number: smsNumberPool.e164Number })
+        .from(smsNumberPool)
+        .where(
+          and(
+            eq(smsNumberPool.organisationId, input.organisationId),
+            eq(smsNumberPool.status, 'READY')
+          )
         )
-      )
-      .limit(1);
-    if (number === undefined) {
-      return { kind: 'blocked', reason: 'REPLY_NUMBER_NOT_READY' };
+        .limit(1);
+      if (number === undefined) {
+        return { kind: 'blocked', reason: 'REPLY_NUMBER_NOT_READY' };
+      }
+      sourceNumber = number.e164Number;
     }
+    const sender = {
+      sourceNumber,
+      ...(sinchAccountId === null ? {} : { sinchAccountId })
+    };
 
     await executor
       .insert(smsAllowanceSettings)
@@ -282,7 +295,7 @@ export class PostgresSmsCommerceRepository {
     if (existing !== undefined) {
       return {
         kind: 'reserved',
-        sourceNumber: number.e164Number,
+        ...sender,
         warningThresholdReached: false,
         alreadyReserved: true
       };
@@ -301,7 +314,7 @@ export class PostgresSmsCommerceRepository {
     });
     return {
       kind: 'reserved',
-      sourceNumber: number.e164Number,
+      ...sender,
       warningThresholdReached: decision.warningThresholdReached,
       alreadyReserved: false
     };

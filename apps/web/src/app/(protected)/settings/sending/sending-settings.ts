@@ -21,6 +21,7 @@ import {
   type Database,
   type DbTransaction,
   invoices,
+  messageAttempts,
   operationalResetRuns,
   organisationOnboarding,
   organisations,
@@ -78,6 +79,7 @@ type ProviderEvidence =
       xeroConnectionId: string | null;
       xeroConnectedAt: Date | null;
       replyNumberReadyAt: Date | null;
+      sharedSenderLinkedAt: Date | null;
     };
 
 export interface CustomerRolloutReadiness {
@@ -420,6 +422,18 @@ async function getProviderEvidence(
         eq(xeroConnections.status, 'CONNECTED')
       ))
       .limit(1);
+    const xeroEvidence = {
+      edition: 'SOLO' as const,
+      xeroConnectionId: connection?.id ?? null,
+      xeroConnectedAt: connection?.connectedAt ?? null
+    };
+    if (organisation.sinchSharedAccountId !== null) {
+      return {
+        ...xeroEvidence,
+        replyNumberReadyAt: null,
+        sharedSenderLinkedAt: organisation.sinchSharedAccountLinkedAt
+      };
+    }
     const [number] = await database
       .select({
         provider: smsNumberPool.provider,
@@ -441,10 +455,9 @@ async function getProviderEvidence(
       number.readyAt !== null &&
       number.readyAt.getTime() <= now.getTime();
     return {
-      edition: 'SOLO',
-      xeroConnectionId: connection?.id ?? null,
-      xeroConnectedAt: connection?.connectedAt ?? null,
-      replyNumberReadyAt: numberVerified ? number.readyAt : null
+      ...xeroEvidence,
+      replyNumberReadyAt: numberVerified ? number.readyAt : null,
+      sharedSenderLinkedAt: null
     };
   }
 
@@ -477,7 +490,9 @@ const hasHealthyProviders = (evidence: ProviderEvidence, now: Date): boolean =>
   evidence.edition === 'SOLO'
     ? evidence.xeroConnectionId !== null &&
       evidence.xeroConnectedAt !== null &&
-      evidence.replyNumberReadyAt !== null
+      (evidence.replyNumberReadyAt !== null ||
+        (evidence.sharedSenderLinkedAt !== null &&
+          evidence.sharedSenderLinkedAt.getTime() <= now.getTime()))
     : legacyProviders.every((provider) =>
         evidence.authentications.some((authentication) =>
           authentication.provider === provider &&
@@ -504,10 +519,12 @@ async function getControlledSmsEvidence(
   now: Date
 ): Promise<CustomerRolloutReadiness['gates']['controlledSmsEvidence']['evidence']> {
   const recentSmsSince = new Date(now.getTime() - controlledSmsFreshnessMs);
-  let dedicatedSmsCondition: SQL | undefined;
+  let soloUsageCondition: SQL | undefined;
+  let sharedAccountCondition: SQL | undefined;
   if (providerEvidence.edition === 'SOLO') {
-    const { replyNumberReadyAt } = providerEvidence;
-    if (replyNumberReadyAt === null) return null;
+    const senderReadyAt = providerEvidence.sharedSenderLinkedAt ??
+      providerEvidence.replyNumberReadyAt;
+    if (senderReadyAt === null) return null;
     const [onboarding] = await database
       .select({ completedAt: organisationOnboarding.completedAt })
       .from(organisationOnboarding)
@@ -517,23 +534,37 @@ async function getControlledSmsEvidence(
       ))
       .limit(1);
     if (!onboarding?.completedAt) return null;
-    const earliestDedicatedSend = new Date(Math.max(
+    const earliestSend = new Date(Math.max(
       onboarding.completedAt.getTime(),
-      replyNumberReadyAt.getTime()
+      senderReadyAt.getTime()
     ));
 
-    // The worker commits usage for dedicated-number sends. Shared-sender
-    // verification and verified-admin tests do not reserve or commit usage.
-    dedicatedSmsCondition = exists(
+    // Verification and trial tests use the platform sender without committing paid usage.
+    soloUsageCondition = exists(
       database.select({ id: smsUsageLedger.id }).from(smsUsageLedger).where(and(
         eq(smsUsageLedger.organisationId, outboundMessages.organisationId),
         eq(smsUsageLedger.outboundMessageId, outboundMessages.id),
         eq(smsUsageLedger.source, 'TEST_SMS'),
         eq(smsUsageLedger.entryType, 'COMMIT'),
-        gte(smsUsageLedger.occurredAt, earliestDedicatedSend),
+        gte(smsUsageLedger.occurredAt, earliestSend),
         lte(smsUsageLedger.occurredAt, now)
       ))
     );
+    const sharedAccountId = organisation.sinchSharedAccountId;
+    if (sharedAccountId !== null) {
+      // Only an accepted provider submission stores this marker. A later
+      // delivery update may change the attempt status without changing its account.
+      sharedAccountCondition = exists(
+        database.select({ id: messageAttempts.id }).from(messageAttempts).where(and(
+          eq(messageAttempts.organisationId, outboundMessages.organisationId),
+          eq(messageAttempts.outboundMessageId, outboundMessages.id),
+          eq(messageAttempts.provider, 'SINCH'),
+          eq(messageAttempts.sinchAccountId, sharedAccountId),
+          gte(messageAttempts.requestDispatchedAt, earliestSend),
+          lte(messageAttempts.requestDispatchedAt, now)
+        ))
+      );
+    }
   }
 
   const recentTestMessages = await database
@@ -552,7 +583,8 @@ async function getControlledSmsEvidence(
       inArray(outboundMessages.status, ['ACCEPTED', 'DELIVERED']),
       gte(outboundMessages.createdAt, recentSmsSince),
       lte(outboundMessages.createdAt, now),
-      dedicatedSmsCondition
+      soloUsageCondition,
+      sharedAccountCondition
     ))
     .orderBy(desc(outboundMessages.completedAt), desc(outboundMessages.createdAt));
   const message = recentTestMessages.find((message) =>

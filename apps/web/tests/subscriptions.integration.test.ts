@@ -10,6 +10,7 @@ import {
   migrateDatabase,
   memberships,
   organisations,
+  replyNumberProvisioningRequests,
   subscriptionEvents,
   subscriptions,
   users
@@ -211,7 +212,7 @@ const seed = async () => {
 };
 
 describe('AccountPulse Solo subscription persistence', () => {
-  it('rolls back the paid lifecycle event when provisioning cannot be enqueued', async () => {
+  it('applies a paid lifecycle event without provisioning a dedicated number', async () => {
     const seeded = await seed();
     currentOrganisationId = seeded.organisationId;
     const stripe = new FakeStripe();
@@ -225,9 +226,7 @@ describe('AccountPulse Solo subscription persistence', () => {
       soloAnnualPriceId: 'price_solo_annual',
       verifyPlatformOwner: () => Promise.resolve(false),
       clock: { now: () => now },
-      enqueueLifecycle: () => Promise.resolve(),
-      enqueueNumberProvision: () =>
-        Promise.reject(new Error('PROVISIONING_QUEUE_UNAVAILABLE'))
+      enqueueLifecycle: () => Promise.resolve()
     });
     stripe.event = stripeEvent({
       id: eventId,
@@ -235,20 +234,22 @@ describe('AccountPulse Solo subscription persistence', () => {
       status: 'active'
     });
 
-    await expect(service.handleWebhook('{}', 'signed')).rejects.toThrow(
-      'PROVISIONING_QUEUE_UNAVAILABLE'
-    );
+    await expect(service.handleWebhook('{}', 'signed')).resolves.toBe('APPLIED');
 
     await expect(
       client.db.query.subscriptions.findFirst({
         where: (table, { eq }) => eq(table.organisationId, seeded.organisationId)
       })
-    ).resolves.toMatchObject({ status: 'TRIALING' });
+    ).resolves.toMatchObject({ status: 'ACTIVE' });
     await expect(
       client.db.query.subscriptionEvents.findFirst({
         where: (table, { eq }) => eq(table.stripeEventId, eventId)
       })
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ outcome: 'APPLIED' });
+    await expect(
+      client.db.select().from(replyNumberProvisioningRequests)
+        .where(eq(replyNumberProvisioningRequests.organisationId, seeded.organisationId))
+    ).resolves.toEqual([]);
   });
 
   it('deduplicates and orders webhooks while pausing sends on billing risk', async () => {
@@ -268,8 +269,7 @@ describe('AccountPulse Solo subscription persistence', () => {
       enqueueLifecycle: (_transaction, job) => {
         lifecycleJobs.push(job.organisationId);
         return Promise.resolve();
-      },
-      enqueueNumberProvision: () => Promise.resolve()
+      }
     });
 
     stripe.event = stripeEvent({
@@ -314,14 +314,13 @@ describe('AccountPulse Solo subscription persistence', () => {
   });
 
   it.each([
-    ['active', 'CANCEL_AT_PERIOD_END', 'live', 'CUSTOMER', true, 1],
-    ['past_due', 'PAST_DUE', 'dry-run', 'CONTROLLED', false, 0],
-    ['unpaid', 'PAST_DUE', 'dry-run', 'CONTROLLED', false, 0]
-  ] as const)('handles scheduled cancellation for %s safely', async (status, expectedStatus, sendMode, rolloutScope, acknowledged, provisionCount) => {
+    ['active', 'CANCEL_AT_PERIOD_END', 'live', 'CUSTOMER', true],
+    ['past_due', 'PAST_DUE', 'dry-run', 'CONTROLLED', false],
+    ['unpaid', 'PAST_DUE', 'dry-run', 'CONTROLLED', false]
+  ] as const)('handles scheduled cancellation for %s safely', async (status, expectedStatus, sendMode, rolloutScope, acknowledged) => {
     const seeded = await seed();
     currentOrganisationId = seeded.organisationId;
     const stripe = new FakeStripe();
-    const provisionJobs: string[] = [];
     const service = createSubscriptionService({
       stripe,
       repository: createPostgresSubscriptionRepository(client.db, { now: () => now }),
@@ -329,8 +328,7 @@ describe('AccountPulse Solo subscription persistence', () => {
       soloAnnualPriceId: 'price_solo_annual',
       verifyPlatformOwner: () => Promise.resolve(false),
       clock: { now: () => now },
-      enqueueLifecycle: () => Promise.resolve(),
-      enqueueNumberProvision: (_transaction, job) => { provisionJobs.push(job.organisationId); return Promise.resolve(); }
+      enqueueLifecycle: () => Promise.resolve()
     });
     stripe.event = stripeEvent({ id: 'evt_' + randomUUID(), created: 1_794_201_600, status, cancelAtPeriodEnd: true });
     await expect(service.handleWebhook('{}', 'signed')).resolves.toBe('APPLIED');
@@ -338,7 +336,6 @@ describe('AccountPulse Solo subscription persistence', () => {
     const [organisation] = await client.db.select().from(organisations).where(eq(organisations.id, seeded.organisationId));
     expect(subscription?.status).toBe(expectedStatus);
     expect(organisation).toMatchObject({ sendMode, rolloutScope, liveSendAcknowledged: acknowledged });
-    expect(provisionJobs).toHaveLength(provisionCount);
   });
 
   it('rejects the wrong price without changing entitlement or leaking IDs to audit', async () => {
@@ -354,8 +351,7 @@ describe('AccountPulse Solo subscription persistence', () => {
       soloAnnualPriceId: 'price_solo_annual',
       verifyPlatformOwner: () => Promise.resolve(false),
       clock: { now: () => now },
-      enqueueLifecycle: () => Promise.resolve(),
-      enqueueNumberProvision: () => Promise.resolve()
+      enqueueLifecycle: () => Promise.resolve()
     });
     const eventId = `evt_${randomUUID()}`;
     stripe.event = stripeEvent({
@@ -627,8 +623,7 @@ describe('single paid Checkout across cadences', () => {
         soloAnnualPriceId: 'price_solo_annual',
         verifyPlatformOwner: () => Promise.resolve(false),
         clock,
-        enqueueLifecycle: () => Promise.resolve(),
-        enqueueNumberProvision: () => Promise.resolve()
+        enqueueLifecycle: () => Promise.resolve()
       })
     );
     return {

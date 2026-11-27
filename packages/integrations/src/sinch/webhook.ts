@@ -103,6 +103,39 @@ const metadataFrom = (value: unknown): Record<string, string> => {
   );
 };
 
+const accountFrom = (payload: JsonRecord): string | undefined => {
+  const accountId = optionalString(payload, 'account_id');
+  const vendorAccount = payload.vendor_account_id;
+  const vendorAccountId =
+    typeof vendorAccount === 'object' && vendorAccount !== null
+      ? optionalString(vendorAccount as JsonRecord, 'account_id')
+      : undefined;
+  if (
+    accountId !== undefined &&
+    vendorAccountId !== undefined &&
+    accountId !== vendorAccountId
+  ) {
+    throw new Error('Conflicting Sinch provider accounts');
+  }
+  return accountId ?? vendorAccountId;
+};
+
+const inboundFields = (payload: JsonRecord) => {
+  const accountId = accountFrom(payload);
+  const to = optionalString(payload, 'destination_number');
+  const messageId = optionalString(payload, 'message_id');
+  return {
+    ...(accountId === undefined ? {} : { accountId }),
+    ...(to === undefined ? {} : { to }),
+    ...(messageId === undefined ? {} : { messageId }),
+    from: requiredString(payload, 'source_number'),
+    receivedAt:
+      optionalString(payload, 'received_date') ??
+      requiredString(payload, 'date_received'),
+    content: requiredString(payload, 'content')
+  };
+};
+
 const deliveryCategory = (
   status: string
 ): SinchDeliveryEvent['category'] => {
@@ -119,38 +152,31 @@ const deliveryCategory = (
   return 'nonterminal';
 };
 
-const parseReply = (payload: JsonRecord): SinchReplyEvent => {
-  const event: SinchReplyEvent = {
+export const parseSinchReply = (payload: JsonRecord): SinchReplyEvent => {
+  return {
     kind: 'reply',
     replyId: requiredString(payload, 'reply_id'),
-    from: requiredString(payload, 'source_number'),
-    to: requiredString(payload, 'destination_number'),
-    receivedAt: requiredString(payload, 'received_date'),
-    content: requiredString(payload, 'content'),
+    ...inboundFields(payload),
     metadata: metadataFrom(payload.metadata)
   };
-  const messageId = optionalString(payload, 'message_id');
-  if (messageId !== undefined) event.messageId = messageId;
-  return event;
 };
 
 const parseOptOut = (payload: JsonRecord): SinchOptOutEvent => {
-  const event: SinchOptOutEvent = {
+  return {
     kind: 'opt-out',
     notificationId: requiredString(payload, 'notification_id'),
-    from: requiredString(payload, 'source_number'),
-    to: requiredString(payload, 'destination_number'),
-    receivedAt: requiredString(payload, 'received_date'),
-    content: requiredString(payload, 'content')
+    ...inboundFields(payload),
+    ...(payload.metadata === undefined
+      ? {}
+      : { metadata: metadataFrom(payload.metadata) })
   };
-  const messageId = optionalString(payload, 'message_id');
-  if (messageId !== undefined) event.messageId = messageId;
-  return event;
 };
 
 const parseDelivery = (payload: JsonRecord): SinchDeliveryEvent => {
   const status = requiredString(payload, 'status');
-  const rawStatusCode = payload.status_code;
+  const accountId = accountFrom(payload);
+  const from = optionalString(payload, 'source_number');
+  const rawStatusCode = payload.status_code ?? payload.error_code;
   const statusCode =
     typeof rawStatusCode === 'number'
       ? rawStatusCode
@@ -162,20 +188,29 @@ const parseDelivery = (payload: JsonRecord): SinchDeliveryEvent => {
   }
   return {
     kind: 'delivery',
+    ...(accountId === undefined ? {} : { accountId }),
+    ...(from === undefined ? {} : { from }),
     messageId: requiredString(payload, 'message_id'),
     status,
     statusCode,
     category: deliveryCategory(status),
-    occurredAt: requiredString(payload, 'timestamp'),
+    occurredAt:
+      optionalString(payload, 'timestamp') ??
+      requiredString(payload, 'date_received'),
     metadata: metadataFrom(payload.metadata)
   };
 };
 
 export function parseSinchEvent(rawBody: Uint8Array): SinchEvent {
   const payload = parseRecord(rawBody);
-  const eventType = requiredString(payload, 'event_type');
-  if (eventType === 'REPLY') return parseReply(payload);
+  const eventType = payload.event_type;
+  if (eventType === 'REPLY') return parseSinchReply(payload);
   if (eventType === 'OPT_OUT') return parseOptOut(payload);
   if (eventType === 'DELIVERY_REPORT') return parseDelivery(payload);
-  throw new Error(`Unsupported Sinch event type: ${eventType}`);
+  if (eventType === undefined) {
+    if (typeof payload.reply_id === 'string') return parseSinchReply(payload);
+    if (typeof payload.notification_id === 'string') return parseOptOut(payload);
+    if (typeof payload.delivery_report_id === 'string') return parseDelivery(payload);
+  }
+  throw new Error('Unsupported Sinch event type');
 }

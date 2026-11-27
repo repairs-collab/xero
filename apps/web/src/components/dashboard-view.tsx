@@ -10,6 +10,7 @@ import {
 } from '@heroicons/react/24/outline';
 import Link from 'next/link';
 
+import { xeroSyncHealthCopy, type XeroSyncHealth } from '../server/xero-sync-health.js';
 import { KpiCard } from './kpi-card.js';
 
 export interface DashboardModel {
@@ -20,17 +21,19 @@ export interface DashboardModel {
   openEscalations: number;
   paidAfterReminders: string;
   lastXeroSync: string;
-  xeroHealthy: boolean;
+  xeroSyncHealth: XeroSyncHealth;
   messagingHealthy: boolean;
   supportEmail: string;
   supportChatUrl: string | null;
 }
 
 const StatusDot = ({ healthy }: { healthy: boolean }) => (
-  <span className={`status-dot ${healthy ? 'status-dot--ok' : 'status-dot--bad'}`} />
+  <span aria-hidden="true" className={`status-dot ${healthy ? 'status-dot--ok' : 'status-dot--bad'}`} />
 );
 
 export function DashboardView({ model }: { model: DashboardModel }) {
+  const xeroCurrent = model.xeroSyncHealth === 'CURRENT';
+  const xeroHealth = xeroSyncHealthCopy[model.xeroSyncHealth];
   return (
     <div className="page-stack">
       <header className="page-heading page-heading--split">
@@ -40,7 +43,7 @@ export function DashboardView({ model }: { model: DashboardModel }) {
           <p>Keep receivables moving without losing the human touch.</p>
         </div>
         <div className="provider-health" aria-label="Connection health">
-          <span><StatusDot healthy={model.xeroHealthy} />Xero {model.xeroHealthy ? 'connected' : 'needs attention'}</span>
+          <span><StatusDot healthy={xeroCurrent} />{xeroHealth.label}</span>
           <span><StatusDot healthy={model.messagingHealthy} />AccountPulse messaging {model.messagingHealthy ? 'ready' : 'needs attention'}</span>
         </div>
       </header>
@@ -102,13 +105,13 @@ export function DashboardView({ model }: { model: DashboardModel }) {
           </article>
           <article className="panel sync-panel">
             <span className="eyebrow">Latest sync</span>
-            <div className="sync-note"><ArrowPathIcon aria-hidden="true" /><span>Last Xero sync<strong>{model.lastXeroSync}</strong></span></div>
+            <div className="sync-note"><ArrowPathIcon aria-hidden="true" /><span>Last successful Xero sync<strong>{model.lastXeroSync}</strong></span></div>
           </article>
-          <article className={`panel connection-panel ${model.xeroHealthy ? 'connection-panel--healthy' : 'connection-panel--attention'}`}>
-            <CheckCircleIcon aria-hidden="true" />
+          <article className={`panel connection-panel ${xeroCurrent ? 'connection-panel--healthy' : 'connection-panel--attention'}`}>
+            {xeroCurrent ? <CheckCircleIcon aria-hidden="true" /> : <ExclamationTriangleIcon aria-hidden="true" />}
             <div>
-              <h2>{model.xeroHealthy ? 'Xero connected' : 'Xero needs attention'}</h2>
-              <p>{model.xeroHealthy ? 'Invoices, payments and customers are in sync.' : 'Open settings to restore invoice and payment updates.'}</p>
+              <h2>{xeroHealth.label}</h2>
+              <p>{xeroHealth.description}</p>
             </div>
           </article>
           <article className="panel support-panel">

@@ -1,12 +1,13 @@
 import { timingSafeEqual } from 'node:crypto';
 
-import type { WebhookRepository } from '@bc5000/db/web';
+import type { SinchSharedRoute, WebhookRepository } from '@bc5000/db/web';
 import {
   parseRetellWebhook,
   verifyRetellWebhook
 } from '@bc5000/integrations/retell';
 import {
   parseSinchEvent,
+  type SinchEvent,
   verifySinchCallback
 } from '@bc5000/integrations/sinch';
 import {
@@ -114,6 +115,7 @@ export function createXeroWebhookHandler(
 export function createSinchWebhookHandler(
   dependencies: Omit<CommonDependencies, 'organisationId'> & {
     organisationId?: string;
+    resolveSharedEvent?(event: SinchEvent): Promise<SinchSharedRoute>;
     resolveOrganisationId?(destinationNumber: string): Promise<string | null>;
     resolveDeliveryOrganisationId?(messageId: string): Promise<string | null>;
     resolveLegacyOrganisationId?(candidateId: string): Promise<string | null>;
@@ -165,6 +167,24 @@ export function createSinchWebhookHandler(
           : event.notificationId;
     const destinationNumber =
       event.kind === 'reply' || event.kind === 'opt-out' ? event.to : null;
+    const ignored = () => new Response('', {
+      status: 202,
+      headers: { 'x-accountpulse-ignored-destination': 'true' }
+    });
+    const sharedRoute = await dependencies.resolveSharedEvent?.(event);
+    if (sharedRoute?.kind === 'pending') return new Response('', { status: 503 });
+    if (sharedRoute?.kind === 'ignored') return ignored();
+    if (sharedRoute?.kind === 'shared') {
+      await enqueueRecorded(
+        { ...dependencies, organisationId: sharedRoute.organisationId },
+        sharedRoute.organisationId,
+        'SINCH',
+        eventId,
+        rawBody
+      );
+      return new Response('', { status: 202 });
+    }
+
     let resolvedOrganisationId: string | null = null;
     if (
       typeof destinationNumber === 'string' &&
@@ -174,12 +194,19 @@ export function createSinchWebhookHandler(
         await dependencies.resolveOrganisationId(destinationNumber);
     }
     if (
-      resolvedOrganisationId === null &&
       typeof event.messageId === 'string' &&
       dependencies.resolveDeliveryOrganisationId !== undefined
     ) {
-      resolvedOrganisationId =
+      const originalOrganisationId =
         await dependencies.resolveDeliveryOrganisationId(event.messageId);
+      if (
+        resolvedOrganisationId !== null &&
+        originalOrganisationId !== null &&
+        originalOrganisationId !== resolvedOrganisationId
+      ) {
+        return ignored();
+      }
+      resolvedOrganisationId ??= originalOrganisationId;
     }
     if (
       resolvedOrganisationId === null &&
@@ -198,12 +225,7 @@ export function createSinchWebhookHandler(
     ) {
       resolvedOrganisationId = dependencies.organisationId ?? null;
     }
-    if (resolvedOrganisationId === null) {
-      return new Response('', {
-        status: 202,
-        headers: { 'x-accountpulse-ignored-destination': 'true' }
-      });
-    }
+    if (resolvedOrganisationId === null) return ignored();
     await enqueueRecorded(
       { ...dependencies, organisationId: resolvedOrganisationId },
       resolvedOrganisationId,

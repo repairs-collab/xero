@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { eq } from 'drizzle-orm';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
@@ -23,6 +24,7 @@ vi.mock('next/link', () => ({
 import { queryOutbox } from '../src/app/(protected)/outbox/outbox-query.js';
 import { parseOutboxDateRange } from '../src/app/(protected)/outbox/outbox-date-range.js';
 import { OutboxTable } from '../src/components/outbox-table.js';
+import { loadCustomerSmsSender } from '../src/server/customer-sms-sender.js';
 
 const client = createDatabase(
   process.env.DATABASE_URL ??
@@ -31,6 +33,27 @@ const client = createDatabase(
 
 beforeAll(async () => migrateDatabase(client.db));
 afterAll(async () => client.pool.end());
+
+it('returns shared SMS readiness scoped to the workspace without the provider account ID', async () => {
+  const { organisationId, foreignOrganisationId } = await seedOutbox();
+  const linkedAccountId = 'shared-' + randomUUID();
+  await client.db.update(organisations).set({
+    edition: 'SOLO',
+    sinchSharedAccountId: linkedAccountId,
+    sinchSharedAccountLinkedAt: new Date('2026-09-29T00:00:00.000Z')
+  }).where(eq(organisations.id, organisationId));
+
+  await expect(loadCustomerSmsSender(client.db, organisationId)).resolves.toEqual({
+    timeZone: 'Australia/Sydney',
+    number: null,
+    sharedSmsReady: true
+  });
+  await expect(loadCustomerSmsSender(client.db, foreignOrganisationId)).resolves.toEqual({
+    timeZone: 'Australia/Sydney',
+    number: null,
+    sharedSmsReady: false
+  });
+});
 
 async function seedOutbox() {
   const organisationId = randomUUID();

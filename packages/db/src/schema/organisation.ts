@@ -49,6 +49,10 @@ export const organisations = pgTable(
       .$type<OrganisationEdition>()
       .notNull()
       .default('INTERNAL_LEGACY'),
+    sinchSharedAccountId: varchar('sinch_shared_account_id', { length: 128 }),
+    sinchSharedAccountLinkedAt: timestamp('sinch_shared_account_linked_at', {
+      withTimezone: true
+    }),
     sendMode: varchar('send_mode', { length: 16 })
       .$type<'dry-run' | 'live'>()
       .notNull()
@@ -104,6 +108,14 @@ export const organisations = pgTable(
     check(
       'organisations_edition_ck',
       sql`${table.edition} in ('INTERNAL_LEGACY', 'SOLO')`
+    ),
+    uniqueIndex('organisations_sinch_shared_account_uq').on(table.sinchSharedAccountId),
+    check(
+      'organisations_sinch_shared_account_ck',
+      sql`(${table.sinchSharedAccountId} is null and ${table.sinchSharedAccountLinkedAt} is null)
+        or (${table.edition} = 'SOLO' and ${table.sinchSharedAccountId} is not null
+          and ${table.sinchSharedAccountId} ~ '^[A-Za-z0-9_-]{1,128}$'
+          and ${table.sinchSharedAccountLinkedAt} is not null)`
     ),
     check(
       'organisations_rollout_scope_ck',

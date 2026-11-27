@@ -6,6 +6,41 @@ import { jobNames } from '@bc5000/jobs';
 import { createSinchWebhookHandler } from './webhook-handlers.js';
 
 describe('commercial Sinch webhook routing', () => {
+  it.each([['ignored', 202], ['pending', 503]] as const)(
+    'keeps a %s shared-account reply out of the dedicated workspace',
+    async (kind, status) => {
+      const recordOnceWithId = vi.fn(() =>
+        Promise.resolve({ kind: 'recorded' as const, id: 'wrong-workspace' })
+      );
+      const dependencies = {
+        publicKeys: new Map<string, string>(),
+        sharedToken: 'a'.repeat(32),
+        repository: { recordOnce: vi.fn(), recordOnceWithId },
+        queue: { enqueueUnique: vi.fn() },
+        resolveSharedEvent: () => Promise.resolve({ kind }),
+        resolveOrganisationId: () => Promise.resolve('another-workspace')
+      };
+      const response = await createSinchWebhookHandler(dependencies)(
+        new Request('https://accountpulse.example/api/webhooks/sinch', {
+          method: 'POST',
+          headers: { 'x-accountpulse-webhook-token': 'a'.repeat(32) },
+          body: JSON.stringify({
+            event_type: 'REPLY',
+            account_id: 'account-customer-a',
+            reply_id: 'reply-1',
+            source_number: '+61400000001',
+            destination_number: '+61400000009',
+            received_date: '2026-11-27T00:00:00.000Z',
+            content: 'Please call me.'
+          })
+        })
+      );
+
+      expect(response.status).toBe(status);
+      expect(recordOnceWithId).not.toHaveBeenCalled();
+    }
+  );
+
   it('routes a reply by its dedicated destination number before persistence', async () => {
     const recordOnceWithId = vi.fn(() =>
       Promise.resolve({ kind: 'recorded' as const, id: 'webhook-1' })

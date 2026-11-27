@@ -115,6 +115,70 @@ describe('verifySinchCallback', () => {
 });
 
 describe('parseSinchEvent', () => {
+  it('preserves account and original-message data for a shared reply without a destination', () => {
+    const payload = Buffer.from(JSON.stringify({
+      account_id: 'account-customer-a',
+      reply_id: 'shared-reply-1',
+      message_id: 'shared-outbound-1',
+      source_number: '+61400000001',
+      date_received: '2026-11-27T01:02:03Z',
+      content: 'Please call me',
+      metadata: { outboundMessageId: 'local-outbound-1' }
+    }));
+    expect(parseSinchEvent(payload)).toEqual({
+      kind: 'reply',
+      accountId: 'account-customer-a',
+      replyId: 'shared-reply-1',
+      messageId: 'shared-outbound-1',
+      from: '+61400000001',
+      receivedAt: '2026-11-27T01:02:03Z',
+      content: 'Please call me',
+      metadata: { outboundMessageId: 'local-outbound-1' }
+    });
+  });
+
+  it('preserves the original-message reference on a shared opt-out', () => {
+    const payload = Buffer.from(JSON.stringify({
+      event_type: 'OPT_OUT',
+      account_id: 'account-customer-b',
+      notification_id: 'shared-opt-out-1',
+      message_id: 'shared-outbound-2',
+      source_number: '+61400000001',
+      received_date: '2026-11-27T01:02:03Z',
+      content: 'STOP',
+      metadata: { outboundMessageId: 'local-outbound-2' }
+    }));
+    expect(parseSinchEvent(payload)).toEqual({
+      kind: 'opt-out',
+      accountId: 'account-customer-b',
+      notificationId: 'shared-opt-out-1',
+      messageId: 'shared-outbound-2',
+      from: '+61400000001',
+      receivedAt: '2026-11-27T01:02:03Z',
+      content: 'STOP',
+      metadata: { outboundMessageId: 'local-outbound-2' }
+    });
+  });
+
+  it('preserves account scope on an official delivery report', () => {
+    const payload = Buffer.from(JSON.stringify({
+      delivery_report_id: 'delivery-1',
+      vendor_account_id: { account_id: 'account-customer-a' },
+      message_id: 'shared-outbound-1',
+      source_number: '+61400000001',
+      date_received: '2026-11-27T01:02:03Z',
+      status: 'delivered',
+      error_code: '220'
+    }));
+    expect(parseSinchEvent(payload)).toMatchObject({
+      kind: 'delivery',
+      accountId: 'account-customer-a',
+      messageId: 'shared-outbound-1',
+      statusCode: 220,
+      from: '+61400000001'
+    });
+  });
+
   it('maps a reply even when message_id is absent', () => {
     expect(
       parseSinchEvent(

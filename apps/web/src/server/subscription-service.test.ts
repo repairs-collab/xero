@@ -445,12 +445,10 @@ const createService = (
     stripeSubscriptionId: string;
     cancelledAt: string;
   }> = [];
-  const numberProvisionJobs: Array<{ organisationId: string }> = [];
   return {
     stripe,
     repository,
     lifecycleJobs,
-    numberProvisionJobs,
     service: createSubscriptionService({
       stripe,
       repository,
@@ -466,10 +464,6 @@ const createService = (
           stripeSubscriptionId: job.stripeSubscriptionId,
           cancelledAt: job.cancelledAt
         });
-        return Promise.resolve();
-      },
-      enqueueNumberProvision: (_transaction, job) => {
-        numberProvisionJobs.push({ organisationId: job.organisationId });
         return Promise.resolve();
       }
     })
@@ -1116,8 +1110,7 @@ describe('subscription webhooks', () => {
       service,
       stripe,
       repository,
-      lifecycleJobs,
-      numberProvisionJobs
+      lifecycleJobs
     } = createService();
     stripe.event = subscriptionEvent({
       id: `evt_${status}_${String(cancel)}`,
@@ -1158,25 +1151,6 @@ describe('subscription webhooks', () => {
           ]
         : []
     );
-    expect(numberProvisionJobs).toEqual(
-      expected === 'ACTIVE' || expected === 'CANCEL_AT_PERIOD_END'
-        ? [{ organisationId: 'org_solo' }]
-        : []
-    );
-  });
-
-  it.each([
-    ['before', 1794225601, 1],
-    ['at', 1794225600, 0]
-  ])('only queues scheduled-cancellation provisioning %s the boundary', async (_label, end, count) => {
-    const { service, stripe, numberProvisionJobs } = createService();
-    stripe.event = subscriptionEvent({ data: { object: {
-      ...(subscriptionEvent().data.object as Record<string, unknown>),
-      status: 'active', cancel_at_period_end: true,
-      current_period_start: end - 1000, current_period_end: end, cancel_at: end
-    } } });
-    await expect(service.handleWebhook('{}', 'signed')).resolves.toBe('APPLIED');
-    expect(numberProvisionJobs).toHaveLength(count);
   });
 
   it('does not publish a second cancellation job when Stripe retries an atomically applied event', async () => {
@@ -1226,8 +1200,8 @@ describe('subscription webhooks', () => {
     expect(repository.rejectedInputs).toHaveLength(1);
   });
 
-  it('records Checkout completion and queues idempotent number provisioning without granting an active subscription', async () => {
-    const { service, stripe, repository, numberProvisionJobs } = createService();
+  it('records Checkout completion without requesting a number or granting an active subscription', async () => {
+    const { service, stripe, repository, lifecycleJobs } = createService();
     stripe.event = {
       id: 'evt_checkout_completed',
       type: 'checkout.session.completed',
@@ -1262,7 +1236,7 @@ describe('subscription webhooks', () => {
     });
     expect(repository.lifecycleInputs).toEqual([]);
     expect(repository.currentAccount?.status).toBe('TRIALING');
-    expect(numberProvisionJobs).toEqual([{ organisationId: 'org_solo' }]);
+    expect(lifecycleJobs).toEqual([]);
   });
 
   it.each([
@@ -1413,7 +1387,7 @@ describe('subscription webhooks', () => {
       }
     ]
   ] as const)('parses operational Stripe event %s without granting access', async (_label, event, expected) => {
-    const { service, stripe, repository, lifecycleJobs, numberProvisionJobs } = createService();
+    const { service, stripe, repository, lifecycleJobs } = createService();
     stripe.event = event;
     stripe.chargeOwnership.set('ch_solo', {
       stripeCustomerId: 'cus_solo',
@@ -1429,7 +1403,6 @@ describe('subscription webhooks', () => {
       currency: 'aud'
     });
     expect(lifecycleJobs).toEqual([]);
-    expect(numberProvisionJobs).toEqual([]);
   });
 
   it('deduplicates a signed operational replay before any live Stripe ownership read', async () => {

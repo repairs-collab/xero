@@ -10,6 +10,7 @@ DEPLOY_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 
 for file in \
   collect-server-health.sh \
+  server-health-operations.sql \
   accountpulse-server-health.service \
   accountpulse-server-health.timer; do
   [[ -f "$DEPLOY_ROOT/$file" ]] || {
@@ -18,10 +19,13 @@ for file in \
   }
 done
 
-install -d -m 0755 /var/lib/accountpulse/server-health
+install -d -m 0755 /var/lib/accountpulse/server-health /usr/local/share/accountpulse
 install -m 0755 \
   "$DEPLOY_ROOT/collect-server-health.sh" \
   /usr/local/sbin/accountpulse-collect-server-health
+install -m 0644 \
+  "$DEPLOY_ROOT/server-health-operations.sql" \
+  /usr/local/share/accountpulse/server-health-operations.sql
 install -m 0644 \
   "$DEPLOY_ROOT/accountpulse-server-health.service" \
   /etc/systemd/system/accountpulse-server-health.service

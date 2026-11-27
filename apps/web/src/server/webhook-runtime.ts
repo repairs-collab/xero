@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 
 import {
   organisations,
@@ -6,8 +6,10 @@ import {
   messageAttempts,
   PostgresSmsCommerceRepository,
   PostgresXeroConnectionRepository,
-  PostgresWebhookRepository
+  PostgresWebhookRepository,
+  resolveSharedSinchEvent
 } from '@bc5000/db/web';
+import type { SinchEvent } from '@bc5000/integrations/sinch';
 import { getDatabaseClient } from './runtime.js';
 import { getJobQueue } from './job-runtime.js';
 
@@ -55,20 +57,23 @@ export async function getSinchWebhookDependencies() {
       : { organisationId: legacyOrganisationId }),
     repository: new PostgresWebhookRepository(database),
     queue: await getJobQueue(),
+    resolveSharedEvent: (event: SinchEvent) =>
+      resolveSharedSinchEvent(database, event),
     resolveOrganisationId: (destinationNumber: string) =>
       numbers.findOrganisationIdByDestinationNumber(destinationNumber),
     resolveDeliveryOrganisationId: async (messageId: string) => {
-      const [attempt] = await database
+      const attempts = await database
         .select({ organisationId: messageAttempts.organisationId })
         .from(messageAttempts)
         .where(
           and(
             eq(messageAttempts.provider, 'SINCH'),
-            eq(messageAttempts.providerMessageId, messageId)
+            eq(messageAttempts.providerMessageId, messageId),
+            isNull(messageAttempts.sinchAccountId)
           )
         )
-        .limit(1);
-      return attempt?.organisationId ?? null;
+        .limit(2);
+      return attempts.length === 1 ? attempts[0]?.organisationId ?? null : null;
     },
     resolveLegacyOrganisationId: async (candidateId: string) => {
       if (

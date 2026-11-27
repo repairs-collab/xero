@@ -27,6 +27,11 @@ interface CapacityView extends Capacity {
   usedPercent: number;
 }
 
+interface OperationsHealth {
+  overdueReminderWorkspaces: number;
+  staleXeroWorkspaces: number;
+}
+
 export interface ServerHealthSnapshot {
   schemaVersion: 1;
   checkedAt: string;
@@ -40,6 +45,7 @@ export interface ServerHealthSnapshot {
   memory: Capacity;
   disk: Capacity;
   additionalDisk: AdditionalDisk;
+  operations: OperationsHealth | null;
   services: Array<{
     name: CoreServerService;
     status: ServerServiceStatus;
@@ -62,6 +68,7 @@ export interface ServerHealthView {
   memory: CapacityView | null;
   disk: CapacityView | null;
   additionalDisk: (AdditionalDisk & CapacityView) | null;
+  operations: OperationsHealth | null;
   services: Array<{
     name: CoreServerService;
     label: string;
@@ -90,6 +97,7 @@ const unavailable = (
   memory: null,
   disk: null,
   additionalDisk: null,
+  operations: null,
   services: []
 });
 
@@ -111,6 +119,15 @@ const parseCapacity = (value: unknown): Capacity | null => {
     !isNonNegativeSafeInteger(freeBytes) || freeBytes > totalBytes
   ) return null;
   return { totalBytes, usedBytes, freeBytes };
+};
+
+const parseOperations = (value: unknown): OperationsHealth | null => {
+  if (!isRecord(value)) return null;
+  const { overdueReminderWorkspaces, staleXeroWorkspaces } = value;
+  return isNonNegativeSafeInteger(overdueReminderWorkspaces) &&
+    isNonNegativeSafeInteger(staleXeroWorkspaces)
+    ? { overdueReminderWorkspaces, staleXeroWorkspaces }
+    : null;
 };
 
 const parseSnapshot = (raw: string): ServerHealthSnapshot | null => {
@@ -182,6 +199,7 @@ const parseSnapshot = (raw: string): ServerHealthSnapshot | null => {
     memory,
     disk,
     additionalDisk: { ...additionalDisk, diskId: ADDITIONAL_DISK_ID },
+    operations: parseOperations(value.operations),
     services
   };
 };
@@ -226,10 +244,13 @@ export const evaluateServerHealth = (
   const critical =
     maxUsedRatio >= 0.9 ||
     loadPerCoreRatio >= 1.5 ||
+    (snapshot.operations?.overdueReminderWorkspaces ?? 0) > 0 ||
     serviceStatuses.some(({ status }) => status === 'UNHEALTHY' || status === 'DOWN');
   const warning =
     maxUsedRatio >= 0.8 ||
     loadPerCoreRatio >= 1 ||
+    snapshot.operations === null ||
+    (snapshot.operations?.staleXeroWorkspaces ?? 0) > 0 ||
     serviceStatuses.some(({ status }) => status === 'STARTING');
   const status: ServerHealthStatus = critical
     ? 'CRITICAL'
@@ -263,6 +284,7 @@ export const evaluateServerHealth = (
       ...snapshot.additionalDisk,
       usedPercent: Math.round(additionalDiskUsedRatio * 100)
     },
+    operations: snapshot.operations,
     services: serviceStatuses
   };
 };

@@ -69,7 +69,8 @@ export class PostgresEntitlementRepository {
         onboardingCompletedVersion: organisationOnboarding.completedVersion,
         adminMobile: organisationOnboarding.adminMobile,
         adminMobileVerifiedAt: organisationOnboarding.adminMobileVerifiedAt,
-        replyNumberReadyAt: organisationOnboarding.replyNumberReadyAt
+        replyNumberReadyAt: organisationOnboarding.replyNumberReadyAt,
+        sinchSharedAccountId: organisations.sinchSharedAccountId
       })
       .from(organisations)
       .leftJoin(
@@ -140,7 +141,8 @@ export class PostgresEntitlementRepository {
       trialEndsAt: account.trialEndsAt,
       onboardingCompletedVersion: account.onboardingCompletedVersion,
       requiredOnboardingVersion: account.onboardingVersion,
-      replyNumberReady: account.replyNumberReadyAt !== null,
+      replyNumberReady:
+        account.sinchSharedAccountId !== null || account.replyNumberReadyAt !== null,
       verifiedAdminMobile:
         account.adminMobileVerifiedAt === null ? null : account.adminMobile,
       acceptedTrialTestSmsParts,

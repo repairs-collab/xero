@@ -7,11 +7,11 @@ import {
   operationalResetRuns,
   organisations,
   PostgresPaymentRecoveryRepository,
-  PostgresReplyNumberProvisioningRepository,
   PostgresSmsCommerceRepository,
   PostgresXeroConnectionRepository,
   providerConnections,
   PostgresVoiceCallRepository,
+  resolveSharedSinchEvent,
   retentionCases,
   subscriptions
 } from '@bc5000/db';
@@ -39,7 +39,6 @@ import { executeReminder } from './handlers/reminder-execute.js';
 import { runReminderCycle } from './handlers/automatic-reminder-dispatch.js';
 import { applyRetention } from './handlers/retention-apply.js';
 import { executeTestSms } from './handlers/test-sms-execute.js';
-import { provisionPaidSmsNumber } from './handlers/sms-number-provision.js';
 import { reconcileSmsOverageInvoices } from './handlers/sms-overage-invoice-reconcile.js';
 import { processSubscriptionLifecycle } from './handlers/subscription-lifecycle.js';
 import { processTrialExpiry } from './handlers/trial-expiry.js';
@@ -56,10 +55,10 @@ import { startWorker } from './main.js';
 import { createApprovedSmsRecoveryService } from './operations/approved-sms-recovery.js';
 import {
   assertInboundReplyRecoveryComplete,
+  createInboundReplyRecoveryProcessor,
   createInboundReplyRecoveryService
 } from './operations/inbound-reply-recovery.js';
 import { createOperationalResetService } from './operations/operational-reset.js';
-import { backfillPaidSmsNumberProvisioning } from './operations/sms-number-provisioning-backfill.js';
 import {
   reconcileCancelledSubscriptionLifecycles,
   reconcileDuePaymentRecoveries
@@ -86,6 +85,7 @@ import {
   parseSinchCredentials
 } from './runtime-config.js';
 import { waitForDatabaseMigrations } from './startup.js';
+import { startWorkerHeartbeat } from './worker-heartbeat.js';
 import { OrganisationXeroClientFactory } from './xero-client-factory.js';
 
 const required = (name: string): string => {
@@ -222,6 +222,15 @@ async function main() {
         }
         recoveryOrganisationId = organisationRows[0].id;
       }
+      const [recoveryWorkspace] = await databaseClient.db
+        .select({
+          accountId: organisations.sinchSharedAccountId
+        })
+        .from(organisations)
+        .where(eq(organisations.id, recoveryOrganisationId))
+        .limit(1);
+      if (!recoveryWorkspace) throw new Error('ORGANISATION_NOT_FOUND');
+      const accountId = recoveryWorkspace.accountId ?? undefined;
       const sinchCredentials = parseSinchCredentials(process.env);
       const sinch = new SinchClient({
         http: new FetchHttpClient(),
@@ -243,20 +252,16 @@ async function main() {
         .orderBy(desc(operationalResetRuns.completedAt))
         .limit(1);
       const recovery = createInboundReplyRecoveryService({
-        sinch,
-        processReply: async (event) => {
-          const receivedAt = new Date(event.receivedAt);
-          if (!Number.isFinite(receivedAt.getTime())) {
-            throw new Error('Sinch reply has an invalid received timestamp');
-          }
-          if (
-            latestCompletedReset?.completedAt !== null &&
-            latestCompletedReset?.completedAt !== undefined &&
-            receivedAt <= latestCompletedReset.completedAt
-          ) {
-            return 'skipped';
-          }
-          await processInboundReply(
+        sinch: {
+          checkReplies: () => sinch.checkReplies(accountId),
+          confirmReplies: (replyIds) => sinch.confirmReplies(replyIds, accountId)
+        },
+        processReply: createInboundReplyRecoveryProcessor({
+          organisationId: recoveryOrganisationId,
+          accountId,
+          resetCompletedAt: latestCompletedReset?.completedAt,
+          resolveSharedEvent: (event) => resolveSharedSinchEvent(databaseClient.db, event),
+          importReply: (event) => processInboundReply(
             databaseClient.db,
             recoveryOrganisationId,
             event,
@@ -265,9 +270,8 @@ async function main() {
               replyId: event.replyId,
               messageId: event.messageId
             }
-          );
-          return 'processed';
-        }
+          )
+        })
       });
       const result = await recovery.run();
       console.info('Inbound reply recovery result', {
@@ -411,8 +415,6 @@ async function main() {
   const voiceCallRepository = new PostgresVoiceCallRepository(
     databaseClient.db
   );
-  const replyNumberProvisioningRepository =
-    new PostgresReplyNumberProvisioningRepository(databaseClient.db);
   const paymentRecoveryRepository =
     new PostgresPaymentRecoveryRepository(databaseClient.db);
   const voiceGateway = new VoiceGatewayClient({
@@ -443,25 +445,16 @@ async function main() {
     listCancelledSubscriptionsNeedingLifecycle: () =>
       listCancelledSubscriptionsNeedingLifecycle(databaseClient.db)
   };
-  const reconcilePaidSmsNumberProvisioning = async (): Promise<number> => {
-    const candidates = await backfillPaidSmsNumberProvisioning({
-      repository: replyNumberProvisioningRepository,
-      publisher: queue,
-      clock
-    });
-    console.info('Paid SMS number provisioning reconciliation completed', {
-      candidates
-    });
-    return candidates;
-  };
-
+  const heartbeatPath = process.env.ACCOUNT_PULSE_WORKER_HEARTBEAT_PATH;
   await startWorker({
     queue,
     database: { close: () => databaseClient.pool.end() },
     organisationIds: allRows.map((row) => row.id),
     logger: console,
+    ...(heartbeatPath === undefined
+      ? {}
+      : { startHeartbeat: () => startWorkerHeartbeat(heartbeatPath) }),
     bootstrap: async () => {
-      await reconcilePaidSmsNumberProvisioning();
       const cancellationCandidateCount =
         await reconcileCancelledSubscriptionLifecycles({
           repository: subscriptionLifecycleReconciliationRepository,
@@ -566,13 +559,9 @@ async function main() {
           { database: databaseClient.db, clock, sinch, callbackUrl },
           payload
         ).then(() => undefined),
-      [jobNames.smsNumberProvision]: (payload) =>
-        provisionPaidSmsNumber(
-          { repository: replyNumberProvisioningRepository, clock },
-          payload
-        ).then(() => undefined),
-      [jobNames.smsNumberProvisionReconcile]: () =>
-        reconcilePaidSmsNumberProvisioning().then(() => undefined),
+      // Acknowledge jobs queued by earlier releases without provisioning a number.
+      [jobNames.smsNumberProvision]: () => Promise.resolve(),
+      [jobNames.smsNumberProvisionReconcile]: () => Promise.resolve(),
       [jobNames.smsOverageInvoiceReconcile]: () =>
         reconcileSmsOverageInvoices({
           repository: {

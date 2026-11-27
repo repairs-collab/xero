@@ -265,6 +265,78 @@ describe('test SMS execution', () => {
     expect(attempts[0]?.status).toBe('DRY_RUN');
   });
 
+  it.each([true, false])(
+    'keeps paid pooled test usage under the workspace when accepted=%s',
+    async (accepted) => {
+      const seeded = await seedTestSms();
+      const accountId = `AP_${randomUUID()}`;
+      const messageId = randomUUID();
+      await client.db.update(organisations)
+        .set({
+          edition: 'SOLO',
+          sinchSharedAccountId: accountId,
+          sinchSharedAccountLinkedAt: now
+        })
+        .where(eq(organisations.id, seeded.organisationId));
+      await client.db.insert(subscriptions).values({
+        organisationId: seeded.organisationId,
+        planCode: 'SOLO_AU_2000',
+        status: 'ACTIVE',
+        stripeProviderStatus: 'active',
+        trustedStripeProviderStatus: 'active',
+        currentPeriodStart: new Date('2026-09-01T00:00:00Z'),
+        currentPeriodEnd: new Date('2026-10-01T00:00:00Z')
+      });
+      await client.db.insert(organisationOnboarding).values({
+        organisationId: seeded.organisationId,
+        version: 1,
+        completedVersion: 1,
+        completedAt: now
+      });
+      const sendSms = vi.fn<SmsProvider['sendSms']>();
+      if (accepted) {
+        sendSms.mockResolvedValue({ kind: 'accepted', messageId, status: 'QUEUED' });
+      } else {
+        sendSms.mockRejectedValue(new SinchUnknownSubmissionOutcome());
+      }
+      const result = accepted
+        ? { kind: 'sent', providerMessageId: messageId }
+        : { kind: 'unknown' };
+
+      await expect(executeTestSms(dependencies(sendSms), seeded)).resolves.toEqual(result);
+      await expect(executeTestSms(dependencies(sendSms), seeded)).resolves.toEqual(result);
+      expect(sendSms).toHaveBeenCalledTimes(1);
+      expect(sendSms.mock.calls[0]?.[0]).toMatchObject({
+        accountId,
+        destinationNumber: number,
+        metadata: {
+          organisationId: seeded.organisationId,
+          outboundMessageId: seeded.outboundMessageId
+        }
+      });
+      expect(sendSms.mock.calls[0]?.[0]).not.toHaveProperty('sourceNumber');
+
+      const entries = await client.db.select({
+        type: smsUsageLedger.entryType,
+        parts: smsUsageLedger.partDelta
+      }).from(smsUsageLedger)
+        .where(eq(smsUsageLedger.outboundMessageId, seeded.outboundMessageId))
+        .orderBy(smsUsageLedger.entryType);
+      expect(entries).toEqual(accepted
+        ? [{ type: 'COMMIT', parts: 1 }, { type: 'RESERVE', parts: 1 }]
+        : [{ type: 'RESERVE', parts: 1 }]
+      );
+      if (accepted) {
+        await expect(client.db.query.messageAttempts.findFirst({
+          where: (table, { eq }) => eq(table.outboundMessageId, seeded.outboundMessageId)
+        })).resolves.toMatchObject({
+          sinchAccountId: accountId,
+          providerMessageId: messageId
+        });
+      }
+    }
+  );
+
   it('cancels a suppressed destination immediately before sending', async () => {
     const seeded = await seedTestSms({ suppressed: true });
     const sendSms = vi.fn();

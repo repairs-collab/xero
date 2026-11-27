@@ -17,6 +17,7 @@ const now = new Date('2026-11-10T00:00:00.000Z');
 interface FakeExecutorOptions {
   includedParts: number;
   entries: Array<{ entryType: 'RESERVE' | 'COMMIT' | 'RELEASE' | 'ADJUST'; partDelta: number }>;
+  sinchSharedAccountId?: string;
   existingReservation?: {
     partDelta: number;
     billingPeriodStart: Date;
@@ -57,11 +58,20 @@ class FakeSelectQuery implements PromiseLike<unknown[]> {
   }
 
   private rows(): unknown[] {
-    if (this.table === organisations) return [{ edition: 'SOLO' }];
+    if (this.table === organisations) {
+      return [{
+        edition: 'SOLO',
+        sinchSharedAccountId: this.options.sinchSharedAccountId ?? null
+      }];
+    }
     if (this.table === subscriptions) {
       return [{ currentPeriodStart: periodStart, currentPeriodEnd: periodEnd }];
     }
-    if (this.table === smsNumberPool) return [{ e164Number: '+61400000001' }];
+    if (this.table === smsNumberPool) {
+      return this.options.sinchSharedAccountId === undefined
+        ? [{ e164Number: '+61400000001' }]
+        : [];
+    }
     if (this.table === smsAllowanceSettings) {
       return [{
         includedParts: this.options.includedParts,
@@ -101,6 +111,40 @@ const createExecutor = (options: FakeExecutorOptions) => {
 };
 
 describe('PostgresSmsCommerceRepository SMS allowance', () => {
+  it('reserves usage under the workspace when Sinch chooses a shared sender', async () => {
+    const { executor, insertedUsage } = createExecutor({
+      includedParts: 1_000,
+      entries: [],
+      sinchSharedAccountId: 'AP_Workspace-1'
+    });
+    const repository = new PostgresSmsCommerceRepository({} as never);
+
+    await expect(
+      repository.reserveUsage(
+        {
+          organisationId: 'org-solo',
+          outboundMessageId: 'outbound-pooled',
+          source: 'MANUAL_REMINDER',
+          partCount: 2,
+          now
+        },
+        executor
+      )
+    ).resolves.toMatchObject({
+      kind: 'reserved',
+      sinchAccountId: 'AP_Workspace-1',
+      sourceNumber: null
+    });
+    expect(insertedUsage).toEqual([
+      expect.objectContaining({
+        organisationId: 'org-solo',
+        outboundMessageId: 'outbound-pooled',
+        entryType: 'RESERVE',
+        partDelta: 2
+      })
+    ]);
+  });
+
   it('blocks a crossing send when persisted legacy overage uses an unapproved rate', async () => {
     const { executor, insertedUsage } = createExecutor({
       includedParts: 2_000,

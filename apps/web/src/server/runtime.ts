@@ -370,14 +370,6 @@ export const getSubscriptionService = () => {
             },
             subscriptionLifecycleSingletonKey(input)
           );
-        },
-        enqueueNumberProvision: async (transaction, input) => {
-          await queue.enqueueUniqueInTransaction(
-            transaction,
-            jobNames.smsNumberProvision,
-            { organisationId: input.organisationId },
-            `${jobNames.smsNumberProvision}:${input.organisationId}:${input.eventId}`
-          );
         }
       });
     })();

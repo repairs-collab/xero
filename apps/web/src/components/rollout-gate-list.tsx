@@ -221,8 +221,8 @@ const soloGateCopy: Partial<Record<keyof typeof gateCopy, {
   correction: string;
 }>> = {
   providersHealthy: {
-    title: 'Xero is connected and your reply number is ready',
-    correction: 'Check your Xero connection and contact support if your dedicated reply number is still pending.'
+    title: 'Xero is connected and SMS sending is ready',
+    correction: 'Check your Xero connection and contact support if SMS setup is still pending.'
   },
   syncFresh: {
     title: 'Fresh Xero sync',
@@ -230,7 +230,7 @@ const soloGateCopy: Partial<Record<keyof typeof gateCopy, {
   },
   controlledSmsEvidence: {
     title: 'Controlled Test SMS',
-    correction: 'After completing onboarding, send a Test SMS from your dedicated reply number to an allowlisted mobile. It must be accepted or delivered within the last seven days.'
+    correction: 'After completing onboarding and SMS setup, send a Test SMS to an allowlisted mobile. It must be accepted or delivered within the last seven days.'
   }
 };
 

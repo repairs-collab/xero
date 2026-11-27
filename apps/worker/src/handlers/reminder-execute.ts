@@ -836,11 +836,15 @@ export async function executeReminder(
             ...(sendContext.smsSourceNumber === null
               ? {}
               : { sourceNumber: sendContext.smsSourceNumber }),
+            ...(sendContext.sinchAccountId === null
+              ? {}
+              : { accountId: sendContext.sinchAccountId }),
             content: reminder.content,
             callbackUrl: dependencies.callbackUrl,
             metadata: {
               organisationId: payload.organisationId,
-              stageInstanceId: payload.stageInstanceId
+              stageInstanceId: payload.stageInstanceId,
+              outboundMessageId: claim.outboundId
             }
           });
           return {
@@ -917,6 +921,7 @@ export async function executeReminder(
       ...(accepted.providerMessageId === null
         ? {}
         : { providerMessageId: accepted.providerMessageId }),
+      sinchAccountId: sendResult.sinchAccountId,
       providerPayload: accepted.providerPayload,
       now
     });
