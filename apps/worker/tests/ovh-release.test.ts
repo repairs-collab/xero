@@ -73,6 +73,23 @@ describe('OVH release pipeline', () => {
     expect(workflow).not.toContain('CERTIFICATE_ARN');
   });
 
+  it('boots the exact worker image in isolated infrastructure before saving it', () => {
+    const workflow = repositoryFile('.github/workflows/deploy.yml');
+    const smoke = repositoryFile('deploy/ovh/smoke-worker-image.sh');
+    const workerBuild = workflow.indexOf('docker build --pull --file apps/worker/Dockerfile');
+    const workerSmoke = workflow.indexOf('smoke-worker-image.sh "accountpulse-worker:${IMAGE_TAG}"');
+    const workerSave = workflow.indexOf('docker save accountpulse-worker:${IMAGE_TAG}');
+
+    expect(workerBuild).toBeGreaterThanOrEqual(0);
+    expect(workerSmoke).toBeGreaterThan(workerBuild);
+    expect(workerSave).toBeGreaterThan(workerSmoke);
+    expect(smoke).toContain('docker network create --internal');
+    expect(smoke).toContain('--pull never --network "$network"');
+    expect(smoke).toContain('pg_isready -h 127.0.0.1');
+    expect(smoke).toContain('"$image" node /app/worker.mjs migrate');
+    expect(smoke).toContain('"$health" == healthy && "$restarts" == 0');
+  });
+
   it('installs commercial credentials through protected production secrets', () => {
     const workflow = repositoryFile('.github/workflows/deploy.yml');
     const installer = repositoryFile(
@@ -158,6 +175,26 @@ describe('OVH release pipeline', () => {
     expect(release).toContain('rollback_images');
     expect(release).toContain('previous-images.env');
     expect(release).toContain('release-metadata.json');
+  });
+
+  it('requires a healthy candidate worker before recording an OVH release', () => {
+    const release = repositoryFile('deploy/ovh/release.sh');
+    const workerReadinessCheck = '\nwait_for_worker_readiness\n';
+
+    expect(release).toContain('up -d --force-recreate --no-deps worker');
+    expect(release).toContain('read -r image state health restarts');
+    expect(release.indexOf(workerReadinessCheck)).toBeGreaterThan(
+      release.indexOf('rollback_armed=true')
+    );
+    expect(release.indexOf(workerReadinessCheck)).toBeLessThan(
+      release.indexOf('/health/ready')
+    );
+    expect(release.lastIndexOf(workerReadinessCheck)).toBeGreaterThan(
+      release.indexOf('/health/ready')
+    );
+    expect(release.lastIndexOf(workerReadinessCheck)).toBeLessThan(
+      release.indexOf('PREVIOUS_SHA=')
+    );
   });
 
   it('rolls back only to a recorded immutable release without restoring the database', () => {

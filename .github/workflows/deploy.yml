@@ -50,6 +50,11 @@ jobs:
           set -Eeuo pipefail
           docker build --pull --file apps/web/Dockerfile --tag accountpulse-web:${IMAGE_TAG} .
           docker build --pull --file apps/worker/Dockerfile --tag accountpulse-worker:${IMAGE_TAG} .
+      - name: Verify built worker startup
+        run: bash deploy/ovh/smoke-worker-image.sh "accountpulse-worker:${IMAGE_TAG}"
+      - name: Save verified immutable images
+        run: |
+          set -Eeuo pipefail
           docker save accountpulse-web:${IMAGE_TAG} | zstd -T0 -o accountpulse-web.tar.zst
           docker save accountpulse-worker:${IMAGE_TAG} | zstd -T0 -o accountpulse-worker.tar.zst
       - uses: actions/upload-artifact@v4
@@ -91,7 +96,7 @@ jobs:
           SSH=(ssh -i ~/.ssh/id_accountpulse -p "$OVH_PORT" "$OVH_USER@$OVH_HOST")
           SCP=(scp -i ~/.ssh/id_accountpulse -P "$OVH_PORT")
           "${SSH[@]}" "mkdir -p '$OVH_DEPLOY_PATH/artifacts/$IMAGE_TAG'"
-          "${SCP[@]}" deploy/ovh/docker-compose.yml deploy/ovh/release.sh deploy/ovh/rollback.sh deploy/ovh/rollback-safety.sh deploy/ovh/install-protected-environment.sh deploy/ovh/install-public-hostname.sh deploy/ovh/accountpulse-site.caddy deploy/ovh/collect-server-health.sh deploy/ovh/install-server-health-monitor.sh deploy/ovh/accountpulse-server-health.service deploy/ovh/accountpulse-server-health.timer "$OVH_USER@$OVH_HOST:$OVH_DEPLOY_PATH/"
+          "${SCP[@]}" deploy/ovh/docker-compose.yml deploy/ovh/release.sh deploy/ovh/rollback.sh deploy/ovh/rollback-safety.sh deploy/ovh/install-protected-environment.sh deploy/ovh/install-public-hostname.sh deploy/ovh/accountpulse-site.caddy deploy/ovh/collect-server-health.sh deploy/ovh/server-health-operations.sql deploy/ovh/install-server-health-monitor.sh deploy/ovh/accountpulse-server-health.service deploy/ovh/accountpulse-server-health.timer "$OVH_USER@$OVH_HOST:$OVH_DEPLOY_PATH/"
           "${SCP[@]}" accountpulse-web.tar.zst accountpulse-worker.tar.zst "$OVH_USER@$OVH_HOST:$OVH_DEPLOY_PATH/artifacts/$IMAGE_TAG/"
       - name: Install protected production environment
         env:
@@ -142,6 +147,13 @@ jobs:
           ssh -i ~/.ssh/id_accountpulse -p "$OVH_PORT" "$OVH_USER@$OVH_HOST" \
             "cat '$OVH_DEPLOY_PATH/releases/$IMAGE_TAG/release-metadata.json'" \
             > release-metadata-production.json
+      - name: Enable the OVH operations monitor
+        continue-on-error: true
+        run: |
+          set -Eeuo pipefail
+          ssh -i ~/.ssh/id_accountpulse -p "$OVH_PORT" "$OVH_USER@$OVH_HOST" \
+            "cd '$OVH_DEPLOY_PATH' && sudo -n -- ./install-server-health-monitor.sh && systemctl is-active accountpulse-server-health.timer" ||
+            { echo "::warning::The application released, but the OVH operations monitor needs host installation."; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: accountpulse-release-production-${{ github.sha }}

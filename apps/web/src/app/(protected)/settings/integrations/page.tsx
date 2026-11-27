@@ -4,6 +4,7 @@ import { headers } from 'next/headers';
 import { authorise } from '@bc5000/auth';
 import {
   auditEvents,
+  organisations,
   providerConnections,
   xeroConnections
 } from '@bc5000/db/web';
@@ -12,6 +13,12 @@ import {
   getDatabaseClient,
   requireWebSession
 } from '../../../../server/runtime.js';
+import {
+  formatLastXeroSync,
+  getXeroSyncHealth,
+  usesLegacyXeroConnection,
+  xeroSyncHealthCopy
+} from '../../../../server/xero-sync-health.js';
 import { disconnectXero, requestXeroSync } from './actions.js';
 
 export default async function IntegrationsPage() {
@@ -23,9 +30,9 @@ export default async function IntegrationsPage() {
   authorise(session, 'provider.configure', organisationId);
 
   const database = getDatabaseClient().db;
-  const [[legacyConnection], [xeroOAuthConnection], tests] = await Promise.all([
+  const [[legacyConnection], [organisation], tests] = await Promise.all([
     database
-      .select()
+      .select({ enabled: providerConnections.enabled })
       .from(providerConnections)
       .where(
         and(
@@ -35,9 +42,15 @@ export default async function IntegrationsPage() {
       )
       .limit(1),
     database
-      .select()
-      .from(xeroConnections)
-      .where(eq(xeroConnections.organisationId, organisationId))
+      .select({
+        edition: organisations.edition,
+        lastSuccessfulSyncAt: organisations.lastSuccessfulSyncAt,
+        timeZone: organisations.timeZone,
+        oauthStatus: xeroConnections.status
+      })
+      .from(organisations)
+      .leftJoin(xeroConnections, eq(xeroConnections.organisationId, organisations.id))
+      .where(eq(organisations.id, organisationId))
       .limit(1),
     database
       .select()
@@ -56,9 +69,23 @@ export default async function IntegrationsPage() {
   const scopeCount = Array.isArray(latestXeroTest?.afterValue?.requiredScopes)
     ? latestXeroTest.afterValue.requiredScopes.length
     : 0;
-  const connected =
-    xeroOAuthConnection?.status === 'CONNECTED' ||
-    legacyConnection?.enabled === true;
+  if (!organisation) throw new Error('No active organisation');
+  const { oauthStatus, lastSuccessfulSyncAt, timeZone } = organisation;
+  const xeroState = {
+    edition: organisation.edition,
+    oauthStatus,
+    legacyEnabled: legacyConnection?.enabled === true
+  };
+  const legacyEnabled = usesLegacyXeroConnection(xeroState);
+  const xeroSyncHealth = getXeroSyncHealth(
+    {
+      ...xeroState,
+      lastSuccessfulSyncAt
+    },
+    new Date()
+  );
+  const connected = oauthStatus === 'CONNECTED' || legacyEnabled;
+  const connectUrl = `/xero/connect?organisationId=${encodeURIComponent(organisationId)}&returnTo=%2Fsettings%2Fintegrations`;
 
   return (
     <div className="page-stack">
@@ -76,43 +103,59 @@ export default async function IntegrationsPage() {
           <div className="integration-title">
             <span className="provider-logo provider-logo--xero">X</span>
             <div>
-              <h2>Xero customer connection</h2>
-              <p>
-                {xeroOAuthConnection?.status ??
-                  (legacyConnection?.enabled
-                    ? 'Legacy Custom Connection'
-                    : 'Not connected')}
-              </p>
+              <h2>{xeroSyncHealthCopy[xeroSyncHealth].label}</h2>
             </div>
-            <span className={`status-dot ${connected ? 'status-dot--ok' : ''}`} />
+            <span
+              aria-hidden="true"
+              className={`status-dot${xeroSyncHealth === 'CURRENT' ? ' status-dot--ok' : ''}`}
+            />
           </div>
           <dl>
             <div>
               <dt>Connection type</dt>
               <dd>
-                {xeroOAuthConnection
-                  ? 'Customer OAuth'
-                  : legacyConnection?.enabled
-                    ? 'Legacy Custom Connection'
+                {legacyEnabled
+                  ? 'Legacy Custom Connection'
+                  : oauthStatus !== null && oauthStatus !== 'DISCONNECTED'
+                    ? 'Customer OAuth'
                     : 'Not connected'}
               </dd>
             </div>
             <div>
               <dt>Required permissions</dt>
               <dd>
-                {xeroOAuthConnection?.status === 'CONNECTED'
+                {oauthStatus === 'CONNECTED'
                   ? 'Granted'
-                  : scopeCount === 3
-                    ? 'Legacy verified'
-                    : 'Awaiting connection'}
+                  : oauthStatus === 'REAUTH_REQUIRED'
+                    ? 'Reconnection required'
+                    : legacyEnabled && scopeCount === 3
+                      ? 'Legacy verified'
+                      : legacyEnabled
+                        ? 'Awaiting verification'
+                        : 'Awaiting connection'}
+              </dd>
+            </div>
+            <div>
+              <dt>Last successful sync</dt>
+              <dd>
+                {lastSuccessfulSyncAt === null ? (
+                  'No successful sync recorded'
+                ) : (
+                  <time dateTime={lastSuccessfulSyncAt.toISOString()}>
+                    {formatLastXeroSync(lastSuccessfulSyncAt, timeZone)}
+                  </time>
+                )}
               </dd>
             </div>
           </dl>
-          {xeroOAuthConnection?.status === 'CONNECTED' ? (
+          {xeroSyncHealth === 'DELAYED' && (
+            <p className="settings-copy">Invoices and payments may be out of date.</p>
+          )}
+          {oauthStatus === 'CONNECTED' ? (
             <div className="settings-form">
               <a
                 className="button button--primary"
-                href={`/xero/connect?organisationId=${encodeURIComponent(organisationId)}&returnTo=%2Fsettings%2Fintegrations`}
+                href={connectUrl}
               >
                 Reconnect Xero
               </a>
@@ -124,9 +167,9 @@ export default async function IntegrationsPage() {
           ) : (
             <a
               className="button button--primary"
-              href={`/xero/connect?organisationId=${encodeURIComponent(organisationId)}&returnTo=%2Fsettings%2Fintegrations`}
+              href={connectUrl}
             >
-              Connect Xero
+              {oauthStatus === 'REAUTH_REQUIRED' ? 'Reconnect Xero' : 'Connect Xero'}
             </a>
           )}
           {connected && (

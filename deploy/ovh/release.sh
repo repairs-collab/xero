@@ -57,7 +57,7 @@ fi
 zstd -dc "$ARTIFACT_DIR/accountpulse-web.tar.zst" | docker load
 zstd -dc "$ARTIFACT_DIR/accountpulse-worker.tar.zst" | docker load
 docker image inspect "accountpulse-web:${RELEASE_SHA}" >/dev/null
-docker image inspect "accountpulse-worker:${RELEASE_SHA}" >/dev/null
+candidate_worker_image=$(docker image inspect --format '{{.Id}}' "accountpulse-worker:${RELEASE_SHA}")
 
 base_compose=(docker compose --env-file "$BASE_ENV" -f "$COMPOSE_FILE")
 if [[ -f "$CURRENT_MANIFEST" ]]; then
@@ -105,6 +105,35 @@ on_error() {
 }
 trap on_error ERR
 
+wait_for_worker_readiness() {
+  local worker_container worker_details image state health restarts attempt
+  worker_container=$("${active_compose[@]}" ps --all --quiet worker) || return 1
+  if [[ -z "$worker_container" ]]; then
+    echo "The candidate worker container is missing." >&2
+    return 1
+  fi
+
+  for attempt in {1..48}; do
+    worker_details=$(docker inspect --type container --format \
+      '{{.Image}} {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.RestartCount}}' \
+      "$worker_container") || return 1
+    read -r image state health restarts <<< "$worker_details"
+    if [[ "$image" != "$candidate_worker_image" || "$restarts" != 0 ||
+          "$state" == restarting || "$state" == exited || "$state" == dead ||
+          "$health" == unhealthy || "$health" == none ]]; then
+      echo "Candidate worker failed readiness (state=$state, health=$health, restarts=$restarts)." >&2
+      return 1
+    fi
+    if [[ "$state" == running && "$health" == healthy ]]; then
+      return 0
+    fi
+    sleep 2
+  done
+
+  echo "The candidate worker did not become ready within 96 seconds." >&2
+  return 1
+}
+
 candidate_compose=(docker compose --env-file "$BASE_ENV" --env-file "$CANDIDATE_MANIFEST" -f "$COMPOSE_FILE")
 rollback_armed=true
 "${current_compose[@]}" stop web worker
@@ -112,10 +141,14 @@ rollback_armed=true
 
 cp "$CANDIDATE_MANIFEST" "$CURRENT_MANIFEST"
 active_compose=(docker compose --env-file "$BASE_ENV" --env-file "$CURRENT_MANIFEST" -f "$COMPOSE_FILE")
+# Give every release a new worker container and restart count, even on reruns.
+"${active_compose[@]}" up -d --force-recreate --no-deps worker
 "${active_compose[@]}" up -d
 
+wait_for_worker_readiness
 curl --fail --show-error --silent --retry 18 --retry-delay 5 --retry-all-errors --connect-timeout 10 \
   "https://${PUBLIC_HOSTNAME}/health/ready" >/dev/null
+wait_for_worker_readiness
 
 PREVIOUS_SHA=$(sed -n 's/^ACCOUNT_PULSE_WEB_IMAGE=.*://p' "$PREVIOUS_MANIFEST" | head -n 1)
 printf '{\n  "releaseSha": "%s",\n  "previousReleaseSha": "%s",\n  "hostname": "%s",\n  "backup": "%s",\n  "releasedAt": "%s"\n}\n' \

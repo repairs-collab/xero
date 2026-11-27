@@ -29,6 +29,18 @@ describe('production container runtimes', () => {
     expect(contents).toContain('node --check /workspace/worker.mjs');
   });
 
+  it('ships and runs the worker heartbeat probe in the final image', () => {
+    const contents = readFileSync(
+      resolve(process.cwd(), 'apps/worker/Dockerfile'),
+      'utf8'
+    );
+
+    expect(contents).toContain(
+      'COPY --from=build --chown=node:node /workspace/worker-healthcheck.mjs /app/worker-healthcheck.mjs'
+    );
+    expect(contents).toMatch(/HEALTHCHECK[^\n]+\["node", "\/app\/worker-healthcheck\.mjs"\]/);
+  });
+
   it('ships web public assets in the production image', () => {
     const contents = readFileSync(
       resolve(process.cwd(), 'apps/web/Dockerfile'),

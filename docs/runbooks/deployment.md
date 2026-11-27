@@ -108,11 +108,16 @@ mount. It never receives the Docker socket, a shell, host credentials or a host
 filesystem path. The snapshot contains uptime, CPU load, memory and root disk
 capacity, the live capacity and ID of OVH disk 698708443 (nominal 200 GB), a UTC
 check time, and the health of the fixed `web`, `worker`, `postgres` and `caddy`
-containers. The HUD shows Unavailable until it receives a current snapshot with
-valid metrics for both disks.
+containers. The worker health check requires a fresh heartbeat written after
+queue and handler registration. The collector also reports aggregate counts
+for Customer Live workspaces with no completed reminder calculation in
+25 minutes or no successful Xero sync in 90 minutes. The query uses a
+bounded, read-only transaction and outputs only counts.
 
-After the reviewed monitor files have been transferred to the OVH deploy path,
-install the collector through a separately approved host change:
+The protected release installs the collector if the OVH deployment account
+already has noninteractive permission to run the installer. If the release
+reports that host installation is needed, install from the reviewed release
+directory:
 
 ```bash
 cd /the/protected/OVH_DEPLOY_PATH
@@ -126,7 +131,18 @@ Verify it without changing application state:
 systemctl status accountpulse-server-health.timer --no-pager
 systemctl status accountpulse-server-health.service --no-pager
 test -r /var/lib/accountpulse/server-health/server-health.json
+journalctl -u accountpulse-server-health.service -p warning --since today
 ```
+
+The collector logs an alert when it detects a worker failure, overdue
+reminder checks or stale Xero sync. Owner → Server health shows the same
+checks. To deliver alerts by email, configure the existing mail relay in
+root-owned `/etc/accountpulse/server-health-mail.curl` with mode `0600`.
+Set `url` to its TLS-only `smtps://` endpoint and supply `user`,
+`mail-from` and `mail-rcpt` for `ap@motts.com.au`. The collector accepts
+only SMTPS and emails the same alert at most once per hour while it persists.
+Keep credentials off GitHub and out of the snapshot. This runs on the OVH
+host and cannot alert during a complete host outage.
 
 Do not add the Docker socket to the web container. Do not extend the snapshot
 with hostnames, IP addresses, environment values, credentials, process command

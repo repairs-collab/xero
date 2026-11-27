@@ -3,9 +3,10 @@ import { and, count, eq, gt, inArray, isNotNull, sql } from 'drizzle-orm';
 import type { Database } from '../connection.js';
 import { outboundMessages } from '../schema/messaging.js';
 import { pauses, tasks } from '../schema/operations.js';
-import { organisations, providerConnections } from '../schema/organisation.js';
+import { organisations, providerConnections, type OrganisationEdition } from '../schema/organisation.js';
 import { invoices } from '../schema/receivables.js';
 import { approvals, invoiceChases, stageInstances } from '../schema/reminders.js';
+import { xeroConnections, type XeroConnectionStatus } from '../schema/xero.js';
 
 export interface DashboardSnapshot {
   overdueTotal: string;
@@ -15,7 +16,11 @@ export interface DashboardSnapshot {
   openEscalations: number;
   paidAfterReminders: string;
   lastXeroSync: Date | null;
-  xeroHealthy: boolean;
+  xeroOAuthStatus: XeroConnectionStatus | null;
+  legacyXeroEnabled: boolean;
+  edition: OrganisationEdition;
+  baseCurrency: string;
+  timeZone: string;
   messagingHealthy: boolean;
 }
 
@@ -29,11 +34,22 @@ export class DashboardRepository {
       this.database.select({ count: count() }).from(approvals).where(and(eq(approvals.organisationId, organisationId), eq(approvals.status, 'PENDING'))),
       this.database.select({ count: sql<number>`count(distinct ${pauses.contactId})` }).from(pauses).where(and(eq(pauses.organisationId, organisationId), eq(pauses.active, true), isNotNull(pauses.contactId))),
       this.database.select({ count: count() }).from(tasks).where(and(eq(tasks.organisationId, organisationId), eq(tasks.status, 'OPEN'))),
-      this.database.select({ lastSuccessfulSyncAt: organisations.lastSuccessfulSyncAt, baseCurrency: organisations.baseCurrency }).from(organisations).where(eq(organisations.id, organisationId)).limit(1),
+      this.database
+        .select({
+          lastSuccessfulSyncAt: organisations.lastSuccessfulSyncAt,
+          baseCurrency: organisations.baseCurrency,
+          timeZone: organisations.timeZone,
+          edition: organisations.edition,
+          xeroOAuthStatus: xeroConnections.status
+        })
+        .from(organisations)
+        .leftJoin(xeroConnections, eq(xeroConnections.organisationId, organisations.id))
+        .where(eq(organisations.id, organisationId))
+        .limit(1),
       this.database.select({ provider: providerConnections.provider, enabled: providerConnections.enabled, authenticatedAt: providerConnections.lastSuccessfulAuthenticationAt }).from(providerConnections).where(eq(providerConnections.organisationId, organisationId)),
       this.database.select({ total: sql<string>`coalesce(sum(${remindedPaidInvoices.total}), 0)` }).from(remindedPaidInvoices)
     ]);
-    const health = new Map(connections.map((row) => [row.provider, row.enabled && row.authenticatedAt !== null]));
+    const sinch = connections.find((row) => row.provider === 'SINCH');
     return {
       overdueTotal: overdue[0]?.total ?? '0',
       overdueCount: overdue[0]?.count ?? 0,
@@ -42,8 +58,12 @@ export class DashboardRepository {
       openEscalations: taskCount[0]?.count ?? 0,
       paidAfterReminders: paid[0]?.total ?? '0',
       lastXeroSync: organisation[0]?.lastSuccessfulSyncAt ?? null,
-      xeroHealthy: health.get('XERO') ?? false,
-      messagingHealthy: health.get('SINCH') ?? false
+      xeroOAuthStatus: organisation[0]?.xeroOAuthStatus ?? null,
+      legacyXeroEnabled: connections.some((row) => row.provider === 'XERO' && row.enabled),
+      edition: organisation[0]?.edition ?? 'INTERNAL_LEGACY',
+      baseCurrency: organisation[0]?.baseCurrency ?? 'AUD',
+      timeZone: organisation[0]?.timeZone ?? 'Australia/Sydney',
+      messagingHealthy: sinch?.enabled === true && sinch.authenticatedAt !== null
     };
   }
 }

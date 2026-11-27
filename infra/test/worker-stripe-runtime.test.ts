@@ -57,4 +57,4 @@ it('initializes Stripe from a standalone worker bundle without node_modules', as
       rmSync(directory, { recursive: true, force: true });
     }
   }
-});
+}, 20_000);

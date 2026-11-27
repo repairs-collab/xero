@@ -11,7 +11,7 @@ const model: DashboardModel = {
   openEscalations: 1,
   paidAfterReminders: '$500',
   lastXeroSync: '11 Nov 2026, 9:00 am',
-  xeroHealthy: true,
+  xeroSyncHealth: 'CURRENT',
   messagingHealthy: true,
   supportEmail: 'ap@motts.com.au',
   supportChatUrl: 'https://sophie.example/chat'
@@ -23,6 +23,17 @@ describe('dashboard support', () => {
 
     expect(markup).toContain('AccountPulse messaging ready');
     expect(markup).not.toContain('Sinch');
+  });
+
+  it('marks delayed Xero data for attention and keeps the last sync visible', () => {
+    const markup = renderToStaticMarkup(
+      <DashboardView model={{ ...model, xeroSyncHealth: 'DELAYED' }} />
+    );
+
+    expect(markup).toContain('Xero sync delayed');
+    expect(markup).toContain('connection-panel--attention');
+    expect(markup).toContain('11 Nov 2026, 9:00 am');
+    expect(markup).not.toContain('Invoices, payments and customers are in sync.');
   });
 
   it('offers Sophie chat and a human support email', () => {

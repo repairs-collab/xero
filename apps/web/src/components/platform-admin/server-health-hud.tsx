@@ -167,6 +167,26 @@ export function ServerHealthHud({ health }: { health: ServerHealthView }) {
             </div>
           </section>
 
+          <section className="panel server-health-services" aria-labelledby="server-health-operations">
+            <div className="panel__heading">
+              <h2 id="server-health-operations">Reminder and Xero checks</h2>
+            </div>
+            {health.operations === null ? (
+              <p>Reminder and Xero monitoring is unavailable.</p>
+            ) : (
+              <div className="server-health-service-grid">
+                <article>
+                  <strong>Workspaces with overdue reminder checks</strong>
+                  <span>{health.operations.overdueReminderWorkspaces}</span>
+                </article>
+                <article>
+                  <strong>Workspaces with stale Xero sync</strong>
+                  <span>{health.operations.staleXeroWorkspaces}</span>
+                </article>
+              </div>
+            )}
+          </section>
+
           <section className="panel server-health-thresholds" aria-label="Capacity thresholds">
             <strong>Capacity thresholds</strong>
             <span>Warning at 80%</span>
