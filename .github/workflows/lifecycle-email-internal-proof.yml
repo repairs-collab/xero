@@ -1,0 +1,88 @@
+name: Prove internal AccountPulse lifecycle email
+
+on:
+  push:
+    branches: [codex/accountpulse-lifecycle-email-proof]
+    paths:
+      - deploy/ovh/lifecycle-email-proof-release.txt
+
+permissions:
+  contents: read
+
+concurrency:
+  group: accountpulse-ovh-release
+  cancel-in-progress: false
+
+jobs:
+  prove-internal-mail:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    environment: production
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify requested deployed commit and exact proof helper
+        id: request
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          proof_sha=$(git show HEAD:deploy/ovh/lifecycle-email-proof-release.txt | python3 -c '
+          import re
+          import sys
+          request = sys.stdin.buffer.read(42)
+          if not re.fullmatch(rb"[a-f0-9]{40}\n?", request):
+              raise SystemExit("Invalid lifecycle email proof release request")
+          print(request.decode("ascii").strip())
+          ')
+          git merge-base --is-ancestor "$proof_sha" HEAD
+          helper=deploy/ovh/prove-lifecycle-email.py
+          git show "$proof_sha:$helper" > "$RUNNER_TEMP/ap-lifecycle-proof.py"
+          cmp --silent "$RUNNER_TEMP/ap-lifecycle-proof.py" "$helper"
+          python3 -m py_compile "$RUNNER_TEMP/ap-lifecycle-proof.py"
+          printf 'sha=%s\n' "$proof_sha" >> "$GITHUB_OUTPUT"
+      - name: Send one synthetic welcome message to the internal mailbox
+        env:
+          PROOF_SHA: ${{ steps.request.outputs.sha }}
+          OVH_HOST: ${{ vars.OVH_HOST }}
+          OVH_PORT: ${{ vars.OVH_PORT }}
+          OVH_USER: ${{ vars.OVH_USER }}
+          OVH_SSH_PRIVATE_KEY: ${{ secrets.OVH_SSH_PRIVATE_KEY }}
+          OVH_SSH_HOST_KEY: ${{ secrets.OVH_SSH_HOST_KEY }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          [[ "$PROOF_SHA" =~ ^[0-9a-f]{40}$ &&
+             "$OVH_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ &&
+             "$OVH_PORT" =~ ^[0-9]{1,5}$ &&
+             "$OVH_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ &&
+             -n "$OVH_SSH_PRIVATE_KEY" && -n "$OVH_SSH_HOST_KEY" ]] || {
+            echo 'Lifecycle email proof deployment access is unavailable.'
+            exit 1
+          }
+          ssh_dir=$(mktemp -d "$RUNNER_TEMP/ap-lifecycle-proof-ssh.XXXXXX")
+          trap 'rm -f "$ssh_dir/key" "$ssh_dir/known_hosts"; rmdir "$ssh_dir"' EXIT
+          printf '%s\n' "$OVH_SSH_PRIVATE_KEY" > "$ssh_dir/key"
+          printf '%s\n' "$OVH_SSH_HOST_KEY" > "$ssh_dir/known_hosts"
+          outcome=
+          status=0
+          outcome=$(timeout --kill-after=5s 120s ssh -F /dev/null -T \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$ssh_dir/known_hosts" -o GlobalKnownHostsFile=/dev/null \
+            -o ConnectTimeout=8 -i "$ssh_dir/key" -p "$OVH_PORT" -- "$OVH_USER@$OVH_HOST" \
+            "sudo -n -- /usr/bin/python3 - '$PROOF_SHA'" \
+            < "$RUNNER_TEMP/ap-lifecycle-proof.py" 2>/dev/null) || status=$?
+          case "$outcome:$status" in
+            LIFECYCLE_EMAIL_PROOF_ACCEPTED:0)
+              echo 'LIFECYCLE_EMAIL_PROOF_ACCEPTED'
+              ;;
+            LIFECYCLE_EMAIL_PROOF_REFUSED:1|LIFECYCLE_EMAIL_PROOF_NOT_CONFIRMED:1)
+              echo "$outcome"
+              exit 1
+              ;;
+            *)
+              echo 'LIFECYCLE_EMAIL_PROOF_UNAVAILABLE'
+              exit 1
+              ;;
+          esac
