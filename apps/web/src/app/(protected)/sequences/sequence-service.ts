@@ -1,21 +1,31 @@
-import { and, eq, max } from 'drizzle-orm';
+import { and, desc, eq, exists, inArray, max } from 'drizzle-orm';
 
 import { authorise, type AppSession } from '@bc5000/auth';
 import {
   auditEvents,
+  organisations,
   reminderSequences,
   reminderSequenceVersions,
   sequenceExclusions,
   sequenceStages,
   type Database,
+  type DbTransaction,
   type SequenceKind
 } from '@bc5000/db/web';
 import {
+  debtContactScheduleWindow,
   validateSmsTemplate,
   type DailyBasis,
   type ReminderStageChannel,
   type SmsAggregationStrategy
 } from '@bc5000/domain';
+import {
+  getSmsScheduleIssue,
+  schedulesSms,
+  smsScheduleChannels,
+  SequenceScheduleValidationError,
+  type SequenceScheduleTimes
+} from './sms-schedule.js';
 
 export interface SequenceDraftStage {
   key: string;
@@ -56,16 +66,16 @@ export function validateSequenceDraft(draft: SequenceDraft): void {
     !timePattern.test(draft.socialWindowStart) ||
     !timePattern.test(draft.socialWindowEnd)
   ) {
-    throw new Error('INVALID_TIME');
+    throw new SequenceScheduleValidationError('INVALID_TIME');
   }
   if (draft.socialWindowStart >= draft.socialWindowEnd) {
-    throw new Error('INVALID_SOCIAL_WINDOW');
+    throw new SequenceScheduleValidationError('INVALID_SOCIAL_WINDOW');
   }
   if (
     draft.sendTime < draft.socialWindowStart ||
     draft.sendTime >= draft.socialWindowEnd
   ) {
-    throw new Error('SEND_TIME_OUTSIDE_SOCIAL_WINDOW');
+    throw new SequenceScheduleValidationError('SEND_TIME_OUTSIDE_SOCIAL_WINDOW');
   }
   if (
     !Number.isFinite(Number(draft.minimumBalance)) ||
@@ -181,6 +191,70 @@ const voiceStages = (): SequenceDraftStage[] => [
   { key: 'thirty-days-voice', offsetDays: 30, channels: ['VOICE'] }
 ];
 
+interface SequenceScope {
+  organisationId: string;
+  sequenceId: string;
+}
+
+const sequenceScope = ({ organisationId, sequenceId }: SequenceScope) =>
+  and(eq(reminderSequences.organisationId, organisationId), eq(reminderSequences.id, sequenceId));
+
+async function lockSequence(database: DbTransaction, input: SequenceScope) {
+  const [sequence] = await database
+    .select({
+      kind: reminderSequences.kind,
+      mode: reminderSequences.mode,
+      enabled: reminderSequences.enabled,
+      timeZone: organisations.timeZone
+    })
+    .from(reminderSequences)
+    .innerJoin(organisations, eq(organisations.id, reminderSequences.organisationId))
+    .where(sequenceScope(input))
+    .for('update', { of: reminderSequences })
+    .limit(1);
+  if (sequence === undefined) throw new Error('SEQUENCE_NOT_FOUND');
+  return sequence;
+}
+
+export async function loadActiveSmsSchedule(
+  database: Pick<Database, 'select'>,
+  { organisationId, sequenceId }: SequenceScope
+): Promise<SequenceScheduleTimes | undefined> {
+  const [timing] = await database
+    .select({
+      sendTime: reminderSequenceVersions.sendTime,
+      socialWindowStart: reminderSequenceVersions.socialWindowStart,
+      socialWindowEnd: reminderSequenceVersions.socialWindowEnd
+    })
+    .from(reminderSequenceVersions)
+    .where(and(
+      eq(reminderSequenceVersions.organisationId, organisationId),
+      eq(reminderSequenceVersions.sequenceId, sequenceId),
+      eq(reminderSequenceVersions.status, 'ACTIVE'),
+      exists(
+        database.select({ id: sequenceStages.id }).from(sequenceStages).where(and(
+          eq(sequenceStages.organisationId, organisationId),
+          eq(sequenceStages.sequenceVersionId, reminderSequenceVersions.id),
+          eq(sequenceStages.enabled, true),
+          inArray(sequenceStages.channel, [...smsScheduleChannels])
+        ))
+      )
+    ))
+    .orderBy(desc(reminderSequenceVersions.versionNumber))
+    .limit(1);
+  return timing;
+}
+
+const sameSchedule = (published: SequenceScheduleTimes, draft: SequenceScheduleTimes): boolean =>
+  published.sendTime === `${draft.sendTime}:00` &&
+  published.socialWindowStart === `${draft.socialWindowStart}:00` &&
+  published.socialWindowEnd === `${draft.socialWindowEnd}:00`;
+
+function validateAutomaticSmsSchedule(times: SequenceScheduleTimes, timeZone: string, now: Date) {
+  const issue = getSmsScheduleIssue(times, debtContactScheduleWindow(timeZone, now));
+  if (issue !== null) throw new SequenceScheduleValidationError(issue);
+}
+
 export function createSequenceService(dependencies: {
   database: Database;
   clock: { now(): Date };
@@ -201,25 +275,23 @@ export function createSequenceService(dependencies: {
       input.organisationId
     );
     const now = dependencies.clock.now();
-    const changed = await dependencies.database
-      .update(reminderSequences)
-      .set({ mode: input.mode, updatedAt: now })
-      .where(
-        and(
-          eq(reminderSequences.organisationId, input.organisationId),
-          eq(reminderSequences.id, input.sequenceId)
-        )
-      )
-      .returning({ id: reminderSequences.id });
-    if (changed.length === 0) throw new Error('SEQUENCE_NOT_FOUND');
-    await dependencies.database.insert(auditEvents).values({
-      organisationId: input.organisationId,
-      actorUserId: session.userId,
-      eventType: 'SEQUENCE_MODE_CHANGED',
-      entityType: 'SEQUENCE',
-      entityId: input.sequenceId,
-      afterValue: { mode: input.mode },
-      occurredAt: now
+    await dependencies.database.transaction(async (transaction) => {
+      const sequence = await lockSequence(transaction, input);
+      if (sequence.kind === 'MESSAGING' && sequence.mode !== 'AUTOMATIC' && input.mode === 'AUTOMATIC') {
+        const published = await loadActiveSmsSchedule(transaction, input);
+        if (published) validateAutomaticSmsSchedule(published, sequence.timeZone, now);
+      }
+      await transaction.update(reminderSequences)
+        .set({ mode: input.mode, updatedAt: now }).where(sequenceScope(input));
+      await transaction.insert(auditEvents).values({
+        organisationId: input.organisationId,
+        actorUserId: session.userId,
+        eventType: 'SEQUENCE_MODE_CHANGED',
+        entityType: 'SEQUENCE',
+        entityId: input.sequenceId,
+        afterValue: { mode: input.mode },
+        occurredAt: now
+      });
     });
   };
 
@@ -229,25 +301,23 @@ export function createSequenceService(dependencies: {
   ): Promise<void> => {
     authorise(session, 'sequence.manage', input.organisationId);
     const now = dependencies.clock.now();
-    const changed = await dependencies.database
-      .update(reminderSequences)
-      .set({ enabled: input.enabled, updatedAt: now })
-      .where(
-        and(
-          eq(reminderSequences.organisationId, input.organisationId),
-          eq(reminderSequences.id, input.sequenceId)
-        )
-      )
-      .returning({ id: reminderSequences.id, kind: reminderSequences.kind });
-    if (changed.length === 0) throw new Error('SEQUENCE_NOT_FOUND');
-    await dependencies.database.insert(auditEvents).values({
-      organisationId: input.organisationId,
-      actorUserId: session.userId,
-      eventType: 'SEQUENCE_ENABLED_CHANGED',
-      entityType: 'SEQUENCE',
-      entityId: input.sequenceId,
-      afterValue: { enabled: input.enabled, kind: changed[0]?.kind },
-      occurredAt: now
+    await dependencies.database.transaction(async (transaction) => {
+      const sequence = await lockSequence(transaction, input);
+      if (sequence.kind === 'MESSAGING' && sequence.mode === 'AUTOMATIC' && !sequence.enabled && input.enabled) {
+        const published = await loadActiveSmsSchedule(transaction, input);
+        if (published) validateAutomaticSmsSchedule(published, sequence.timeZone, now);
+      }
+      await transaction.update(reminderSequences)
+        .set({ enabled: input.enabled, updatedAt: now }).where(sequenceScope(input));
+      await transaction.insert(auditEvents).values({
+        organisationId: input.organisationId,
+        actorUserId: session.userId,
+        eventType: 'SEQUENCE_ENABLED_CHANGED',
+        entityType: 'SEQUENCE',
+        entityId: input.sequenceId,
+        afterValue: { enabled: input.enabled, kind: sequence.kind },
+        occurredAt: now
+      });
     });
   };
 
@@ -388,19 +458,15 @@ export function createSequenceService(dependencies: {
     validateSequenceDraft(draft);
     const now = dependencies.clock.now();
     return dependencies.database.transaction(async (transaction) => {
-      const [sequence] = await transaction
-        .select({ id: reminderSequences.id, kind: reminderSequences.kind })
-        .from(reminderSequences)
-        .where(
-          and(
-            eq(reminderSequences.organisationId, draft.organisationId),
-            eq(reminderSequences.id, draft.sequenceId)
-          )
-        )
-        .for('update')
-        .limit(1);
-      if (sequence === undefined) throw new Error('SEQUENCE_NOT_FOUND');
+      const sequence = await lockSequence(transaction, draft);
       if (sequence.kind !== draft.kind) throw new Error('SEQUENCE_KIND_MISMATCH');
+      if (sequence.kind === 'MESSAGING' && sequence.mode === 'AUTOMATIC' &&
+          draft.stages.some((stage) => schedulesSms(stage.channels))) {
+        const published = await loadActiveSmsSchedule(transaction, draft);
+        if (!published || !sameSchedule(published, draft)) {
+          validateAutomaticSmsSchedule(draft, sequence.timeZone, now);
+        }
+      }
       const [latest] = await transaction
         .select({ value: max(reminderSequenceVersions.versionNumber) })
         .from(reminderSequenceVersions)

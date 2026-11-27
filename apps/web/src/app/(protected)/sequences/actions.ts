@@ -12,6 +12,7 @@ import {
   type SequenceDraft,
   type SequenceDraftStage
 } from './sequence-service.js';
+import { SequenceScheduleValidationError, type SequenceScheduleIssue } from './sms-schedule.js';
 
 async function context() {
   const session = await requireWebAcceptedSession(
@@ -100,46 +101,69 @@ const draftFrom = (formData: FormData): SequenceDraft => {
 const tabFor = (formData: FormData): 'messaging' | 'voice' =>
   formData.get('tab') === 'voice' ? 'voice' : 'messaging';
 
-export async function saveSequenceDraft(formData: FormData): Promise<void> {
-  const { session, sequences } = await context();
-  const draft = draftFrom(formData);
-  await sequences.saveSequenceDraft(session, draft);
-  revalidatePath(`/sequences/${draft.sequenceId}`);
+function scheduleIssue(error: unknown): SequenceScheduleIssue {
+  if (error instanceof SequenceScheduleValidationError) return error.issue;
+  throw error;
 }
 
-export async function activateSequenceVersion(
+export async function saveSequenceVersion(
+  _previousIssue: SequenceScheduleIssue | null,
   formData: FormData
-): Promise<void> {
+): Promise<SequenceScheduleIssue | null> {
   const { session, sequences } = await context();
   const draft = draftFrom(formData);
-  await sequences.activateSequenceVersion(session, draft);
-  revalidatePath('/');
-  redirect(
-    `/sequences/${draft.sequenceId}?tab=${tabFor(formData)}&activated=1`
-  );
+  const activate = formData.get('versionAction') === 'activate';
+  try {
+    if (activate) await sequences.activateSequenceVersion(session, draft);
+    else await sequences.saveSequenceDraft(session, draft);
+  } catch (error) {
+    return scheduleIssue(error);
+  }
+  revalidatePath(`/sequences/${draft.sequenceId}`);
+  if (activate) {
+    revalidatePath('/');
+    redirect(`/sequences/${draft.sequenceId}?tab=${tabFor(formData)}&activated=1`);
+  }
+  return null;
 }
 
-export async function setSequenceMode(formData: FormData): Promise<void> {
+export async function setSequenceMode(
+  _previousIssue: SequenceScheduleIssue | null,
+  formData: FormData
+): Promise<SequenceScheduleIssue | null> {
   const { session, sequences } = await context();
   const sequenceId = requiredText(formData, 'sequenceId');
-  await sequences.setSequenceMode(session, {
-    organisationId: requiredText(formData, 'organisationId'),
-    sequenceId,
-    mode: formData.get('mode') === 'AUTOMATIC' ? 'AUTOMATIC' : 'REVIEW'
-  });
+  try {
+    await sequences.setSequenceMode(session, {
+      organisationId: requiredText(formData, 'organisationId'),
+      sequenceId,
+      mode: formData.get('mode') === 'AUTOMATIC' ? 'AUTOMATIC' : 'REVIEW'
+    });
+  } catch (error) {
+    return scheduleIssue(error);
+  }
   revalidatePath(`/sequences/${sequenceId}`);
+  return null;
 }
 
-export async function setSequenceEnabled(formData: FormData): Promise<void> {
+export async function setSequenceEnabled(
+  _previousIssue: SequenceScheduleIssue | null,
+  formData: FormData
+): Promise<SequenceScheduleIssue | null> {
   const { session, sequences } = await context();
   const sequenceId = requiredText(formData, 'sequenceId');
-  await sequences.setSequenceEnabled(session, {
-    organisationId: requiredText(formData, 'organisationId'),
-    sequenceId,
-    enabled: formData.get('enabled') === 'true'
-  });
+  try {
+    await sequences.setSequenceEnabled(session, {
+      organisationId: requiredText(formData, 'organisationId'),
+      sequenceId,
+      enabled: formData.get('enabled') === 'true'
+    });
+  } catch (error) {
+    return scheduleIssue(error);
+  }
   revalidatePath('/sequences');
   revalidatePath(`/sequences/${sequenceId}`);
+  return null;
 }
 
 export async function createStandardSequence(

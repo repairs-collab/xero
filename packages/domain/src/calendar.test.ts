@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   createBusinessCalendar,
+  debtContactScheduleWindow,
   decideDebtContactWindow
 } from './calendar.js';
 
@@ -15,6 +16,17 @@ describe('createBusinessCalendar', () => {
     expect(calendar.isBusinessDate('2026-10-03')).toBe(false);
     expect(calendar.isBusinessDate('2026-10-05')).toBe(false);
     expect(calendar.nextBusinessDate('2026-10-02')).toBe('2026-10-06');
+  });
+});
+
+describe('debtContactScheduleWindow', () => {
+  it.each([
+    ['Australia/Sydney', '08:30', '17:00'],
+    ['Australia/Brisbane', '08:30', '16:00'],
+    ['Australia/Perth', '06:30', '14:00'],
+    ['Australia/Adelaide', '08:00', '16:30']
+  ])('converts the recurring Sydney contact window for %s', (timeZone, start, end) => {
+    expect(debtContactScheduleWindow(timeZone, new Date('2026-11-27T00:00:00Z'))).toEqual({ start, end });
   });
 });
 

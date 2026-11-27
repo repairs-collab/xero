@@ -4,13 +4,17 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
 import {
+  organisations,
   reminderSequences,
   reminderSequenceVersions,
   sequenceStages
 } from '@bc5000/db/web';
+import { debtContactScheduleWindow } from '@bc5000/domain';
 
 import { SequenceEditor } from '../../../../components/sequence-editor.js';
 import { getDatabaseClient, requireWebSession } from '../../../../server/runtime.js';
+import { loadActiveSmsSchedule } from '../sequence-service.js';
+import { getSmsScheduleIssue } from '../sms-schedule.js';
 
 export default async function SequenceDetailPage({
   params
@@ -25,9 +29,18 @@ export default async function SequenceDetailPage({
   if (membership === undefined) {
     throw new Error('No active organisation membership');
   }
-  const [sequence] = await getDatabaseClient()
-    .db.select()
+  const database = getDatabaseClient().db;
+  const [sequence] = await database
+    .select({
+      id: reminderSequences.id,
+      kind: reminderSequences.kind,
+      name: reminderSequences.name,
+      mode: reminderSequences.mode,
+      enabled: reminderSequences.enabled,
+      timeZone: organisations.timeZone
+    })
     .from(reminderSequences)
+    .innerJoin(organisations, eq(organisations.id, reminderSequences.organisationId))
     .where(
       and(
         eq(reminderSequences.organisationId, membership.organisationId),
@@ -36,9 +49,21 @@ export default async function SequenceDetailPage({
     )
     .limit(1);
   if (sequence === undefined) notFound();
+  const smsContactWindow = sequence.kind === 'MESSAGING'
+    ? debtContactScheduleWindow(sequence.timeZone, new Date())
+    : null;
+  const currentSmsSchedule = sequence.kind === 'MESSAGING' && sequence.mode === 'AUTOMATIC'
+    ? await loadActiveSmsSchedule(database, {
+        organisationId: membership.organisationId,
+        sequenceId: sequence.id
+      })
+    : undefined;
+  const publishedSmsIssue = currentSmsSchedule
+    ? getSmsScheduleIssue(currentSmsSchedule, smsContactWindow)
+    : null;
 
-  const [version] = await getDatabaseClient()
-    .db.select()
+  const [version] = await database
+    .select()
     .from(reminderSequenceVersions)
     .where(
       and(
@@ -52,8 +77,8 @@ export default async function SequenceDetailPage({
     .orderBy(desc(reminderSequenceVersions.versionNumber))
     .limit(1);
   const rows = version
-    ? await getDatabaseClient()
-        .db.select()
+    ? await database
+        .select()
         .from(sequenceStages)
         .where(eq(sequenceStages.sequenceVersionId, version.id))
         .orderBy(asc(sequenceStages.offsetDays), asc(sequenceStages.createdAt))
@@ -138,6 +163,11 @@ export default async function SequenceDetailPage({
         mode={sequence.mode}
         enabled={sequence.enabled}
         role={membership.role}
+        timeZone={sequence.timeZone}
+        smsContactWindow={smsContactWindow}
+        publishedSmsWarning={currentSmsSchedule && publishedSmsIssue
+          ? { issue: publishedSmsIssue, sendTime: currentSmsSchedule.sendTime.slice(0, 5) }
+          : null}
         initial={{
           dailyBasis: version?.dailyBasis ?? 'BUSINESS_DAYS',
           smsAggregation:
