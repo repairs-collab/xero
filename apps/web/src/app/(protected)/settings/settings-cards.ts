@@ -1,4 +1,5 @@
 import type { Role } from '@bc5000/auth';
+import type { OrganisationEdition } from '@bc5000/db/web';
 
 export interface SettingsCard {
   eyebrow: string;
@@ -6,6 +7,7 @@ export interface SettingsCard {
   description: string;
   href: string;
   adminOnly?: boolean;
+  legacyOnly?: boolean;
 }
 
 const settingsCards: SettingsCard[] = [
@@ -27,7 +29,8 @@ const settingsCards: SettingsCard[] = [
     title: 'Test sending',
     description: 'Safely test a number and follow its status in Outbox',
     href: '/settings/test-sms',
-    adminOnly: true
+    adminOnly: true,
+    legacyOnly: true
   },
   {
     eyebrow: 'Exclusions',
@@ -47,7 +50,8 @@ const settingsCards: SettingsCard[] = [
     title: 'VoIPcloud voice',
     description: 'Configure the Australian VoIPcloud gateway and test calls',
     href: '/settings/voice',
-    adminOnly: true
+    adminOnly: true,
+    legacyOnly: true
   },
   {
     eyebrow: 'Access',
@@ -57,5 +61,23 @@ const settingsCards: SettingsCard[] = [
   }
 ];
 
-export const settingsCardsForRole = (role: Role): SettingsCard[] =>
-  settingsCards.filter((card) => !card.adminOnly || role === 'ADMIN');
+export const settingsCardsForRole = (
+  role: Role,
+  edition: OrganisationEdition
+): SettingsCard[] =>
+  settingsCards
+    .filter(
+      (card) =>
+        (!card.adminOnly || role === 'ADMIN') &&
+        (!card.legacyOnly || edition === 'INTERNAL_LEGACY')
+    )
+    .map((card) =>
+      edition === 'SOLO' && card.href === '/settings/sending'
+        ? {
+            ...card,
+            eyebrow: 'Reminders',
+            title: 'Customer sending',
+            description: 'Enable customer reminders and check your sending status'
+          }
+        : card
+    );

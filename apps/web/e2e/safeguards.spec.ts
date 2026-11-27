@@ -5,6 +5,7 @@ import {
   launchScenario,
   loginAs,
   prepareCustomerRolloutScenario,
+  prepareSoloCustomerSendingScenario,
   readRolloutState,
   resetLaunchScenario,
   seedSmsOptOut
@@ -95,6 +96,31 @@ test('rejects an inexact final customer acknowledgement', async ({ page }) => {
     sendMode: 'live',
     rolloutScope: 'CONTROLLED',
     operationalState: 'RECONCILED'
+  });
+});
+
+test('lets a ready Solo administrator enable and pause sending without diagnostic steps', async ({ page }) => {
+  await prepareSoloCustomerSendingScenario();
+  await page.goto('/settings/sending');
+
+  await expect(page.getByRole('heading', { name: 'Customer sending is off' })).toBeVisible();
+  await expect(page.getByLabel(/acknowledgement/i)).toHaveCount(0);
+  await expect(page.getByText('Controlled Test SMS')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Enable customer sending' }).click();
+
+  await expect(page).toHaveURL(/rollout=customer-enabled/);
+  await expect(page.getByRole('heading', { name: 'Customer sending is enabled' })).toBeVisible();
+  await expect(readRolloutState()).resolves.toMatchObject({
+    sendMode: 'live',
+    rolloutScope: 'CUSTOMER',
+    operationalState: 'RECONCILED'
+  });
+
+  await page.getByRole('button', { name: 'Pause sending' }).click();
+  await expect(page.getByRole('heading', { name: 'Customer sending is off' })).toBeVisible();
+  await expect(readRolloutState()).resolves.toMatchObject({
+    sendMode: 'dry-run',
+    rolloutScope: 'CONTROLLED'
   });
 });
 

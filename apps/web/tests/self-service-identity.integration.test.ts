@@ -7,7 +7,8 @@ import { createDatabase, migrateDatabase, users } from '@bc5000/db';
 
 import {
   ensureSelfServiceIdentity,
-  SelfServiceIdentityConflict
+  SelfServiceIdentityConflict,
+  SelfServiceSignupClosed
 } from '../src/server/self-service-identity.js';
 
 const client = createDatabase(
@@ -24,7 +25,7 @@ afterAll(async () => {
 });
 
 describe('self-service Cognito identity persistence', () => {
-  it('creates and then updates a provisional user by Cognito subject', async () => {
+  it('creates a provisional user while open and lets the existing identity sign in while closed', async () => {
     const subject = randomUUID();
     const email = `owner-${randomUUID()}@example.invalid`;
 
@@ -32,12 +33,12 @@ describe('self-service Cognito identity persistence', () => {
       subject,
       email: email.toUpperCase(),
       name: 'First Name'
-    });
+    }, { allowCreate: true });
     const updated = await ensureSelfServiceIdentity(client.db, {
       subject,
       email,
       name: 'Updated Name'
-    });
+    }, { allowCreate: false });
 
     expect(created.created).toBe(true);
     expect(updated).toEqual({ userId: created.userId, created: false });
@@ -52,6 +53,17 @@ describe('self-service Cognito identity persistence', () => {
     });
   });
 
+  it('cannot create an unknown Cognito subject while signup is closed', async () => {
+    const subject = randomUUID();
+    await expect(ensureSelfServiceIdentity(client.db, {
+      subject,
+      email: `new-${randomUUID()}@example.invalid`
+    }, { allowCreate: false })).rejects.toThrow(SelfServiceSignupClosed);
+
+    const stored = await client.db.select().from(users).where(eq(users.cognitoSubject, subject));
+    expect(stored).toHaveLength(0);
+  });
+
   it('never links a different Cognito subject by matching email', async () => {
     const email = `conflict-${randomUUID()}@example.invalid`;
     const firstSubject = randomUUID();
@@ -60,14 +72,14 @@ describe('self-service Cognito identity persistence', () => {
       subject: firstSubject,
       email,
       name: 'First Owner'
-    });
+    }, { allowCreate: true });
 
     await expect(
       ensureSelfServiceIdentity(client.db, {
         subject: secondSubject,
         email: email.toUpperCase(),
         name: 'Second Owner'
-      })
+      }, { allowCreate: true })
     ).rejects.toThrow(SelfServiceIdentityConflict);
 
     const matching = await client.db

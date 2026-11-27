@@ -16,9 +16,11 @@ import {
   hasCurrentLegalAcceptance,
   safeLocalReturnTo
 } from '../../../server/legal-acceptance.js';
+import { isPublicSignupEnabled } from '../../../server/public-signup.js';
 import {
   ensureSelfServiceIdentity,
-  SelfServiceIdentityConflict
+  SelfServiceIdentityConflict,
+  SelfServiceSignupClosed
 } from '../../../server/self-service-identity.js';
 import { acceptPendingInvitations } from '../../(protected)/settings/users/user-administration.js';
 
@@ -38,11 +40,15 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const database = getDatabaseClient().db;
   let applicationIdentity: Awaited<ReturnType<typeof ensureSelfServiceIdentity>>;
   try {
-    applicationIdentity = await ensureSelfServiceIdentity(database, identity);
+    applicationIdentity = await ensureSelfServiceIdentity(database, identity, {
+      allowCreate: isPublicSignupEnabled()
+    });
   } catch (error) {
-    if (!(error instanceof SelfServiceIdentityConflict)) throw error;
-    const recovery = new URL('/account-recovery', configuration.redirectUri);
-    recovery.searchParams.set('reason', 'identity-conflict');
+    if (!(error instanceof SelfServiceIdentityConflict) && !(error instanceof SelfServiceSignupClosed)) throw error;
+    const destination = error instanceof SelfServiceSignupClosed
+      ? '/start'
+      : '/account-recovery?reason=identity-conflict';
+    const recovery = new URL(destination, configuration.redirectUri);
     const response = NextResponse.redirect(recovery, 303);
     response.headers.append('Set-Cookie', clearCognitoTransactionCookie());
     return response;

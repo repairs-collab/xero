@@ -10,15 +10,13 @@ import { legalIdentity } from '../../server/legal-content.js';
 import { LegalAcceptanceRequired } from '../../server/legal-acceptance.js';
 import {
   confirmBusinessDetails,
-  confirmSequenceReview,
-  requestAdminMobileCode,
-  verifyAdminMobileCode
+  confirmSequenceReview
 } from './actions.js';
 
 export default async function SelfServiceOnboardingPage({
   searchParams
 }: {
-  searchParams: Promise<{ sync?: string; mobile?: string }>;
+  searchParams: Promise<{ sync?: string }>;
 }) {
   const support = legalIdentity();
   let session;
@@ -52,10 +50,7 @@ export default async function SelfServiceOnboardingPage({
               ? 'Your Xero organisation is connected'
               : 'Complete your AccountPulse setup'}
           </h1>
-          <p>
-            Your Solo workspace is in safe review mode. No customer reminders
-            are sent during setup.
-          </p>
+          <p>Review and approve reminders before they are sent.</p>
           {!xeroConnected ? (
             <div className="callout callout--warning">
               <strong>Connect Xero to begin</strong>
@@ -75,24 +70,13 @@ export default async function SelfServiceOnboardingPage({
           ) : parameters.sync === 'retry' ? (
             <div className="callout callout--warning">
               <strong>The first sync needs another attempt</strong>
-              <p>
-                Your workspace and Xero connection are safe. Open Integrations
-                to retry the initial sync.
-              </p>
-            </div>
-          ) : xeroConnected ? (
-            <div className="callout">
-              <strong>Initial sync queued</strong>
-              <p>AccountPulse will reconcile the Xero totals before sending.</p>
+              <Link href="/settings/integrations">Retry the sync in Integrations</Link>
             </div>
           ) : null}
           {status.trial.readOnly && (
             <div className="callout callout--warning" role="status">
               <strong>Payment is required to activate AccountPulse</strong>
-              <p>
-                Subscribe to activate sending, export your data, or disconnect
-                Xero. Scheduled customer sending remains paused.
-              </p>
+              <p>Subscribe to send customer reminders.</p>
               <div className="button-row">
                 <Link href="/settings/billing" className="button button--primary">
                   Subscribe
@@ -101,18 +85,6 @@ export default async function SelfServiceOnboardingPage({
                   Disconnect Xero
                 </Link>
               </div>
-            </div>
-          )}
-          {parameters.mobile === 'sent' && (
-            <div className="callout" role="status">
-              <strong>Verification code sent</strong>
-              <p>Enter the six-digit code below within ten minutes.</p>
-            </div>
-          )}
-          {parameters.mobile === 'verified' && (
-            <div className="callout" role="status">
-              <strong>Administrator mobile verified</strong>
-              <p>This number is now ready for eligible test messages.</p>
             </div>
           )}
         </section>
@@ -130,11 +102,15 @@ export default async function SelfServiceOnboardingPage({
             </span>
           </div>
           <div className="page-stack">
-            {status.steps.map((step, index) => (
+            {status.steps.map((step) => (
               <article className="sequence-card" key={step.key}>
                 <div>
                   <span className="eyebrow">
-                    Step {index + 1} · {step.complete ? 'Complete' : 'Action required'}
+                    {step.complete
+                      ? 'Complete'
+                      : step.key === 'REPLY_NUMBER_READY'
+                        ? 'Waiting for AccountPulse'
+                        : 'Action required'}
                   </span>
                   <h3>{step.label}</h3>
                   <p>{step.description}</p>
@@ -150,51 +126,6 @@ export default async function SelfServiceOnboardingPage({
                       Confirm details
                     </button>
                   </form>
-                ) : !step.complete &&
-                  step.key === 'ADMIN_MOBILE_VERIFIED' ? (
-                  <div className="page-stack">
-                    <form action={requestAdminMobileCode}>
-                      <input
-                        type="hidden"
-                        name="organisationId"
-                        value={activeMembership.organisationId}
-                      />
-                      <label>
-                        Australian Administrator mobile
-                        <input
-                          name="mobile"
-                          type="tel"
-                          inputMode="tel"
-                          autoComplete="tel"
-                          placeholder="04xx xxx xxx"
-                          required
-                        />
-                      </label>
-                      <button className="button">Send verification code</button>
-                    </form>
-                    {parameters.mobile === 'sent' && (
-                      <form action={verifyAdminMobileCode}>
-                        <input
-                          type="hidden"
-                          name="organisationId"
-                          value={activeMembership.organisationId}
-                        />
-                        <label>
-                          Six-digit code
-                          <input
-                            name="code"
-                            inputMode="numeric"
-                            pattern="[0-9]{6}"
-                            maxLength={6}
-                            required
-                          />
-                        </label>
-                        <button className="button button--primary">
-                          Verify mobile
-                        </button>
-                      </form>
-                    )}
-                  </div>
                 ) : !step.complete && step.key === 'SEQUENCE_REVIEWED' ? (
                   <form action={confirmSequenceReview}>
                     <input
@@ -202,15 +133,20 @@ export default async function SelfServiceOnboardingPage({
                       name="organisationId"
                       value={activeMembership.organisationId}
                     />
-                    <button className="button button--primary">
-                      Confirm Review mode
-                    </button>
+                    <div className="button-row">
+                      <Link className="button" href={step.href}>
+                        Open sequences
+                      </Link>
+                      <button className="button button--primary">
+                        Confirm Review mode
+                      </button>
+                    </div>
                   </form>
-                ) : (
+                ) : !step.complete && step.key !== 'REPLY_NUMBER_READY' ? (
                   <Link className="button" href={step.href}>
-                    {step.complete ? 'Review' : 'Continue'}
+                    Continue
                   </Link>
-                )}
+                ) : null}
               </article>
             ))}
           </div>
@@ -227,8 +163,9 @@ export default async function SelfServiceOnboardingPage({
           </div>
           <p className="muted-copy">
             AccountPulse Solo supports one Xero organisation. To register
-            interest in multiple organisations, contact
-            {support.supportEmail} for the Enterprise waitlist.
+            interest in multiple organisations, contact{' '}
+            <a href={`mailto:${support.supportEmail}`}>{support.supportEmail}</a>{' '}
+            for the Enterprise waitlist.
           </p>
         </section>
       </main>
@@ -238,7 +175,6 @@ export default async function SelfServiceOnboardingPage({
   return (
     <main className="public-page">
       <section className="public-card">
-        <span className="eyebrow">Step 1 of 2</span>
         <h1>Connect your Xero organisation</h1>
         <p>
           AccountPulse requests the minimum accounting access needed to sync
@@ -251,8 +187,7 @@ export default async function SelfServiceOnboardingPage({
           Connect Xero
         </Link>
         <p className="muted-copy">
-          The workspace starts in dry-run review mode with automatic sequences
-          disabled.
+          Review and approve reminders before they are sent.
         </p>
       </section>
     </main>

@@ -120,11 +120,14 @@ describe('voice settings view', () => {
     expect(revalidated).toBe(true);
   });
 
-  it('shows the voice settings entry only to Administrators', () => {
-    expect(settingsCardsForRole('ADMIN').map((card) => card.href)).toContain(
+  it('shows the voice settings entry only to legacy Administrators', () => {
+    expect(settingsCardsForRole('ADMIN', 'INTERNAL_LEGACY').map((card) => card.href)).toContain(
       '/settings/voice'
     );
-    expect(settingsCardsForRole('OPERATOR').map((card) => card.href)).not.toContain(
+    expect(settingsCardsForRole('OPERATOR', 'INTERNAL_LEGACY').map((card) => card.href)).not.toContain(
+      '/settings/voice'
+    );
+    expect(settingsCardsForRole('ADMIN', 'SOLO').map((card) => card.href)).not.toContain(
       '/settings/voice'
     );
   });

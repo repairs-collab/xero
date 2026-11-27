@@ -8,6 +8,10 @@ const ovhCompose = readFileSync(
   resolve(process.cwd(), 'deploy/ovh/docker-compose.yml'),
   'utf8'
 );
+const protectedEnvironmentInstaller = readFileSync(
+  resolve(process.cwd(), 'deploy/ovh/install-protected-environment.sh'),
+  'utf8'
+);
 
 describe('AccountPulse OVH deployment workflow', () => {
   it('has no AWS application deployment path', () => {
@@ -63,6 +67,14 @@ describe('AccountPulse OVH deployment workflow', () => {
         new RegExp(`for name in [^\\n]*${name}`)
       );
     }
+  });
+
+  it('defaults public signup to closed and forwards the production setting to the web service', () => {
+    expect(workflow).toContain("vars.ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED || 'false'");
+    expect(workflow).toMatch(/for name in [^\n]*ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED/);
+    expect(protectedEnvironmentInstaller).toContain('configuration[ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED]=false');
+    expect(ovhCompose).toContain('ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED: ${ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED:-false}');
+    expect(ovhCompose.match(/^\s+ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED:/gm)).toHaveLength(1);
   });
 
   it('cannot invoke reset or customer activation from a normal deployment', () => {
