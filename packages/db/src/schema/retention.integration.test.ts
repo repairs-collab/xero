@@ -44,6 +44,7 @@ describe('commercial retention schema', () => {
         'request_type',
         'status',
         'verification_reference',
+        'verified_requester_email',
         'idempotency_key',
         'verified_at',
         'target_at',
@@ -71,10 +72,10 @@ describe('commercial retention schema', () => {
   });
 
   it('reopens legacy completions that lack durable owner and export evidence before enforcing the new constraint', async () => {
-    const migration = await readFile(
+    const migration = (await readFile(
       new URL('../../drizzle/0036_simple_xorn.sql', import.meta.url),
       'utf8'
-    );
+    )).replace(/\r\n/g, '\n');
     const reopen = migration.indexOf(
       'UPDATE "data_request_cases"\n   SET "status" = CASE'
     );

@@ -6,6 +6,8 @@ import { and, desc, eq } from 'drizzle-orm';
 import {
   auditEvents,
   dataRequestCases,
+  lifecycleEmailRecipientKey,
+  PostgresLifecycleEmailRepository,
   organisations,
   platformAdminAuditEvents,
   retentionCases,
@@ -42,6 +44,7 @@ export interface RetentionOperationsPage {
     organisationName: string;
     requestType: DataRequestType;
     status: string;
+    verifiedRequesterEmail: string | null;
     verificationReference: string;
     verifiedAt: Date;
     targetAt: Date;
@@ -63,6 +66,7 @@ export interface RetentionOperationsRepository {
     actorUserId: string;
     organisationId: string;
     requestType: DataRequestType;
+    verifiedRequesterEmail: string;
     verificationReference: string;
     idempotencyKey: string;
     verifiedAt: Date;
@@ -161,6 +165,7 @@ export class PostgresRetentionOperationsRepository
           organisationName: organisations.name,
           requestType: dataRequestCases.requestType,
           status: dataRequestCases.status,
+          verifiedRequesterEmail: dataRequestCases.verifiedRequesterEmail,
           verificationReference: dataRequestCases.verificationReference,
           verifiedAt: dataRequestCases.verifiedAt,
           targetAt: dataRequestCases.targetAt,
@@ -208,6 +213,7 @@ export class PostgresRetentionOperationsRepository
         .values({
           organisationId: input.organisationId,
           requestType: input.requestType,
+          verifiedRequesterEmail: input.verifiedRequesterEmail,
           verificationReference: input.verificationReference,
           idempotencyKey: input.idempotencyKey,
           verifiedAt: input.verifiedAt,
@@ -241,6 +247,33 @@ export class PostgresRetentionOperationsRepository
           },
           occurredAt: input.now
         });
+        if (input.targetAt > input.now) {
+          const [organisation] = await transaction
+            .select({ name: organisations.name })
+            .from(organisations)
+            .where(eq(organisations.id, input.organisationId))
+            .limit(1);
+          if (organisation === undefined) {
+            throw new Error('ORGANISATION_NOT_FOUND');
+          }
+          await new PostgresLifecycleEmailRepository(transaction).enqueue({
+            organisationId: input.organisationId,
+            recipient: input.verifiedRequesterEmail,
+            template: 'PRIVACY_REQUEST_RECEIVED',
+            templateVersion: 1,
+            renderData: {
+              organisationName: organisation.name,
+              requestId: inserted.id,
+              requestType: inserted.requestType,
+              targetResponseAt: inserted.targetAt.toISOString()
+            },
+            idempotencyKey: `privacy-request-received:v1:${inserted.id}`,
+            sourceType: 'DATA_REQUEST',
+            sourceId: inserted.id,
+            availableAt: input.now,
+            expiresAt: input.targetAt
+          });
+        }
         return { ok: true, value: inserted };
       }
 
@@ -257,6 +290,7 @@ export class PostgresRetentionOperationsRepository
       if (
         existing === undefined ||
         existing.requestType !== input.requestType ||
+        existing.verifiedRequesterEmail !== input.verifiedRequesterEmail ||
         existing.verificationReference !== input.verificationReference ||
         existing.verifiedAt.getTime() !== input.verifiedAt.getTime() ||
         existing.targetAt.getTime() !== input.targetAt.getTime() ||
@@ -666,6 +700,32 @@ export class PostgresRetentionOperationsRepository
         },
         occurredAt: input.now
       });
+      if (request.verifiedRequesterEmail !== null) {
+        const [organisation] = await transaction
+          .select({ name: organisations.name })
+          .from(organisations)
+          .where(eq(organisations.id, input.organisationId))
+          .limit(1);
+        if (organisation === undefined) {
+          throw new Error('ORGANISATION_NOT_FOUND');
+        }
+        await new PostgresLifecycleEmailRepository(transaction).enqueue({
+          organisationId: input.organisationId,
+          recipient: request.verifiedRequesterEmail,
+          template: 'EXPORT_DELIVERED',
+          templateVersion: 1,
+          renderData: {
+            organisationName: organisation.name,
+            requestId: request.id,
+            completedAt: input.now.toISOString()
+          },
+          idempotencyKey: `export-delivered:v1:${request.id}`,
+          sourceType: 'DATA_REQUEST',
+          sourceId: request.id,
+          availableAt: input.now,
+          expiresAt: new Date(input.now.getTime() + 14 * 24 * 60 * 60_000)
+        });
+      }
       return { ok: true, value: updated };
     });
   }
@@ -674,6 +734,15 @@ export class PostgresRetentionOperationsRepository
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const opaqueReferencePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const normaliseVerifiedRequesterEmail = (value: string): string | null => {
+  const address = value.trim().toLowerCase();
+  try {
+    lifecycleEmailRecipientKey(address);
+  } catch {
+    return null;
+  }
+  return address;
+};
 
 export const createRetentionOperationsService = (dependencies: {
   verifyOwner(actorUserId: string): Promise<boolean>;
@@ -707,6 +776,7 @@ export const createRetentionOperationsService = (dependencies: {
       input: {
         organisationId: string;
         requestType: DataRequestType;
+        verifiedRequesterEmail: string;
         verificationReference: string;
         idempotencyKey: string;
         verifiedAt: Date;
@@ -716,9 +786,16 @@ export const createRetentionOperationsService = (dependencies: {
       const actionNow = now();
       const verificationReference = input.verificationReference.trim();
       const idempotencyKey = input.idempotencyKey.trim();
+      const verifiedRequesterEmail = normaliseVerifiedRequesterEmail(
+        input.verifiedRequesterEmail
+      );
+      const targetAt = new Date(
+        input.verifiedAt.getTime() + 14 * 24 * 60 * 60 * 1000
+      );
       if (
         !uuidPattern.test(input.organisationId) ||
         !['EXPORT', 'DELETION'].includes(input.requestType) ||
+        verifiedRequesterEmail === null ||
         !opaqueReferencePattern.test(verificationReference) ||
         !opaqueReferencePattern.test(idempotencyKey) ||
         !Number.isFinite(input.verifiedAt.getTime()) ||
@@ -730,12 +807,11 @@ export const createRetentionOperationsService = (dependencies: {
         actorUserId,
         organisationId: input.organisationId,
         requestType: input.requestType,
+        verifiedRequesterEmail,
         verificationReference,
         idempotencyKey,
         verifiedAt: input.verifiedAt,
-        targetAt: new Date(
-          input.verifiedAt.getTime() + 14 * 24 * 60 * 60 * 1000
-        ),
+        targetAt,
         now: actionNow
       });
     },

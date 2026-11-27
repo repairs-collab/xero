@@ -5,6 +5,8 @@ export * from './repositories/platform-admin-repository.js';
 export * from './repositories/entitlement-repository.js';
 export * from './repositories/entitlement-repository.js';
 export * from './repositories/conversation-repository.js';
+export * from './repositories/lifecycle-email-repository.js';
+export * from './repositories/lifecycle-email-monitoring-repository.js';
 export * from './repositories/sms-commerce-repository.js';
 export * from './repositories/sinch-correlation.js';
 export * from './repositories/debt-contact-repository.js';

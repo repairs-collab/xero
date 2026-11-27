@@ -796,6 +796,9 @@ export const dataRequestCases = pgTable(
     verificationReference: varchar('verification_reference', {
       length: 128
     }).notNull(),
+    verifiedRequesterEmail: varchar('verified_requester_email', {
+      length: 320
+    }),
     idempotencyKey: varchar('idempotency_key', { length: 128 }).notNull(),
     verifiedAt: timestamp('verified_at', { withTimezone: true }).notNull(),
     targetAt: timestamp('target_at', { withTimezone: true }).notNull(),
@@ -835,6 +838,10 @@ export const dataRequestCases = pgTable(
     check(
       'data_request_cases_type_ck',
       sql`${table.requestType} in ('EXPORT', 'DELETION')`
+    ),
+    check(
+      'data_request_cases_requester_email_ck',
+      sql`${table.verifiedRequesterEmail} is null or (${table.verifiedRequesterEmail} = lower(btrim(${table.verifiedRequesterEmail})) and ${table.verifiedRequesterEmail} ~ '^[^[:space:][:cntrl:]@,;:<>"]+@[^[:space:][:cntrl:]@,;:<>"]+[.][^[:space:][:cntrl:]@,;:<>"]+$')`
     ),
     check(
       'data_request_cases_status_ck',

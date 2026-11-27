@@ -1,4 +1,43 @@
+import type { LifecycleEmailClientConfig } from '@bc5000/integrations/email';
+
 type Environment = Record<string, string | undefined>;
+
+export interface LifecycleEmailDeliveryConfiguration {
+  smtp: LifecycleEmailClientConfig;
+  activatedAt: Date;
+}
+
+export function parseLifecycleEmailConfiguration(environment: Environment): LifecycleEmailDeliveryConfiguration | null {
+  const enabled = environment.TRANSACTIONAL_EMAIL_ENABLED;
+  if (enabled === undefined || enabled === 'false') return null;
+
+  const host = environment.SMTP_HOST?.trim();
+  const user = environment.SMTP_USERNAME?.trim();
+  const pass = environment.SMTP_PASSWORD;
+  const portText = environment.SMTP_PORT ?? '';
+  const port = Number(portText);
+  const secure = environment.SMTP_SECURE;
+  const fromName = environment.SMTP_FROM_NAME;
+  const fromAddress = environment.SMTP_FROM_EMAIL;
+  const replyTo = environment.SMTP_REPLY_TO;
+  const cutoff = environment.TRANSACTIONAL_EMAIL_ACTIVATED_AT ?? '';
+  const activatedAt = new Date(cutoff);
+  const canonicalCutoff = cutoff.includes('.') ? cutoff : cutoff.replace(/Z$/, '.000Z');
+  if (
+    enabled !== 'true' || !host || !user || !pass?.trim() ||
+    !/^\d+$/.test(portText) || port < 1 || port > 65535 ||
+    (secure !== 'true' && secure !== 'false') ||
+    fromName !== 'AccountPulse' || fromAddress !== 'ap@motts.com.au' || replyTo !== 'ap@motts.com.au' ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/.test(cutoff) ||
+    !Number.isFinite(activatedAt.getTime()) || activatedAt.toISOString() !== canonicalCutoff
+  ) {
+    throw new Error('LIFECYCLE_EMAIL_INVALID_CONFIGURATION');
+  }
+  return {
+    smtp: { host, port, secure: secure === 'true', user, pass, fromName, fromAddress, replyTo },
+    activatedAt
+  };
+}
 
 export interface ManagedSecretReader {
   read(reference: string): Promise<string>;

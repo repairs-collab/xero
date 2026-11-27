@@ -7,13 +7,16 @@ import { createDatabase, migrateDatabase } from '../client.js';
 import {
   organisationOnboarding,
   organisations,
+  lifecycleEmailOutbox,
+  memberships,
   outboundMessages,
   replyNumberProvisioningRequests,
   smsAllowanceSettings,
   smsNumberPool,
   smsOverageStatements,
   smsUsageLedger,
-  subscriptions
+  subscriptions,
+  users
 } from '../schema/index.js';
 import { PostgresSmsCommerceRepository } from './sms-commerce-repository.js';
 
@@ -313,6 +316,123 @@ describe('PostgresSmsCommerceRepository', () => {
       reason: 'SMS_ALLOWANCE_EXHAUSTED',
       projectedParts: 1_001
     });
+  });
+
+  it('queues one warning per monthly period only when committed usage crosses the threshold', async () => {
+    const annualStart = new Date('2026-11-01T00:00:00.000Z');
+    const annualEnd = new Date('2027-11-01T00:00:00.000Z');
+    const organisationId = await seedPaidOrganisation({
+      currentPeriodStart: annualStart,
+      currentPeriodEnd: annualEnd
+    });
+    const administratorId = randomUUID();
+    const administratorEmail = `sms-warning-${administratorId}@example.invalid`;
+    await client.db.insert(users).values({
+      id: administratorId,
+      cognitoSubject: randomUUID(),
+      email: administratorEmail,
+      displayName: 'SMS Warning Administrator'
+    });
+    await client.db.insert(memberships).values({
+      organisationId,
+      userId: administratorId,
+      role: 'ADMIN'
+    });
+    await client.db.insert(smsAllowanceSettings).values({
+      organisationId,
+      includedParts: 10,
+      warningPercent: 80,
+      overageEnabled: true,
+      overageCapCents: null,
+      overageCentsPerPart: 11
+    });
+    await seedPoolNumber({ verified: true, createdAt: new Date(-Date.now()) });
+    const number = await repository.reserveAvailableNumber(organisationId, now);
+    await repository.markNumberReady(organisationId, number.id, now);
+
+    const releasedId = await seedOutbound(organisationId);
+    await repository.reserveUsage({
+      organisationId,
+      outboundMessageId: releasedId,
+      source: 'MANUAL_REMINDER',
+      partCount: 8,
+      now
+    });
+    await expect(
+      client.db.select().from(lifecycleEmailOutbox)
+        .where(eq(lifecycleEmailOutbox.organisationId, organisationId))
+    ).resolves.toEqual([]);
+    await repository.releaseUsage(organisationId, releasedId, now);
+    await expect(
+      client.db.select().from(lifecycleEmailOutbox)
+        .where(eq(lifecycleEmailOutbox.organisationId, organisationId))
+    ).resolves.toEqual([]);
+
+    const firstPeriodId = await seedOutbound(organisationId);
+    await repository.reserveUsage({
+      organisationId,
+      outboundMessageId: firstPeriodId,
+      source: 'MANUAL_REMINDER',
+      partCount: 8,
+      now
+    });
+    await repository.commitUsage(organisationId, firstPeriodId, now);
+    await repository.commitUsage(organisationId, firstPeriodId, now);
+
+    const afterThresholdId = await seedOutbound(organisationId);
+    await repository.reserveUsage({
+      organisationId,
+      outboundMessageId: afterThresholdId,
+      source: 'MANUAL_REMINDER',
+      partCount: 1,
+      now
+    });
+    await repository.commitUsage(organisationId, afterThresholdId, now);
+
+    const secondPeriodAt = new Date('2026-12-10T00:00:00.000Z');
+    const secondPeriodId = await seedOutbound(organisationId);
+    await repository.reserveUsage({
+      organisationId,
+      outboundMessageId: secondPeriodId,
+      source: 'MANUAL_REMINDER',
+      partCount: 8,
+      now: secondPeriodAt
+    });
+    await repository.commitUsage(organisationId, secondPeriodId, secondPeriodAt);
+
+    const warnings = (
+      await client.db
+        .select()
+        .from(lifecycleEmailOutbox)
+        .where(eq(lifecycleEmailOutbox.organisationId, organisationId))
+    ).sort((left, right) => left.sourceId.localeCompare(right.sourceId));
+    expect(warnings).toHaveLength(2);
+    expect(warnings.map(({ recipient }) => recipient)).toEqual([
+      administratorEmail,
+      administratorEmail
+    ]);
+    expect(warnings.map(({ renderData }) => renderData)).toEqual([
+      {
+        organisationName: `SMS commerce ${organisationId}`,
+        committedParts: 8,
+        includedParts: 10,
+        warningPercent: 80,
+        billingPeriodEnd: '2026-12-01T00:00:00.000Z'
+      },
+      {
+        organisationName: `SMS commerce ${organisationId}`,
+        committedParts: 8,
+        includedParts: 10,
+        warningPercent: 80,
+        billingPeriodEnd: '2027-01-01T00:00:00.000Z'
+      }
+    ]);
+    expect(warnings.map(({ expiresAt }) => expiresAt)).toEqual([
+      new Date('2026-12-01T00:00:00.000Z'),
+      new Date('2027-01-01T00:00:00.000Z')
+    ]);
+    expect(warnings.every(({ template }) => template === 'SMS_USAGE_WARNING')).toBe(true);
+    expect(warnings.every(({ idempotencyKey }) => !idempotencyKey.includes(administratorEmail))).toBe(true);
   });
 
   it('resets an annual subscription allowance on clamped monthly boundaries and retries idempotently', async () => {

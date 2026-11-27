@@ -50,13 +50,17 @@ const externalSendOptions = {
   deleteAfterSeconds: 2_592_000
 } as const;
 
-const optionsFor = (name: JobName) =>
-  name === jobNames.reminderExecute ||
+const lifecycleEmailOptions = { ...externalSendOptions, expireInSeconds: 180 } as const;
+
+const optionsFor = (name: JobName) => {
+  if (name === jobNames.lifecycleEmailDispatch) return lifecycleEmailOptions;
+  return name === jobNames.reminderExecute ||
   name === jobNames.operatorReplyExecute ||
   name === jobNames.testSmsExecute ||
   name === jobNames.voiceCallExecute
     ? externalSendOptions
     : safeRetryOptions;
+};
 
 const stableJobId = (name: JobName, singletonKey: string): string => {
   const hex = createHash('sha256')
@@ -108,6 +112,7 @@ export interface DurableJobQueueOptions {
 export interface RegisteredJob<Name extends JobName> {
   id: string;
   data: JobPayloads[Name];
+  signal: AbortSignal;
 }
 
 export type QueueHandler<Name extends JobName> = (
@@ -323,7 +328,8 @@ export class DurableJobQueue implements JobPublisher {
         for (const job of jobs) {
           await handler({
             id: job.id,
-            data: parseJobPayload(name, job.data)
+            data: parseJobPayload(name, job.data),
+            signal: job.signal
           });
         }
       }

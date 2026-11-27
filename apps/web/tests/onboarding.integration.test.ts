@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AppSession } from '@bc5000/auth';
 import {
   createDatabase,
+  lifecycleEmailOutbox,
   memberships,
   migrateDatabase,
   organisationOnboarding,
@@ -110,6 +111,40 @@ const seedReadySolo = async (): Promise<{
 describe('guided Solo onboarding persistence', () => {
   it('completes without test sending or a separate mobile code and records completion idempotently', async () => {
     const seeded = await seedReadySolo();
+    const secondAdminId = randomUUID();
+    const disabledMemberId = randomUUID();
+    const disabledUserId = randomUUID();
+    await client.db.insert(users).values([
+      {
+        id: secondAdminId,
+        cognitoSubject: randomUUID(),
+        email: `second-${secondAdminId}@example.invalid`,
+        displayName: 'Second Administrator'
+      },
+      {
+        id: disabledMemberId,
+        cognitoSubject: randomUUID(),
+        email: `disabled-member-${disabledMemberId}@example.invalid`,
+        displayName: 'Disabled Member'
+      },
+      {
+        id: disabledUserId,
+        cognitoSubject: randomUUID(),
+        email: `disabled-user-${disabledUserId}@example.invalid`,
+        displayName: 'Disabled User',
+        disabledAt: now
+      }
+    ]);
+    await client.db.insert(memberships).values([
+      { organisationId: seeded.organisationId, userId: secondAdminId, role: 'ADMIN' },
+      {
+        organisationId: seeded.organisationId,
+        userId: disabledMemberId,
+        role: 'ADMIN',
+        disabledAt: now
+      },
+      { organisationId: seeded.organisationId, userId: disabledUserId, role: 'ADMIN' }
+    ]);
     const service = createOnboardingService({
       repository: createPostgresOnboardingRepository(client.db, {
         replyNumberStatus: () => Promise.resolve('READY')
@@ -134,6 +169,59 @@ describe('guided Solo onboarding persistence', () => {
       completedVersion: 1,
       completedAt: now
     });
+    const completionNotices = await client.db
+      .select()
+      .from(lifecycleEmailOutbox)
+      .where(eq(lifecycleEmailOutbox.organisationId, seeded.organisationId));
+    expect(completionNotices).toHaveLength(2);
+    expect(completionNotices.map(({ recipient }) => recipient).sort()).toEqual([
+      `${seeded.session.userId}@example.invalid`,
+      `second-${secondAdminId}@example.invalid`
+    ].sort());
+    expect(completionNotices).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          template: 'ONBOARDING_COMPLETED',
+          templateVersion: 1,
+          renderData: { organisationName: 'Ready Solo' },
+          sourceType: 'ONBOARDING',
+          sourceId: `${seeded.organisationId}:1`,
+          status: 'PENDING',
+          availableAt: now
+        })
+      ])
+    );
+    expect(
+      completionNotices.every(({ idempotencyKey, recipient }) =>
+        !idempotencyKey.includes(recipient)
+      )
+    ).toBe(true);
+  });
+
+  it('does not queue completion before every onboarding requirement is true', async () => {
+    const seeded = await seedReadySolo();
+    await client.db
+      .update(subscriptions)
+      .set({ status: 'INCOMPLETE' })
+      .where(eq(subscriptions.organisationId, seeded.organisationId));
+    const service = createOnboardingService({
+      repository: createPostgresOnboardingRepository(client.db, {
+        verifiedAdminMobile: () =>
+          Promise.resolve({ number: '+61412345678', verifiedAt: now }),
+        replyNumberStatus: () => Promise.resolve('READY')
+      }),
+      clock: { now: () => now }
+    });
+
+    await expect(
+      service.getStatus(seeded.session, seeded.organisationId)
+    ).resolves.toMatchObject({ complete: false });
+    await expect(
+      client.db
+        .select()
+        .from(lifecycleEmailOutbox)
+        .where(eq(lifecycleEmailOutbox.organisationId, seeded.organisationId))
+    ).resolves.toEqual([]);
   });
 
   it('completes SMS setup for a linked shared sender without a dedicated number', async () => {

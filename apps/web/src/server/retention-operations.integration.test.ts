@@ -7,6 +7,7 @@ import {
   auditEvents,
   createDatabase,
   dataRequestCases,
+  lifecycleEmailOutbox,
   migrateDatabase,
   organisations,
   platformAdminAuditEvents,
@@ -85,6 +86,7 @@ describe('retention owner repository', () => {
     const input = {
       organisationId,
       requestType: 'DELETION' as const,
+      verifiedRequesterEmail: ' Requester@Example.Invalid ',
       verificationReference: 'privacy-case-idempotent',
       idempotencyKey: 'verified-request-idempotent',
       verifiedAt: new Date('2026-09-17T09:30:00.000Z')
@@ -94,7 +96,7 @@ describe('retention owner repository', () => {
     const retry = await service.recordVerifiedRequest(actorUserId, input);
     const conflict = await service.recordVerifiedRequest(actorUserId, {
       ...input,
-      requestType: 'EXPORT'
+      verifiedRequesterEmail: 'other@example.invalid'
     });
 
     expect(first).toEqual(retry);
@@ -108,22 +110,108 @@ describe('retention owner repository', () => {
     ).toEqual([
       expect.objectContaining({
         requestType: 'DELETION',
+        verifiedRequesterEmail: 'requester@example.invalid',
         verifiedAt: new Date('2026-09-17T09:30:00.000Z'),
         targetAt: new Date('2026-10-01T09:30:00.000Z'),
         version: 0
       })
     ]);
-    expect(
-      await client.db
-        .select()
-        .from(auditEvents)
-        .where(
-          and(
-            eq(auditEvents.organisationId, organisationId),
-            eq(auditEvents.eventType, 'DATA_REQUEST_VERIFIED')
-          )
+    const verificationAudits = await client.db
+      .select()
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.organisationId, organisationId),
+          eq(auditEvents.eventType, 'DATA_REQUEST_VERIFIED')
         )
-    ).toHaveLength(1);
+      );
+    expect(verificationAudits).toHaveLength(1);
+    expect(JSON.stringify(verificationAudits[0]?.afterValue)).not.toContain(
+      'requester@example.invalid'
+    );
+    expect(JSON.stringify(verificationAudits[0]?.afterValue)).not.toContain(
+      'privacy-case-idempotent'
+    );
+    const receiptNotices = await client.db
+      .select()
+      .from(lifecycleEmailOutbox)
+      .where(eq(lifecycleEmailOutbox.organisationId, organisationId));
+    expect(receiptNotices).toEqual([
+      expect.objectContaining({
+        recipient: 'requester@example.invalid',
+        template: 'PRIVACY_REQUEST_RECEIVED',
+        templateVersion: 1,
+        renderData: {
+          organisationName: 'Verified request tenant',
+          requestId: (first.value as { id: string }).id,
+          requestType: 'DELETION',
+          targetResponseAt: '2026-10-01T09:30:00.000Z'
+        },
+        sourceType: 'DATA_REQUEST',
+        sourceId: (first.value as { id: string }).id,
+        status: 'PENDING',
+        availableAt: now,
+        expiresAt: new Date('2026-10-01T09:30:00.000Z')
+      })
+    ]);
+    const receiptEnvelope = {
+      renderData: receiptNotices[0]?.renderData,
+      idempotencyKey: receiptNotices[0]?.idempotencyKey,
+      sourceType: receiptNotices[0]?.sourceType,
+      sourceId: receiptNotices[0]?.sourceId
+    };
+    expect(JSON.stringify(receiptEnvelope)).not.toContain(
+      'requester@example.invalid'
+    );
+    expect(JSON.stringify(receiptEnvelope)).not.toContain(
+      'privacy-case-idempotent'
+    );
+  });
+
+  it('records an overdue verified request without creating an expired receipt notice', async () => {
+    const actorUserId = randomUUID();
+    const organisationId = randomUUID();
+    await client.db.insert(users).values({
+      id: actorUserId,
+      cognitoSubject: randomUUID(),
+      email: `${actorUserId}@example.invalid`,
+      displayName: 'Backfill Privacy Officer'
+    });
+    await client.db.insert(organisations).values({
+      id: organisationId,
+      xeroOrganisationId: randomUUID(),
+      name: 'Backfilled request tenant',
+      timeZone: 'Australia/Sydney',
+      baseCurrency: 'AUD'
+    });
+    const service = createRetentionOperationsService({
+      verifyOwner: () => Promise.resolve(true),
+      repository: new PostgresRetentionOperationsRepository(client.db),
+      clock: { now: () => now }
+    });
+
+    await expect(
+      service.recordVerifiedRequest(actorUserId, {
+        organisationId,
+        requestType: 'EXPORT',
+        verifiedRequesterEmail: 'backfill-requester@example.invalid',
+        verificationReference: 'privacy-case-backfilled',
+        idempotencyKey: 'verified-request-backfilled',
+        verifiedAt: new Date('2026-09-03T23:59:59.999Z')
+      })
+    ).resolves.toMatchObject({ ok: true });
+    await expect(
+      client.db
+        .select()
+        .from(dataRequestCases)
+        .where(eq(dataRequestCases.organisationId, organisationId))
+    ).resolves.toHaveLength(1);
+    await expect(
+      client.db
+        .select()
+        .from(lifecycleEmailOutbox)
+        .where(eq(lifecycleEmailOutbox.organisationId, organisationId))
+    ).resolves.toEqual([]);
   });
 
   it('gives legal hold precedence with tenant-scoped and idempotent owner review', async () => {
@@ -171,6 +259,7 @@ describe('retention owner repository', () => {
     const created = await service.recordVerifiedRequest(actorUserId, {
       organisationId,
       requestType: 'DELETION',
+      verifiedRequesterEmail: 'held-requester@example.invalid',
       verificationReference: 'privacy-case-held-owner',
       idempotencyKey: 'verified-request-held-owner',
       verifiedAt: new Date('2026-09-17T09:30:00.000Z')
@@ -434,18 +523,64 @@ describe('retention owner repository', () => {
     const exportAuditId = randomUUID();
     await client.db.insert(users).values({ id: actorUserId, cognitoSubject: randomUUID(), email: `${actorUserId}@example.invalid`, displayName: 'Export Owner' });
     await client.db.insert(organisations).values({ id: organisationId, xeroOrganisationId: randomUUID(), name: 'Export completion tenant', timeZone: 'Australia/Sydney', baseCurrency: 'AUD' });
-    await client.db.insert(dataRequestCases).values({ id: requestId, organisationId, requestType: 'EXPORT', status: 'IN_REVIEW', verificationReference: 'privacy-export-complete', idempotencyKey: 'verified-export-complete', verifiedAt: new Date('2026-09-01T00:00:00.000Z'), targetAt: new Date('2026-09-15T00:00:00.000Z'), version: 1, lastReviewedAt: new Date('2026-09-15T00:00:00.000Z') });
+    await client.db.insert(dataRequestCases).values({ id: requestId, organisationId, requestType: 'EXPORT', status: 'IN_REVIEW', verifiedRequesterEmail: 'export-requester@example.invalid', verificationReference: 'privacy-export-complete', idempotencyKey: 'verified-export-complete', verifiedAt: new Date('2026-09-01T00:00:00.000Z'), targetAt: new Date('2026-09-15T00:00:00.000Z'), version: 1, lastReviewedAt: new Date('2026-09-15T00:00:00.000Z') });
     const service = createRetentionOperationsService({ verifyOwner: () => Promise.resolve(true), repository: new PostgresRetentionOperationsRepository(client.db), clock: { now: () => now } });
-    const completion = { organisationId, requestId, expectedVersion: 1, operationId: 'complete-export-request-v1', deliveryReference: 'secure-delivery-123' };
+    const completion = { organisationId, requestId, expectedVersion: 2, operationId: 'complete-export-request-v2', deliveryReference: 'secure-delivery-123' };
 
+    await expect(service.reviewDataRequest(actorUserId, { organisationId, requestId, expectedVersion: 1, operationId: 'review-export-request-v1', reason: 'Review request before secure delivery' })).resolves.toMatchObject({ ok: true, value: { status: 'IN_REVIEW', version: 2 } });
+    await expect(client.db.select().from(lifecycleEmailOutbox).where(eq(lifecycleEmailOutbox.organisationId, organisationId))).resolves.toEqual([]);
     await expect(service.completeExportRequest(actorUserId, completion)).resolves.toEqual({ ok: false, code: 'CONFLICT' });
+    await expect(client.db.select().from(lifecycleEmailOutbox).where(eq(lifecycleEmailOutbox.organisationId, organisationId))).resolves.toEqual([]);
     await client.db.insert(platformAdminAuditEvents).values({ id: exportAuditId, actorUserId, targetOrganisationId: organisationId, eventType: 'PLATFORM_CUSTOMER_BACKUP_DOWNLOADED', entityType: 'DATA_REQUEST', entityId: requestId, reason: 'Owner delivered verified customer export', afterValue: { requestId }, occurredAt: new Date('2026-09-17T23:00:00.000Z') });
 
     const first = await service.completeExportRequest(actorUserId, completion);
     const retry = await service.completeExportRequest(actorUserId, completion);
     expect(first).toEqual(retry);
-    expect(first).toMatchObject({ ok: true, value: { id: requestId, status: 'COMPLETED', version: 2, completedAt: now, completedByUserId: actorUserId, completionReference: 'secure-delivery-123', completionExportAuditEventId: exportAuditId } });
+    expect(first).toMatchObject({ ok: true, value: { id: requestId, status: 'COMPLETED', version: 3, completedAt: now, completedByUserId: actorUserId, completionReference: 'secure-delivery-123', completionExportAuditEventId: exportAuditId } });
     await expect(service.completeExportRequest(actorUserId, { ...completion, operationId: 'stale-second-completion' })).resolves.toEqual({ ok: false, code: 'CONFLICT' });
     expect(await client.db.select().from(auditEvents).where(and(eq(auditEvents.organisationId, organisationId), eq(auditEvents.eventType, 'DATA_REQUEST_EXPORT_COMPLETED'), eq(auditEvents.entityId, requestId)))).toHaveLength(1);
+    const deliveryNotices = await client.db.select().from(lifecycleEmailOutbox).where(eq(lifecycleEmailOutbox.organisationId, organisationId));
+    expect(deliveryNotices).toEqual([
+      expect.objectContaining({
+        recipient: 'export-requester@example.invalid',
+        template: 'EXPORT_DELIVERED',
+        renderData: {
+          organisationName: 'Export completion tenant',
+          requestId,
+          completedAt: now.toISOString()
+        },
+        sourceType: 'DATA_REQUEST',
+        sourceId: requestId,
+        status: 'PENDING',
+        availableAt: now,
+        expiresAt: new Date('2026-10-02T00:00:00.000Z')
+      })
+    ]);
+    const deliveryEnvelope = {
+      renderData: deliveryNotices[0]?.renderData,
+      idempotencyKey: deliveryNotices[0]?.idempotencyKey,
+      sourceType: deliveryNotices[0]?.sourceType,
+      sourceId: deliveryNotices[0]?.sourceId
+    };
+    expect(JSON.stringify(deliveryEnvelope)).not.toContain('secure-delivery-123');
+    expect(JSON.stringify(deliveryEnvelope)).not.toContain(
+      'export-requester@example.invalid'
+    );
+    expect(JSON.stringify(deliveryEnvelope)).not.toContain(
+      'privacy-export-complete'
+    );
+  });
+
+  it('completes a legacy export without guessing a lifecycle recipient', async () => {
+    const actorUserId = randomUUID();
+    const organisationId = randomUUID();
+    const requestId = randomUUID();
+    await client.db.insert(users).values({ id: actorUserId, cognitoSubject: randomUUID(), email: `${actorUserId}@example.invalid`, displayName: 'Legacy Export Owner' });
+    await client.db.insert(organisations).values({ id: organisationId, xeroOrganisationId: randomUUID(), name: 'Legacy export tenant', timeZone: 'Australia/Sydney', baseCurrency: 'AUD' });
+    await client.db.insert(dataRequestCases).values({ id: requestId, organisationId, requestType: 'EXPORT', status: 'IN_REVIEW', verificationReference: 'privacy-export-legacy', idempotencyKey: 'verified-export-legacy', verifiedAt: new Date('2026-09-01T00:00:00.000Z'), targetAt: new Date('2026-09-15T00:00:00.000Z'), version: 1, lastReviewedAt: new Date('2026-09-15T00:00:00.000Z') });
+    await client.db.insert(platformAdminAuditEvents).values({ actorUserId, targetOrganisationId: organisationId, eventType: 'PLATFORM_CUSTOMER_BACKUP_DOWNLOADED', entityType: 'DATA_REQUEST', entityId: requestId, reason: 'Owner delivered legacy customer export', afterValue: { requestId }, occurredAt: new Date('2026-09-17T23:00:00.000Z') });
+    const service = createRetentionOperationsService({ verifyOwner: () => Promise.resolve(true), repository: new PostgresRetentionOperationsRepository(client.db), clock: { now: () => now } });
+    await expect(service.completeExportRequest(actorUserId, { organisationId, requestId, expectedVersion: 1, operationId: 'complete-export-legacy-v1', deliveryReference: 'secure-delivery-legacy' })).resolves.toMatchObject({ ok: true });
+    await expect(client.db.select().from(lifecycleEmailOutbox).where(eq(lifecycleEmailOutbox.organisationId, organisationId))).resolves.toEqual([]);
   });
 });

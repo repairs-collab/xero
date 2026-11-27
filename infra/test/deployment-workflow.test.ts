@@ -77,6 +77,24 @@ describe('AccountPulse OVH deployment workflow', () => {
     expect(ovhCompose.match(/^\s+ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED:/gm)).toHaveLength(1);
   });
 
+  it('keeps lifecycle delivery off by default and supplies SMTP credentials only to the worker', () => {
+    expect(workflow).toContain("vars.TRANSACTIONAL_EMAIL_ENABLED || 'false'");
+    expect(workflow).toContain(
+      "vars.TRANSACTIONAL_EMAIL_ENABLED == 'true' && secrets.ACCOUNT_PULSE_LIFECYCLE_SMTP_PASSWORD"
+    );
+    expect(protectedEnvironmentInstaller).toContain('configuration[TRANSACTIONAL_EMAIL_ENABLED]=false');
+    expect(protectedEnvironmentInstaller).toContain(
+      "unset 'configuration[TRANSACTIONAL_EMAIL_ACTIVATED_AT]' 'configuration[SMTP_PASSWORD]'"
+    );
+    const web = ovhCompose.slice(ovhCompose.indexOf('\n  web:'), ovhCompose.indexOf('\n  worker:'));
+    const worker = ovhCompose.slice(ovhCompose.indexOf('\n  worker:'), ovhCompose.indexOf('\n  voice-monitor:'));
+    const voiceMonitor = ovhCompose.slice(ovhCompose.indexOf('\n  voice-monitor:'), ovhCompose.indexOf('\n  voice-gateway:'));
+    expect(web).not.toContain('SMTP_PASSWORD');
+    expect(worker).toContain('SMTP_PASSWORD: ${SMTP_PASSWORD:-}');
+    expect(voiceMonitor).toContain('TRANSACTIONAL_EMAIL_ENABLED: "false"');
+    expect(voiceMonitor).toContain('SMTP_PASSWORD: ""');
+  });
+
   it('cannot invoke reset or customer activation from a normal deployment', () => {
     expect(workflow).not.toContain('operational-reset');
     expect(workflow).not.toContain('CUSTOMER_ROLLOUT');

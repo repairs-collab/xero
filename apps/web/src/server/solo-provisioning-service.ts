@@ -4,10 +4,13 @@ import type { AppSession } from '@bc5000/auth';
 import {
   auditEvents,
   type Database,
+  lifecycleEmailRecipientKey,
+  listLifecycleEmailAdminRecipients,
   memberships,
   organisationOnboarding,
   organisations,
   subscriptions,
+  PostgresLifecycleEmailRepository,
   users,
   xeroConnections,
   xeroPendingAuthorisations
@@ -255,6 +258,28 @@ export const createPostgresSoloProvisioningRepository = (
           },
           occurredAt: input.now
         });
+        const lifecycleEmails = new PostgresLifecycleEmailRepository(
+          transaction
+        );
+        const recipients = await listLifecycleEmailAdminRecipients(
+          transaction,
+          organisation.id
+        );
+        for (const recipient of recipients) {
+          await lifecycleEmails.enqueue({
+            organisationId: organisation.id,
+            recipient,
+            template: 'WORKSPACE_WELCOME',
+            templateVersion: 1,
+            renderData: { organisationName },
+            idempotencyKey:
+              `workspace-welcome:v1:${lifecycleEmailRecipientKey(recipient)}`,
+            sourceType: 'SOLO_WORKSPACE',
+            sourceId: organisation.id,
+            availableAt: input.now,
+            expiresAt: new Date(input.now.getTime() + 30 * 24 * 60 * 60_000)
+          });
+        }
         await transaction
           .delete(xeroPendingAuthorisations)
           .where(eq(xeroPendingAuthorisations.id, pending.id));

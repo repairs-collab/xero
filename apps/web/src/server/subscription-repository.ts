@@ -8,8 +8,11 @@ import {
   directDebitRequests,
   type Database,
   type DbTransaction,
+  lifecycleEmailRecipientKey,
+  listLifecycleEmailAdminRecipients,
   memberships,
   organisations,
+  PostgresLifecycleEmailRepository,
   retiredStripeSubscriptions,
   soloCheckoutAttempts,
   subscriptionEvents,
@@ -169,6 +172,9 @@ const noticeIdempotencyKey = (
 ): string =>
   `stripe:${eventId}:${template}:v1:${createHash('sha256').update(recipient).digest('hex')}`;
 
+const sevenDaysAfter = (value: Date): Date =>
+  new Date(value.getTime() + 7 * 24 * 60 * 60_000);
+
 const lockStripeSubscriptionOwnership = async (
   transaction: DbTransaction,
   subscriptionIds: Array<string | null>
@@ -229,7 +235,7 @@ type CheckoutAttemptRow = typeof soloCheckoutAttempts.$inferSelect;
 
 const lockBillingRows = async (transaction: DbTransaction, organisationId: string) => {
   const [organisation] = await transaction
-    .select({ edition: organisations.edition })
+    .select({ edition: organisations.edition, name: organisations.name })
     .from(organisations)
     .where(eq(organisations.id, organisationId))
     .for('update')
@@ -876,6 +882,32 @@ export const createPostgresSubscriptionRepository = (
           afterValue: { planCode: 'SOLO_AU_2000' },
           occurredAt: clock.now()
         });
+        const lifecycleNow = clock.now();
+        const lifecycleEmails = new PostgresLifecycleEmailRepository(transaction);
+        const recipients = await listLifecycleEmailAdminRecipients(
+          transaction,
+          input.organisationId
+        );
+        const billingCadence = attempt?.billingCadence ?? subscription.billingCadence;
+        for (const recipient of recipients) {
+          await lifecycleEmails.enqueue({
+            organisationId: input.organisationId,
+            recipient,
+            template: 'PAYMENT_CONFIRMED',
+            templateVersion: 1,
+            renderData: {
+              organisationName: organisation.name,
+              billingCadence
+            },
+            idempotencyKey:
+              `payment-confirmed:v1:${input.eventId}:` +
+              lifecycleEmailRecipientKey(recipient),
+            sourceType: 'STRIPE_CHECKOUT',
+            sourceId: input.eventId,
+            availableAt: lifecycleNow,
+            expiresAt: sevenDaysAfter(lifecycleNow)
+          });
+        }
         await effects?.onApplied(transaction);
         return 'APPLIED';
       });
@@ -1077,6 +1109,50 @@ export const createPostgresSubscriptionRepository = (
           },
           occurredAt: now
         });
+        const lifecycleEmails = new PostgresLifecycleEmailRepository(transaction);
+        if (
+          subscription.status === 'CANCEL_AT_PERIOD_END' &&
+          input.status !== 'CANCEL_AT_PERIOD_END'
+        ) {
+          await lifecycleEmails.cancelUnsentForSource({
+            organisationId: input.organisationId,
+            sourceType: 'STRIPE_SUBSCRIPTION_CANCELLATION',
+            sourceId: input.stripeSubscriptionId,
+            template: 'CANCELLATION_SCHEDULED',
+            now
+          });
+        }
+        if (
+          subscription.status !== 'CANCEL_AT_PERIOD_END' &&
+          input.status === 'CANCEL_AT_PERIOD_END'
+        ) {
+          const effectiveAt = input.cancelAt ?? input.currentPeriodEnd;
+          if (effectiveAt > now) {
+            const recipients = await listLifecycleEmailAdminRecipients(
+              transaction,
+              input.organisationId
+            );
+            for (const recipient of recipients) {
+              await lifecycleEmails.enqueue({
+                organisationId: input.organisationId,
+                recipient,
+                template: 'CANCELLATION_SCHEDULED',
+                templateVersion: 1,
+                renderData: {
+                  organisationName: organisation.name,
+                  effectiveAt: effectiveAt.toISOString()
+                },
+                idempotencyKey:
+                  `cancellation-scheduled:v1:${input.eventId}:` +
+                  lifecycleEmailRecipientKey(recipient),
+                sourceType: 'STRIPE_SUBSCRIPTION_CANCELLATION',
+                sourceId: input.stripeSubscriptionId,
+                availableAt: now,
+                expiresAt: effectiveAt
+              });
+            }
+          }
+        }
         await effects?.onApplied(transaction);
         return 'APPLIED';
       });
@@ -1162,6 +1238,7 @@ export const createPostgresSubscriptionRepository = (
         const [organisation] = await transaction
           .select({
             id: organisations.id,
+            name: organisations.name,
             edition: organisations.edition,
             platformStatus: organisations.platformStatus,
             platformStatusVersion: organisations.platformStatusVersion,
@@ -1378,6 +1455,15 @@ export const createPostgresSubscriptionRepository = (
         }
 
         const actionNow = clock.now();
+        const startsPaymentFailureEpisode =
+          input.caseKind === 'PAYMENT_FAILURE' &&
+          targetStatus !== 'RESOLVED' &&
+          (existingCase === undefined || existingCase.status === 'RESOLVED');
+        const resolvesPaymentFailureEpisode =
+          input.caseKind === 'PAYMENT_FAILURE' &&
+          targetStatus === 'RESOLVED' &&
+          existingCase !== undefined &&
+          existingCase.status !== 'RESOLVED';
         const resolvedAt =
           targetStatus === 'RESOLVED' ? input.eventCreatedAt : null;
         const recoveryEndsAt =
@@ -1548,6 +1634,77 @@ export const createPostgresSubscriptionRepository = (
               afterValue: { platformStatus: 'ACTIVE' },
               occurredAt: actionNow
             });
+          }
+        }
+
+        const recoveryEndsAtForNotice = billingCase.recoveryEndsAt;
+        if (
+          (startsPaymentFailureEpisode || resolvesPaymentFailureEpisode) &&
+          recoveryEndsAtForNotice !== null &&
+          Number.isFinite(recoveryEndsAtForNotice.getTime())
+        ) {
+          const lifecycleEmails = new PostgresLifecycleEmailRepository(
+            transaction
+          );
+          const sourceId =
+            `${billingCase.id}:` + recoveryEndsAtForNotice.toISOString();
+          if (resolvesPaymentFailureEpisode) {
+            await lifecycleEmails.cancelUnsentForSource({
+              organisationId: organisation.id,
+              sourceType: 'STRIPE_BILLING_EPISODE',
+              sourceId,
+              template: 'PAYMENT_FAILED',
+              now: actionNow
+            });
+          }
+          const recipients = await listLifecycleEmailAdminRecipients(
+            transaction,
+            organisation.id
+          );
+          if (
+            startsPaymentFailureEpisode &&
+            recoveryEndsAtForNotice > actionNow
+          ) {
+            for (const recipient of recipients) {
+              await lifecycleEmails.enqueue({
+                organisationId: organisation.id,
+                recipient,
+                template: 'PAYMENT_FAILED',
+                templateVersion: 1,
+                renderData: {
+                  organisationName: organisation.name,
+                  amountMinor: input.amountMinor,
+                  currency: input.currency,
+                  recoveryEndsAt: recoveryEndsAtForNotice.toISOString()
+                },
+                idempotencyKey:
+                  `payment-failed:v1:${sourceId}:` +
+                  lifecycleEmailRecipientKey(recipient),
+                sourceType: 'STRIPE_BILLING_EPISODE',
+                sourceId,
+                availableAt: actionNow,
+                expiresAt: recoveryEndsAtForNotice
+              });
+            }
+          }
+          if (resolvesPaymentFailureEpisode) {
+            const expiresAt = sevenDaysAfter(actionNow);
+            for (const recipient of recipients) {
+              await lifecycleEmails.enqueue({
+                organisationId: organisation.id,
+                recipient,
+                template: 'PAYMENT_RECOVERED',
+                templateVersion: 1,
+                renderData: { organisationName: organisation.name },
+                idempotencyKey:
+                  `payment-recovered:v1:${sourceId}:` +
+                  lifecycleEmailRecipientKey(recipient),
+                sourceType: 'STRIPE_BILLING_EPISODE',
+                sourceId,
+                availableAt: actionNow,
+                expiresAt
+              });
+            }
           }
         }
 

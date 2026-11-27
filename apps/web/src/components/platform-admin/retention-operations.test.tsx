@@ -32,6 +32,7 @@ describe('platform retention operations view', () => {
               organisationName: 'Alpha Repairs',
               requestType: 'EXPORT',
               status: 'IN_REVIEW',
+              verifiedRequesterEmail: 'requester@example.invalid',
               verificationReference: 'privacy-case-123',
               verifiedAt: new Date('2026-09-17T09:30:00.000Z'),
               targetAt: new Date('2026-10-01T09:30:00.000Z'),
@@ -67,6 +68,12 @@ describe('platform retention operations view', () => {
     expect(html).toContain('name="expectedVersion" value="1"');
     expect(html).toContain('name="operationId" value="review-22222222-2222-4222-8222-222222222222-v1"');
     expect(html).toContain('Record verified request');
+    expect(html).toContain('name="verifiedRequesterEmail"');
+    expect(html).toContain('type="email"');
+    expect(html).toContain(
+      'Only this verified mailbox receives request and export notices.'
+    );
+    expect(html).toContain('requester@example.invalid');
     expect(html).toContain('Record backup-ageing evidence');
     expect(html).toContain('name="closureEpisodeId" value="33333333-3333-4333-8333-333333333333"');
     expect(html).toContain('name="operationId" value="backup-33333333-3333-4333-8333-333333333333-at1789689600000"');

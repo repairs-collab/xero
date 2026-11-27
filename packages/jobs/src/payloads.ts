@@ -14,6 +14,7 @@ const voiceCallPayload = z
   .strict();
 
 export const jobPayloadSchemas = {
+  [jobNames.lifecycleEmailDispatch]: z.object({}).strict(),
   [jobNames.xeroInitialSync]: organisationPayload,
   [jobNames.xeroIncrementalSync]: organisationPayload,
   [jobNames.xeroInvoiceRefresh]: z.object({

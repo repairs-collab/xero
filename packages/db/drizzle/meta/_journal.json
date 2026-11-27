@@ -344,6 +344,27 @@
       "when": 1795755600001,
       "tag": "0048_worker_repair",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1795755600002,
+      "tag": "0049_lifecycle_email_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1795755600003,
+      "tag": "0050_verified_requester_email",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1795755600004,
+      "tag": "0051_lifecycle_email_monitoring_indexes",
+      "breakpoints": true
     }
   ]
 }

@@ -234,6 +234,26 @@ const seedVoiceCall = async (
 };
 
 describe('database invariants', () => {
+  it('stores verified requester email while preserving legacy null requests', async () => {
+    expect(await tableColumns('data_request_cases')).toContain(
+      'verified_requester_email'
+    );
+    const metadata = await database.pool.query<{
+      is_nullable: string;
+      character_maximum_length: number;
+    }>(
+      `select is_nullable, character_maximum_length
+         from information_schema.columns
+        where table_schema = 'public'
+          and table_name = 'data_request_cases'
+          and column_name = 'verified_requester_email'`
+    );
+    expect(metadata.rows).toEqual([
+      { is_nullable: 'YES', character_maximum_length: 320 }
+    ]);
+    expect(schema.dataRequestCases.verifiedRequesterEmail).toBeDefined();
+  });
+
   it('forwards a database already at published 0037 and quarantines ambiguous legacy direct-debit evidence', async () => {
     const client = await database.pool.connect();
     const schemaName = `billing_upgrade_${randomUUID().replaceAll('-', '_')}`;

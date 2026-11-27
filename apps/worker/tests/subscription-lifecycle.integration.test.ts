@@ -6,11 +6,15 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   auditEvents,
   createDatabase,
+  lifecycleEmailOutbox,
+  memberships,
   migrateDatabase,
+  organisationOnboarding,
   organisations,
   retentionCases,
   smsNumberPool,
   subscriptions,
+  users,
   xeroConnections
 } from '@bc5000/db';
 
@@ -308,6 +312,23 @@ describe('cancelled Solo subscription lifecycle', () => {
       stripeSubscriptionId,
       cancelledAt
     });
+    const administratorId = randomUUID();
+    await client.db.insert(users).values({
+      id: administratorId,
+      cognitoSubject: randomUUID(),
+      email: `cancelled-${administratorId}@example.invalid`,
+      displayName: 'Cancelled subscription administrator'
+    });
+    await client.db.insert(memberships).values({
+      organisationId,
+      userId: administratorId,
+      role: 'ADMIN'
+    });
+    await client.db.insert(organisationOnboarding).values({
+      organisationId,
+      version: 1,
+      replyNumberReadyAt: cancelledAt
+    });
     const [connection] = await client.db
       .insert(xeroConnections)
       .values({
@@ -367,6 +388,12 @@ describe('cancelled Solo subscription lifecycle', () => {
       })
     ).rejects.toThrow('SIMULATED_LOCAL_FAILURE');
     expect(remoteDeleted).toBe(true);
+    await expect(
+      client.db
+        .select()
+        .from(lifecycleEmailOutbox)
+        .where(eq(lifecycleEmailOutbox.organisationId, organisationId))
+    ).resolves.toEqual([]);
     expect(
       (
         await client.db
@@ -414,6 +441,43 @@ describe('cancelled Solo subscription lifecycle', () => {
         .select()
         .from(retentionCases)
         .where(eq(retentionCases.organisationId, organisationId))
+    ).resolves.toHaveLength(1);
+    const [onboarding] = await client.db
+      .select({ replyNumberReadyAt: organisationOnboarding.replyNumberReadyAt })
+      .from(organisationOnboarding)
+      .where(eq(organisationOnboarding.organisationId, organisationId));
+    expect(onboarding?.replyNumberReadyAt).toBeNull();
+    const notices = await client.db
+      .select()
+      .from(lifecycleEmailOutbox)
+      .where(eq(lifecycleEmailOutbox.organisationId, organisationId));
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({
+      recipient: `cancelled-${administratorId}@example.invalid`,
+      template: 'CANCELLATION_EFFECTIVE',
+      templateVersion: 1,
+      renderData: {
+        organisationName: 'Cancellation retry convergence tenant',
+        cancelledAt: '2027-04-10T04:00:00.000Z',
+        dataRetainedUntil: '2032-04-10T04:00:00.000Z'
+      },
+      sourceType: 'SUBSCRIPTION_CANCELLATION_EPISODE',
+      sourceId: `${stripeSubscriptionId}:2027-04-10T04:00:00.000Z`,
+      availableAt: new Date('2027-04-10T05:00:00.000Z'),
+      expiresAt: new Date('2027-04-17T05:00:00.000Z'),
+      status: 'PENDING'
+    });
+    await expect(
+      applySubscriptionCancellationEpisode(client.db, episode, {
+        prepareXeroDisconnect,
+        deleteXeroConnection: () => Promise.resolve()
+      })
+    ).resolves.toBe('STALE');
+    await expect(
+      client.db
+        .select()
+        .from(lifecycleEmailOutbox)
+        .where(eq(lifecycleEmailOutbox.organisationId, organisationId))
     ).resolves.toHaveLength(1);
   });
 

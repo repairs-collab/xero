@@ -12,6 +12,7 @@ const scheduleDefinitions = [
 ] as const;
 
 const globalScheduleDefinitions = [
+  { name: jobNames.lifecycleEmailDispatch, cron: '* * * * *' },
   { name: jobNames.xeroOAuthCleanup, cron: '*/15 * * * *' },
   { name: jobNames.smsOverageInvoiceReconcile, cron: '35 * * * *' },
   { name: jobNames.paymentRecoveryReconcile, cron: '15 * * * *' },
