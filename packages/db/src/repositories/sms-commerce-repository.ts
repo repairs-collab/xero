@@ -32,6 +32,11 @@ import {
   subscriptions,
   type OutboundSource
 } from '../schema/index.js';
+import {
+  lifecycleEmailRecipientKey,
+  listLifecycleEmailAdminRecipients,
+  PostgresLifecycleEmailRepository
+} from './lifecycle-email-repository.js';
 
 type Executor = Database | DbTransaction;
 
@@ -392,6 +397,45 @@ export class PostgresSmsCommerceRepository {
       )
       .limit(1);
     if (reservation === undefined) return;
+    let settings: {
+      includedParts: number;
+      warningPercent: number;
+      overageEnabled: boolean;
+      overageCentsPerPart: number | null;
+    } | undefined;
+    let committedBefore = 0;
+    if (entryType === 'COMMIT') {
+      [settings] = await executor
+        .select({
+          includedParts: smsAllowanceSettings.includedParts,
+          warningPercent: smsAllowanceSettings.warningPercent,
+          overageEnabled: smsAllowanceSettings.overageEnabled,
+          overageCentsPerPart: smsAllowanceSettings.overageCentsPerPart
+        })
+        .from(smsAllowanceSettings)
+        .where(eq(smsAllowanceSettings.organisationId, organisationId))
+        .for('update')
+        .limit(1);
+      if (settings === undefined) {
+        throw new Error('SMS_ALLOWANCE_SETTINGS_MISSING');
+      }
+      const entriesBefore = await executor
+        .select({
+          entryType: smsUsageLedger.entryType,
+          partDelta: smsUsageLedger.partDelta
+        })
+        .from(smsUsageLedger)
+        .where(
+          and(
+            eq(smsUsageLedger.organisationId, organisationId),
+            eq(
+              smsUsageLedger.billingPeriodStart,
+              reservation.billingPeriodStart
+            )
+          )
+        );
+      committedBefore = summariseSmsUsage(entriesBefore).committedParts;
+    }
     const terminalEntries = await executor
       .select({ entryType: smsUsageLedger.entryType })
       .from(smsUsageLedger)
@@ -408,7 +452,7 @@ export class PostgresSmsCommerceRepository {
     if (terminalEntries.length > 0) {
       throw new Error('SMS_USAGE_RESERVATION_ALREADY_FINALISED');
     }
-    await executor
+    const inserted = await executor
       .insert(smsUsageLedger)
       .values({
         organisationId,
@@ -432,18 +476,10 @@ export class PostgresSmsCommerceRepository {
           smsUsageLedger.organisationId,
           smsUsageLedger.idempotencyKey
         ]
-      });
+      })
+      .returning({ id: smsUsageLedger.id });
+    if (inserted.length === 0) return;
     if (entryType === 'COMMIT') {
-      const [settings] = await executor
-        .select({
-          includedParts: smsAllowanceSettings.includedParts,
-          overageEnabled: smsAllowanceSettings.overageEnabled,
-          overageCentsPerPart: smsAllowanceSettings.overageCentsPerPart
-        })
-        .from(smsAllowanceSettings)
-        .where(eq(smsAllowanceSettings.organisationId, organisationId))
-        .for('update')
-        .limit(1);
       if (settings === undefined) {
         throw new Error('SMS_ALLOWANCE_SETTINGS_MISSING');
       }
@@ -521,6 +557,52 @@ export class PostgresSmsCommerceRepository {
               updatedAt: now
             }
           });
+      }
+      const crossedWarningThreshold =
+        committedBefore * 100 <
+          settings.includedParts * settings.warningPercent &&
+        usageAfterCommit.committedParts * 100 >=
+          settings.includedParts * settings.warningPercent;
+      if (
+        crossedWarningThreshold &&
+        now.getTime() < reservation.billingPeriodEnd.getTime()
+      ) {
+        const [organisation] = await executor
+          .select({ name: organisations.name })
+          .from(organisations)
+          .where(eq(organisations.id, organisationId))
+          .limit(1);
+        if (organisation === undefined) {
+          throw new Error('ORGANISATION_NOT_FOUND');
+        }
+        const recipients = await listLifecycleEmailAdminRecipients(
+          executor,
+          organisationId
+        );
+        const lifecycleEmails = new PostgresLifecycleEmailRepository(executor);
+        const periodKey = reservation.billingPeriodStart.toISOString();
+        for (const recipient of recipients) {
+          await lifecycleEmails.enqueue({
+            organisationId,
+            recipient,
+            template: 'SMS_USAGE_WARNING',
+            templateVersion: 1,
+            renderData: {
+              organisationName: organisation.name,
+              committedParts: usageAfterCommit.committedParts,
+              includedParts: settings.includedParts,
+              warningPercent: settings.warningPercent,
+              billingPeriodEnd: reservation.billingPeriodEnd.toISOString()
+            },
+            idempotencyKey:
+              `sms-usage-warning:v1:${periodKey}:` +
+              lifecycleEmailRecipientKey(recipient),
+            sourceType: 'SMS_ALLOWANCE_PERIOD',
+            sourceId: periodKey,
+            availableAt: now,
+            expiresAt: reservation.billingPeriodEnd
+          });
+        }
       }
     }
   }

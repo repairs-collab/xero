@@ -1,6 +1,7 @@
 export * from './commerce.js';
 export * from './debt-contact.js';
 export * from './legal.js';
+export * from './lifecycle-email.js';
 export * from './messaging.js';
 export * from './onboarding.js';
 export * from './operations.js';

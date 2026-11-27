@@ -1,4 +1,5 @@
 export const jobNames = {
+  lifecycleEmailDispatch: 'lifecycle-email.dispatch',
   xeroInitialSync: 'xero.initial-sync',
   xeroIncrementalSync: 'xero.incremental-sync',
   xeroInvoiceRefresh: 'xero.invoice-refresh',

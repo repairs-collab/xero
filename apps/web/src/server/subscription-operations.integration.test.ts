@@ -7,6 +7,7 @@ import {
   auditEvents,
   billingCases,
   createDatabase,
+  lifecycleEmailOutbox,
   memberships,
   migrateDatabase,
   organisations,
@@ -214,6 +215,14 @@ describe('operational Stripe event persistence', () => {
 
     await expect(repository().applyOperationalEvent(failed)).resolves.toBe('APPLIED');
     await expect(repository().applyOperationalEvent(failed)).resolves.toBe('DUPLICATE');
+    await expect(
+      repository().applyOperationalEvent({
+        ...failed,
+        eventId: `evt_${randomUUID()}`,
+        eventCreatedAt: new Date('2026-11-12T00:00:30.000Z'),
+        payloadHash: 'b'.repeat(64)
+      })
+    ).resolves.toBe('APPLIED');
 
     const [paymentCase] = await client.db
       .select()
@@ -222,7 +231,12 @@ describe('operational Stripe event persistence', () => {
     const held = await client.db
       .select()
       .from(transactionalEmailOutbox)
-      .where(eq(transactionalEmailOutbox.billingCaseId, paymentCase!.id));
+      .where(
+        and(
+          eq(transactionalEmailOutbox.billingCaseId, paymentCase!.id),
+          eq(transactionalEmailOutbox.sourceEventId, eventId)
+        )
+      );
     const [organisation] = await client.db
       .select()
       .from(organisations)
@@ -258,6 +272,39 @@ describe('operational Stripe event persistence', () => {
       liveSendAcknowledged: true
     });
     expect(providerEvents).toHaveLength(1);
+
+    const failureNotices = await client.db
+      .select()
+      .from(lifecycleEmailOutbox)
+      .where(
+        and(
+          eq(lifecycleEmailOutbox.organisationId, seeded.organisationId),
+          eq(lifecycleEmailOutbox.template, 'PAYMENT_FAILED')
+        )
+      );
+    expect(failureNotices).toHaveLength(2);
+    expect(failureNotices[0]).toMatchObject({
+      sourceType: 'STRIPE_BILLING_EPISODE',
+      sourceId: `${paymentCase!.id}:2026-12-12T00:00:00.000Z`,
+      renderData: {
+        organisationName: 'Payment operations test',
+        amountMinor: 12_345,
+        currency: 'aud',
+        recoveryEndsAt: '2026-12-12T00:00:00.000Z'
+      },
+      expiresAt: new Date('2026-12-12T00:00:00.000Z'),
+      status: 'PENDING'
+    });
+    await client.db
+      .update(lifecycleEmailOutbox)
+      .set({
+        status: 'SENDING',
+        claimToken: randomUUID(),
+        attempts: 1,
+        lastAttemptedAt: clockNow,
+        updatedAt: clockNow
+      })
+      .where(eq(lifecycleEmailOutbox.id, failureNotices[0]!.id));
 
     const recoveredId = `evt_${randomUUID()}`;
     await expect(
@@ -303,12 +350,44 @@ describe('operational Stripe event persistence', () => {
       suspensionReason: null
     });
     expect(recoveryNotices).toHaveLength(2);
+    const lifecycleNotices = await client.db
+      .select()
+      .from(lifecycleEmailOutbox)
+      .where(eq(lifecycleEmailOutbox.organisationId, seeded.organisationId));
+    const cancelledFailures = lifecycleNotices.filter(
+      (notice) => notice.template === 'PAYMENT_FAILED'
+    );
+    expect(cancelledFailures.map(({ status }) => status).sort()).toEqual([
+      'CANCELLED',
+      'SENDING'
+    ]);
+    expect(
+      cancelledFailures.find(({ status }) => status === 'SENDING')
+        ?.cancellationRequestedAt
+    ).toEqual(clockNow);
+    const recoveries = lifecycleNotices.filter(
+      (notice) => notice.template === 'PAYMENT_RECOVERED'
+    );
+    expect(recoveries).toHaveLength(2);
+    expect(
+      recoveries.every(
+        ({ renderData, expiresAt, sourceType, sourceId, status }) =>
+          JSON.stringify(renderData) ===
+            JSON.stringify({ organisationName: 'Payment operations test' }) &&
+          expiresAt.getTime() ===
+            new Date('2026-11-19T01:00:00.000Z').getTime() &&
+          sourceType === 'STRIPE_BILLING_EPISODE' &&
+          sourceId === `${paymentCase!.id}:2026-12-12T00:00:00.000Z` &&
+          status === 'PENDING'
+      )
+    ).toBe(true);
 
     await expect(
       repository().applyOperationalEvent({
         ...failed,
         eventId: `evt_${randomUUID()}`,
-        eventCreatedAt: new Date('2026-11-12T00:00:30.000Z')
+        eventCreatedAt: new Date('2026-11-12T00:00:45.000Z'),
+        payloadHash: 'c'.repeat(64)
       })
     ).resolves.toBe('IGNORED_OUT_OF_ORDER');
     const [afterOlderRisk] = await client.db
@@ -1578,12 +1657,17 @@ describe('operational Stripe event persistence', () => {
       .select()
       .from(transactionalEmailOutbox)
       .where(eq(transactionalEmailOutbox.organisationId, seeded.organisationId));
+    const lifecycleNotices = await client.db
+      .select()
+      .from(lifecycleEmailOutbox)
+      .where(eq(lifecycleEmailOutbox.organisationId, seeded.organisationId));
     const events = await client.db
       .select()
       .from(subscriptionEvents)
       .where(eq(subscriptionEvents.stripeEventId, eventId));
     expect(cases).toEqual([]);
     expect(notices).toEqual([]);
+    expect(lifecycleNotices).toEqual([]);
     expect(events).toHaveLength(1);
   });
 

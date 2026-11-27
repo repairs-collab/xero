@@ -2,19 +2,13 @@ import {
   allJobNames,
   parseJobPayload,
   type JobName,
-  type JobPayloads
+  type JobPayloads,
+  type QueueHandler as WorkerHandler
 } from '@bc5000/jobs';
 
 import type { InFlightJobs } from './shutdown.js';
 
-export interface RegisteredJob<Name extends JobName> {
-  id: string;
-  data: JobPayloads[Name];
-}
-
-export type WorkerHandler<Name extends JobName> = (
-  job: RegisteredJob<Name>
-) => Promise<void>;
+export type { RegisteredJob, QueueHandler as WorkerHandler } from '@bc5000/jobs';
 
 export interface WorkerQueue {
   register<Name extends JobName>(
@@ -25,9 +19,12 @@ export interface WorkerQueue {
   stop(): Promise<void>;
 }
 
-export type JobHandlers = Partial<{
-  [Name in JobName]: (payload: JobPayloads[Name]) => Promise<void>;
-}>;
+export interface JobContext {
+  signal: AbortSignal;
+}
+
+type JobHandler<Name extends JobName> = (payload: JobPayloads[Name], context?: JobContext) => Promise<void>;
+export type JobHandlers = Partial<{ [Name in JobName]: JobHandler<Name> }>;
 
 export interface WorkerFailureLogger {
   error(message: string, details?: unknown): void;
@@ -114,16 +111,14 @@ export async function registerHandlers(
   logger?: WorkerFailureLogger
 ): Promise<void> {
   for (const name of allJobNames) {
-    const handler = handlers[name] as
-      | ((payload: JobPayloads[typeof name]) => Promise<void>)
-      | undefined;
+    const handler = handlers[name] as JobHandler<typeof name> | undefined;
     if (handler === undefined) continue;
 
     await queue.register(name, async (job) => {
       const payload = parseJobPayload(name, job.data);
       inFlight.add(job.id);
       try {
-        await handler(payload);
+        await handler(payload, { signal: job.signal });
       } catch (error) {
         logger?.error('Worker job failed', failureDetails(name, job.id, error));
         throw error;

@@ -64,6 +64,7 @@ export const createRetentionActionHandlers = (
       {
         organisationId: text(formData, 'organisationId'),
         requestType: text(formData, 'requestType') as DataRequestType,
+        verifiedRequesterEmail: text(formData, 'verifiedRequesterEmail'),
         verificationReference: text(formData, 'verificationReference'),
         idempotencyKey: text(formData, 'idempotencyKey'),
         verifiedAt: utcDateTime(text(formData, 'verifiedAt'))

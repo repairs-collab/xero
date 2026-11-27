@@ -5,9 +5,12 @@ import { hasPaidSubscriptionAccess } from '@bc5000/domain';
 import {
   auditEvents,
   type Database,
+  lifecycleEmailRecipientKey,
+  listLifecycleEmailAdminRecipients,
   organisationOnboarding,
   type OperationalState,
   organisations,
+  PostgresLifecycleEmailRepository,
   reminderSequences,
   smsNumberPool,
   subscriptions,
@@ -213,9 +216,14 @@ export const createPostgresOnboardingRepository = (
       const [current] = await transaction
         .select({
           version: organisationOnboarding.version,
-          completedVersion: organisationOnboarding.completedVersion
+          completedVersion: organisationOnboarding.completedVersion,
+          organisationName: organisations.name
         })
         .from(organisationOnboarding)
+        .innerJoin(
+          organisations,
+          eq(organisations.id, organisationOnboarding.organisationId)
+        )
         .where(
           eq(organisationOnboarding.organisationId, input.organisationId)
         )
@@ -250,6 +258,31 @@ export const createPostgresOnboardingRepository = (
         afterValue: { version: input.version },
         occurredAt: input.occurredAt
       });
+      const lifecycleEmails = new PostgresLifecycleEmailRepository(
+        transaction
+      );
+      const recipients = await listLifecycleEmailAdminRecipients(
+        transaction,
+        input.organisationId
+      );
+      for (const recipient of recipients) {
+        await lifecycleEmails.enqueue({
+          organisationId: input.organisationId,
+          recipient,
+          template: 'ONBOARDING_COMPLETED',
+          templateVersion: 1,
+          renderData: { organisationName: current.organisationName },
+          idempotencyKey:
+            `onboarding-completed:v${input.version}:` +
+            lifecycleEmailRecipientKey(recipient),
+          sourceType: 'ONBOARDING',
+          sourceId: `${input.organisationId}:${input.version}`,
+          availableAt: input.occurredAt,
+          expiresAt: new Date(
+            input.occurredAt.getTime() + 30 * 24 * 60 * 60_000
+          )
+        });
+      }
     });
   }
 });

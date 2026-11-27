@@ -104,6 +104,9 @@ jobs:
           ACCOUNT_PULSE_LEGAL_ENTITY: ${{ vars.ACCOUNT_PULSE_LEGAL_ENTITY }}
           ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED: ${{ vars.ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED || 'false' }}
           ACCOUNT_PULSE_SUPPORT_EMAIL: ${{ vars.ACCOUNT_PULSE_SUPPORT_EMAIL }}
+          TRANSACTIONAL_EMAIL_ENABLED: ${{ vars.TRANSACTIONAL_EMAIL_ENABLED || 'false' }}
+          TRANSACTIONAL_EMAIL_ACTIVATED_AT: ${{ vars.TRANSACTIONAL_EMAIL_ACTIVATED_AT }}
+          SMTP_PASSWORD: ${{ vars.TRANSACTIONAL_EMAIL_ENABLED == 'true' && secrets.ACCOUNT_PULSE_LIFECYCLE_SMTP_PASSWORD || '' }}
           DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION: ${{ vars.DEBT_CONTACT_HOLIDAY_CALENDAR_VERSION }}
           DEBT_CONTACT_HOLIDAY_COVERAGE_END: ${{ vars.DEBT_CONTACT_HOLIDAY_COVERAGE_END }}
           DEBT_CONTACT_HOLIDAY_DATES_JSON: ${{ vars.DEBT_CONTACT_HOLIDAY_DATES_JSON }}
@@ -130,6 +133,21 @@ jobs:
             }
             printf '%s=%s\n' "$name" "$value" >> "$overlay"
           done
+          [[ "$TRANSACTIONAL_EMAIL_ENABLED" == true || "$TRANSACTIONAL_EMAIL_ENABLED" == false ]] || {
+            echo 'TRANSACTIONAL_EMAIL_ENABLED must be true or false.' >&2
+            exit 65
+          }
+          printf 'TRANSACTIONAL_EMAIL_ENABLED=%s\n' "$TRANSACTIONAL_EMAIL_ENABLED" >> "$overlay"
+          if [[ "$TRANSACTIONAL_EMAIL_ENABLED" == true ]]; then
+            for name in TRANSACTIONAL_EMAIL_ACTIVATED_AT SMTP_PASSWORD; do
+              value=${!name:-}
+              [[ -n "$value" && "$value" != *$'\n'* && "$value" != *$'\r'* ]] || {
+                echo "Protected lifecycle email setting $name is missing or invalid." >&2
+                exit 65
+              }
+              printf '%s=%s\n' "$name" "$value" >> "$overlay"
+            done
+          fi
           SSH=(ssh -i ~/.ssh/id_accountpulse -p "$OVH_PORT" "$OVH_USER@$OVH_HOST")
           "${SSH[@]}" "umask 077; cat > '$OVH_DEPLOY_PATH/.protected-commercial.env'" < "$overlay"
           "${SSH[@]}" "cd '$OVH_DEPLOY_PATH' && chmod 700 install-protected-environment.sh && ./install-protected-environment.sh '$OVH_DEPLOY_PATH/.protected-commercial.env'"

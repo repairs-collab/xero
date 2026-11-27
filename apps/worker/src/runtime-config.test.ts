@@ -6,10 +6,63 @@ import {
   parseApprovedSmsRecoveryCommand,
   parseDebtContactHolidayDates,
   parseInboundReplyRecoveryCommand,
+  parseLifecycleEmailConfiguration,
   parseOperationalResetCommand,
   parseProviderCredentials,
   parseXeroWorkerConfiguration
 } from './runtime-config.js';
+
+describe('lifecycle email configuration', () => {
+  const enabled = {
+    TRANSACTIONAL_EMAIL_ENABLED: 'true',
+    TRANSACTIONAL_EMAIL_ACTIVATED_AT: '2026-11-27T07:30:00Z',
+    SMTP_HOST: 'mail.example.test',
+    SMTP_PORT: '465',
+    SMTP_SECURE: 'true',
+    SMTP_USERNAME: 'mail-user',
+    SMTP_PASSWORD: ' sensitive pass ',
+    SMTP_FROM_NAME: 'AccountPulse',
+    SMTP_FROM_EMAIL: 'ap@motts.com.au',
+    SMTP_REPLY_TO: 'ap@motts.com.au'
+  };
+
+  it('leaves delivery disabled without checking SMTP settings when absent or false', () => {
+    expect(parseLifecycleEmailConfiguration({})).toBeNull();
+    expect(parseLifecycleEmailConfiguration({ TRANSACTIONAL_EMAIL_ENABLED: 'false', SMTP_PORT: 'bad' })).toBeNull();
+  });
+
+  it.each([['1', 'false', 1, false], ['65535', 'true', 65535, true]] as const)(
+    'parses SMTP port %s and secure %s', (port, secure, parsedPort, parsedSecure) => {
+      expect(parseLifecycleEmailConfiguration({ ...enabled, SMTP_PORT: port, SMTP_SECURE: secure })).toEqual({
+        smtp: {
+          host: 'mail.example.test', port: parsedPort, secure: parsedSecure,
+          user: 'mail-user', pass: ' sensitive pass ', fromName: 'AccountPulse',
+          fromAddress: 'ap@motts.com.au', replyTo: 'ap@motts.com.au'
+        },
+        activatedAt: new Date('2026-11-27T07:30:00Z')
+      });
+    }
+  );
+
+  it.each(Object.keys(enabled).filter((name) => name !== 'TRANSACTIONAL_EMAIL_ENABLED'))(
+    'requires %s before enabling delivery', (name) => {
+      expect(() => parseLifecycleEmailConfiguration({ ...enabled, [name]: undefined }))
+        .toThrow(/^LIFECYCLE_EMAIL_INVALID_CONFIGURATION$/);
+    }
+  );
+
+  it.each([
+    ['TRANSACTIONAL_EMAIL_ENABLED', 'yes'], ['SMTP_PORT', '0'], ['SMTP_PORT', '65536'],
+    ['TRANSACTIONAL_EMAIL_ACTIVATED_AT', '2026-11-27T18:30:00+11:00'],
+    ['TRANSACTIONAL_EMAIL_ACTIVATED_AT', '2026-02-30T07:30:00Z'],
+    ['SMTP_PORT', '2.5'], ['SMTP_PORT', '1e3'], ['SMTP_SECURE', '1'], ['SMTP_PASSWORD', '  '],
+    ['SMTP_HOST', ' '], ['SMTP_USERNAME', ' '], ['SMTP_FROM_NAME', 'Other Sender'],
+    ['SMTP_FROM_EMAIL', 'other@example.test'], ['SMTP_REPLY_TO', 'other@example.test']
+  ])('rejects invalid %s without disclosing values', (name, value) => {
+    expect(() => parseLifecycleEmailConfiguration({ ...enabled, [name]: value }))
+      .toThrow(/^LIFECYCLE_EMAIL_INVALID_CONFIGURATION$/);
+  });
+});
 
 describe('worker runtime configuration', () => {
   it('parses the explicitly configured debt-contact holiday calendar', () => {

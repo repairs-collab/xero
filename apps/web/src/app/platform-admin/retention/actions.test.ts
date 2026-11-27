@@ -25,6 +25,7 @@ describe('retention owner actions', () => {
     const formData = new FormData();
     formData.set('organisationId', '11111111-1111-4111-8111-111111111111');
     formData.set('requestType', 'DELETION');
+    formData.set('verifiedRequesterEmail', 'requester@example.invalid');
     formData.set('verificationReference', 'privacy-case-123');
     formData.set('idempotencyKey', 'verified-request-123');
     formData.set('verifiedAt', '2026-09-17T09:30');
@@ -35,6 +36,7 @@ describe('retention owner actions', () => {
     expect(recordVerifiedRequest).toHaveBeenCalledWith('verified-owner', {
       organisationId: '11111111-1111-4111-8111-111111111111',
       requestType: 'DELETION',
+      verifiedRequesterEmail: 'requester@example.invalid',
       verificationReference: 'privacy-case-123',
       idempotencyKey: 'verified-request-123',
       verifiedAt: new Date('2026-09-17T09:30:00.000Z')

@@ -199,9 +199,18 @@ declare -A commercial_names=(
   [STRIPE_SOLO_ANNUAL_PRICE_ID]=true
   [STRIPE_SMS_OVERAGE_PRICE_ID]=true
   [STRIPE_PORTAL_CONFIGURATION_ID]=true
+  [TRANSACTIONAL_EMAIL_ENABLED]=true
+  [TRANSACTIONAL_EMAIL_ACTIVATED_AT]=true
+  [SMTP_PASSWORD]=true
 )
 configuration[ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED]=false
-declare -A commercial_seen=([ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED]=true)
+configuration[TRANSACTIONAL_EMAIL_ENABLED]=false
+declare -A commercial_seen=(
+  [ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED]=true
+  [TRANSACTIONAL_EMAIL_ENABLED]=true
+  [TRANSACTIONAL_EMAIL_ACTIVATED_AT]=true
+  [SMTP_PASSWORD]=true
+)
 while IFS= read -r line || [[ -n "$line" ]]; do
   [[ -z "$line" ]] && continue
   [[ "$line" == *=* ]] || {
@@ -225,6 +234,23 @@ done < "$COMMERCIAL_ENV"
 case "${configuration[ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED]}" in
   true|false) ;;
   *) echo 'ACCOUNT_PULSE_PUBLIC_SIGNUP_ENABLED must be true or false.' >&2; exit 65 ;;
+esac
+
+case "${configuration[TRANSACTIONAL_EMAIL_ENABLED]}" in
+  false)
+    unset 'configuration[TRANSACTIONAL_EMAIL_ACTIVATED_AT]' 'configuration[SMTP_PASSWORD]'
+    ;;
+  true)
+    delivery_cutoff=${configuration[TRANSACTIONAL_EMAIL_ACTIVATED_AT]:-}
+    utc_cutoff_pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+    canonical_cutoff=$(date -u --date="$delivery_cutoff" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)
+    [[ "$delivery_cutoff" =~ $utc_cutoff_pattern && "$delivery_cutoff" == "$canonical_cutoff" &&
+       -n ${configuration[SMTP_PASSWORD]:-} ]] || {
+      echo 'Enabled lifecycle email requires a canonical UTC activation cutoff and protected SMTP password.' >&2
+      exit 65
+    }
+    ;;
+  *) echo 'TRANSACTIONAL_EMAIL_ENABLED must be true or false.' >&2; exit 65 ;;
 esac
 
 for name in "${!commercial_names[@]}"; do

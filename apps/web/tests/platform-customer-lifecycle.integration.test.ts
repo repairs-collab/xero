@@ -7,6 +7,7 @@ import type { AppSession } from '@bc5000/auth';
 import { decideAccountEntitlements } from '@bc5000/domain';
 import {
   createDatabase,
+  lifecycleEmailOutbox,
   memberships,
   migrateDatabase,
   organisationOnboarding,
@@ -128,6 +129,12 @@ describe('platform customer lifecycle', () => {
       overageCapCents: null,
       overageCentsPerPart: 11
     });
+    await expect(
+      client.db
+        .select()
+        .from(lifecycleEmailOutbox)
+        .where(eq(lifecycleEmailOutbox.organisationId, result.organisationId))
+    ).resolves.toEqual([]);
   });
 
   it('creates an owner-only backup without authentication or provider secrets', async () => {

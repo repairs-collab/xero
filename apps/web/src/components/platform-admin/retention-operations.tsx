@@ -95,6 +95,19 @@ export function PlatformRetentionOperations({
             </select>
           </label>
           <label>
+            Verified requester email
+            <input
+              name="verifiedRequesterEmail"
+              type="email"
+              required
+              maxLength={320}
+              autoComplete="off"
+            />
+            <small>
+              Only this verified mailbox receives request and export notices.
+            </small>
+          </label>
+          <label>
             Verification case reference
             <input name="verificationReference" required pattern="[A-Za-z0-9][A-Za-z0-9._-]*" />
           </label>
@@ -220,6 +233,7 @@ export function PlatformRetentionOperations({
               </header>
               <p>{item.verificationReference}</p>
               <div className="platform-audit-meta">
+                <span>Requester {item.verifiedRequesterEmail ?? 'Legacy address unavailable'}</span>
                 <span>Verified {date(item.verifiedAt)}</span>
                 <span>
                   {item.blockReason ? label(item.blockReason) : 'No recorded block'}

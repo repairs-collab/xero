@@ -15,7 +15,11 @@ import {
   auditEvents,
   type Database,
   type DbTransaction,
+  lifecycleEmailRecipientKey,
+  listLifecycleEmailAdminRecipients,
   organisationOnboarding,
+  organisations,
+  PostgresLifecycleEmailRepository,
   retentionCases,
   smsNumberPool,
   type SubscriptionStatus,
@@ -399,7 +403,51 @@ export async function applySubscriptionCancellationEpisode(
         .where(eq(xeroConnections.id, connection.id));
     }
 
-    await writeSubscriptionRetentionDeadline(transaction, input);
+    const retentionWrite = await writeSubscriptionRetentionDeadline(
+      transaction,
+      input
+    );
+    if (retentionWrite === 'STALE') return 'STALE';
+    if (input.deletionEligibleAt !== null) {
+      const [organisation] = await transaction
+        .select({ name: organisations.name })
+        .from(organisations)
+        .where(eq(organisations.id, input.organisationId))
+        .limit(1);
+      if (organisation === undefined) {
+        throw new Error('ORGANISATION_NOT_FOUND');
+      }
+      const lifecycleEmails = new PostgresLifecycleEmailRepository(transaction);
+      const recipients = await listLifecycleEmailAdminRecipients(
+        transaction,
+        input.organisationId
+      );
+      const sourceId =
+        `${input.stripeSubscriptionId}:` +
+        input.closureEffectiveAt.toISOString();
+      for (const recipient of recipients) {
+        await lifecycleEmails.enqueue({
+          organisationId: input.organisationId,
+          recipient,
+          template: 'CANCELLATION_EFFECTIVE',
+          templateVersion: 1,
+          renderData: {
+            organisationName: organisation.name,
+            cancelledAt: input.closureEffectiveAt.toISOString(),
+            dataRetainedUntil: input.deletionEligibleAt.toISOString()
+          },
+          idempotencyKey:
+            `cancellation-effective:v1:${sourceId}:` +
+            lifecycleEmailRecipientKey(recipient),
+          sourceType: 'SUBSCRIPTION_CANCELLATION_EPISODE',
+          sourceId,
+          availableAt: input.disconnectedAt,
+          expiresAt: new Date(
+            input.disconnectedAt.getTime() + 7 * 24 * 60 * 60_000
+          )
+        });
+      }
+    }
     return 'APPLIED';
   });
 }

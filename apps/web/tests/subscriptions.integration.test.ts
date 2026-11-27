@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto';
 
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { AppSession } from '@bc5000/auth';
 import {
   auditEvents,
   createDatabase,
+  lifecycleEmailOutbox,
   migrateDatabase,
   memberships,
   organisations,
@@ -436,6 +437,155 @@ describe('AccountPulse Solo subscription persistence', () => {
         payloadHash: 'd'.repeat(64)
       })
     ).rejects.toThrow('STRIPE_EVENT_PAYLOAD_MISMATCH');
+  });
+
+  it.each(['MONTHLY', 'ANNUAL'] as const)(
+    'queues one initial-payment confirmation for an accepted %s Checkout',
+    async (billingCadence) => {
+      const { organisationId, session } = await seed();
+      const repository = createPostgresSubscriptionRepository(client.db, {
+        now: () => now
+      });
+      const stripeCustomerId = `cus_${organisationId}`;
+      const stripeSubscriptionId = `sub_${organisationId}`;
+      const event = {
+        organisationId,
+        eventId: `evt_paid_${billingCadence}_${organisationId}`,
+        eventType: 'checkout.session.completed' as const,
+        eventCreatedAt: new Date('2026-11-09T11:00:00.000Z'),
+        payloadHash: 'e'.repeat(64),
+        stripeCustomerId,
+        stripeSubscriptionId,
+        initialCardInvoiceId: `in_${organisationId}`,
+        initialCardPaymentSucceededAt: new Date('2026-11-09T11:00:00.000Z')
+      };
+      await client.db
+        .update(subscriptions)
+        .set({ billingCadence })
+        .where(eq(subscriptions.organisationId, organisationId));
+
+      await expect(repository.applyCheckoutCompleted(event)).resolves.toBe('APPLIED');
+      await expect(repository.applyCheckoutCompleted(event)).resolves.toBe('DUPLICATE');
+
+      const notices = await client.db
+        .select()
+        .from(lifecycleEmailOutbox)
+        .where(eq(lifecycleEmailOutbox.organisationId, organisationId));
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toMatchObject({
+        recipient: `${session.userId}@example.invalid`,
+        template: 'PAYMENT_CONFIRMED',
+        templateVersion: 1,
+        renderData: {
+          organisationName: 'Solo subscription test',
+          billingCadence
+        },
+        sourceType: 'STRIPE_CHECKOUT',
+        sourceId: event.eventId,
+        status: 'PENDING',
+        availableAt: now,
+        expiresAt: new Date('2026-11-16T12:00:00.000Z')
+      });
+      expect(notices[0]!.idempotencyKey).not.toContain(
+        `${session.userId}@example.invalid`
+      );
+    }
+  );
+
+  it('queues scheduled cancellation only on transitions and cancels it on withdrawal', async () => {
+    const { organisationId } = await seed();
+    const repository = createPostgresSubscriptionRepository(client.db, {
+      now: () => now
+    });
+    const stripeCustomerId = `cus_${organisationId}`;
+    const stripeSubscriptionId = `sub_${organisationId}`;
+    await client.db
+      .update(subscriptions)
+      .set({
+        status: 'ACTIVE',
+        stripeProviderStatus: 'active',
+        stripeCustomerId,
+        stripeSubscriptionId,
+        billingCadence: 'MONTHLY',
+        currentPeriodStart: new Date('2026-11-09T00:00:00.000Z'),
+        currentPeriodEnd: new Date('2026-12-09T00:00:00.000Z'),
+        lastStripeEventCreatedAt: new Date('2026-11-09T10:00:00.000Z')
+      })
+      .where(eq(subscriptions.organisationId, organisationId));
+    const scheduled = {
+      organisationId,
+      eventId: `evt_schedule_${organisationId}`,
+      eventType: 'customer.subscription.updated',
+      eventCreatedAt: new Date('2026-11-09T11:00:00.000Z'),
+      payloadHash: 'f'.repeat(64),
+      stripeCustomerId,
+      stripeSubscriptionId,
+      planCode: 'SOLO_AU_2000' as const,
+      billingCadence: 'MONTHLY' as const,
+      status: 'CANCEL_AT_PERIOD_END' as const,
+      stripeProviderStatus: 'active',
+      currentPeriodStart: new Date('2026-11-09T00:00:00.000Z'),
+      currentPeriodEnd: new Date('2026-12-09T00:00:00.000Z'),
+      trialEndsAt: null,
+      cancelAt: new Date('2026-12-09T00:00:00.000Z'),
+      cancelledAt: null
+    };
+
+    await expect(repository.applyLifecycleEvent(scheduled)).resolves.toBe('APPLIED');
+    await expect(
+      repository.applyLifecycleEvent({
+        ...scheduled,
+        eventId: `evt_schedule_repeat_${organisationId}`,
+        eventCreatedAt: new Date('2026-11-09T11:01:00.000Z')
+      })
+    ).resolves.toBe('APPLIED');
+    await expect(
+      repository.applyLifecycleEvent({
+        ...scheduled,
+        eventId: `evt_schedule_withdraw_${organisationId}`,
+        eventCreatedAt: new Date('2026-11-09T11:02:00.000Z'),
+        status: 'ACTIVE',
+        cancelAt: null
+      })
+    ).resolves.toBe('APPLIED');
+    await expect(
+      repository.applyLifecycleEvent({
+        ...scheduled,
+        eventId: `evt_schedule_again_${organisationId}`,
+        eventCreatedAt: new Date('2026-11-09T11:03:00.000Z'),
+        cancelAt: new Date('2026-12-10T00:00:00.000Z'),
+        currentPeriodEnd: new Date('2026-12-10T00:00:00.000Z')
+      })
+    ).resolves.toBe('APPLIED');
+
+    const notices = await client.db
+      .select()
+      .from(lifecycleEmailOutbox)
+      .where(
+        and(
+          eq(lifecycleEmailOutbox.organisationId, organisationId),
+          eq(lifecycleEmailOutbox.template, 'CANCELLATION_SCHEDULED')
+        )
+      );
+    expect(notices).toHaveLength(2);
+    expect(notices.map(({ status }) => status).sort()).toEqual([
+      'CANCELLED',
+      'PENDING'
+    ]);
+    expect(notices).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceType: 'STRIPE_SUBSCRIPTION_CANCELLATION',
+          sourceId: stripeSubscriptionId,
+          renderData: {
+            organisationName: 'Solo subscription test',
+            effectiveAt: '2026-12-10T00:00:00.000Z'
+          },
+          expiresAt: new Date('2026-12-10T00:00:00.000Z'),
+          status: 'PENDING'
+        })
+      ])
+    );
   });
 });
 

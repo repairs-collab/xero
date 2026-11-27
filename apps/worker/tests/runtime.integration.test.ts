@@ -38,15 +38,24 @@ class FakeWorkerQueue implements WorkerQueue {
 
   async run<Name extends JobName>(
     name: Name,
-    job: RegisteredJob<Name>
+    job: Omit<RegisteredJob<Name>, 'signal'> & { signal?: AbortSignal }
   ): Promise<void> {
     const handler = this.handlers.get(name);
     if (handler === undefined) throw new Error(`No handler for ${name}`);
-    await handler(job);
+    await handler({ signal: new AbortController().signal, ...job });
   }
 }
 
 describe('worker runtime', () => {
+  it('passes the queue cancellation signal to the lifecycle email handler', async () => {
+    const queue = new FakeWorkerQueue();
+    const handler = vi.fn(async () => {});
+    const signal = new AbortController().signal;
+    await registerHandlers(queue, { [jobNames.lifecycleEmailDispatch]: handler }, new InFlightJobs());
+    await queue.run(jobNames.lifecycleEmailDispatch, { id: randomUUID(), data: {}, signal });
+    expect(handler).toHaveBeenCalledWith({}, { signal });
+  });
+
   it('propagates handler failures and always clears in-flight tracking', async () => {
     const queue = new FakeWorkerQueue();
     const inFlight = new InFlightJobs();

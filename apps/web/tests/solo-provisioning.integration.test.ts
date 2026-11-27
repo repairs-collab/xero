@@ -8,6 +8,7 @@ import { decideAccountEntitlements } from '@bc5000/domain';
 import {
   auditEvents,
   createDatabase,
+  lifecycleEmailOutbox,
   memberships,
   migrateDatabase,
   organisationOnboarding,
@@ -284,6 +285,25 @@ describe('AccountPulse Solo provisioning', () => {
       .where(eq(stageInstances.organisationId, first.organisationId));
     expect(sequences).toEqual([]);
     expect(outboundWork).toEqual([]);
+
+    const welcomeNotices = await client.db
+      .select()
+      .from(lifecycleEmailOutbox)
+      .where(eq(lifecycleEmailOutbox.organisationId, first.organisationId));
+    expect(welcomeNotices).toHaveLength(1);
+    expect(welcomeNotices[0]).toMatchObject({
+      recipient: `${seeded.session.userId}@example.invalid`,
+      template: 'WORKSPACE_WELCOME',
+      templateVersion: 1,
+      renderData: { organisationName: 'Solo Repairs Pty Ltd' },
+      sourceType: 'SOLO_WORKSPACE',
+      sourceId: first.organisationId,
+      status: 'PENDING',
+      availableAt: now
+    });
+    expect(welcomeNotices[0]!.idempotencyKey).not.toContain(
+      `${seeded.session.userId}@example.invalid`
+    );
   });
 
   it('rejects a tenant already owned elsewhere without revealing its owner', async () => {

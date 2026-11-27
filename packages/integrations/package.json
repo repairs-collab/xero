@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./email": "./src/email/index.ts",
     "./http": "./src/http.ts",
     "./retell": "./src/retell/index.ts",
     "./sms": "./src/sms/index.ts",
@@ -19,6 +20,7 @@
   },
   "dependencies": {
     "@bc5000/domain": "workspace:*",
+    "nodemailer": "10.6.1",
     "stripe": "22.3.2"
   },
   "devDependencies": {

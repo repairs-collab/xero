@@ -7,6 +7,7 @@ import {
   BuildingOffice2Icon,
   ChatBubbleLeftRightIcon,
   ClipboardDocumentListIcon,
+  EnvelopeIcon,
   HomeIcon,
   ServerStackIcon,
   ShieldCheckIcon
@@ -19,6 +20,7 @@ const navigation = [
   ['Overview', '/platform-admin', HomeIcon],
   ['Customers', '/platform-admin#customers', BuildingOffice2Icon],
   ['Billing operations', '/platform-admin/billing', BanknotesIcon],
+  ['Email delivery', '/platform-admin/email', EnvelopeIcon],
   ['Retention & privacy', '/platform-admin/retention', ArchiveBoxIcon],
   ['Sinch & SMS', '/platform-admin/sms', ChatBubbleLeftRightIcon],
   ['Server health', '/platform-admin/system', ServerStackIcon],

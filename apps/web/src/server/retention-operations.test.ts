@@ -41,6 +41,7 @@ describe('retention owner operations', () => {
       service.recordVerifiedRequest('verified-owner', {
         organisationId,
         requestType: 'DELETION',
+        verifiedRequesterEmail: '  Requester@Example.Invalid  ',
         verificationReference: 'privacy-case-123',
         idempotencyKey: 'verified-request-123',
         verifiedAt: new Date('2026-09-17T09:30:00.000Z')
@@ -51,6 +52,7 @@ describe('retention owner operations', () => {
       actorUserId: 'verified-owner',
       organisationId,
       requestType: 'DELETION',
+      verifiedRequesterEmail: 'requester@example.invalid',
       verificationReference: 'privacy-case-123',
       idempotencyKey: 'verified-request-123',
       verifiedAt: new Date('2026-09-17T09:30:00.000Z'),
@@ -88,12 +90,63 @@ describe('retention owner operations', () => {
       ownerService.recordVerifiedRequest('verified-owner', {
         organisationId,
         requestType: 'DELETION',
+        verifiedRequesterEmail: 'requester@example.invalid',
         verificationReference: 'contains spaces and personal details',
         idempotencyKey: 'verified-request-123',
         verifiedAt: new Date('2026-09-17T09:30:00.000Z')
       })
     ).resolves.toEqual({ ok: false, code: 'VALIDATION' });
     expect(recordVerifiedRequest).not.toHaveBeenCalled();
+
+    await expect(
+      ownerService.recordVerifiedRequest('verified-owner', {
+        organisationId,
+        requestType: 'EXPORT',
+        verifiedRequesterEmail: 'one@example.invalid, two@example.invalid',
+        verificationReference: 'privacy-case-123',
+        idempotencyKey: 'verified-request-123',
+        verifiedAt: new Date('2026-09-17T09:30:00.000Z')
+      })
+    ).resolves.toEqual({ ok: false, code: 'VALIDATION' });
+    expect(recordVerifiedRequest).not.toHaveBeenCalled();
+
+    await expect(
+      ownerService.recordVerifiedRequest('verified-owner', {
+        organisationId,
+        requestType: 'EXPORT',
+        verifiedRequesterEmail: 'requester name@example.invalid',
+        verificationReference: 'privacy-case-123',
+        idempotencyKey: 'verified-request-123',
+        verifiedAt: new Date('2026-09-17T09:30:00.000Z')
+      })
+    ).resolves.toEqual({ ok: false, code: 'VALIDATION' });
+    expect(recordVerifiedRequest).not.toHaveBeenCalled();
+
+    recordVerifiedRequest.mockResolvedValueOnce({
+      ok: true,
+      value: { id: requestId }
+    });
+    await expect(
+      ownerService.recordVerifiedRequest('verified-owner', {
+        organisationId,
+        requestType: 'EXPORT',
+        verifiedRequesterEmail: 'requester@example.invalid',
+        verificationReference: 'privacy-case-123',
+        idempotencyKey: 'verified-request-123',
+        verifiedAt: new Date('2026-09-03T23:59:59.999Z')
+      })
+    ).resolves.toEqual({ ok: true, value: { id: requestId } });
+    expect(recordVerifiedRequest).toHaveBeenLastCalledWith({
+      actorUserId: 'verified-owner',
+      organisationId,
+      requestType: 'EXPORT',
+      verifiedRequesterEmail: 'requester@example.invalid',
+      verificationReference: 'privacy-case-123',
+      idempotencyKey: 'verified-request-123',
+      verifiedAt: new Date('2026-09-03T23:59:59.999Z'),
+      targetAt: new Date('2026-09-17T23:59:59.999Z'),
+      now
+    });
   });
 
   it('records opaque backup-ageing evidence with an expected-state guard', async () => {

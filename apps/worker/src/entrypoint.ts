@@ -6,6 +6,7 @@ import {
   migrateDatabase,
   operationalResetRuns,
   organisations,
+  PostgresLifecycleEmailRepository,
   PostgresPaymentRecoveryRepository,
   PostgresSmsCommerceRepository,
   PostgresXeroConnectionRepository,
@@ -15,6 +16,7 @@ import {
   retentionCases,
   subscriptions
 } from '@bc5000/db';
+import { createLifecycleEmailClient } from '@bc5000/integrations/email';
 import { FetchHttpClient } from '@bc5000/integrations/http';
 import {
   SinchClient,
@@ -33,6 +35,7 @@ import {
 import { DurableJobQueue, jobNames } from '@bc5000/jobs';
 
 import { executeOperatorReply } from './handlers/operator-reply-execute.js';
+import { createLifecycleEmailDispatchHandler } from './handlers/lifecycle-email-dispatch.js';
 import { testProviderConnection } from './handlers/provider-connection-test.js';
 import { reconcileNightly } from './handlers/reconcile-nightly.js';
 import { executeReminder } from './handlers/reminder-execute.js';
@@ -59,6 +62,7 @@ import {
   createInboundReplyRecoveryService
 } from './operations/inbound-reply-recovery.js';
 import { createOperationalResetService } from './operations/operational-reset.js';
+import { runLifecycleEmailProof } from './operations/lifecycle-email-proof.js';
 import {
   reconcileCancelledSubscriptionLifecycles,
   reconcileDuePaymentRecoveries
@@ -80,6 +84,7 @@ import {
   parseApprovedSmsRecoveryCommand,
   parseDebtContactHolidayDates,
   parseInboundReplyRecoveryCommand,
+  parseLifecycleEmailConfiguration,
   parseOperationalResetCommand,
   parseProviderCredentials,
   parseSinchCredentials
@@ -107,6 +112,15 @@ const requiredPositiveInteger = (name: string): number => {
 };
 
 async function main() {
+  if (process.argv[2] === 'test-lifecycle-email') {
+    const result = process.argv.length === 3 && !process.stdin.isTTY
+      ? await runLifecycleEmailProof(process.stdin, process.env.TRANSACTIONAL_EMAIL_ENABLED)
+      : 'LIFECYCLE_EMAIL_PROOF_REFUSED';
+    console.info(result);
+    if (result !== 'LIFECYCLE_EMAIL_PROOF_ACCEPTED') process.exitCode = 1;
+    return;
+  }
+
   const debtContactHolidayDates = parseDebtContactHolidayDates(process.env);
   const debtContactHolidays = { list: () => debtContactHolidayDates };
   const databaseUrl = databaseUrlFromEnvironment(process.env);
@@ -465,6 +479,12 @@ async function main() {
       });
     },
     handlers: {
+      [jobNames.lifecycleEmailDispatch]: createLifecycleEmailDispatchHandler({
+        repository: new PostgresLifecycleEmailRepository(databaseClient.db),
+        config: parseLifecycleEmailConfiguration(process.env),
+        createClient: createLifecycleEmailClient,
+        clock
+      }),
       [jobNames.xeroInitialSync]: async (payload) =>
         runInitialSync(
           {
