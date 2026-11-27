@@ -85,6 +85,7 @@ import {
   parseSinchCredentials
 } from './runtime-config.js';
 import { waitForDatabaseMigrations } from './startup.js';
+import { startWorkerHeartbeat } from './worker-heartbeat.js';
 import { OrganisationXeroClientFactory } from './xero-client-factory.js';
 
 const required = (name: string): string => {
@@ -444,11 +445,15 @@ async function main() {
     listCancelledSubscriptionsNeedingLifecycle: () =>
       listCancelledSubscriptionsNeedingLifecycle(databaseClient.db)
   };
+  const heartbeatPath = process.env.ACCOUNT_PULSE_WORKER_HEARTBEAT_PATH;
   await startWorker({
     queue,
     database: { close: () => databaseClient.pool.end() },
     organisationIds: allRows.map((row) => row.id),
     logger: console,
+    ...(heartbeatPath === undefined
+      ? {}
+      : { startHeartbeat: () => startWorkerHeartbeat(heartbeatPath) }),
     bootstrap: async () => {
       const cancellationCandidateCount =
         await reconcileCancelledSubscriptionLifecycles({

@@ -36,6 +36,7 @@ const healthy: ServerHealthView = {
     freeBytes: 125_000_000_000,
     usedPercent: 38
   },
+  operations: { overdueReminderWorkspaces: 0, staleXeroWorkspaces: 0 },
   services: [
     { name: 'web', label: 'Web app', status: 'HEALTHY' },
     { name: 'worker', label: 'Worker', status: 'HEALTHY' },
@@ -77,6 +78,15 @@ describe('owner server health HUD', () => {
     expect(html).not.toContain('/dev/sdb');
   });
 
+  it('shows aggregate reminder and Xero monitoring in the Owner console', () => {
+    const html = renderToStaticMarkup(
+      <ServerHealthHud health={{ ...healthy, operations: { overdueReminderWorkspaces: 2, staleXeroWorkspaces: 3 } }} />
+    );
+
+    expect(html).toContain('Workspaces with overdue reminder checks</strong><span>2</span>');
+    expect(html).toContain('Workspaces with stale Xero sync</strong><span>3</span>');
+  });
+
   it('uses urgent presentation for a critical snapshot without adding controls', () => {
     const html = renderToStaticMarkup(
       <ServerHealthHud
@@ -111,6 +121,7 @@ describe('owner server health HUD', () => {
           memory: null,
           disk: null,
           additionalDisk: null,
+          operations: null,
           services: []
         }}
       />

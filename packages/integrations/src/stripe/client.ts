@@ -1,4 +1,4 @@
-import { createRequire } from 'node:module';
+import Stripe from 'stripe';
 
 export const accountPulseSoloPlanCode = 'SOLO_AU_2000' as const;
 
@@ -884,7 +884,7 @@ export class StripeBillingClient {
 type StripeConstructor = new (secretKey: string) => StripeApi;
 
 const requireStripeConstructor = (): StripeConstructor => {
-  const loaded = createRequire(import.meta.url)('stripe') as unknown;
+  const loaded = Stripe as unknown;
   const candidate =
     typeof loaded === 'object' && loaded !== null && 'default' in loaded
       ? loaded.default
