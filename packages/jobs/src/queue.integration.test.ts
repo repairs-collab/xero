@@ -322,54 +322,54 @@ describe('durable job queue', () => {
 
   it('upserts one UTC schedule per organisation across restarts', async () => {
     const organisationId = randomUUID();
+    const organisationScheduleNames = [
+      jobNames.xeroIncrementalSync,
+      jobNames.xeroNightlyReconcile,
+      jobNames.remindersCalculate,
+      jobNames.voiceRemindersCalculate,
+      jobNames.voiceRemindersDispatch,
+      jobNames.retentionApply,
+      jobNames.subscriptionTrialExpiry
+    ];
+    const globalScheduleNames = [
+      jobNames.xeroOAuthCleanup,
+      jobNames.smsOverageInvoiceReconcile,
+      jobNames.paymentRecoveryReconcile,
+      jobNames.subscriptionLifecycleReconcile
+    ];
+    const retiredSchedulesBefore = await queueController.getSchedules(
+      jobNames.smsNumberProvisionReconcile
+    );
 
     await ensureRecurringSchedules(queue, [organisationId]);
+    await queue.stop();
+    await queue.start();
     await ensureRecurringSchedules(queue, [organisationId]);
 
     const schedules = await queue.getSchedules();
     const ownedSchedules = schedules.filter((schedule) =>
       schedule.key.endsWith(`/${organisationId}`)
     );
-    expect(ownedSchedules).toHaveLength(7);
-    expect(ownedSchedules.every((schedule) => schedule.timezone === 'UTC')).toBe(
-      true
+    expect(ownedSchedules.map(({ name }) => name).sort()).toEqual(
+      organisationScheduleNames.sort()
     );
-    expect(
-      ownedSchedules.filter(
-        (schedule) => schedule.name === jobNames.xeroIncrementalSync
-      )
-    ).toHaveLength(1);
-    expect(
-      ownedSchedules.filter(
-        (schedule) => schedule.name === jobNames.voiceRemindersCalculate
-      )
-    ).toHaveLength(1);
-    expect(
-      ownedSchedules.filter(
-        (schedule) => schedule.name === jobNames.voiceRemindersDispatch
-      )
-    ).toHaveLength(1);
-    expect(
-      schedules.filter(
-        (schedule) => schedule.key === jobNames.xeroOAuthCleanup
-      )
-    ).toHaveLength(1);
-    expect(
-      schedules.filter(
-        (schedule) =>
-          schedule.key === jobNames.subscriptionLifecycleReconcile
-      )
-    ).toHaveLength(1);
-    expect(
-      schedules.filter(
-        (schedule) => schedule.key === 'sms-number.provision-reconcile'
-      )
-    ).toHaveLength(1);
-    expect(
-      schedules.filter(
-        (schedule) =>
-          schedule.key === jobNames.smsOverageInvoiceReconcile
-      )
-    ).toHaveLength(1);
+    for (const { name, key, timezone } of ownedSchedules) {
+      expect(key).toBe(`${name}/${organisationId}`);
+      expect(timezone).toBe('UTC');
+    }
+
+    for (const name of globalScheduleNames) {
+      expect(schedules.filter((schedule) => schedule.name === name)).toEqual([
+        expect.objectContaining({ key: name, timezone: 'UTC' })
+      ]);
+    }
+
+    for (const { key, updatedOn } of schedules.filter(
+      ({ name }) => name === jobNames.smsNumberProvisionReconcile
+    )) {
+      expect(retiredSchedulesBefore).toContainEqual(
+        expect.objectContaining({ key, updatedOn })
+      );
+    }
   });
 });

@@ -504,17 +504,28 @@ describe('owner-created Solo rollout', () => {
         responseReceivedAt: sentAt
       });
       if (committedAt !== null) {
-        await client.db.insert(smsUsageLedger).values({
+        const usage = {
           organisationId: seeded.organisationId,
           outboundMessageId,
           billingPeriodStart: new Date('2026-09-01T00:00:00.000Z'),
           billingPeriodEnd: new Date('2026-10-01T00:00:00.000Z'),
           source: 'TEST_SMS',
-          entryType: 'COMMIT',
-          partDelta: 1,
-          idempotencyKey: randomUUID(),
-          occurredAt: committedAt
-        });
+          partDelta: 1
+        };
+        await client.db.insert(smsUsageLedger).values([
+          {
+            ...usage,
+            entryType: 'RESERVE',
+            idempotencyKey: `reserve:${outboundMessageId}`,
+            occurredAt: sentAt
+          },
+          {
+            ...usage,
+            entryType: 'COMMIT',
+            idempotencyKey: `commit:${outboundMessageId}`,
+            occurredAt: committedAt
+          }
+        ]);
       }
       return outboundMessageId;
     };
