@@ -1,0 +1,77 @@
+"""Read-only OVH evidence for the 2026-11-20 Motts processing incident."""
+import datetime
+import json
+import re
+import subprocess
+
+def run(args, data=None):
+    result = subprocess.run(args, input=data, text=True, capture_output=True, timeout=45)
+    if result.returncode:
+        raise RuntimeError(result.stderr[:500])
+    return result.stdout
+
+containers = json.loads(run(['docker', 'inspect', 'bc5000-worker', 'bc5000-web', 'bc5000-postgres']))
+secrets = []
+worker_env = {}
+for container in containers:
+    env = dict(value.split('=', 1) for value in container['Config']['Env'] if '=' in value)
+    secrets.extend(value for key, value in env.items() if re.search('SECRET|PASSWORD|TOKEN|CREDENTIAL|KEY|DATABASE_URL', key) and len(value) > 4)
+    for key, value in env.items():
+        if 'CREDENTIAL' in key:
+            try:
+                secrets.extend(v for v in json.loads(value).values() if isinstance(v, str) and len(v) > 4)
+            except (ValueError, AttributeError):
+                pass
+    if container['Name'] == '/bc5000-worker':
+        worker_env = env
+
+def clean(value):
+    text = str(value)
+    for secret in sorted(secrets, key=len, reverse=True):
+        text = text.replace(secret, '[REDACTED]')
+    text = re.sub(r'\+\d{9,15}', '[PHONE]', text)
+    text = re.sub(r'[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}', '[EMAIL]', text)
+    return text
+
+def emit(label, value):
+    print(label + ': ' + clean(json.dumps(value, default=str)), flush=True)
+
+emit('checked_at_utc', datetime.datetime.now(datetime.timezone.utc).isoformat())
+for container in containers:
+    state = container['State']
+    emit('container', {'name': container['Name'], 'image': container['Config']['Image'], 'imageId': container['Image'], 'status': state['Status'], 'running': state['Running'], 'restarting': state['Restarting'], 'exitCode': state['ExitCode'], 'oomKilled': state['OOMKilled'], 'startedAt': state['StartedAt'], 'finishedAt': state['FinishedAt'], 'restartCount': container['RestartCount']})
+price_names = ['STRIPE_SOLO_MONTHLY_PRICE_ID', 'STRIPE_SOLO_ANNUAL_PRICE_ID', 'STRIPE_SMS_OVERAGE_PRICE_ID']
+emit('stripe_configuration', {'present': {key: bool(worker_env.get(key)) for key in price_names}, 'equalPairs': [[a,b] for i,a in enumerate(price_names) for b in price_names[i+1:] if worker_env.get(a) and worker_env.get(a)==worker_env.get(b)]})
+logs = subprocess.run(['docker', 'logs', '--timestamps', '--tail', '100', 'bc5000-worker'], capture_output=True, text=True, timeout=30)
+emit('worker_logs', (logs.stdout + logs.stderr).splitlines())
+
+db_env = dict(value.split('=', 1) for value in containers[2]['Config']['Env'] if '=' in value)
+def query(sql):
+    # Both session default and explicit transaction prohibit writes.
+    command = ['docker','exec','-i','-e','PGOPTIONS=-c default_transaction_read_only=on -c statement_timeout=15000','bc5000-postgres','psql','-X','-q','-t','-A','-v','ON_ERROR_STOP=1','-U',db_env['POSTGRES_USER'],'-d',db_env['POSTGRES_DB']]
+    raw = run(command, 'BEGIN READ ONLY; SELECT coalesce(json_agg(t),\'[]\'::json) FROM (' + sql + ') t; ROLLBACK;')
+    return json.loads(raw)
+
+orgs=query("SELECT id,name,edition,send_mode,rollout_scope,live_send_acknowledged,maintenance_mode,platform_status,operational_state,last_successful_sync_at FROM organisations WHERE name='Mott Appliance Repairs'")
+if len(orgs) != 1 or orgs[0]['edition'] != 'INTERNAL_LEGACY':
+    raise RuntimeError('Exact existing Motts legacy organisation was not uniquely identified')
+emit('organisation',orgs)
+org=orgs[0]['id']
+if not re.fullmatch('[0-9a-f-]{36}',org):
+    raise RuntimeError('Invalid organisation ID')
+start="'2026-11-20 00:00:00 Australia/Sydney'::timestamptz"
+queries={
+ 'outbox_daily':f"SELECT (created_at AT TIME ZONE 'Australia/Sydney')::date day,source,status,count(*) n,count(DISTINCT invoice_id) invoices,count(DISTINCT recipient_key) recipients FROM outbound_messages WHERE organisation_id='{org}' AND channel='SMS' AND created_at >= {start} GROUP BY 1,2,3 ORDER BY 1,2,3",
+ 'cancel_reasons':f"SELECT failure_reason,count(*) n,count(DISTINCT invoice_id) invoices FROM outbound_messages WHERE organisation_id='{org}' AND channel='SMS' AND created_at >= {start} AND status='CANCELLED' GROUP BY 1 ORDER BY 2 DESC",
+ 'attempts_daily':f"SELECT (a.created_at AT TIME ZONE 'Australia/Sydney')::date day,a.status,a.error_code,count(*) n,count(a.provider_message_id) provider_ids,count(a.request_dispatched_at) dispatched FROM message_attempts a WHERE organisation_id='{org}' AND provider='SINCH' AND created_at >= {start} GROUP BY 1,2,3 ORDER BY 1,2",
+ 'last_accepted':f"SELECT max(created_at) last_created,max(completed_at) last_completed,count(*) FILTER(WHERE status='ACCEPTED') accepted,count(*) FILTER(WHERE status='DELIVERED') delivered FROM outbound_messages WHERE organisation_id='{org}' AND channel='SMS' AND status IN ('ACCEPTED','DELIVERED')",
+ 'stages':f"SELECT origin,channel,status,count(*) n,min(scheduled_at) earliest,max(scheduled_at) latest FROM stage_instances WHERE organisation_id='{org}' AND scheduled_at >= {start} GROUP BY 1,2,3 ORDER BY 1,2,3",
+ 'approvals':f"SELECT status,count(*) n,min(created_at) earliest,max(decided_at) latest_decision FROM approvals WHERE organisation_id='{org}' AND (created_at >= {start} OR status='PENDING') GROUP BY 1",
+ 'queue_columns':"SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='pgboss' AND table_name IN ('job','schedule') ORDER BY table_name,ordinal_position",
+ 'queues':f"SELECT name,state,count(*) n,min(created_on) earliest,max(created_on) latest FROM pgboss.job WHERE data->>'organisationId'='{org}' GROUP BY 1,2 ORDER BY 1,2",
+}
+for label,sql in queries.items():
+    try:
+        emit(label,query(sql))
+    except Exception as error:
+        emit(label+'_error',str(error))

@@ -1,0 +1,45 @@
+name: Bill Chaser incident read-only evidence
+
+on:
+  push:
+    branches: [codex/billchaser-sms-incident]
+    paths:
+      - .github/workflows/incident-readonly.yml
+      - deploy/ovh/incident-readonly.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: accountpulse-ovh-release
+  cancel-in-progress: false
+
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      OVH_HOST: ${{ vars.OVH_HOST }}
+      OVH_PORT: ${{ vars.OVH_PORT }}
+      OVH_USER: ${{ vars.OVH_USER }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate read-only collector
+        run: python3 -m py_compile deploy/ovh/incident-readonly.py
+      - name: Install existing pinned SSH access
+        env:
+          OVH_SSH_PRIVATE_KEY: ${{ secrets.OVH_SSH_PRIVATE_KEY }}
+          OVH_SSH_HOST_KEY: ${{ secrets.OVH_SSH_HOST_KEY }}
+        run: |
+          set -Eeuo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$OVH_SSH_PRIVATE_KEY" > ~/.ssh/id_accountpulse
+          chmod 600 ~/.ssh/id_accountpulse
+          printf '%s\n' "$OVH_SSH_HOST_KEY" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+      - name: Read current containers and Motts incident evidence
+        run: |
+          set -Eeuo pipefail
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -i ~/.ssh/id_accountpulse -p "$OVH_PORT" "$OVH_USER@$OVH_HOST" \
+            'python3 -' < deploy/ovh/incident-readonly.py
