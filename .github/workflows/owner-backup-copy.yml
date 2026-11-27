@@ -1,0 +1,80 @@
+name: AccountPulse encrypted owner backup copy
+
+on:
+  push:
+    branches: [codex/accountpulse-owner-backup-copy]
+    paths: [.github/owner-backup-copy.request]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: accountpulse-ovh-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    environment: production
+    env:
+      OVH_HOST: ${{ vars.OVH_HOST }}
+      OVH_PORT: ${{ vars.OVH_PORT }}
+      OVH_USER: ${{ vars.OVH_USER }}
+      OVH_DEPLOY_PATH: ${{ vars.OVH_DEPLOY_PATH }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Stage one encrypted backup for direct owner retrieval
+        env:
+          OVH_SSH_PRIVATE_KEY: ${{ secrets.OVH_SSH_PRIVATE_KEY }}
+          OVH_SSH_HOST_KEY: ${{ secrets.OVH_SSH_HOST_KEY }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          work=$(mktemp -d)
+          trap 'rm -f -- "$work/ovh-key" "$work/known_hosts" "$work/age.tar.gz" "$work/age" "$work/age-keygen" "$work/copy.py"; rmdir -- "$work"' EXIT
+          mapfile -t request < <(tr -d '\r' < .github/owner-backup-copy.request)
+          operation=${request[0]:-}
+          request_id=${request[1]:-}
+          [[ "$request_id" =~ ^[0-9a-f]{24}$ &&
+             "$OVH_DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] ||
+            { echo 'Invalid backup request or protected deploy path.' >&2; exit 65; }
+          printf '%s\n' "$OVH_SSH_PRIVATE_KEY" > "$work/ovh-key"
+          printf '%s\n' "$OVH_SSH_HOST_KEY" > "$work/known_hosts"
+          endpoint="$OVH_USER@$OVH_HOST"
+          remote="$OVH_DEPLOY_PATH/.owner-copy-$request_id"
+          options=(-i "$work/ovh-key" -o "UserKnownHostsFile=$work/known_hosts"
+            -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes
+            -o ConnectTimeout=10 -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none)
+          remote_ssh=(ssh "${options[@]}" -p "$OVH_PORT" "$endpoint")
+          if [[ "$operation" == cleanup && "${#request[@]}" == 2 ]]; then
+            "${remote_ssh[@]}" "if test -f '$remote/copy.py'; then python3 '$remote/copy.py' cleanup '$OVH_DEPLOY_PATH' '$request_id'; fi"
+            exit
+          fi
+          recipient=${request[2]:-}
+          ssh_public=${request[3]:-}
+          [[ "$operation" == stage && "${#request[@]}" == 4 &&
+             "$recipient" =~ ^age1[0-9a-z]{58}$ &&
+             "$ssh_public" =~ ^AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}$ ]] ||
+            { echo 'Invalid backup public recipient or SSH transfer key.' >&2; exit 65; }
+          curl --fail --silent --show-error --location --max-time 45 \
+            https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz \
+            --output "$work/age.tar.gz"
+          printf '%s  %s\n' cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10 "$work/age.tar.gz" |
+            sha256sum --check --status
+          tar -xOzf "$work/age.tar.gz" age/age > "$work/age"
+          tar -xOzf "$work/age.tar.gz" age/age-keygen > "$work/age-keygen"
+          chmod 700 "$work/age" "$work/age-keygen"
+          python3 deploy/ovh/owner-backup-copy.test.py "$work/age" "$work/age-keygen"
+          cp deploy/ovh/owner-backup-copy.py "$work/copy.py"
+          "${remote_ssh[@]}" "umask 077; mkdir '$remote'"
+          remote_cleanup() {
+            "${remote_ssh[@]}" "if test -f '$remote/copy.py'; then python3 '$remote/copy.py' cleanup '$OVH_DEPLOY_PATH' '$request_id'; else rm -f -- '$remote/age'; rmdir -- '$remote'; fi"
+          }
+          if ! scp "${options[@]}" -P "$OVH_PORT" "$work/copy.py" "$work/age" "$endpoint:$remote/" ||
+             ! "${remote_ssh[@]}" "chmod 700 '$remote/age' && python3 '$remote/copy.py' stage '$OVH_DEPLOY_PATH' '$request_id' '$recipient' '$ssh_public'"; then
+            remote_cleanup
+            exit 1
+          fi
