@@ -152,9 +152,10 @@ has not refreshed for more than 15 minutes, the Owner console must show
 
 ### Owner worker repair
 
-Install the protected runner after releasing the worker heartbeat and the
-repair migration. Use the existing deployment directory and the OVH account
-with host administration access.
+The protected production workflow installs the repair runner after the
+application passes its release health checks and confirms the timer is active.
+If the workflow reports that host installation is required, use the existing
+deployment directory and an OVH account with host administration access.
 
 ```bash
 cd /the/protected/OVH_DEPLOY_PATH
