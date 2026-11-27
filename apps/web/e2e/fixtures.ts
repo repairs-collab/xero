@@ -83,6 +83,7 @@ export async function prepareSoloCustomerSendingScenario(): Promise<void> {
         status: 'ACTIVE',
         stripeProviderStatus: 'active',
         trustedStripeProviderStatus: 'active',
+        currentPeriodStart: now,
         currentPeriodEnd: new Date(now.getTime() + 86_400_000)
       });
       await transaction.insert(organisationOnboarding).values({
